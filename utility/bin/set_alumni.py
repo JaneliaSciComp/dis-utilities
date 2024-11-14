@@ -1,8 +1,8 @@
-""" set_alumni.py
-    Set (or unset) the alumni tag for a given user
+"""set_alumni.py
+Set (or unset) the alumni tag for a given user
 """
 
-__version__ = '1.0.0'
+__version__ = "1.0.0"
 
 import argparse
 import json
@@ -16,13 +16,14 @@ import doi_common.doi_common as DL
 # Database
 DB = {}
 
+
 def terminate_program(msg=None):
-    ''' Terminate the program gracefully
-        Keyword arguments:
-          msg: error message or object
-        Returns:
-          None
-    '''
+    """Terminate the program gracefully
+    Keyword arguments:
+      msg: error message or object
+    Returns:
+      None
+    """
     if msg:
         if not isinstance(msg, str):
             msg = f"An exception of type {type(msg).__name__} occurred. Arguments:\n{msg.args}"
@@ -31,21 +32,27 @@ def terminate_program(msg=None):
 
 
 def initialize_program():
-    ''' Intialize the program
-        Keyword arguments:
-          None
-        Returns:
-          None
-    '''
+    """Intialize the program
+    Keyword arguments:
+      None
+    Returns:
+      None
+    """
     # Database
     try:
         dbconfig = JRC.get_config("databases")
     except Exception as err:
         terminate_program(err)
-    dbs = ['dis']
+    dbs = ["dis"]
     for source in dbs:
         dbo = attrgetter(f"{source}.{ARG.MANIFOLD}.write")(dbconfig)
-        LOGGER.info("Connecting to %s %s on %s as %s", dbo.name, ARG.MANIFOLD, dbo.host, dbo.user)
+        LOGGER.info(
+            "Connecting to %s %s on %s as %s",
+            dbo.name,
+            ARG.MANIFOLD,
+            dbo.host,
+            dbo.user,
+        )
         try:
             DB[source] = JRC.connect_database(dbo)
         except Exception as err:
@@ -53,19 +60,19 @@ def initialize_program():
 
 
 def processing():
-    ''' Set alumni tag
-        Keyword arguments:
-          None
-        Returns:
-          None
-    '''
-    coll = DB['dis'].orcid
+    """Set alumni tag
+    Keyword arguments:
+      None
+    Returns:
+      None
+    """
+    coll = DB["dis"].orcid
     if ARG.ORCID:
         lookup = ARG.ORCID
-        lookup_by = 'orcid'
+        lookup_by = "orcid"
     else:
         lookup = ARG.EMPLOYEE
-        lookup_by = 'employeeId'
+        lookup_by = "employeeId"
     try:
         row = DL.single_orcid_lookup(lookup, coll, lookup_by)
     except Exception as err:
@@ -95,25 +102,49 @@ def processing():
 
 # -----------------------------------------------------------------------------
 
-if __name__ == '__main__':
-    PARSER = argparse.ArgumentParser(
-        description="Set alumni tag")
+if __name__ == "__main__":
+    PARSER = argparse.ArgumentParser(description="Set alumni tag")
     UGROUP = PARSER.add_mutually_exclusive_group(required=True)
-    UGROUP.add_argument('--orcid', dest='ORCID', action='store',
-                        help='ORCID')
-    UGROUP.add_argument('--employee', dest='EMPLOYEE', action='store',
-                        help='Employee ID')
-    PARSER.add_argument('--unset', dest='UNSET', action='store_true',
-                        default=False, help='Unset alumni tag')
-    PARSER.add_argument('--manifold', dest='MANIFOLD', action='store',
-                        default='prod', choices=['dev', 'prod'],
-                        help='MongoDB manifold (dev, prod)')
-    PARSER.add_argument('--write', dest='WRITE', action='store_true',
-                        default=False, help='Write to database')
-    PARSER.add_argument('--verbose', dest='VERBOSE', action='store_true',
-                        default=False, help='Flag, Chatty')
-    PARSER.add_argument('--debug', dest='DEBUG', action='store_true',
-                        default=False, help='Flag, Very chatty')
+    UGROUP.add_argument("--orcid", dest="ORCID", action="store", help="ORCID")
+    UGROUP.add_argument(
+        "--employee", dest="EMPLOYEE", action="store", help="Employee ID"
+    )
+    PARSER.add_argument(
+        "--unset",
+        dest="UNSET",
+        action="store_true",
+        default=False,
+        help="Unset alumni tag",
+    )
+    PARSER.add_argument(
+        "--manifold",
+        dest="MANIFOLD",
+        action="store",
+        default="prod",
+        choices=["dev", "prod"],
+        help="MongoDB manifold (dev, prod)",
+    )
+    PARSER.add_argument(
+        "--write",
+        dest="WRITE",
+        action="store_true",
+        default=False,
+        help="Write to database",
+    )
+    PARSER.add_argument(
+        "--verbose",
+        dest="VERBOSE",
+        action="store_true",
+        default=False,
+        help="Flag, Chatty",
+    )
+    PARSER.add_argument(
+        "--debug",
+        dest="DEBUG",
+        action="store_true",
+        default=False,
+        help="Flag, Very chatty",
+    )
     ARG = PARSER.parse_args()
     LOGGER = JRC.setup_logging(ARG)
     initialize_program()
