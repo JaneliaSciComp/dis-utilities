@@ -71,9 +71,9 @@ class MongoOrcidRecord:
         self.employeeId = employeeId
         self.exists = exists
     def has_orcid(self):
-        return(True if self.orcid else False)
+        return True if self.orcid else False
     def has_employeeId(self):
-        return(True if self.employeeId else False)
+        return True if self.employeeId else False
 
 
 
@@ -88,7 +88,7 @@ def create_author(author_info):
         sys.exit("ERROR: Neither 'family', 'given', nor 'name' is present in one of the author records.")
     orcid = author_info['paper_orcid'] if 'paper_orcid' in author_info else None
     affiliations = author_info['affiliations'] if author_info['asserted'] == True else None
-    return(Author(name, orcid, affiliations))
+    return Author(name, orcid, affiliations)
 
 
 def create_employee(id):
@@ -122,11 +122,12 @@ def create_employee(id):
             exists=True)
         )
     else:
-        return(Employee(exists=False))
+        return Employee(exists=False)
 
 
 def create_guess(employee, name=None, score=None):
-    return(Guess(
+    return(
+        Guess(
         employee.id, 
         employee.job_title, 
         employee.email,
@@ -150,7 +151,8 @@ def create_guess(employee, name=None, score=None):
 
 ### Functions for matching authors to employees
 
-def get_corresponding_employee(author, orcid_collection, verbose_arg, write_arg): # The high-level decision tree that is the core procedure of this script
+def get_corresponding_employee(author, orcid_collection, verbose_arg, write_arg): 
+    """ The high-level decision tree that is the core procedure of this script."""
     final_choice = None
 
     if author.orcid:
@@ -187,13 +189,13 @@ def get_corresponding_employee(author, orcid_collection, verbose_arg, write_arg)
         if best_guess.approved:
             final_choice = best_guess
 
-    return(final_choice)
+    return final_choice
 
 
 def guess_employee(author, inform_message, verbose_arg):
     candidates = propose_candidates(author)
     best_guess = evaluate_candidates(author, candidates, inform_message, verbose_arg)
-    return(best_guess)
+    return best_guess
 
 def propose_candidates(author):
     """ 
@@ -218,7 +220,7 @@ def propose_candidates(author):
     candidate_ids = [id for id in list(set(flatten(all_results))) if id is not None]
     candidate_employees = [create_employee(id) for id in candidate_ids]
     candidate_employees = [e for e in candidate_employees if e.location == 'Janelia Research Campus']
-    return(fuzzy_match(author, candidate_employees))
+    return fuzzy_match(author, candidate_employees)
 
 
 def name_search(first, last):
@@ -274,9 +276,9 @@ def fuzzy_match(author, candidate_employees):
             guess.score = fuzz.token_sort_ratio(author.name, guess.name, processor=utils.default_process) #processor will convert the strings to lowercase, remove non-alphanumeric characters, and trim whitespace
         high_score = max( [g.score for g in guesses] )
         winners = [ g for g in guesses if g.score == high_score ]
-        return(winners)
+        return winners
     elif not guesses:
-        return( [ Guess(exists=False) ] )
+        return [ Guess(exists=False) ]
 
 
 def evaluate_candidates(author, candidates, inform_message, verbose=False):
@@ -336,10 +338,10 @@ def evaluate_candidates(author, candidates, inform_message, verbose=False):
             index = [guess.name for guess in selection_list].index(ans['decision'][0])
             winner = candidates[index]
             winner.approved = True
-            return(winner)
+            return winner
         elif ans['decision'] == ['None of the above']:
             print(f"No action will be taken for {author.name}.\n")
-            return( Guess(exists=False) )
+            return Guess(exists=False) 
 
     elif len(candidates) == 1:
         best_guess = candidates[0]
@@ -353,7 +355,7 @@ def evaluate_candidates(author, candidates, inform_message, verbose=False):
                 print(
                     f"Employee best guess: {best_guess.name}, ID: {best_guess.id}, job title: {best_guess.job_title}, supOrgName: {best_guess.supOrgName}, email: {best_guess.email}, Confidence: {round(best_guess.score, ndigits = 3)}\n"
                     )
-            return( Guess(exists=False) )
+            return Guess(exists=False)
         elif float(best_guess.score) > 85.0:
             print(inform_message)
             print(colored(
@@ -366,10 +368,10 @@ def evaluate_candidates(author, candidates, inform_message, verbose=False):
             ans = inquirer.prompt(quest, theme=BlueComposure())
             if ans['decision'] == 'Yes':
                 best_guess.approved = True
-                return(best_guess)
+                return best_guess
             else:
                 print(f"No action will be taken for {author.name}.\n")
-                return( Guess(exists=False) )
+                return Guess(exists=False)
 
 
 
@@ -383,7 +385,7 @@ def get_author_objects(doi, doi_record, doi_collection):
     all_authors = set_author_check_attr(all_authors)
     # If the paper has affiliations, we will only check those authors with janelia affiliations. Otherwise, we will check all authors.
     print_janelia_authors(all_authors)
-    return(all_authors)
+    return all_authors
 
 def set_author_check_attr(all_authors):
     new_author_list = all_authors
@@ -398,7 +400,7 @@ def set_author_check_attr(all_authors):
         )
         for i in range(len(new_author_list)):
             setattr(new_author_list[i], 'check', is_janelian(new_author_list[i], pattern, orcid_collection))
-    return(new_author_list)
+    return new_author_list
 
 def is_janelian(author, pattern, orcid_collection):
     result = False
@@ -407,7 +409,7 @@ def is_janelian(author, pattern, orcid_collection):
             result = True
     if bool(re.search(pattern, " ".join(author.affiliations))):
         result = True
-    return(result)
+    return result
 
 def add_preferred_names_to_complete_orcid_record(mongo_orcid_record, author, employee, orcid_collection, verbose_arg):
     doi_common.add_orcid_name(lookup=author.orcid, lookup_by='orcid', given=first_names_for_orcid_record(author, employee), family=last_names_for_orcid_record(author, employee), coll=orcid_collection)
@@ -466,7 +468,7 @@ def first_names_for_orcid_record(author, employee):
         [HumanName(author.name).last]+employee.last_names
     )
     h_result = [HumanName(n) for n in result]
-    return(list(set([' '.join((n.first,n.middle)).strip() for n in h_result])))
+    return list(set([' '.join((n.first,n.middle)).strip() for n in h_result]))
 
 def last_names_for_orcid_record(author, employee):
     result = generate_name_permutations(
@@ -475,7 +477,7 @@ def last_names_for_orcid_record(author, employee):
         [HumanName(author.name).last]+employee.last_names
     )
     h_result = [HumanName(n) for n in result]
-    return(list(set([n.last for n in h_result])))
+    return list(set([n.last for n in h_result]))
 
 
 def get_mongo_orcid_record(search_term, orcid_collection):
@@ -505,14 +507,14 @@ def search_people_api(query, mode):
         response = JRC.call_people_by_name(query)
     elif mode == 'id':
         response = JRC.call_people_by_id(query)
-    return(response)
+    return response
 
 def strip_orcid_if_provided_as_url(orcid):
     prefixes = ["http://orcid.org/", "https://orcid.org/"]
     for prefix in prefixes:
         if orcid.startswith(prefix):
             return orcid[len(prefix):]
-    return(orcid)
+    return orcid
 
 def overwrite_jrc_author(revised_jrc_authors):
     id_list = [e.id for e in revised_jrc_authors]
@@ -538,7 +540,7 @@ def get_dois_from_commandline(doi_arg, file_arg):
         except Exception as err:
             print(f"Could not process {file_arg}")
             exit()
-    return(dois)
+    return dois
 
 def print_title(doi, doi_record):
     if 'titles' in doi_record: # DataCite
