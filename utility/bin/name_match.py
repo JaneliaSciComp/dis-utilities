@@ -411,8 +411,13 @@ def is_janelian(author, pattern, orcid_collection):
         result = True
     return result
 
-def add_preferred_names_to_complete_orcid_record(mongo_orcid_record, author, employee, orcid_collection, verbose_arg):
-    doi_common.add_orcid_name(lookup=author.orcid, lookup_by='orcid', given=first_names_for_orcid_record(author, employee), family=last_names_for_orcid_record(author, employee), coll=orcid_collection)
+def add_preferred_names_to_complete_orcid_record(author, employee, orcid_collection, verbose_arg):
+    doi_common.add_orcid_name(
+        lookup=author.orcid, 
+        lookup_by='orcid', 
+        given=first_names_for_orcid_record(author, employee), 
+        family=last_names_for_orcid_record(author, employee), 
+        coll=orcid_collection)
     if verbose_arg:
         print( f"{author.name} has an ORCID on this paper. They are in our ORCID collection, with both an ORCID an employee ID.\n" )
 
@@ -420,23 +425,50 @@ def add_id_and_names_to_incomplete_orcid_record(employee, author, to_add, orcid_
     if to_add not in {'id', 'orcid'}:
         raise ValueError("to_add argument to add_id_and_names_to_incomplete_orcid_record() must be either 'orcid' or 'id'.")
     if to_add == 'id':
-        if not doi_common.single_orcid_lookup(employee.id, orcid_collection, 'employeeId'):
+        if not doi_common.single_orcid_lookup(
+            employee.id, 
+            orcid_collection, 
+            'employeeId'):
             if write_arg:
-                doi_common.update_existing_orcid(lookup=author.orcid, lookup_by='orcid', coll=orcid_collection, add=employee.id)
-                doi_common.add_orcid_name(lookup=author.orcid, lookup_by='orcid', coll=orcid_collection, given=first_names_for_orcid_record(author, best_guess), family=last_names_for_orcid_record(author, best_guess))
+                doi_common.update_existing_orcid(
+                    lookup=author.orcid, 
+                    lookup_by='orcid', 
+                    coll=orcid_collection, 
+                    add=employee.id)
+                doi_common.add_orcid_name(
+                    lookup=author.orcid, 
+                    lookup_by='orcid', 
+                    coll=orcid_collection, 
+                    given=first_names_for_orcid_record(author, employee), 
+                    family=last_names_for_orcid_record(author, employee))
         else:
             print(f'ERROR: {author.name} has at least two records in our orcid collection. Aborting attempt to add employeeId {employee.id} to existing record for this ORCID: {author.orcid}')
     if to_add == 'orcid':
-        if not doi_common.single_orcid_lookup(author.orcid, orcid_collection, 'orcid'):
+        if not doi_common.single_orcid_lookup(
+            author.orcid, 
+            orcid_collection, 
+            'orcid'):
             if write_arg:
-                doi_common.update_existing_orcid(lookup=employee.id, lookup_by='employeeId', add=author.orcid)
-                doi_common.add_orcid_name(lookup=employee.id, lookup_by='employeeId', coll=orcid_collection, given=first_names_for_orcid_record(author, best_guess), family=last_names_for_orcid_record(author, best_guess))
+                doi_common.update_existing_orcid(
+                    lookup=employee.id, 
+                    lookup_by='employeeId', 
+                    add=author.orcid)
+                doi_common.add_orcid_name(
+                    lookup=employee.id, 
+                    lookup_by='employeeId', 
+                    coll=orcid_collection, 
+                    given=first_names_for_orcid_record(author, employee), 
+                    family=last_names_for_orcid_record(author, employee))
         else:
             print(f'ERROR: {author.name} has two records in our orcid collection. Aborting attempt to add orcid {author.orcid} to existing record for this employeeId: {employee.id}')
 
 def create_orcid_record(best_guess, orcid_collection, author, write_arg):
     if write_arg:
-        doi_common.add_orcid(best_guess.id, orcid_collection, given=first_names_for_orcid_record(author, best_guess), family=last_names_for_orcid_record(author, best_guess), orcid=author.orcid)
+        doi_common.add_orcid(
+            best_guess.id, 
+            orcid_collection, 
+            given=first_names_for_orcid_record(author, best_guess), 
+            family=last_names_for_orcid_record(author, best_guess), orcid=author.orcid)
         print(f"Record created for {author.name} in orcid collection.")
 
 def generate_name_permutations(first_names, middle_names, last_names):
