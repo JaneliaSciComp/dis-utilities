@@ -63,7 +63,7 @@ class Guess(Employee):
     def __repr__(self):
         attrs = {k:v for k, v in self.__dict__.items() if v}
         return f"Guess({', '.join(f'{k}={v}' for k, v in attrs.items())})"
-        #return '"Guess(' + ', '.join(f'{k}={v}' for k, v in attrs.items()) + ')"'
+        
 
 class MongoOrcidRecord:
     def __init__(self, orcid=None, employeeId=None, exists=False):
@@ -92,15 +92,23 @@ def create_author(author_info):
 
 
 def create_employee(id):
+    """ A function to create employee objects. Searches the People system to get employee data. """
+    def parse_search_results(search_res, *keys):
+        """ A helper function to find employee data in the data structure resulting from People search. """
+        if len(keys) > 1:
+            return [search_res.get(key, "").strip() if search_res.get(key) else None for key in keys]
+        key = keys[0]
+        return search_res.get(key, "").strip() if search_res.get(key) else None
+
     idsearch_results = search_people_api(id, mode='id')
     if idsearch_results:
-        job_title = job_title = idsearch_results['businessTitle'].strip() if 'businessTitle' in idsearch_results else None
-        email = idsearch_results['email'].strip() if 'email' in idsearch_results else None
-        location = idsearch_results['locationName'].strip() if 'locationName'in idsearch_results else None # will be 'Janelia Research Campus' for janelians
-        supOrgName = idsearch_results['supOrgName'].strip() if 'supOrgName' in idsearch_results and idsearch_results['supOrgName'] else None
-        first_names = [ idsearch_results['nameFirstPreferred'].strip() if idsearch_results['nameFirstPreferred'] else None, idsearch_results['nameFirst'].strip() if idsearch_results['nameFirst'] else None]
-        middle_names = [ idsearch_results['nameMiddlePreferred'].strip() if idsearch_results['nameMiddlePreferred'] else None, idsearch_results['nameMiddle'].strip() if idsearch_results['nameMiddle'] else None]
-        last_names = [ idsearch_results['nameLastPreferred'].strip() if idsearch_results['nameLastPreferred'] else None, idsearch_results['nameLast'].strip() if idsearch_results['nameLast'] else None ]
+        job_title = parse_search_results(idsearch_results, 'businessTitle') 
+        email = parse_search_results(idsearch_results, 'email') 
+        location = parse_search_results(idsearch_results, 'locationName') # will be 'Janelia Research Campus' for janelians
+        supOrgName = parse_search_results(idsearch_results, 'supOrgName')
+        first_names = parse_search_results(idsearch_results, 'nameFirstPreferred', 'nameFirst')  #e.g. ['Zhe J.', 'James Zhe']
+        middle_names = parse_search_results(idsearch_results, 'nameMiddlePreferred', 'nameMiddle') # e.g. [None, None]
+        last_names = parse_search_results(idsearch_results, 'nameLastPreferred', 'nameLast') #e.g. ['Liu', 'Liu']
         return(
             Employee(
             id=id,
