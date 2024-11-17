@@ -162,7 +162,7 @@ def get_corresponding_employee(author, orcid_collection, verbose_arg, write_arg)
             if mongo_orcid_record.has_employeeId():
                 employee = create_employee(mongo_orcid_record.employeeId)
                 final_choice = employee
-                add_preferred_names_to_complete_orcid_record(mongo_orcid_record, author, employee, orcid_collection, verbose_arg)
+                add_preferred_names_to_complete_orcid_record(author, employee, orcid_collection, verbose_arg)
             else:
                 best_guess = guess_employee(author, f"{author.name} has an ORCID on this paper. They are in our ORCID collection, but without an employee ID.", verbose_arg)
                 if best_guess.approved:
@@ -197,88 +197,119 @@ def guess_employee(author, inform_message, verbose_arg):
     best_guess = evaluate_candidates(author, candidates, inform_message, verbose_arg)
     return best_guess
 
+
+
+
 def propose_candidates(author):
     """ 
-    Given an author object, search the People API for one or more matches using the People Search. 
+    Given an author object, search the People API for one or more hits. 
     Arguments: 
         author: an author object.
     Returns:
         A list of guess objects. This list will never be empty. It may, however, simply contain one 'empty' guess object.
     """
-    name = HumanName(author.name)
-    basic = name_search(name.first, name.last)
-    stripped = name_search(unidecode(name.first), unidecode(name.last)) # decode accents and other special characters
-    hyphen_split1 = name_search(name.first, name.last.split('-')[0]) if '-' in name.last else None # try different parts of a hyphenated last name
-    hyphen_split2 = name_search(name.first, name.last.split('-')[1]) if '-' in name.last else None
-    strp_hyph1 = name_search(unidecode(name.first), unidecode(name.last.split('-')[0])) if '-' in name.last else None # split on hyphen and decoded
-    strp_hyph2 = name_search(unidecode(name.first), unidecode(name.last.split('-')[1])) if '-' in name.last else None
-    two_middle_names1 = name_search(name.first, name.middle.split(' ')[0]) if len(name.middle.split())==2 else None # try different parts of a multi-word middle name, e.g. Virginia Marjorie Tartaglio Scarlett
-    two_middle_names2 = name_search(name.first, name.middle.split(' ')[1]) if len(name.middle.split())==2 else None
-    strp_middle1 = name_search(unidecode(name.first), unidecode(name.middle.split()[0])) if len(name.middle.split())==2 else None # split on middle name space and decoded
-    strp_middle2 = name_search(unidecode(name.first), unidecode(name.middle.split()[1])) if len(name.middle.split())==2 else None
-    all_results = [basic, stripped, hyphen_split1, hyphen_split2, strp_hyph1, strp_hyph2, two_middle_names1, two_middle_names2, strp_middle1, strp_middle2]
-    candidate_ids = [id for id in list(set(flatten(all_results))) if id is not None]
-    candidate_employees = [create_employee(id) for id in candidate_ids]
-    candidate_employees = [e for e in candidate_employees if e.location == 'Janelia Research Campus']
-    return fuzzy_match(author, candidate_employees)
+    candidate_ids = name_search(author)
+    if candidate_ids:
+        candidate_employees = [create_employee(id) for id in candidate_ids]
+        candidate_employees = [e for e in candidate_employees if e.location == 'Janelia Research Campus']
+        guesses = fuzzy_match(author, candidate_employees)
+        return guesses
+    else:
+        return [ Guess(exists=False) ]
 
 
-def name_search(first, last):
-    """ 
+def name_search(author): 
+    """
+    Searches all reasonable two-word permutations of a person's name in the 
+    People system, using the following heuristic: search the first name
+    and the last name separately, and keep the employee IDs of all employees who
+    came up in both searches. (The People system only allows searching
+    by one word at a time.)
     Arguments: 
-        first: first name, a string.
-        last: last name, a string.
+        author: An author object.
     Returns:
-        A list of candidate employee ids (strings) OR None.
+        A list of employee objects OR None.
     """
-    search_results1 = search_people_api(first, mode='name') # a list of dicts
-    search_results2 = search_people_api(last, mode='name')
-    if search_results1 and search_results2:
-        return( process_search_results(search_results1, search_results2) )
+    name = HumanName(author.name) # handles suffixes, compound names, etc.
+    #^ Two examples: 'Norma Citlalicue Pérez Rosas' / 'Miguel Angel Núñez-Ochoa'
+    basic = (name.first, name.last) 
+    #^ ('Norma', 'Rosas') / ('Miguel', 'Núñez-Ochoa')
+    stripped = (unidecode(name.first), unidecode(name.last)) 
+    #^ ('Norma', 'Rosas') / ('Miguel', 'Nunez-Ochoa')
+    hyphen_split1 = (name.first, name.last.split('-')[0]) if '-' in name.last else None 
+    #^ None / ('Miguel', 'Núñez')
+    hyphen_split2 = (name.first, name.last.split('-')[1]) if '-' in name.last else None 
+    #^ None / ('Miguel', 'Ochoa')
+    strp_hyph1 = (unidecode(name.first), unidecode(name.last.split('-')[0])) if '-' in name.last else None 
+    #^ None / ('Miguel', 'Nunez')
+    strp_hyph2 = (unidecode(name.first), unidecode(name.last.split('-')[1])) if '-' in name.last else None 
+    #^ None / ('Miguel', 'Ochoa')
+    two_middle_names1 = (name.first, name.middle.split(' ')[0]) if len(name.middle.split())==2 else None 
+    #^ ('Norma', 'Citlalicue') / None
+    two_middle_names2 = (name.first, name.middle.split(' ')[1]) if len(name.middle.split())==2 else None
+    #^ ('Norma', 'Pérez') / None
+    strp_middle1 = (unidecode(name.first), unidecode(name.middle.split()[0])) if len(name.middle.split())==2 else None 
+    #^ ('Norma', 'Citlalicue') / None
+    strp_middle2 = (unidecode(name.first), unidecode(name.middle.split()[1])) if len(name.middle.split())==2 else None
+    #^ ('Norma', 'Perez') / None
+    name_tuples = [basic, 
+                   stripped, 
+                   hyphen_split1, 
+                   hyphen_split2, 
+                   strp_hyph1, 
+                   strp_hyph2, 
+                   two_middle_names1, 
+                   two_middle_names2, 
+                   strp_middle1, 
+                   strp_middle2]
+    name_tuples = [tup for tup in name_tuples if tup is not None]
+    name_tuples = list(set(name_tuples))
+    result = []
+    for tup in name_tuples:
+        search_results1 = search_people_api(tup[0], mode='name') 
+        #^ a list of dicts, e.g. a dict for Virginia Scarlett and a dict for Virginia Ruetten
+        search_results2 = search_people_api(tup[1], mode='name') 
+        #^ a list of dicts, e.g. a dict for Virginia Scarlett and a dict for Scarlett Pitts
+        if search_results1 and search_results2:
+            employee_ids1 = {item['employeeId'] for item in search_results1}
+            employee_ids2 = {item['employeeId'] for item in search_results2}
+            common_ids = list(employee_ids1.intersection(employee_ids2))
+            common_ids = [id for id in common_ids if id is not None] # you never know...
+            if common_ids:
+                for id in common_ids:
+                    result.append(id)
+    candidate_ids = list(set(result))
+    if candidate_ids:
+        return candidate_ids
     else:
-        return(None)
-
-def process_search_results(list1, list2):
-    """
-    A function to enforce that the same employeeId must appear in both the first and last name searches to return a successful result.
-    Arguments:
-        list1: a list of dicts, where each dict is the metadata for an employee from our People search on the first name. (e.g., [a dict for Virginia Scarlett, a dict for Virginia Ruetten])
-        list2: a list of dicts, where each dict is the metadata for an employee from our People search on the last name. (e.g., [a dict for Virginia Scarlett, a dict for Scarlett Pitts])
-    Returns:
-        A list of employee Ids from dicts that occurred in both lists (e.g., [Virginia Scarlett's employeeId])
-        OR
-        None
-    """
-    employee_ids_list1 = {item['employeeId'] for item in list1}
-    employee_ids_list2 = {item['employeeId'] for item in list2}
-    common_ids = list(employee_ids_list1.intersection(employee_ids_list2))
-    if common_ids:
-        return(common_ids)
-    else:
-        return(None)
+        return None
+ 
 
 def fuzzy_match(author, candidate_employees):
     """ 
     Arguments: 
         author: an author object.
-        candidate_employees: a list of employee objects, possibly an empty list.
+        candidate_employees: a list of employee objects, or None.
     Returns:
-        A list of guess objects. This list will never be empty. It may, however, simply contain one 'empty' guess object.
+        A list of guess objects. This list will never be empty. It may, however, simply contain one 'non-existent' guess object.
     """
     guesses = []
     if candidate_employees:
         for employee in candidate_employees:
             employee_permuted_names = generate_name_permutations(employee.first_names, employee.middle_names, employee.last_names)
             for name in employee_permuted_names:
-                guesses.append(create_guess(employee, name=name)) # Each employee will generate several guesses, e.g. Virginia T Scarlett, Virginia Scarlett, Ginnie Scarlett
+                guesses.append(create_guess(employee, name=name)) 
+                # Each employee will generate several guesses, e.g. Virginia T Scarlett, Virginia Scarlett, Ginnie Scarlett
     if guesses:
         for guess in guesses:
-            guess.score = fuzz.token_sort_ratio(author.name, guess.name, processor=utils.default_process) #processor will convert the strings to lowercase, remove non-alphanumeric characters, and trim whitespace
+            guess.score = fuzz.token_sort_ratio(author.name, guess.name, processor=utils.default_process) 
+            #^processor will convert the strings to lowercase, remove non-alphanumeric characters, and trim whitespace
         high_score = max( [g.score for g in guesses] )
         winners = [ g for g in guesses if g.score == high_score ]
         return winners
-    elif not guesses:
+    else:
         return [ Guess(exists=False) ]
+
 
 
 def evaluate_candidates(author, candidates, inform_message, verbose=False):
@@ -472,7 +503,8 @@ def create_orcid_record(best_guess, orcid_collection, author, write_arg):
         print(f"Record created for {author.name} in orcid collection.")
 
 def generate_name_permutations(first_names, middle_names, last_names):
-        middle_names = [n for n in middle_names if n not in ('', None)] # some example middle_names, from HHMI People system: [None], ['D.', ''], ['Marie Sophie'], ['', '']
+        middle_names = [n for n in middle_names if n not in ('', None)] 
+        # some example middle_names from HHMI People system: [None], ['D.', ''], ['Marie Sophie'], ['', '']
         permutations = set()
         # All possible first names + all possible last names
         for first_name, last_name in itertools.product(first_names, last_names):
