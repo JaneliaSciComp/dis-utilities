@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "25.1.0"
+__version__ = "25.2.0"
 # Database
 DB = {}
 # Custom queries
@@ -2108,8 +2108,8 @@ def show_doi_ui(doi):
     alink = f"/doi/authors/{doi}"
     html += f"<h4>{chead}</h4><span class='citation'>{citation} {journal}.</span><br><br>"
     html += f"<span class='paperdata'>DOI: {link} {tiny_badge('primary', 'Raw data', rlink)}" \
-            + f" {tiny_badge('info', 'HQ migration', mlink)} {obutton}</span>" \
-            + f" {tiny_badge('info', 'Author details', alink)}<br>"
+            + f" {tiny_badge('info', 'HQ migration', mlink)}" \
+            + f" {tiny_badge('info', 'Author details', alink)} {obutton}</span><br>"
     if row:
         citations = s2_citation_count(doi, fmt='html')
         if citations:
