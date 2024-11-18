@@ -5,7 +5,8 @@
 
 import requests
 import argparse
-import re
+import sys
+from nameparser import HumanName
 from operator import attrgetter
 from termcolor import colored
 import jrc_common.jrc_common as JRC
@@ -59,13 +60,30 @@ def get_type(doi_record):
 
 ### Functions for formatting and printing citations
 
-def fix_endnote(endnote_citation):
-    parts = endnote_citation.split('. ')
-    authors = parts[0]
-    title = parts[1]
-    url = parts[-1]
-    url = re.sub(r'^http://dx\.doi\.org/', 'https://doi.org/', url)
-    return(authors + ". " + title + ". " + url)
+
+def parse_ris(lines):
+    with open(arg.RIS, "r") as inF:
+        lines = inF.readlines()
+        title = None
+        doi = None
+        authors = []
+        for line in lines:
+            try:
+                code, content = line.split("  - ")[0], line.split("  - ")[1].strip()
+                if code == 'T1':
+                    title = content
+                if code == 'DO':
+                    doi = content
+                if code == 'AU':
+                    authors.append(HumanName(content))
+            except:
+                continue
+
+        author_str = ', '.join([f"{name.last}, {''.join(name.initials_list()[:-1])}" for name in authors])
+        citation = f"{author_str}. {title}. https://doi.org/{doi}."
+        return citation
+
+
 
 def print_citation(item):
     if item.preprint:
@@ -120,8 +138,8 @@ if __name__ == '__main__':
                          help='Produce a citation from a single DOI.')
     muexgroup.add_argument('--file', dest='FILE', action='store',
                          help='Produce a citation from a file containing one or more DOIs.')
-    muexgroup.add_argument('--endnote', dest='ENDNOTE', action='store',
-                         help='Print updated citations from a file containing citations in the Janelia Science News style, obtained by EndNote export.')
+    muexgroup.add_argument('--ris', dest='RIS', action='store',
+                         help='Print citations from a .ris file.')
     
     
     arg = parser.parse_args()
@@ -131,24 +149,17 @@ if __name__ == '__main__':
         items.append( create_item(arg.DOI.strip().lower()) )
     if arg.FILE:
         try:
-            with open(arg.FILE, "r", encoding="ascii") as instream:
-                for doi in instream.read().splitlines():
+            with open(arg.FILE, "r") as inF:
+                for doi in inF.read().splitlines():
                     if doi.strip(): # don't throw an error if you encounter an empty line
                         items.append( create_item(doi.strip().lower()) )
         except:
             print(f"Could not process {arg.FILE}")
             raise ImportError
 
-    if arg.ENDNOTE:
-        try:
-            with open(arg.ENDNOTE, "r", encoding="ascii") as instream:
-                for endnote_citation in instream.read().splitlines():
-                    if endnote_citation.strip(): # don't throw an error if you encounter an empty line
-                        print( fix_endnote(endnote_citation)+'\n' )
-        except:
-            print(f"Could not process {arg.ENDNOTE}")
-            raise ImportError
-
+    if arg.RIS:
+        print(parse_ris(arg.RIS))
+        sys.exit(0)
     
     items = [i for i in items if i is not None]
     for item in sorted(items, key=lambda i: i.citation):

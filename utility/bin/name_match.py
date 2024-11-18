@@ -60,6 +60,10 @@ class Guess(Employee):
         self.name = name
         self.score = score
         self.approved = approved
+    def __repr__(self):
+        attrs = {k:v for k, v in self.__dict__.items() if v}
+        return f"Guess({', '.join(f'{k}={v}' for k, v in attrs.items())})"
+        #return '"Guess(' + ', '.join(f'{k}={v}' for k, v in attrs.items()) + ')"'
 
 class MongoOrcidRecord:
     def __init__(self, orcid=None, employeeId=None, exists=False):
@@ -366,7 +370,7 @@ def evaluate_candidates(author, candidates, inform_message, verbose=False):
 ### Functions to search and write to database
 
 def get_author_objects(doi, doi_record, doi_collection):
-    print_title(doi_record)
+    print_title(doi, doi_record)
     all_authors = [ create_author(author_record) for author_record in doi_common.get_author_details(doi_record, doi_collection)]
     all_authors = set_author_check_attr(all_authors)
     # If the paper has affiliations, we will only check those authors with janelia affiliations. Otherwise, we will check all authors.
@@ -379,16 +383,21 @@ def set_author_check_attr(all_authors):
         for i in range(len(new_author_list)):
             setattr(new_author_list[i], 'check', True)
     else:
+        pattern = re.compile(
+        r'(?i)(janelia|'  # (?i) means case-insensitive; pattern matches "Janelia" in any form, e.g., "Janelia", "thejaneliafarm", etc.
+        r'(ashburn.*(hhmi|howard\s*hughes))|'  # "Ashburn" with "HHMI" or "Howard Hughes"
+        r'(hhmi|howard\s*hughes).*ashburn)'  # "HHMI" or "Howard Hughes" with "Ashburn" 
+        )
         for i in range(len(new_author_list)):
-            setattr(new_author_list[i], 'check', is_janelian(new_author_list[i], orcid_collection))
+            setattr(new_author_list[i], 'check', is_janelian(new_author_list[i], pattern, orcid_collection))
     return(new_author_list)
 
-def is_janelian(author, orcid_collection):
+def is_janelian(author, pattern, orcid_collection):
     result = False
     if author.orcid:
         if doi_common.single_orcid_lookup(author.orcid, orcid_collection, 'orcid'):
             result = True
-    if bool(re.search(r'\bJanelia\b', " ".join(author.affiliations))):
+    if bool(re.search(pattern, " ".join(author.affiliations))):
         result = True
     return(result)
 
@@ -523,7 +532,7 @@ def get_dois_from_commandline(doi_arg, file_arg):
             exit()
     return(dois)
 
-def print_title(doi_record):
+def print_title(doi, doi_record):
     if 'titles' in doi_record: # DataCite
         print(f"{doi}: {doi_record['titles'][0]['title']}")
     else: # Crossref
@@ -583,12 +592,6 @@ def terminate_program(msg=None):
             LOGGER.critical(msg)
             sys.exit(-1 if msg else 0)
 
-
-# Old code that should really be added to our documentation instead of lingering here
-# api_key = os.environ.get('PEOPLE_API_KEY')
-# if not api_key:
-#     print("Error: Please set the environment variable PEOPLE_API_KEY.")
-#     sys.exit(1)
 
 
 
@@ -662,26 +665,12 @@ if __name__ == '__main__':
 
 
 
-#For bug testing, do not run!!!
+#For bug testing
 # import name_match as nm
 # nm.initialize_program()
 # orcid_collection = nm.DB['dis'].orcid
 # doi_collection = nm.DB['dis'].dois
-# doi = '10.1101/2023.10.12.562058'
+# doi = '10.1101/2024.09.16.613338'
 # doi_record = nm.doi_common.get_doi_record(doi, doi_collection)
-# all_authors = [ nm.create_author(author_record) for author_record in nm.doi_common.get_author_details(doi_record, doi_collection)]
-# authors_to_check = nm.determine_authors_to_check(all_authors)
-
-#doi='10.1038/s41587-022-01524-7'
-#doi='10.7554/elife.80660'
-#doi='10.1101/2024.05.09.593460'
-#doi = '10.1101/2023.10.16.562634'
-# Has David Clapham, who has 2 records:
-#doi='10.1021/jacs.4c03092'
-
-#doi='10.1038/s41556-023-01154-4'
-#doi='10.7554/eLife.80622'
-#doi = '10.1038/s41593-024-01738-9'
-
-#A tricky employee Id: 42651 Middle name is a None object
+# all_authors = nm.get_author_objects(doi, doi_record, doi_collection)
 

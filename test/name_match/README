@@ -1,0 +1,37 @@
+This folder contains scripts and scraps for bug testing name_match.py.
+
+Explanations of files, in order of how useful I think they'll be:
+
+db_connect.py: The most minimal bit of code needed to make a database connection. 
+To access the DOI and orcid collections, import this module and then execute this boilerplate code:
+db_connect.initialize_program()
+LOGGER = JRC.setup_logging(db_connect.DummyArg())
+orcid_collection = db_connect.DB['dis'].orcid
+doi_collection = db_connect.DB['dis'].dois
+
+
+tricky_dois.readme: A list of DOIs that might trip up my name_match script, each with an explanation of why I think it's tricky. 
+
+
+tc_common.py: A module that just contains the TestCase class. 
+A TestCase is a DOI + some methods and attributes, the latter coming from a config file. 
+The DOIs for my test cases are chosen to be tricky. 
+The first one I've chosen is a paper with a single author, so the name of the test case is single_author, and the config is in a dir called single_author. 
+The single_author dir looks like this:
+single_author/:
+config.txt
+guesses.txt
+The config contains the "correct answers" to the problems I am testing. 
+I could have also put the guesses in the config file, but these lists of guesses can get quite long. 
+
+authors_to_candidates.py
+A script that tests whether name_match.py correctly proposes a list of candidate employees, given a list of DOI authors.
+
+janelia_authors.py
+A script that tests whether name_match.py correctly assigns a list of DOI authors as either Janelian or non-Janelian, based on their affiliations.
+
+
+affiliations_regex.py: A really simple script that lets me test whether certain affiliations (strings), e.g. '1Howard Hughes Medical Institute, Ashburn VA', will be considered Janelia affiliations. 
+Because this regex pattern is deeply embedded in my name_match script, I just copy-pasted it from name_match.py. 
+But you could import name_match and call the relevant functions if you wanted to.
+
