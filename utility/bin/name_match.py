@@ -151,8 +151,113 @@ def create_guess(employee, name=None, score=None):
 
 ### Functions for matching authors to employees
 
+
+
+def run_name_match(arg, doi_collection, orcid_collection):
+    """ 
+    The core procedure of this program.
+    Iterates through DOIs (if more than one is given),
+    and for each DOI, iterates through authors. If the paper
+    has no affiliations at all, the script will try to get
+    a corresponding employee for all authors. Otherwise,
+    it will only look for a corresponding employee for
+    authors with a Janelia affiliation.
+    Arguments: 
+        arg: command-line arguments from argparse.
+        doi_collection: connection to the DOI collection.
+        orcid_collection: connection to the orcid collection.
+    Returns:
+        A bunch of messages printed to the terminal.
+    """
+    dois = get_dois_from_commandline(arg.DOI, arg.FILE)
+    for doi in dois:
+        doi_record = doi_common.get_doi_record(doi, doi_collection)
+        if not doi_record:
+            print(colored( (f'WARNING: Skipping {doi}. No record found in DOI collection.'), 'yellow' ))
+        else:
+            all_authors = get_author_objects(doi, doi_record, doi_collection)
+            revised_jrc_authors = []
+
+            for author in all_authors: 
+                if author.check == True:
+                    final_choice = get_corresponding_employee(author, orcid_collection, arg.VERBOSE, arg.WRITE)
+                    if final_choice == None:
+                        revised_jrc_authors.append(Employee(exists=False))
+                    else:
+                        revised_jrc_authors.append(final_choice)
+                else:
+                    revised_jrc_authors.append(Employee(exists=False))
+
+            if len(revised_jrc_authors) != len(all_authors):
+                sys.exit("ERROR: Length of revised_jrc_author doesn't make sense. Did you overlook an author, or add two employeeIds for one author?")
+            
+            print("Janelia authors are highlighted below:")
+            for i in range(len(revised_jrc_authors)):
+                if revised_jrc_authors[i].exists:
+                    print(colored(
+                        (all_authors[i].name, revised_jrc_authors[i].id), "black", "on_yellow"
+                    ))
+                else:
+                    print(all_authors[i].name)
+
+            if arg.WRITE:
+                overwrite_jrc_author(revised_jrc_authors)
+            else:
+                print(colored(
+                    ("WARNING: Dry run successful, no updates were made"), "yellow"
+                ))
+
+
+
+
+# Functions for determining which authors we will try to match to employees
+
+def get_author_objects(doi, doi_record, doi_collection):
+    print_title(doi, doi_record)
+    all_authors = [ create_author(author_record) for author_record in doi_common.get_author_details(doi_record, doi_collection)]
+    all_authors = set_author_check_attr(all_authors)
+    # If the paper has affiliations, we will only check those authors with janelia affiliations. Otherwise, we will check all authors.
+    print_janelia_authors(all_authors)
+    return all_authors
+
+def set_author_check_attr(all_authors):
+    new_author_list = all_authors
+    if not any([a.affiliations for a in all_authors]):
+        for i in range(len(new_author_list)):
+            setattr(new_author_list[i], 'check', True)
+    else:
+        pattern = re.compile(
+        r'(?i)(janelia|'  # (?i) means case-insensitive; pattern matches "Janelia" in any form, e.g., "Janelia", "thejaneliafarm", etc.
+        r'(ashburn.*(hhmi|howard\s*hughes))|'  # "Ashburn" with "HHMI" or "Howard Hughes"
+        r'(hhmi|howard\s*hughes).*ashburn)'  # "HHMI" or "Howard Hughes" with "Ashburn" 
+        )
+        for i in range(len(new_author_list)):
+            setattr(new_author_list[i], 'check', is_janelian(new_author_list[i], pattern, orcid_collection))
+    return new_author_list
+
+def is_janelian(author, pattern, orcid_collection):
+    result = False
+    if author.orcid:
+        if doi_common.single_orcid_lookup(author.orcid, orcid_collection, 'orcid'):
+            result = True
+    if bool(re.search(pattern, " ".join(author.affiliations))):
+        result = True
+    return result
+
+
+
+
+
+
+
+# Functions for matching authors to corresponding employees
+
 def get_corresponding_employee(author, orcid_collection, verbose_arg, write_arg): 
-    """ The high-level decision tree that is the core procedure of this script."""
+    """ 
+    The high-level decision tree for trying to find a corresponding employee, 
+    given an author. Also creates or updates the relevant record in our orcid
+    collection if needed.
+    """
     final_choice = None
 
     if author.orcid:
@@ -196,8 +301,6 @@ def guess_employee(author, inform_message, verbose_arg):
     candidates = propose_candidates(author)
     best_guess = evaluate_candidates(author, candidates, inform_message, verbose_arg)
     return best_guess
-
-
 
 
 def propose_candidates(author):
@@ -408,39 +511,9 @@ def evaluate_candidates(author, candidates, inform_message, verbose=False):
 
 
 
-### Functions to search and write to database
+### Functions to search and write to databases
 
-def get_author_objects(doi, doi_record, doi_collection):
-    print_title(doi, doi_record)
-    all_authors = [ create_author(author_record) for author_record in doi_common.get_author_details(doi_record, doi_collection)]
-    all_authors = set_author_check_attr(all_authors)
-    # If the paper has affiliations, we will only check those authors with janelia affiliations. Otherwise, we will check all authors.
-    print_janelia_authors(all_authors)
-    return all_authors
 
-def set_author_check_attr(all_authors):
-    new_author_list = all_authors
-    if not any([a.affiliations for a in all_authors]):
-        for i in range(len(new_author_list)):
-            setattr(new_author_list[i], 'check', True)
-    else:
-        pattern = re.compile(
-        r'(?i)(janelia|'  # (?i) means case-insensitive; pattern matches "Janelia" in any form, e.g., "Janelia", "thejaneliafarm", etc.
-        r'(ashburn.*(hhmi|howard\s*hughes))|'  # "Ashburn" with "HHMI" or "Howard Hughes"
-        r'(hhmi|howard\s*hughes).*ashburn)'  # "HHMI" or "Howard Hughes" with "Ashburn" 
-        )
-        for i in range(len(new_author_list)):
-            setattr(new_author_list[i], 'check', is_janelian(new_author_list[i], pattern, orcid_collection))
-    return new_author_list
-
-def is_janelian(author, pattern, orcid_collection):
-    result = False
-    if author.orcid:
-        if doi_common.single_orcid_lookup(author.orcid, orcid_collection, 'orcid'):
-            result = True
-    if bool(re.search(pattern, " ".join(author.affiliations))):
-        result = True
-    return result
 
 def add_preferred_names_to_complete_orcid_record(author, employee, orcid_collection, verbose_arg):
     doi_common.add_orcid_name(
@@ -696,43 +769,45 @@ if __name__ == '__main__':
     orcid_collection = DB['dis'].orcid
     doi_collection = DB['dis'].dois
 
-    dois = get_dois_from_commandline(arg.DOI, arg.FILE)
-    for doi in dois:
-        doi_record = doi_common.get_doi_record(doi, doi_collection)
-        if not doi_record:
-            print(colored( (f'WARNING: Skipping {doi}. No record found in DOI collection.'), 'yellow' ))
-        else:
-            all_authors = get_author_objects(doi, doi_record, doi_collection)
-            revised_jrc_authors = []
+    run_name_match(arg, doi_collection, orcid_collection)
 
-            for author in all_authors: 
-                if author.check == True:
-                    final_choice = get_corresponding_employee(author, orcid_collection, arg.VERBOSE, arg.WRITE)
-                    if final_choice == None:
-                        revised_jrc_authors.append(Employee(exists=False))
-                    else:
-                        revised_jrc_authors.append(final_choice)
-                else:
-                    revised_jrc_authors.append(Employee(exists=False))
+    # dois = get_dois_from_commandline(arg.DOI, arg.FILE)
+    # for doi in dois:
+    #     doi_record = doi_common.get_doi_record(doi, doi_collection)
+    #     if not doi_record:
+    #         print(colored( (f'WARNING: Skipping {doi}. No record found in DOI collection.'), 'yellow' ))
+    #     else:
+    #         all_authors = get_author_objects(doi, doi_record, doi_collection)
+    #         revised_jrc_authors = []
 
-            if len(revised_jrc_authors) != len(all_authors):
-                sys.exit("ERROR: Length of revised_jrc_author doesn't make sense. Did you overlook an author, or add two employeeIds for one author?")
+    #         for author in all_authors: 
+    #             if author.check == True:
+    #                 final_choice = get_corresponding_employee(author, orcid_collection, arg.VERBOSE, arg.WRITE)
+    #                 if final_choice == None:
+    #                     revised_jrc_authors.append(Employee(exists=False))
+    #                 else:
+    #                     revised_jrc_authors.append(final_choice)
+    #             else:
+    #                 revised_jrc_authors.append(Employee(exists=False))
+
+    #         if len(revised_jrc_authors) != len(all_authors):
+    #             sys.exit("ERROR: Length of revised_jrc_author doesn't make sense. Did you overlook an author, or add two employeeIds for one author?")
             
-            print("Janelia authors are highlighted below:")
-            for i in range(len(revised_jrc_authors)):
-                if revised_jrc_authors[i].exists:
-                    print(colored(
-                        (all_authors[i].name, revised_jrc_authors[i].id), "black", "on_yellow"
-                    ))
-                else:
-                    print(all_authors[i].name)
+    #         print("Janelia authors are highlighted below:")
+    #         for i in range(len(revised_jrc_authors)):
+    #             if revised_jrc_authors[i].exists:
+    #                 print(colored(
+    #                     (all_authors[i].name, revised_jrc_authors[i].id), "black", "on_yellow"
+    #                 ))
+    #             else:
+    #                 print(all_authors[i].name)
 
-            if arg.WRITE:
-                overwrite_jrc_author(revised_jrc_authors)
-            else:
-                print(colored(
-                    ("WARNING: Dry run successful, no updates were made"), "yellow"
-                ))
+    #         if arg.WRITE:
+    #             overwrite_jrc_author(revised_jrc_authors)
+    #         else:
+    #             print(colored(
+    #                 ("WARNING: Dry run successful, no updates were made"), "yellow"
+    #             ))
 
 
 
