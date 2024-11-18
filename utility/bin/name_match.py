@@ -85,7 +85,7 @@ def create_author(author_info):
     elif 'name' in author_info: # e.g. if 'FlyLight Project Team' is an author
         name = author_info['name']
     else:
-        sys.exit("ERROR: Neither 'family', 'given', nor 'name' is present in one of the author records.")
+        raise ValueError("ERROR: Neither 'family', 'given', nor 'name' is present in one of the author records.")
     orcid = author_info['paper_orcid'] if 'paper_orcid' in author_info else None
     affiliations = author_info['affiliations'] if author_info['asserted'] == True else None
     return Author(name, orcid, affiliations)
@@ -189,8 +189,8 @@ def run_name_match(arg, doi_collection, orcid_collection):
                     revised_jrc_authors.append(Employee(exists=False))
 
             if len(revised_jrc_authors) != len(all_authors):
-                sys.exit("ERROR: Length of revised_jrc_author doesn't make sense. Did you overlook an author, or add two employeeIds for one author?")
-            
+                raise ValueError("ERROR: Length of revised_jrc_author doesn't make sense. Did you overlook an author, or add two employeeIds for one author?")
+
             print("Janelia authors are highlighted below:")
             for i in range(len(revised_jrc_authors)):
                 if revised_jrc_authors[i].exists:
@@ -212,15 +212,15 @@ def run_name_match(arg, doi_collection, orcid_collection):
 
 # Functions for determining which authors we will try to match to employees
 
-def get_author_objects(doi, doi_record, doi_collection):
+def get_author_objects(doi, doi_record, orcid_collection):
     print_title(doi, doi_record)
-    all_authors = [ create_author(author_record) for author_record in doi_common.get_author_details(doi_record, doi_collection)]
-    all_authors = set_author_possible_employee_attr(all_authors)
+    all_authors = [ create_author(author_record) for author_record in doi_common.get_author_details(doi_record, orcid_collection)]
+    all_authors = set_author_possible_employee_attr(all_authors, orcid_collection)
     # If the paper has affiliations, we will only check those authors with janelia affiliations. Otherwise, we will check all authors.
     print_janelia_authors(all_authors)
     return all_authors
 
-def set_author_possible_employee_attr(all_authors):
+def set_author_possible_employee_attr(all_authors, orcid_collection):
     new_author_list = all_authors
     if not any([a.affiliations for a in all_authors]):
         for i in range(len(new_author_list)):
@@ -661,7 +661,7 @@ def get_mongo_orcid_record(search_term, orcid_collection):
 def search_people_api(query, mode):
     response = None
     if mode not in {'name', 'id'}:
-        sys.exit("ERROR: HHMI People API search mode must be either 'name' or 'id'.")
+        raise ValueError("ERROR: HHMI People API search mode must be either 'name' or 'id'.") 
     if mode == 'name':
         response = JRC.call_people_by_name(query)
     elif mode == 'id':
