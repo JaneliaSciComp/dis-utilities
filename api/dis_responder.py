@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "25.2.0"
+__version__ = "25.3.0"
 # Database
 DB = {}
 # Custom queries
@@ -528,6 +528,9 @@ def get_orcid_from_db(oid, use_eid=False, both=False, bare=False):
     if 'affiliations' in orc:
         html += f"<tr><td>Affiliations:</td><td>{', '.join(orc['affiliations'])}</td></tr>"
     html += "</table><br>"
+    if 'orcid' in orc:
+        olink = f"/orcidapi/{orc['orcid']}"
+        html += f" {tiny_badge('info', 'ORCID data', olink)}<br>"
     try:
         if use_eid:
             oid = orc['employeeId']
@@ -542,15 +545,17 @@ def get_orcid_from_db(oid, use_eid=False, both=False, bare=False):
     return html, dois
 
 
-def add_orcid_works(data, dois):
-    ''' Generate HTML for a list of works from ORCID
+def add_orcid_works(data, dois, return_html=True):
+    ''' Generate HTML or JSON for a list of works from ORCID
         Keyword arguments:
           data: ORCID data
           dois: list of DOIs from dois collection
+          return_html: return results as HTML
         Returns:
-          HTML for a list of works from ORCID
+          HTML or JSON for a list of works from ORCID
     '''
     html = inner = ""
+    results = []
     works = 0
     for work in data['activities-summary']['works']['group']:
         wsumm = work['work-summary'][0]
@@ -573,6 +578,7 @@ def add_orcid_works(data, dois):
             link = doi_link(doi)
         inner += f"<tr><td>{pdate}</td><td>{link}</td>" \
                  + f"<td>{wsumm['title']['title']['value']}</td></tr>"
+        results.append({"date": pdate, "doi": doi, "title": wsumm['title']['title']['value']})
     if inner:
         title = "title is" if works == 1 else f"{works} titles are"
         html += f"<hr>The additional {title} from ORCID. Note that titles below may " \
@@ -581,7 +587,7 @@ def add_orcid_works(data, dois):
         html += '<table id="works" class="tablesorter standard"><thead><tr>' \
                 + '<th>Published</th><th>DOI</th><th>Title</th>' \
                 + f"</tr></thead><tbody>{inner}</tbody></table>"
-    return html
+    return html if return_html else results
 
 
 def generate_user_table(rows):
@@ -2011,15 +2017,64 @@ def show_oidapi(oid):
         description: ORCID data
     '''
     result = initialize_result()
-    url = f"{app.config['ORCID']}{oid}"
     try:
-        resp = requests.get(url, headers={"Accept": "application/json"}, timeout=10)
-        result['data'] = resp.json()
+        result['data'] = JRC.call_orcid(oid)
     except Exception as err:
         raise InvalidUsage(str(err), 500) from err
     if 'error-code' not in result['data']:
         result['rest']['source'] = 'orcid'
         result['rest']['row_count'] = 1
+    return generate_response(result)
+
+
+@app.route('/orcidpubs/<string:oid>')
+def show_orcidpubs(oid):
+    '''
+    Return publications for an ORCID ID
+    Return information for an ORCID ID (using the ORCID API)
+    ---
+    tags:
+      - ORCID
+    parameters:
+      - in: path
+        name: oid
+        schema:
+          type: string
+        required: true
+        description: ORCID ID
+    responses:
+      200:
+        description: ORCID data
+    '''
+    result = initialize_result()
+    try:
+        _, dois = get_orcid_from_db(oid)
+    except Exception as err:
+        raise InvalidUsage(str(err), 500) from err
+    janelia_dois = []
+    last_janelia_doi = {"doi": None, "jrc_publishing_date": '0000-00-00'}
+    if dois:
+        for doi in dois:
+            try:
+                rec = DL.get_doi_record(doi, DB['dis'].dois)
+            except Exception as err:
+                raise InvalidUsage(str(err), 500) from err
+            janelia_dois.append({"doi": doi, "jrc_publishing_date": rec['jrc_publishing_date']})
+            if rec['jrc_publishing_date'] > last_janelia_doi['jrc_publishing_date']:
+                last_janelia_doi = {"doi": doi, "jrc_publishing_date": rec['jrc_publishing_date']}
+    result['janelia_dois'] = janelia_dois
+    result['last_janelia_doi'] = last_janelia_doi
+    try:
+        data = JRC.call_orcid(oid)
+    except Exception as err:
+        raise InvalidUsage(str(err), 500) from err
+    result['orcid'] = data
+    other = add_orcid_works(data, dois, return_html=False)
+    result['other_dois'] = []
+    if last_janelia_doi['doi'] is not None:
+        for doi in other:
+            if doi['doi'] > last_janelia_doi['doi']:
+                result['other_dois'].append(doi)
     return generate_response(result)
 
 
@@ -3360,9 +3415,7 @@ def show_oid_ui(oid):
     ''' Show ORCID user
     '''
     try:
-        resp = requests.get(f"{app.config['ORCID']}{oid}",
-                            headers={"Accept": "application/json"}, timeout=10)
-        data = resp.json()
+        data = JRC.call_orcid(oid)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not retrieve ORCID ID"),
