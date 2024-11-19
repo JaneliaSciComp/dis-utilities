@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "25.3.0"
+__version__ = "25.4.0"
 # Database
 DB = {}
 # Custom queries
@@ -2027,11 +2027,11 @@ def show_oidapi(oid):
     return generate_response(result)
 
 
-@app.route('/orcidpubs/<string:oid>')
-def show_orcidpubs(oid):
+@app.route('/orcidworks/<string:oid>')
+def show_orcidworks(oid):
     '''
-    Return publications for an ORCID ID
-    Return information for an ORCID ID (using the ORCID API)
+    Return works for an ORCID ID
+    Return works information for an ORCID ID (using the ORCID API)
     ---
     tags:
       - ORCID
