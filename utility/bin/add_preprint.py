@@ -2,7 +2,7 @@
     Associate two DOIs with a preprint relationship.
 """
 
-__version__ = '1.0.0'
+__version__ = '1.1.0'
 
 import argparse
 import collections
@@ -97,6 +97,8 @@ def add_jrc_preprint():
         journal = DL.get_doi_record(ARG.JOURNAL, coll)
     except Exception as err:
         terminate_program(err)
+    if not journal:
+        terminate_program(f"Primary DOI {ARG.JOURNAL} not found")
     try:
         if DL.is_preprint(journal):
             terminate_program(f"Primary DOI {ARG.JOURNAL} is a preprint")
@@ -105,6 +107,11 @@ def add_jrc_preprint():
         terminate_program(err)
     try:
         preprint = DL.get_doi_record(ARG.PREPRINT, coll)
+        if not preprint:
+            LOGGER.error(f"Preprint {ARG.PREPRINT} not found")
+            print("You may insert this DOI with the following command:")
+            print(f"python3 weekly_pubs.py --sync_only --doi {ARG.PREPRINT} --write")
+            sys.exit(-1)
     except Exception as err:
         terminate_program(err)
     try:
