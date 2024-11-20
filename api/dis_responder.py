@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "25.4.0"
+__version__ = "25.5.0"
 # Database
 DB = {}
 # Custom queries
@@ -371,8 +371,12 @@ def get_work_publication_date(wsumm):
             pdate = ppd['year']['value']
         if 'month' in ppd and ppd['month'] and ppd['month']['value']:
             pdate += f"-{ppd['month']['value']}"
+        else:
+            pdate += "-01"
         if 'day' in ppd and ppd['day'] and ppd['day']['value']:
             pdate += f"-{ppd['day']['value']}"
+        else:
+            pdate += "-01"
     return pdate
 
 
@@ -2071,10 +2075,8 @@ def show_orcidworks(oid):
     result['orcid'] = data
     other = add_orcid_works(data, dois, return_html=False)
     result['other_dois'] = []
-    if last_janelia_doi['doi'] is not None:
-        for doi in other:
-            if doi['doi'] > last_janelia_doi['doi']:
-                result['other_dois'].append(doi)
+    for doi in other:
+        result['other_dois'].append(doi)
     return generate_response(result)
 
 
