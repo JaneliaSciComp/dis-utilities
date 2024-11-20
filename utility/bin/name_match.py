@@ -32,10 +32,20 @@ from jrc_common import jrc_common as JRC
 
 
 class Author:
-    """ Author objects are constructed solely from the Crossref-provided author information. """
-    def __init__(self, name, orcid=None, affiliations=None):
+    """ 
+    Author objects are constructed from Rob's 'author_info' data structure, 
+    which includes the Crossref-provided author information, 
+    plus a bit of cross-checking to DIS DB. If he finds a match
+    between an author and and an employee in our database, he adds that
+    employee id to the data structure. His methods of matching are either
+    exact name match or ORCID match.
+    """
+    def __init__(self, name, orcid=None, in_database=False, match_method=None, first_pass_employee_id=None, affiliations=None):
         self.name = name
         self.orcid = orcid
+        self.in_database = in_database
+        self.match_method = match_method # a string, either "name" or "ORCID"
+        self.first_pass_employee_id = first_pass_employee_id
         self.affiliations = affiliations if affiliations is not None else [] # Need to avoid the python mutable arguments trap
 
 class Employee:
@@ -83,15 +93,22 @@ class MongoOrcidRecord:
 ### Functions for instantiating objects of my custom classes
 
 def create_author(author_info):
+    def extract_from_dict(keyword):
+        return author_info[keyword] if keyword in author_info else None
+    
+    name = ''
     if 'given' in author_info and 'family' in author_info:
         name = ' '.join((author_info['given'], author_info['family']))
     elif 'name' in author_info: # e.g. if 'FlyLight Project Team' is an author
         name = author_info['name']
     else:
         raise ValueError("ERROR: Neither 'family', 'given', nor 'name' is present in one of the author records.")
-    orcid = author_info['paper_orcid'] if 'paper_orcid' in author_info else None
+    orcid = extract_from_dict('paper_orcid')
+    in_database = extract_from_dict('in_database')
+    match_method = extract_from_dict('match')
+    first_pass_employee_id = extract_from_dict('employeeId')
     affiliations = author_info['affiliations'] if author_info['asserted'] is True else None
-    return Author(name, orcid, affiliations)
+    return Author(name, orcid, in_database, match_method, first_pass_employee_id, affiliations)
 
 
 def create_employee(id):
@@ -178,10 +195,10 @@ def run_name_match(arg, doi_collection, orcid_collection):
         if not doi_record:
             print(colored( (f'WARNING: Skipping {doi}. No record found in DOI collection.'), 'yellow' ))
         else:
-            all_authors = get_author_objects(doi, doi_record, doi_collection)
+            all_authors = get_author_objects(doi, doi_record, orcid_collection)
             revised_jrc_authors = []
 
-            for author in all_authors: 
+            for author in all_authors:
                 if author.possible_employee is True:
                     final_choice = get_corresponding_employee(author, orcid_collection, arg.VERBOSE, arg.WRITE)
                     if final_choice == None:
@@ -523,6 +540,33 @@ def evaluate_candidates(author, candidates, inform_message, verbose=False):
                 print(
                     f"Employee best guess: {best_guess.name}, ID: {best_guess.id}, job title: {best_guess.job_title}, supOrgName: {best_guess.supOrgName}, email: {best_guess.email}, Confidence: {round(best_guess.score, ndigits = 3)}\n"
                     )
+            # Occasionally, Rob's system catches an exact match to our stored (nick)names,
+            # even when the closest people system match is very low.
+            # For example, we have 'Miguel Angel Núñez-Ochoa' in our database, but in the
+            # People system he is 'Miguel Angel Nunez', which matches the author name with 76% confidence. 
+            # Here, I check whether there is an exact name match to a record in the ORCID database,
+            # only after the people system has been exhausted. If there is an exact match, I prompt the user to confirm.
+            if author.in_database and author.match_method == 'name':
+                candidate_from_exact_name_match = create_employee(author.first_pass_employee_id)
+                print(f'There is someone in our database with the name {author.name}:')
+                print(colored(
+                    (f'{author.name}, ID: {candidate_from_exact_name_match.id}, job title: {candidate_from_exact_name_match.job_title}, supOrgName: {candidate_from_exact_name_match.supOrgName}, email: {candidate_from_exact_name_match.email}'),
+                    "black", "on_green"))
+                quest = [inquirer.Checkbox('decision', 
+                                   message="Do you believe this employee corresponds to this author?", 
+                                   choices=['Yes', 'No'])]
+                ans = inquirer.prompt(quest, theme=BlueComposure())
+                while len(ans['decision']) != 1: 
+                    print('Please choose exactly one option.')
+                    quest = [inquirer.Checkbox('decision', 
+                                   message="Do you believe this employee corresponds to this author?", 
+                                   choices=['Yes', 'No'])]
+                    ans = inquirer.prompt(quest, theme=BlueComposure())
+                if ans['decision'] == ['Yes']:
+                    candidate_from_exact_name_match.approved = True
+                    return candidate_from_exact_name_match
+                else:
+                    return Guess(exists=False)
             return Guess(exists=False)
         elif float(best_guess.score) > 85.0:
             print(inform_message)
@@ -719,7 +763,7 @@ def print_title(doi, doi_record):
         print(f"{doi}: {doi_record['title'][0]}")
 
 def print_janelia_authors(all_authors):
-    print(", ".join( [a.name for a in all_authors if a.possible_employee is True] ))
+    print(f"Possible Janelians: {', '.join( [a.name for a in all_authors if a.possible_employee is True] )}")
 
 def flatten(xs): # https://stackoverflow.com/questions/2158395/flatten-an-irregular-arbitrarily-nested-list-of-lists
     for x in xs:
@@ -811,7 +855,7 @@ if __name__ == '__main__':
 # nm.initialize_program()
 # orcid_collection = nm.DB['dis'].orcid
 # doi_collection = nm.DB['dis'].dois
-# doi = '10.1101/2024.09.16.613338'
+# doi = '10.1101/2024.06.30.601394'
 # doi_record = nm.doi_common.get_doi_record(doi, doi_collection)
-# all_authors = nm.get_author_objects(doi, doi_record, doi_collection)
+# all_authors = [ nm.create_author(author_record) for author_record in nm.doi_common.get_author_details(doi_record, orcid_collection)]
 
