@@ -2,7 +2,7 @@
     Check orcid collection for alumni among entries with ORCID IDs, but no employee ID
 """
 
-__version__ = '1.0.0'
+__version__ = '1.1.0'
 
 import argparse
 import collections
@@ -68,7 +68,7 @@ def call_dis(oid):
         Returns:
           JSON
     """
-    url = f"http://127.0.0.1:5000/orcidworks/{oid}"
+    url = getattr(getattr(REST, "dis"), "url") + f"orcidworks/{oid}"
     try:
         req = requests.get(url, timeout=10)
     except requests.exceptions.RequestException as err:
@@ -288,5 +288,6 @@ if __name__ == '__main__':
     ARG = PARSER.parse_args()
     LOGGER = JRC.setup_logging(ARG)
     initialize_program()
+    REST = JRC.get_config("rest_services")
     processing()
     terminate_program()
