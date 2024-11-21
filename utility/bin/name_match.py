@@ -26,17 +26,26 @@ from unidecode import unidecode
 from termcolor import colored
 import inquirer
 from inquirer.themes import BlueComposure
-import jrc_common.jrc_common as JRC
-import doi_common.doi_common as doi_common
-
+from doi_common import doi_common
+from jrc_common import jrc_common as JRC
 
 
 
 class Author:
-    """ Author objects are constructed solely from the Crossref-provided author information. """
-    def __init__(self, name, orcid=None, affiliations=None):
+    """ 
+    Author objects are constructed from Rob's 'author_info' data structure, 
+    which includes the Crossref-provided author information, 
+    plus a bit of cross-checking to DIS DB. If he finds a match
+    between an author and and an employee in our database, he adds that
+    employee id to the data structure. His methods of matching are either
+    exact name match or ORCID match.
+    """
+    def __init__(self, name, orcid=None, in_database=False, match_method=None, first_pass_employee_id=None, affiliations=None):
         self.name = name
         self.orcid = orcid
+        self.in_database = in_database
+        self.match_method = match_method # a string, either "name" or "ORCID"
+        self.first_pass_employee_id = first_pass_employee_id
         self.affiliations = affiliations if affiliations is not None else [] # Need to avoid the python mutable arguments trap
 
 class Employee:
@@ -53,8 +62,11 @@ class Employee:
         self.exists = exists
 
 class Guess(Employee):
-    """ A Guess is a subtype of Employee that consists of just ONE name permutation 
-    (e.g. Gerald M Rubin) and a fuzzy match score (calculated before the guess object is instantiated). """
+    """ 
+    A Guess is a subtype of Employee that consists of just ONE name permutation 
+    (e.g. Gerald M Rubin) and a fuzzy match score 
+    (calculated before the guess object is instantiated). 
+    """
     def __init__(self, id=None, job_title=None, email=None, location=None, supOrgName=None, first_names=None, middle_names=None, last_names=None, exists=False, name=None, score=None, approved=False):
         super().__init__(id, job_title, email, location, supOrgName, first_names, middle_names, last_names, exists)
         self.name = name
@@ -63,44 +75,60 @@ class Guess(Employee):
     def __repr__(self):
         attrs = {k:v for k, v in self.__dict__.items() if v}
         return f"Guess({', '.join(f'{k}={v}' for k, v in attrs.items())})"
-        #return '"Guess(' + ', '.join(f'{k}={v}' for k, v in attrs.items()) + ')"'
+        
 
 class MongoOrcidRecord:
+    """ A simple data structure representing a record from the orcid collection. """
     def __init__(self, orcid=None, employeeId=None, exists=False):
         self.orcid = orcid
         self.employeeId = employeeId
         self.exists = exists
     def has_orcid(self):
-        return(True if self.orcid else False)
+        return True if self.orcid else False
     def has_employeeId(self):
-        return(True if self.employeeId else False)
+        return True if self.employeeId else False
 
 
 
 ### Functions for instantiating objects of my custom classes
 
 def create_author(author_info):
+    def extract_from_dict(keyword):
+        return author_info[keyword] if keyword in author_info else None
+    
+    name = ''
     if 'given' in author_info and 'family' in author_info:
         name = ' '.join((author_info['given'], author_info['family']))
     elif 'name' in author_info: # e.g. if 'FlyLight Project Team' is an author
         name = author_info['name']
     else:
-        sys.exit("ERROR: Neither 'family', 'given', nor 'name' is present in one of the author records.")
-    orcid = author_info['paper_orcid'] if 'paper_orcid' in author_info else None
-    affiliations = author_info['affiliations'] if author_info['asserted'] == True else None
-    return(Author(name, orcid, affiliations))
+        raise ValueError("ERROR: Neither 'family', 'given', nor 'name' is present in one of the author records.")
+    orcid = extract_from_dict('paper_orcid')
+    in_database = extract_from_dict('in_database')
+    match_method = extract_from_dict('match')
+    first_pass_employee_id = extract_from_dict('employeeId')
+    affiliations = author_info['affiliations'] if author_info['asserted'] is True else None
+    return Author(name, orcid, in_database, match_method, first_pass_employee_id, affiliations)
 
 
 def create_employee(id):
+    """ A function to create employee objects. Searches the People system to get employee data. """
+    def parse_search_results(search_res, *keys):
+        """ A helper function to find employee data in the data structure resulting from People search. """
+        if len(keys) > 1:
+            return [search_res.get(key, "").strip() if search_res.get(key) else None for key in keys]
+        key = keys[0]
+        return search_res.get(key, "").strip() if search_res.get(key) else None
+
     idsearch_results = search_people_api(id, mode='id')
     if idsearch_results:
-        job_title = job_title = idsearch_results['businessTitle'].strip() if 'businessTitle' in idsearch_results else None
-        email = idsearch_results['email'].strip() if 'email' in idsearch_results else None
-        location = idsearch_results['locationName'].strip() if 'locationName'in idsearch_results else None # will be 'Janelia Research Campus' for janelians
-        supOrgName = idsearch_results['supOrgName'].strip() if 'supOrgName' in idsearch_results and idsearch_results['supOrgName'] else None
-        first_names = [ idsearch_results['nameFirstPreferred'].strip() if idsearch_results['nameFirstPreferred'] else None, idsearch_results['nameFirst'].strip() if idsearch_results['nameFirst'] else None]
-        middle_names = [ idsearch_results['nameMiddlePreferred'].strip() if idsearch_results['nameMiddlePreferred'] else None, idsearch_results['nameMiddle'].strip() if idsearch_results['nameMiddle'] else None]
-        last_names = [ idsearch_results['nameLastPreferred'].strip() if idsearch_results['nameLastPreferred'] else None, idsearch_results['nameLast'].strip() if idsearch_results['nameLast'] else None ]
+        job_title = parse_search_results(idsearch_results, 'businessTitle') 
+        email = parse_search_results(idsearch_results, 'email') 
+        location = parse_search_results(idsearch_results, 'locationName') # will be 'Janelia Research Campus' for janelians
+        supOrgName = parse_search_results(idsearch_results, 'supOrgName')
+        first_names = parse_search_results(idsearch_results, 'nameFirstPreferred', 'nameFirst')  #e.g. ['Zhe J.', 'James Zhe']
+        middle_names = parse_search_results(idsearch_results, 'nameMiddlePreferred', 'nameMiddle') # e.g. [None, None]
+        last_names = parse_search_results(idsearch_results, 'nameLastPreferred', 'nameLast') #e.g. ['Liu', 'Liu']
         return(
             Employee(
             id=id,
@@ -114,11 +142,12 @@ def create_employee(id):
             exists=True)
         )
     else:
-        return(Employee(exists=False))
+        return Employee(exists=False)
 
 
 def create_guess(employee, name=None, score=None):
-    return(Guess(
+    return(
+        Guess(
         employee.id, 
         employee.job_title, 
         employee.email,
@@ -142,7 +171,131 @@ def create_guess(employee, name=None, score=None):
 
 ### Functions for matching authors to employees
 
-def get_corresponding_employee(author, orcid_collection, verbose_arg, write_arg): # The high-level decision tree that is the core procedure of this script
+
+
+def run_name_match(arg, doi_collection, orcid_collection):
+    """ 
+    The core procedure of this program.
+    Iterates through DOIs (if more than one is given),
+    and for each DOI, iterates through authors. If all authors
+    have no affiliations at all, the script will try to get
+    a corresponding employee for each author. Otherwise,
+    it will only look for a corresponding employee for
+    authors with a Janelia affiliation.
+    Arguments: 
+        arg: command-line arguments from argparse.
+        doi_collection: connection to the DOI collection.
+        orcid_collection: connection to the orcid collection.
+    Returns:
+        A bunch of messages printed to the terminal.
+    """
+    dois = get_dois_from_commandline(arg.DOI, arg.FILE)
+    for doi in dois:
+        doi_record = doi_common.get_doi_record(doi, doi_collection)
+        if not doi_record:
+            print(colored( (f'WARNING: Skipping {doi}. No record found in DOI collection.'), 'yellow' ))
+        else:
+            all_authors = get_author_objects(doi, doi_record, orcid_collection)
+            revised_jrc_authors = []
+
+            for author in all_authors:
+                if author.possible_employee is True:
+                    final_choice = get_corresponding_employee(author, orcid_collection, arg.VERBOSE, arg.WRITE)
+                    if final_choice == None:
+                        revised_jrc_authors.append(Employee(exists=False))
+                    else:
+                        revised_jrc_authors.append(final_choice)
+                else:
+                    revised_jrc_authors.append(Employee(exists=False))
+
+            if len(revised_jrc_authors) != len(all_authors):
+                raise ValueError("ERROR: Length of revised_jrc_author doesn't make sense. Did you overlook an author, or add two employeeIds for one author?")
+
+            print("Janelia authors are highlighted below:")
+            for i in range(len(revised_jrc_authors)):
+                if revised_jrc_authors[i].exists:
+                    print(colored(
+                        (all_authors[i].name, revised_jrc_authors[i].id), "black", "on_yellow"
+                    ))
+                else:
+                    print(all_authors[i].name)
+
+            if arg.WRITE:
+                overwrite_jrc_author(doi, revised_jrc_authors)
+            else:
+                print(colored(
+                    ("WARNING: Dry run successful, no updates were made"), "yellow"
+                ))
+
+
+
+
+# Functions for determining which authors we will try to match to employees
+
+def get_author_objects(doi, doi_record, orcid_collection):
+    """ 
+    Create author objects and determine whether we will 
+    try to match them to an employee.
+    """
+    print_title(doi, doi_record)
+    all_authors = [ create_author(author_record) for author_record in doi_common.get_author_details(doi_record, orcid_collection)]
+    all_authors = set_author_possible_employee_attr(all_authors, orcid_collection)
+    # If the paper has affiliations, we will only check those authors with janelia affiliations. Otherwise, we will check all authors.
+    print_janelia_authors(all_authors)
+    return all_authors
+
+def set_author_possible_employee_attr(all_authors, orcid_collection):
+    """ Set the attribute author.possible_employee dynamically. """
+    new_author_list = all_authors
+    if not any([a.affiliations for a in all_authors]):
+        for author in new_author_list:
+            setattr(author, 'possible_employee', True)
+    else:
+        pattern = re.compile(
+        r'(?i)(janelia|'  # (?i) means case-insensitive; pattern matches "Janelia" in any form, e.g., "Janelia", "thejaneliafarm", etc.
+        r'(ashburn.*(hhmi|howard\s*hughes))|'  # "Ashburn" with "HHMI" or "Howard Hughes"
+        r'(hhmi|howard\s*hughes).*ashburn)'  # "HHMI" or "Howard Hughes" with "Ashburn" 
+        )
+        for author in new_author_list:
+            setattr(author, 'possible_employee', is_janelian(author, pattern, orcid_collection))
+    return new_author_list
+
+def is_janelian(author, pattern, orcid_collection):
+    """ 
+    Determine whether an author is Janelian: they must be in the orcid collection, 
+    based on orcid ID on the paper, or have Janelia in their affiliations.
+    """
+    result = False
+    if author.orcid:
+        if doi_common.single_orcid_lookup(author.orcid, orcid_collection, 'orcid'):
+            result = True
+    if bool(re.search(pattern, " ".join(author.affiliations))):
+        result = True
+    return result
+
+
+
+
+
+
+
+# Functions for matching authors to corresponding employees
+
+def get_corresponding_employee(author, orcid_collection, verbose_arg, write_arg): 
+    """ 
+    The high-level decision tree for trying to find a corresponding employee, 
+    given an author. Tries to find them in the orcid collection first. If it can't,
+    searches the People system and prompts the user to select a best guess.
+    Also creates or updates the relevant record in our orcid collection if needed.
+    Arguments: 
+        author: an author object.
+        orcid_collection: connection to the orcid collection.
+        verbose_arg: boolean indicating whether the --verbose flag was used.
+        write_arg: boolean indicating whether the --write flag was used. 
+        (Exclusion of this flag indicates user wants a dry run.)
+    Returns:
+        A guess object.
+    """
     final_choice = None
 
     if author.orcid:
@@ -152,7 +305,7 @@ def get_corresponding_employee(author, orcid_collection, verbose_arg, write_arg)
             if mongo_orcid_record.has_employeeId():
                 employee = create_employee(mongo_orcid_record.employeeId)
                 final_choice = employee
-                add_preferred_names_to_complete_orcid_record(mongo_orcid_record, author, employee, orcid_collection, verbose_arg)
+                add_preferred_names_to_complete_orcid_record(author, employee, orcid_collection, verbose_arg)
             else:
                 best_guess = guess_employee(author, f"{author.name} has an ORCID on this paper. They are in our ORCID collection, but without an employee ID.", verbose_arg)
                 if best_guess.approved:
@@ -179,96 +332,138 @@ def get_corresponding_employee(author, orcid_collection, verbose_arg, write_arg)
         if best_guess.approved:
             final_choice = best_guess
 
-    return(final_choice)
+    return final_choice
+
 
 
 def guess_employee(author, inform_message, verbose_arg):
+    """
+    If a name can't be found in the ORCID collection,
+    search the People system, make an educated guess, and 
+    prompt the user to confirm that guess.
+    Arguments: 
+        author: an author object.
+        inform_message: an informational message with info
+        about this author, to be printed if verbose==True.
+        verbose_arg: boolean indicating whether the --verbose flag was used.
+    Returns:
+        A list of guess objects. This list will never be empty. 
+        It may, however, simply contain one 'empty' guess object.
+    """
     candidates = propose_candidates(author)
     best_guess = evaluate_candidates(author, candidates, inform_message, verbose_arg)
-    return(best_guess)
+    return best_guess
 
 def propose_candidates(author):
     """ 
-    Given an author object, search the People API for one or more matches using the People Search. 
+    Given an author object, search the People API for one or more hits. 
     Arguments: 
         author: an author object.
     Returns:
         A list of guess objects. This list will never be empty. It may, however, simply contain one 'empty' guess object.
     """
-    name = HumanName(author.name)
-    basic = name_search(name.first, name.last)
-    stripped = name_search(unidecode(name.first), unidecode(name.last)) # decode accents and other special characters
-    hyphen_split1 = name_search(name.first, name.last.split('-')[0]) if '-' in name.last else None # try different parts of a hyphenated last name
-    hyphen_split2 = name_search(name.first, name.last.split('-')[1]) if '-' in name.last else None
-    strp_hyph1 = name_search(unidecode(name.first), unidecode(name.last.split('-')[0])) if '-' in name.last else None # split on hyphen and decoded
-    strp_hyph2 = name_search(unidecode(name.first), unidecode(name.last.split('-')[1])) if '-' in name.last else None
-    two_middle_names1 = name_search(name.first, name.middle.split(' ')[0]) if len(name.middle.split())==2 else None # try different parts of a multi-word middle name, e.g. Virginia Marjorie Tartaglio Scarlett
-    two_middle_names2 = name_search(name.first, name.middle.split(' ')[1]) if len(name.middle.split())==2 else None
-    strp_middle1 = name_search(unidecode(name.first), unidecode(name.middle.split()[0])) if len(name.middle.split())==2 else None # split on middle name space and decoded
-    strp_middle2 = name_search(unidecode(name.first), unidecode(name.middle.split()[1])) if len(name.middle.split())==2 else None
-    all_results = [basic, stripped, hyphen_split1, hyphen_split2, strp_hyph1, strp_hyph2, two_middle_names1, two_middle_names2, strp_middle1, strp_middle2]
-    candidate_ids = [id for id in list(set(flatten(all_results))) if id is not None]
-    candidate_employees = [create_employee(id) for id in candidate_ids]
-    candidate_employees = [e for e in candidate_employees if e.location == 'Janelia Research Campus']
-    return(fuzzy_match(author, candidate_employees))
+    candidate_ids = name_search(author)
+    if candidate_ids:
+        candidate_employees = [create_employee(id) for id in candidate_ids]
+        candidate_employees = [e for e in candidate_employees if e.location == 'Janelia Research Campus']
+        guesses = fuzzy_match(author, candidate_employees)
+        return guesses
+    else:
+        return [ Guess(exists=False) ]
 
 
-def name_search(first, last):
-    """ 
+def name_search(author): 
+    """
+    Searches all reasonable two-word permutations of a person's name in the 
+    People system, using the following heuristic: search the first name
+    and the last name separately, and keep the employee IDs of all employees who
+    came up in both searches. (The People system only allows searching
+    by one word at a time.)
     Arguments: 
-        first: first name, a string.
-        last: last name, a string.
+        author: An author object.
     Returns:
-        A list of candidate employee ids (strings) OR None.
+        A list of employee objects OR None.
     """
-    search_results1 = search_people_api(first, mode='name') # a list of dicts
-    search_results2 = search_people_api(last, mode='name')
-    if search_results1 and search_results2:
-        return( process_search_results(search_results1, search_results2) )
+    name = HumanName(author.name) # handles suffixes, compound names, etc.
+    #^ Two examples: 'Norma Citlalicue Pérez Rosas' / 'Miguel Angel Núñez-Ochoa'
+    basic = (name.first, name.last) 
+    #^ ('Norma', 'Rosas') / ('Miguel', 'Núñez-Ochoa')
+    stripped = (unidecode(name.first), unidecode(name.last)) 
+    #^ ('Norma', 'Rosas') / ('Miguel', 'Nunez-Ochoa')
+    hyphen_split1 = (name.first, name.last.split('-')[0]) if '-' in name.last else None 
+    #^ None / ('Miguel', 'Núñez')
+    hyphen_split2 = (name.first, name.last.split('-')[1]) if '-' in name.last else None 
+    #^ None / ('Miguel', 'Ochoa')
+    strp_hyph1 = (unidecode(name.first), unidecode(name.last.split('-')[0])) if '-' in name.last else None 
+    #^ None / ('Miguel', 'Nunez')
+    strp_hyph2 = (unidecode(name.first), unidecode(name.last.split('-')[1])) if '-' in name.last else None 
+    #^ None / ('Miguel', 'Ochoa')
+    two_middle_names1 = (name.first, name.middle.split(' ')[0]) if len(name.middle.split())==2 else None 
+    #^ ('Norma', 'Citlalicue') / None
+    two_middle_names2 = (name.first, name.middle.split(' ')[1]) if len(name.middle.split())==2 else None
+    #^ ('Norma', 'Pérez') / None
+    strp_middle1 = (unidecode(name.first), unidecode(name.middle.split()[0])) if len(name.middle.split())==2 else None 
+    #^ ('Norma', 'Citlalicue') / None
+    strp_middle2 = (unidecode(name.first), unidecode(name.middle.split()[1])) if len(name.middle.split())==2 else None
+    #^ ('Norma', 'Perez') / None
+    name_tuples = [basic, 
+                   stripped, 
+                   hyphen_split1, 
+                   hyphen_split2, 
+                   strp_hyph1, 
+                   strp_hyph2, 
+                   two_middle_names1, 
+                   two_middle_names2, 
+                   strp_middle1, 
+                   strp_middle2]
+    name_tuples = [tup for tup in name_tuples if tup is not None]
+    name_tuples = list(set(name_tuples))
+    result = []
+    for tup in name_tuples:
+        search_results1 = search_people_api(tup[0], mode='name') 
+        #^ a list of dicts, e.g. a dict for Virginia Scarlett and a dict for Virginia Ruetten
+        search_results2 = search_people_api(tup[1], mode='name') 
+        #^ a list of dicts, e.g. a dict for Virginia Scarlett and a dict for Scarlett Pitts
+        if search_results1 and search_results2:
+            employee_ids1 = {item['employeeId'] for item in search_results1}
+            employee_ids2 = {item['employeeId'] for item in search_results2}
+            common_ids = list(employee_ids1.intersection(employee_ids2))
+            common_ids = [id for id in common_ids if id is not None] # you never know...
+            if common_ids:
+                for id in common_ids:
+                    result.append(id)
+    candidate_ids = list(set(result))
+    if candidate_ids:
+        return candidate_ids
     else:
-        return(None)
-
-def process_search_results(list1, list2):
-    """
-    A function to enforce that the same employeeId must appear in both the first and last name searches to return a successful result.
-    Arguments:
-        list1: a list of dicts, where each dict is the metadata for an employee from our People search on the first name. (e.g., [a dict for Virginia Scarlett, a dict for Virginia Ruetten])
-        list2: a list of dicts, where each dict is the metadata for an employee from our People search on the last name. (e.g., [a dict for Virginia Scarlett, a dict for Scarlett Pitts])
-    Returns:
-        A list of employee Ids from dicts that occurred in both lists (e.g., [Virginia Scarlett's employeeId])
-        OR
-        None
-    """
-    employee_ids_list1 = {item['employeeId'] for item in list1}
-    employee_ids_list2 = {item['employeeId'] for item in list2}
-    common_ids = list(employee_ids_list1.intersection(employee_ids_list2))
-    if common_ids:
-        return(common_ids)
-    else:
-        return(None)
+        return None
+ 
 
 def fuzzy_match(author, candidate_employees):
     """ 
     Arguments: 
         author: an author object.
-        candidate_employees: a list of employee objects, possibly an empty list.
+        candidate_employees: a list of employee objects, or None.
     Returns:
-        A list of guess objects. This list will never be empty. It may, however, simply contain one 'empty' guess object.
+        A list of guess objects. This list will never be empty. It may, however, simply contain one 'non-existent' guess object.
     """
     guesses = []
     if candidate_employees:
         for employee in candidate_employees:
             employee_permuted_names = generate_name_permutations(employee.first_names, employee.middle_names, employee.last_names)
             for name in employee_permuted_names:
-                guesses.append(create_guess(employee, name=name)) # Each employee will generate several guesses, e.g. Virginia T Scarlett, Virginia Scarlett, Ginnie Scarlett
+                guesses.append(create_guess(employee, name=name)) 
+                # Each employee will generate several guesses, e.g. Virginia T Scarlett, Virginia Scarlett, Ginnie Scarlett
     if guesses:
         for guess in guesses:
-            guess.score = fuzz.token_sort_ratio(author.name, guess.name, processor=utils.default_process) #processor will convert the strings to lowercase, remove non-alphanumeric characters, and trim whitespace
-        high_score = max( [g.score for g in guesses] )
+            guess.score = fuzz.token_sort_ratio(author.name, guess.name, processor=utils.default_process) 
+            #^processor will convert the strings to lowercase, remove non-alphanumeric characters, and trim whitespace
+        high_score = max( g.score for g in guesses )
         winners = [ g for g in guesses if g.score == high_score ]
-        return(winners)
-    elif not guesses:
-        return( [ Guess(exists=False) ] )
+        return winners
+    else:
+        return [ Guess(exists=False) ]
+
 
 
 def evaluate_candidates(author, candidates, inform_message, verbose=False):
@@ -328,24 +523,51 @@ def evaluate_candidates(author, candidates, inform_message, verbose=False):
             index = [guess.name for guess in selection_list].index(ans['decision'][0])
             winner = candidates[index]
             winner.approved = True
-            return(winner)
+            return winner
         elif ans['decision'] == ['None of the above']:
             print(f"No action will be taken for {author.name}.\n")
-            return( Guess(exists=False) )
+            return Guess(exists=False) 
 
     elif len(candidates) == 1:
         best_guess = candidates[0]
         if not best_guess.exists:
             if verbose:
                 print(f"A Janelian named {author.name} could not be found in the HHMI People API. No action to take.\n")
-            return(best_guess)
+            return best_guess
         if float(best_guess.score) < 85.0:
             if verbose:
                 print(inform_message)
                 print(
                     f"Employee best guess: {best_guess.name}, ID: {best_guess.id}, job title: {best_guess.job_title}, supOrgName: {best_guess.supOrgName}, email: {best_guess.email}, Confidence: {round(best_guess.score, ndigits = 3)}\n"
                     )
-            return( Guess(exists=False) )
+            # Occasionally, Rob's system catches an exact match to our stored (nick)names,
+            # even when the closest people system match is very low.
+            # For example, we have 'Miguel Angel Núñez-Ochoa' in our database, but in the
+            # People system he is 'Miguel Angel Nunez', which matches the author name with 76% confidence. 
+            # Here, I check whether there is an exact name match to a record in the ORCID database,
+            # only after the people system has been exhausted. If there is an exact match, I prompt the user to confirm.
+            if author.in_database and author.match_method == 'name':
+                candidate_from_exact_name_match = create_employee(author.first_pass_employee_id)
+                print(f'There is someone in our database with the name {author.name}:')
+                print(colored(
+                    (f'{author.name}, ID: {candidate_from_exact_name_match.id}, job title: {candidate_from_exact_name_match.job_title}, supOrgName: {candidate_from_exact_name_match.supOrgName}, email: {candidate_from_exact_name_match.email}'),
+                    "black", "on_green"))
+                quest = [inquirer.Checkbox('decision', 
+                                   message="Do you believe this employee corresponds to this author?", 
+                                   choices=['Yes', 'No'])]
+                ans = inquirer.prompt(quest, theme=BlueComposure())
+                while len(ans['decision']) != 1: 
+                    print('Please choose exactly one option.')
+                    quest = [inquirer.Checkbox('decision', 
+                                   message="Do you believe this employee corresponds to this author?", 
+                                   choices=['Yes', 'No'])]
+                    ans = inquirer.prompt(quest, theme=BlueComposure())
+                if ans['decision'] == ['Yes']:
+                    candidate_from_exact_name_match.approved = True
+                    return candidate_from_exact_name_match
+                else:
+                    return Guess(exists=False)
+            return Guess(exists=False)
         elif float(best_guess.score) > 85.0:
             print(inform_message)
             print(colored(
@@ -358,51 +580,26 @@ def evaluate_candidates(author, candidates, inform_message, verbose=False):
             ans = inquirer.prompt(quest, theme=BlueComposure())
             if ans['decision'] == 'Yes':
                 best_guess.approved = True
-                return(best_guess)
+                return best_guess
             else:
                 print(f"No action will be taken for {author.name}.\n")
-                return( Guess(exists=False) )
+                return Guess(exists=False)
 
 
 
 
 
-### Functions to search and write to database
+### Functions to search and write to databases
 
-def get_author_objects(doi, doi_record, doi_collection):
-    print_title(doi, doi_record)
-    all_authors = [ create_author(author_record) for author_record in doi_common.get_author_details(doi_record, doi_collection)]
-    all_authors = set_author_check_attr(all_authors)
-    # If the paper has affiliations, we will only check those authors with janelia affiliations. Otherwise, we will check all authors.
-    print_janelia_authors(all_authors)
-    return(all_authors)
 
-def set_author_check_attr(all_authors):
-    new_author_list = all_authors
-    if not any([a.affiliations for a in all_authors]):
-        for i in range(len(new_author_list)):
-            setattr(new_author_list[i], 'check', True)
-    else:
-        pattern = re.compile(
-        r'(?i)(janelia|'  # (?i) means case-insensitive; pattern matches "Janelia" in any form, e.g., "Janelia", "thejaneliafarm", etc.
-        r'(ashburn.*(hhmi|howard\s*hughes))|'  # "Ashburn" with "HHMI" or "Howard Hughes"
-        r'(hhmi|howard\s*hughes).*ashburn)'  # "HHMI" or "Howard Hughes" with "Ashburn" 
-        )
-        for i in range(len(new_author_list)):
-            setattr(new_author_list[i], 'check', is_janelian(new_author_list[i], pattern, orcid_collection))
-    return(new_author_list)
 
-def is_janelian(author, pattern, orcid_collection):
-    result = False
-    if author.orcid:
-        if doi_common.single_orcid_lookup(author.orcid, orcid_collection, 'orcid'):
-            result = True
-    if bool(re.search(pattern, " ".join(author.affiliations))):
-        result = True
-    return(result)
-
-def add_preferred_names_to_complete_orcid_record(mongo_orcid_record, author, employee, orcid_collection, verbose_arg):
-    doi_common.add_orcid_name(lookup=author.orcid, lookup_by='orcid', given=first_names_for_orcid_record(author, employee), family=last_names_for_orcid_record(author, employee), coll=orcid_collection)
+def add_preferred_names_to_complete_orcid_record(author, employee, orcid_collection, verbose_arg):
+    doi_common.add_orcid_name(
+        lookup=author.orcid, 
+        lookup_by='orcid', 
+        given=first_names_for_orcid_record(author, employee), 
+        family=last_names_for_orcid_record(author, employee), 
+        coll=orcid_collection)
     if verbose_arg:
         print( f"{author.name} has an ORCID on this paper. They are in our ORCID collection, with both an ORCID an employee ID.\n" )
 
@@ -410,46 +607,74 @@ def add_id_and_names_to_incomplete_orcid_record(employee, author, to_add, orcid_
     if to_add not in {'id', 'orcid'}:
         raise ValueError("to_add argument to add_id_and_names_to_incomplete_orcid_record() must be either 'orcid' or 'id'.")
     if to_add == 'id':
-        if not doi_common.single_orcid_lookup(employee.id, orcid_collection, 'employeeId'):
+        if not doi_common.single_orcid_lookup(
+            employee.id, 
+            orcid_collection, 
+            'employeeId'):
             if write_arg:
-                doi_common.update_existing_orcid(lookup=author.orcid, lookup_by='orcid', coll=orcid_collection, add=employee.id)
-                doi_common.add_orcid_name(lookup=author.orcid, lookup_by='orcid', coll=orcid_collection, given=first_names_for_orcid_record(author, best_guess), family=last_names_for_orcid_record(author, best_guess))
+                doi_common.update_existing_orcid(
+                    lookup=author.orcid, 
+                    lookup_by='orcid', 
+                    coll=orcid_collection, 
+                    add=employee.id)
+                doi_common.add_orcid_name(
+                    lookup=author.orcid, 
+                    lookup_by='orcid', 
+                    coll=orcid_collection, 
+                    given=first_names_for_orcid_record(author, employee), 
+                    family=last_names_for_orcid_record(author, employee))
         else:
             print(f'ERROR: {author.name} has at least two records in our orcid collection. Aborting attempt to add employeeId {employee.id} to existing record for this ORCID: {author.orcid}')
     if to_add == 'orcid':
-        if not doi_common.single_orcid_lookup(author.orcid, orcid_collection, 'orcid'):
+        if not doi_common.single_orcid_lookup(
+            author.orcid, 
+            orcid_collection, 
+            'orcid'):
             if write_arg:
-                doi_common.update_existing_orcid(lookup=employee.id, lookup_by='employeeId', add=author.orcid)
-                doi_common.add_orcid_name(lookup=employee.id, lookup_by='employeeId', coll=orcid_collection, given=first_names_for_orcid_record(author, best_guess), family=last_names_for_orcid_record(author, best_guess))
+                doi_common.update_existing_orcid(
+                    lookup=employee.id, 
+                    lookup_by='employeeId', 
+                    add=author.orcid)
+                doi_common.add_orcid_name(
+                    lookup=employee.id, 
+                    lookup_by='employeeId', 
+                    coll=orcid_collection, 
+                    given=first_names_for_orcid_record(author, employee), 
+                    family=last_names_for_orcid_record(author, employee))
         else:
             print(f'ERROR: {author.name} has two records in our orcid collection. Aborting attempt to add orcid {author.orcid} to existing record for this employeeId: {employee.id}')
 
 def create_orcid_record(best_guess, orcid_collection, author, write_arg):
     if write_arg:
-        doi_common.add_orcid(best_guess.id, orcid_collection, given=first_names_for_orcid_record(author, best_guess), family=last_names_for_orcid_record(author, best_guess), orcid=author.orcid)
+        doi_common.add_orcid(
+            best_guess.id, 
+            orcid_collection, 
+            given=first_names_for_orcid_record(author, best_guess), 
+            family=last_names_for_orcid_record(author, best_guess), orcid=author.orcid)
         print(f"Record created for {author.name} in orcid collection.")
 
 def generate_name_permutations(first_names, middle_names, last_names):
-        middle_names = [n for n in middle_names if n not in ('', None)] # some example middle_names, from HHMI People system: [None], ['D.', ''], ['Marie Sophie'], ['', '']
-        permutations = set()
-        # All possible first names + all possible last names
-        for first_name, last_name in itertools.product(first_names, last_names):
+    middle_names = [n for n in middle_names if n not in ('', None)] 
+    # some example middle_names from HHMI People system: [None], ['D.', ''], ['Marie Sophie'], ['', '']
+    permutations = set()
+    # All possible first names + all possible last names
+    for first_name, last_name in itertools.product(first_names, last_names):
+        permutations.add(
+            f"{first_name} {last_name}"
+        )
+    # All possible first names + all possible middle names + all possible last names
+    if middle_names:
+        for first_name, middle_name, last_name in itertools.product(first_names, middle_names, last_names):
             permutations.add(
-                f"{first_name} {last_name}"
+                f"{first_name} {middle_name} {last_name}"
             )
-        # All possible first names + all possible middle names + all possible last names
-        if middle_names:
-            for first_name, middle_name, last_name in itertools.product(first_names, middle_names, last_names):
-                permutations.add(
-                    f"{first_name} {middle_name} {last_name}"
-                )
-        # All possible first names + all possible middle initials + all possible last names
-            for first_name, middle_name, last_name in itertools.product(first_names, middle_names, last_names):
-                middle_initial = middle_name[0]
-                permutations.add(
-                    f"{first_name} {middle_initial} {last_name}"
-                )
-        return list(sorted(permutations))
+    # All possible first names + all possible middle initials + all possible last names
+        for first_name, middle_name, last_name in itertools.product(first_names, middle_names, last_names):
+            middle_initial = middle_name[0]
+            permutations.add(
+                f"{first_name} {middle_initial} {last_name}"
+            )
+    return list(sorted(permutations))
 
 def first_names_for_orcid_record(author, employee):
     result = generate_name_permutations(
@@ -458,7 +683,7 @@ def first_names_for_orcid_record(author, employee):
         [HumanName(author.name).last]+employee.last_names
     )
     h_result = [HumanName(n) for n in result]
-    return(list(set([' '.join((n.first,n.middle)).strip() for n in h_result])))
+    return list(set([' '.join((n.first,n.middle)).strip() for n in h_result]))
 
 def last_names_for_orcid_record(author, employee):
     result = generate_name_permutations(
@@ -467,12 +692,12 @@ def last_names_for_orcid_record(author, employee):
         [HumanName(author.name).last]+employee.last_names
     )
     h_result = [HumanName(n) for n in result]
-    return(list(set([n.last for n in h_result])))
+    return list(set([n.last for n in h_result]))
 
 
 def get_mongo_orcid_record(search_term, orcid_collection):
     if not search_term:
-        return(MongoOrcidRecord(exists=False))
+        return MongoOrcidRecord(exists=False)
     else:
         result = ''
         if len(search_term) == 19: #ORCIDs are guaranteed to be 16 digits (plus the hyphens)
@@ -481,32 +706,32 @@ def get_mongo_orcid_record(search_term, orcid_collection):
             result = doi_common.single_orcid_lookup(search_term, orcid_collection, 'employeeId')
         if result:
             if 'orcid' in result and 'employeeId' in result:
-                return(MongoOrcidRecord(orcid=result['orcid'], employeeId=result['employeeId'], exists=True))
+                return MongoOrcidRecord(orcid=result['orcid'], employeeId=result['employeeId'], exists=True)
             if 'orcid' in result and 'employeeId' not in result:
-                return(MongoOrcidRecord(orcid=result['orcid'], exists=True))
+                return MongoOrcidRecord(orcid=result['orcid'], exists=True)
             if 'orcid' not in result and 'employeeId' in result:
-                return(MongoOrcidRecord(employeeId=result['employeeId'], exists=True))
+                return MongoOrcidRecord(employeeId=result['employeeId'], exists=True)
         else:
-            return(MongoOrcidRecord(exists=False))
+            return MongoOrcidRecord(exists=False)
 
 def search_people_api(query, mode):
     response = None
     if mode not in {'name', 'id'}:
-        sys.exit("ERROR: HHMI People API search mode must be either 'name' or 'id'.")
+        raise ValueError("ERROR: HHMI People API search mode must be either 'name' or 'id'.") 
     if mode == 'name':
         response = JRC.call_people_by_name(query)
     elif mode == 'id':
         response = JRC.call_people_by_id(query)
-    return(response)
+    return response
 
 def strip_orcid_if_provided_as_url(orcid):
     prefixes = ["http://orcid.org/", "https://orcid.org/"]
     for prefix in prefixes:
         if orcid.startswith(prefix):
             return orcid[len(prefix):]
-    return(orcid)
+    return orcid
 
-def overwrite_jrc_author(revised_jrc_authors):
+def overwrite_jrc_author(doi, revised_jrc_authors):
     id_list = [e.id for e in revised_jrc_authors]
     id_list = [id for id in id_list if id]
     payload = {'jrc_author': id_list}
@@ -528,9 +753,8 @@ def get_dois_from_commandline(doi_arg, file_arg):
                 for doi in instream.read().splitlines():
                     dois.append(doi.strip().lower())
         except Exception as err:
-            print(f"Could not process {file_arg}")
-            exit()
-    return(dois)
+            raise ValueError(f"ERROR: Could not process {file_arg}") from err
+    return dois
 
 def print_title(doi, doi_record):
     if 'titles' in doi_record: # DataCite
@@ -539,7 +763,7 @@ def print_title(doi, doi_record):
         print(f"{doi}: {doi_record['title'][0]}")
 
 def print_janelia_authors(all_authors):
-    print(", ".join( [a.name for a in all_authors if a.check == True] ))
+    print(f"Possible Janelians: {', '.join( [a.name for a in all_authors if a.possible_employee is True] )}")
 
 def flatten(xs): # https://stackoverflow.com/questions/2158395/flatten-an-irregular-arbitrarily-nested-list-of-lists
     for x in xs:
@@ -622,46 +846,7 @@ if __name__ == '__main__':
     orcid_collection = DB['dis'].orcid
     doi_collection = DB['dis'].dois
 
-    dois = get_dois_from_commandline(arg.DOI, arg.FILE)
-    for doi in dois:
-        doi_record = doi_common.get_doi_record(doi, doi_collection)
-        if not doi_record:
-            print(colored( (f'WARNING: Skipping {doi}. No record found in DOI collection.'), 'yellow' ))
-        else:
-            all_authors = get_author_objects(doi, doi_record, doi_collection)
-            revised_jrc_authors = []
-
-            for author in all_authors: 
-                if author.check == True:
-                    final_choice = get_corresponding_employee(author, orcid_collection, arg.VERBOSE, arg.WRITE)
-                    if final_choice == None:
-                        revised_jrc_authors.append(Employee(exists=False))
-                    else:
-                        revised_jrc_authors.append(final_choice)
-                else:
-                    revised_jrc_authors.append(Employee(exists=False))
-
-            if len(revised_jrc_authors) != len(all_authors):
-                sys.exit("ERROR: Length of revised_jrc_author doesn't make sense. Did you overlook an author, or add two employeeIds for one author?")
-            
-            print("Janelia authors are highlighted below:")
-            for i in range(len(revised_jrc_authors)):
-                if revised_jrc_authors[i].exists:
-                    print(colored(
-                        (all_authors[i].name, revised_jrc_authors[i].id), "black", "on_yellow"
-                    ))
-                else:
-                    print(all_authors[i].name)
-
-            if arg.WRITE:
-                overwrite_jrc_author(revised_jrc_authors)
-            else:
-                print(colored(
-                    ("WARNING: Dry run successful, no updates were made"), "yellow"
-                ))
-
-
-
+    run_name_match(arg, doi_collection, orcid_collection)
 
 
 
@@ -670,7 +855,7 @@ if __name__ == '__main__':
 # nm.initialize_program()
 # orcid_collection = nm.DB['dis'].orcid
 # doi_collection = nm.DB['dis'].dois
-# doi = '10.1101/2024.09.16.613338'
+# doi = '10.1101/2024.06.30.601394'
 # doi_record = nm.doi_common.get_doi_record(doi, doi_collection)
-# all_authors = nm.get_author_objects(doi, doi_record, doi_collection)
+# all_authors = [ nm.create_author(author_record) for author_record in nm.doi_common.get_author_details(doi_record, orcid_collection)]
 
