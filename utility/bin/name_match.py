@@ -572,17 +572,11 @@ def evaluate_candidates(author, candidates, inform_message, verbose=False):
                 print(colored(
                     (f'{author.name}, ID: {candidate_from_exact_name_match.id}, job title: {candidate_from_exact_name_match.job_title}, supOrgName: {candidate_from_exact_name_match.supOrgName}, email: {candidate_from_exact_name_match.email}'),
                     "black", "on_green"))
-                quest = [inquirer.Checkbox('decision', 
+                quest = [inquirer.List('decision', 
                                    message="Do you believe this employee corresponds to this author?", 
                                    choices=['Yes', 'No'])]
                 ans = inquirer.prompt(quest, theme=BlueComposure())
-                while len(ans['decision']) != 1: 
-                    print('Please choose exactly one option.')
-                    quest = [inquirer.Checkbox('decision', 
-                                   message="Do you believe this employee corresponds to this author?", 
-                                   choices=['Yes', 'No'])]
-                    ans = inquirer.prompt(quest, theme=BlueComposure())
-                if ans['decision'] == ['Yes']:
+                if ans['decision'] == 'Yes':
                     candidate_from_exact_name_match.approved = True
                     return candidate_from_exact_name_match
                 else:
