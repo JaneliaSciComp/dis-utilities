@@ -38,13 +38,14 @@ class Author:
     plus a bit of cross-checking to DIS DB. If he finds a match
     between an author and and an employee in our database, he adds that
     employee id to the data structure. His methods of matching are either
-    exact name match or ORCID match.
+    exact name match, ORCID match, or "asserted" meaning affiliations match.
     """
-    def __init__(self, name, orcid=None, in_database=False, match_method=None, first_pass_employee_id=None, affiliations=None):
+    def __init__(self, name, orcid=None, in_database=False, match_method=None, alumni=False, first_pass_employee_id=None, affiliations=None):
         self.name = name
         self.orcid = orcid
         self.in_database = in_database
-        self.match_method = match_method # a string, either "name" or "ORCID"
+        self.match_method = match_method # either "name", "ORCID", "asserted", or False
+        self.alumni = alumni
         self.first_pass_employee_id = first_pass_employee_id
         self.affiliations = affiliations if affiliations is not None else [] # Need to avoid the python mutable arguments trap
 
@@ -106,9 +107,10 @@ def create_author(author_info):
     orcid = extract_from_dict('paper_orcid')
     in_database = extract_from_dict('in_database')
     match_method = extract_from_dict('match')
+    alumni = extract_from_dict('alumni')
     first_pass_employee_id = extract_from_dict('employeeId')
     affiliations = author_info['affiliations'] if author_info['asserted'] is True else None
-    return Author(name, orcid, in_database, match_method, first_pass_employee_id, affiliations)
+    return Author(name, orcid, in_database, match_method, alumni, first_pass_employee_id, affiliations)
 
 
 def create_employee(id):
@@ -196,7 +198,7 @@ def run_name_match(arg, doi_collection, orcid_collection):
             print(colored( (f'WARNING: Skipping {doi}. No record found in DOI collection.'), 'yellow' ))
         else:
             all_authors = get_author_objects(doi, doi_record, orcid_collection)
-            revised_jrc_authors = []
+            revised_jrc_authors = [] # a list of guess objects
 
             for author in all_authors:
                 if author.possible_employee is True:
@@ -213,12 +215,30 @@ def run_name_match(arg, doi_collection, orcid_collection):
 
             print("Janelia authors are highlighted below:")
             for i in range(len(revised_jrc_authors)):
-                if revised_jrc_authors[i].exists:
-                    print(colored(
-                        (all_authors[i].name, revised_jrc_authors[i].id), "black", "on_yellow"
-                    ))
+                author = all_authors[i]
+                final_guess = revised_jrc_authors[i]
+                if final_guess.exists:
+                    if author.alumni is False:
+                        print(colored(
+                            (f"{author.name}, employee id: {final_guess.id}"), "black", "on_yellow"
+                        ))
+                    else:
+                        print(colored(
+                            (f"{author.name}, ALUMNI, employee id: {final_guess.id}"), "black", "on_yellow"
+                        ))
                 else:
-                    print(all_authors[i].name)
+                    if author.alumni is False:
+                        print(author.name)
+                    else:
+                        if author.match_method == "asserted" or author.match_method == "ORCID": # Don't rely on an exact name match
+                            print(colored(
+                                (f"{author.name}, ALUMNI"), "black", "on_yellow" 
+                                # alumni who are not at Janelia will be highlighted, but won't be added to jrc_author.
+                            ))
+                        else:
+                            print(author.name)
+
+                            
 
             if arg.WRITE:
                 overwrite_jrc_author(doi, revised_jrc_authors)
@@ -532,7 +552,7 @@ def evaluate_candidates(author, candidates, inform_message, verbose=False):
         best_guess = candidates[0]
         if not best_guess.exists:
             if verbose:
-                print(f"A Janelian named {author.name} could not be found in the HHMI People API. No action to take.\n")
+                print(f"A {author.name} located at Janelia could not be found in the HHMI People API. No action to take.\n")
             return best_guess
         if float(best_guess.score) < 85.0:
             if verbose:
@@ -855,7 +875,7 @@ if __name__ == '__main__':
 # nm.initialize_program()
 # orcid_collection = nm.DB['dis'].orcid
 # doi_collection = nm.DB['dis'].dois
-# doi = '10.1101/2024.06.30.601394'
+# doi = '10.1146/annurev-neuro-111020-094019'
 # doi_record = nm.doi_common.get_doi_record(doi, doi_collection)
 # all_authors = [ nm.create_author(author_record) for author_record in nm.doi_common.get_author_details(doi_record, orcid_collection)]
 
