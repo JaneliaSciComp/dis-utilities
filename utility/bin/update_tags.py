@@ -268,8 +268,7 @@ def update_single_doi(rec):
                                        message='Select tags',
                                        choices=tagd, default=current))
     quest.append(inquirer.List('additional',
-                               message="Do you want to add tags that are not associated " \
-                                       + "with authors?",
+                               message="Would you like to add any additional tags?",
                                choices=['Yes', 'No'], default='No'))
     quest.append(inquirer.List('newsletter',
                                message=f"Set jrc_newsletter to {today}",

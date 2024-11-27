@@ -10,7 +10,7 @@ import sys
 import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
 
-# pylint: disable=broad-exception-caught,logging-fstring-interpolation
+# pylint: disable=broad-exception-caught,logging-fstring-interpolation,logging-not-lazy
 
 # Database
 DB = {}
@@ -51,6 +51,34 @@ def initialize_program():
             terminate_program(err)
 
 
+def check_first_last(rec):
+    ''' Check for first and last author
+        Keyword arguments:
+          rec: DOI record
+        Returns:
+          None
+    '''
+    for which in ('first', 'last'):
+        testvar = f"jrc_{which}_id"
+        LOGGER.info(f"Checking {testvar} for {rec['doi']}")
+        if testvar in rec and ARG.EMPLOYEE in rec[testvar]:
+            othervar = f"jrc_{which}_author"
+            if len(rec[testvar]) > 1:
+                LOGGER.warning(f"You'll need to manually update {testvar} and {othervar} " \
+                               + f"for {rec['doi']}")
+                continue
+            print(f"Removing {testvar} and {othervar} from DOI {rec['doi']}")
+            if ARG.WRITE:
+                try:
+                    result = DB['dis']['dois'].update_one({'doi': rec['doi']},
+                                                          {'$unset': {testvar: None,
+                                                                      othervar: None}})
+                except Exception as err:
+                    terminate_program(err)
+                if hasattr(result, 'matched_count') and result.modified_count:
+                    print(f"DOI {rec['doi']} updated to remove {which} author")
+
+
 def processing():
     ''' Process the request
         Keyword arguments:
@@ -68,16 +96,18 @@ def processing():
         terminate_program(f"Employee {ARG.EMPLOYEE} not found in JRC authors")
     rec['jrc_author'].remove(ARG.EMPLOYEE)
     print(f"jrc_author changed from\n{original}\n   to\n{rec['jrc_author']}")
+    # jrc_author
+    if ARG.WRITE:
+        try:
+            result = DB['dis']['dois'].update_one({'doi': rec['doi']},
+                                                  {'$set': {'jrc_author': rec['jrc_author']}})
+        except Exception as err:
+            terminate_program(err)
+        if hasattr(result, 'matched_count') and result.modified_count:
+            print(f"DOI {rec['doi']} updated to change jrc_author")
+    check_first_last(rec)
     if not ARG.WRITE:
         LOGGER.warning("Dry run successful, no updates were made")
-        return
-    try:
-        result = DB['dis']['dois'].update_one({'doi': rec['doi']},
-                                              {'$set': {'jrc_author': rec['jrc_author']}})
-    except Exception as err:
-        terminate_program(err)
-    if hasattr(result, 'matched_count') and result.matched_count:
-        print(f"DOI {rec['doi']} updated")
 
 # -----------------------------------------------------------------------------
 
