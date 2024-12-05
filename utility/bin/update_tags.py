@@ -2,7 +2,7 @@
     Update tags for selected DOIs
 """
 
-__version__ = '3.0.0'
+__version__ = '3.1.0'
 
 import argparse
 import collections
@@ -205,9 +205,12 @@ def add_non_author_tags(payload):
             if tag in orgs:
                 del orgs[tag]
     quest = [(inquirer.Checkbox('checklist', carousel=True,
-                                message='Select tags',
+                                message='Select additional tags',
                                 choices=sorted(orgs.keys())))]
-    ans = inquirer.prompt(quest, theme=BlueComposure())
+    try:
+        ans = inquirer.prompt(quest, theme=BlueComposure())
+    except KeyboardInterrupt:
+        terminate_program("User cancelled program")
     tags = []
     for tag in ans['checklist']:
         code = orgs[tag]
@@ -263,17 +266,20 @@ def update_single_doi(rec):
               + f"{rec['jrc_newsletter']}{Style.RESET_ALL}")
     today = datetime.today().strftime('%Y-%m-%d')
     quest = []
-    if tagd:
-        quest.append(inquirer.Checkbox('checklist', carousel=True,
-                                       message='Select tags',
-                                       choices=tagd, default=current))
-    quest.append(inquirer.List('additional',
-                               message="Would you like to add any additional tags?",
-                               choices=['Yes', 'No'], default='No'))
-    quest.append(inquirer.List('newsletter',
-                               message=f"Set jrc_newsletter to {today}",
-                               choices=['Yes', 'No']))
-    ans = inquirer.prompt(quest, theme=BlueComposure())
+    try:
+        if tagd:
+            quest.append(inquirer.Checkbox('checklist', carousel=True,
+                                           message='Select tags',
+                                           choices=tagd, default=current))
+        quest.append(inquirer.List('additional',
+                                   message="Would you like to add any additional tags?",
+                                   choices=['Yes', 'No'], default='No'))
+        quest.append(inquirer.List('newsletter',
+                                   message=f"Set jrc_newsletter to {today}",
+                                   choices=['Yes', 'No']))
+        ans = inquirer.prompt(quest, theme=BlueComposure())
+    except KeyboardInterrupt:
+        terminate_program("User cancelled program")
     if not ans:
         return
     payload = process_tags(ans, tagd)
@@ -285,11 +291,11 @@ def update_single_doi(rec):
         return
     if ARG.WRITE:
         coll = DB['dis'].dois
+        #if not tags:
+        #   result = coll.update_one({"doi": rec['doi']}, {"$unset": {"jrc_tag":1}})
         result = coll.update_one({"doi": rec['doi']}, {"$set": payload})
         if hasattr(result, 'matched_count') and result.matched_count:
             COUNT['updated'] += 1
-        if not tags:
-            result = coll.update_one({"doi": rec['doi']}, {"$unset": {"jrc_tag":1}})
     else:
         print(f"{rec['doi']}\n{json.dumps(payload, indent=2)}")
         COUNT['updated'] += 1
