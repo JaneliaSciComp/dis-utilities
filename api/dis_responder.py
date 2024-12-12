@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "25.5.0"
+__version__ = "26.0.0"
 # Database
 DB = {}
 # Custom queries
@@ -2096,9 +2096,12 @@ def download(fname):
 
 @app.route('/')
 @app.route('/home')
-def show_home():
+@app.route('/<path:doi>')
+def show_home(doi=None):
     ''' Home
     '''
+    if doi and doi != 'home':
+        return show_doi_ui(doi)
     jlist = get_top_journals('All').keys()
     journals = '<option>'
     journals += '</option><option>'.join(sorted(jlist))
