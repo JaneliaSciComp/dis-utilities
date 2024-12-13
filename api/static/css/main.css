@@ -220,6 +220,22 @@ div.codescroll {height: 180px;
    color: #000;
    background-color: #ff8c00;
 }
+.badge-alumni {
+   color: #000;
+   background-color: #ff6347;
+}
+.badge-asserted {
+   color: #0f0;
+   background-color: #444;
+}
+.badge-name {
+   color: #ffd700;
+   background-color: #444;
+}
+.badge-orcid {
+   color: #0f0;
+   background-color: #444;
+}
 
 /* General */
 body {

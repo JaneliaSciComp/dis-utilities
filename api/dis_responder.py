@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "26.0.0"
+__version__ = "27.0.0"
 # Database
 DB = {}
 # Custom queries
@@ -1032,19 +1032,25 @@ def get_badges(auth):
     if 'in_database' in auth and auth['in_database']:
         badges.append(f"{tiny_badge('success', 'In database')}")
         if auth['alumni']:
-            badges.append(f"{tiny_badge('danger', 'Alumni')}")
+            badges.append(f"{tiny_badge('alumni', 'Alumni')}")
         elif 'validated' not in auth or not auth['validated']:
             badges.append(f"{tiny_badge('warning', 'Not validated')}")
         if 'orcid' not in auth or not auth['orcid']:
             badges.append(f"{tiny_badge('urgent', 'No ORCID')}")
         if auth['asserted']:
-            badges.append(f"{tiny_badge('info', 'Janelia affiliation')}")
+            badges.append(f"{tiny_badge('asserted', 'Janelia affiliation')}")
+        elif 'match' in auth and auth['match'] == 'ORCID':
+            badges.append(f"{tiny_badge('orcid', 'ORCID match')}")
+        elif 'match' in auth and auth['match'] == 'name':
+            badges.append(f"{tiny_badge('name', 'Name match')}")
         if 'duplicate_name' in auth:
             badges.append(f"{tiny_badge('warning', 'Duplicate name')}")
     else:
         badges.append(f"{tiny_badge('danger', 'Not in database')}")
         if 'asserted' in auth and auth['asserted']:
-            badges.append(f"{tiny_badge('info', 'Janelia affiliation')}")
+            badges.append(f"{tiny_badge('asserted', 'Janelia affiliation')}")
+        if 'match' in auth and auth['match'] == 'ORCID':
+            badges.append(f"{tiny_badge('orcid', 'ORCID match')}")
     return badges
 
 
@@ -1095,7 +1101,7 @@ def add_orcid_badges(orc):
     if 'orcid' not in orc or not orc['orcid']:
         badges.append(f"{tiny_badge('urgent', 'No ORCID')}")
     if 'alumni' in orc:
-        badges.append(tiny_badge('danger', 'Alumni'))
+        badges.append(tiny_badge('alumni', 'Alumni'))
     if 'employeeId' not in orc:
         badges.append(tiny_badge('warning', 'Not validated'))
     return badges
