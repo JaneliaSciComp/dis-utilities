@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "27.0.0"
+__version__ = "27.1.0"
 # Database
 DB = {}
 # Custom queries
@@ -2129,9 +2129,11 @@ def show_doi_ui(doi):
         row = DB['dis'].dois.find_one({"doi": doi})
     except Exception as err:
         return inspect_error(err, 'Could not get DOI')
+    local = False
     if row:
         html = '<h5 style="color:lime">This DOI is saved locally in the Janelia database</h5>'
         html += add_jrc_fields(row)
+        local = True
     else:
         html = '<h5 style="color:red">This DOI is not saved locally in the ' \
                + 'Janelia database</h5><br>'
@@ -2173,9 +2175,11 @@ def show_doi_ui(doi):
         chead += f" for {data['types']['resourceTypeGeneral']}"
     alink = f"/doi/authors/{doi}"
     html += f"<h4>{chead}</h4><span class='citation'>{citation} {journal}.</span><br><br>"
-    html += f"<span class='paperdata'>DOI: {link} {tiny_badge('primary', 'Raw data', rlink)}" \
-            + f" {tiny_badge('info', 'HQ migration', mlink)}" \
-            + f" {tiny_badge('info', 'Author details', alink)} {obutton}</span><br>"
+    html += f"<span class='paperdata'>DOI: {link} {tiny_badge('primary', 'Raw data', rlink)}"
+    if local:
+        html + f" {tiny_badge('info', 'HQ migration', mlink)}" \
+             + f" {tiny_badge('info', 'Author details', alink)}"
+    html += f" {obutton}</span><br>"
     if row:
         citations = s2_citation_count(doi, fmt='html')
         if citations:
