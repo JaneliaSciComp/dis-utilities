@@ -2,7 +2,7 @@
     Update the MongoDB orcid collection with ORCIDs and names for Janelia authors
 '''
 
-__version__ = '2.5.0'
+__version__ = '2.6.0'
 
 import argparse
 import collections
@@ -475,7 +475,8 @@ def update_orcid():
                 process_author(aut, oids, "crossref")
         add_from_orcid(oids)
         add_janelia_info(oids)
-    perform_cleanup()
+    if not (ARG.GIVEN or ARG.FAMILY or ARG.ORCID):
+        perform_cleanup()
     if ARG.WRITE:
         write_records(oids)
         if NEW_ORCID or ALUMNI:

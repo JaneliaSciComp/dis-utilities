@@ -122,7 +122,9 @@ def process_authors(authors, publications, cnt):
     '''
     # Individual author emails
     summary = ""
+    alumni = []
     for auth, val in authors.items():
+        missing_orcid = False
         resp = JRC.call_people_by_id(auth)
         if not resp or 'employeeId' not in resp or not resp['employeeId']:
             LOGGER.warning(f"No People information found for {auth}")
@@ -131,6 +133,7 @@ def process_authors(authors, publications, cnt):
         author_valid = valid_author(auth)
         if not author_valid:
             LOGGER.warning(f"Skipping author {name}")
+            alumni.append(name)
             continue
         email = DISCONFIG['developer'] if ARG.TEST else resp['email']
         subject = "Your recent publication" if len(val['citations']) == 1 \
@@ -153,6 +156,7 @@ def process_authors(authors, publications, cnt):
                 + "missed anyone, or if we’ve included someone we shouldn’t have."
         if isinstance(author_valid, bool):
             LOGGER.warning(f"Author {name} has no ORCID")
+            missing_orcid = True
             text += "<br><br><span style='font-weight: bold'>Note:</span> We could not find " \
                     + "an ORCID for you. To create one, please visit " \
                     + "<a href='https://orcid.org/register'>ORCID</a>."
@@ -167,7 +171,10 @@ def process_authors(authors, publications, cnt):
                         + f"{AUTHORLIST[doi]}"
             text += "<br><br>"
         summary += f"{name} has {len(val['citations'])} " \
-                   + f"citation{'' if len(val['citations']) == 1 else 's'}<br>"
+                   + f"citation{'' if len(val['citations']) == 1 else 's'}"
+        if missing_orcid:
+            summary += " (missing ORCID)"
+        summary += "<br>"
         if ARG.WRITE or ARG.TEST:
             JRC.send_email(text, DISCONFIG['sender'], [email], subject, mime='html')
         LOGGER.info(f"Email sent to {name} ({email})")
@@ -178,6 +185,9 @@ def process_authors(authors, publications, cnt):
     text = f"{subject}.<br>DOIs: {cnt}<br>Authors: {len(authors)}<br><br>"
     text += "<br><br>".join(publications)
     text += "<br><br>" + summary
+    if alumni:
+        text += "<br>Alumni authors:<br>"
+        text += "<br>".join(alumni)
     email = DISCONFIG['developer'] if ARG.TEST else DISCONFIG['receivers']
     JRC.send_email(text, DISCONFIG['sender'], email, subject, mime='html')
 

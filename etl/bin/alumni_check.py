@@ -226,6 +226,7 @@ def processing():
         Returns:
           None
     '''
+    set_flag = []
     payload = {"orcid": {"$exists": True},
                "employeeId": {"$exists": False},
                "alumni": {"$exists": False}}
@@ -237,11 +238,13 @@ def processing():
     except Exception as err:
         terminate_program(err)
     for row in tqdm(rows, total=cnt):
+        COUNT['read'] += 1
         LOGGER.debug(f"Processing {row['orcid']} ({row['given']} {row['family']})")
         resp = call_dis(row['orcid'])
         gone = left_janelia(resp)
         if gone:
             set_output('Left Janelia', f"{row} left Janelia on {gone}")
+            set_flag.append(row['orcid'])
             continue
         eid, oname, pname = find_employee_id(row)
         if eid:
@@ -264,7 +267,22 @@ def processing():
         alum = possible_alumni(row, relevant)
         if alum:
             set_output('Likely alumni', f"{row} is likely alumni\n{alum}")
+            set_flag.append(row['orcid'])
     write_output()
+    for oid in set_flag:
+        if ARG.WRITE:
+            try:
+                print(oid)
+                result = DB['dis'].orcid.update_one({"orcid": oid}, {"$set": {"alumni": True}})
+                if hasattr(result, 'matched_count') and result.matched_count:
+                    COUNT['updated'] += 1
+            except Exception as err:
+                terminate_program(err)
+        else:
+            LOGGER.info(f"Would have updated {oid}")
+            COUNT['updated'] += 1
+    print(f"Entries read:    {COUNT['read']}")
+    print(f"Entries updated: {COUNT['updated']}")
 
 
 # -----------------------------------------------------------------------------

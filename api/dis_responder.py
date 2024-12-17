@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "25.5.0"
+__version__ = "27.1.0"
 # Database
 DB = {}
 # Custom queries
@@ -1032,19 +1032,25 @@ def get_badges(auth):
     if 'in_database' in auth and auth['in_database']:
         badges.append(f"{tiny_badge('success', 'In database')}")
         if auth['alumni']:
-            badges.append(f"{tiny_badge('danger', 'Alumni')}")
+            badges.append(f"{tiny_badge('alumni', 'Alumni')}")
         elif 'validated' not in auth or not auth['validated']:
             badges.append(f"{tiny_badge('warning', 'Not validated')}")
         if 'orcid' not in auth or not auth['orcid']:
             badges.append(f"{tiny_badge('urgent', 'No ORCID')}")
         if auth['asserted']:
-            badges.append(f"{tiny_badge('info', 'Janelia affiliation')}")
+            badges.append(f"{tiny_badge('asserted', 'Janelia affiliation')}")
+        elif 'match' in auth and auth['match'] == 'ORCID':
+            badges.append(f"{tiny_badge('orcid', 'ORCID match')}")
+        elif 'match' in auth and auth['match'] == 'name':
+            badges.append(f"{tiny_badge('name', 'Name match')}")
         if 'duplicate_name' in auth:
             badges.append(f"{tiny_badge('warning', 'Duplicate name')}")
     else:
         badges.append(f"{tiny_badge('danger', 'Not in database')}")
         if 'asserted' in auth and auth['asserted']:
-            badges.append(f"{tiny_badge('info', 'Janelia affiliation')}")
+            badges.append(f"{tiny_badge('asserted', 'Janelia affiliation')}")
+        if 'match' in auth and auth['match'] == 'ORCID':
+            badges.append(f"{tiny_badge('orcid', 'ORCID match')}")
     return badges
 
 
@@ -1095,7 +1101,7 @@ def add_orcid_badges(orc):
     if 'orcid' not in orc or not orc['orcid']:
         badges.append(f"{tiny_badge('urgent', 'No ORCID')}")
     if 'alumni' in orc:
-        badges.append(tiny_badge('danger', 'Alumni'))
+        badges.append(tiny_badge('alumni', 'Alumni'))
     if 'employeeId' not in orc:
         badges.append(tiny_badge('warning', 'Not validated'))
     return badges
@@ -2096,9 +2102,12 @@ def download(fname):
 
 @app.route('/')
 @app.route('/home')
-def show_home():
+@app.route('/<path:doi>')
+def show_home(doi=None):
     ''' Home
     '''
+    if doi and doi != 'home':
+        return show_doi_ui(doi)
     jlist = get_top_journals('All').keys()
     journals = '<option>'
     journals += '</option><option>'.join(sorted(jlist))
@@ -2120,9 +2129,11 @@ def show_doi_ui(doi):
         row = DB['dis'].dois.find_one({"doi": doi})
     except Exception as err:
         return inspect_error(err, 'Could not get DOI')
+    local = False
     if row:
         html = '<h5 style="color:lime">This DOI is saved locally in the Janelia database</h5>'
         html += add_jrc_fields(row)
+        local = True
     else:
         html = '<h5 style="color:red">This DOI is not saved locally in the ' \
                + 'Janelia database</h5><br>'
@@ -2164,9 +2175,11 @@ def show_doi_ui(doi):
         chead += f" for {data['types']['resourceTypeGeneral']}"
     alink = f"/doi/authors/{doi}"
     html += f"<h4>{chead}</h4><span class='citation'>{citation} {journal}.</span><br><br>"
-    html += f"<span class='paperdata'>DOI: {link} {tiny_badge('primary', 'Raw data', rlink)}" \
-            + f" {tiny_badge('info', 'HQ migration', mlink)}" \
-            + f" {tiny_badge('info', 'Author details', alink)} {obutton}</span><br>"
+    html += f"<span class='paperdata'>DOI: {link} {tiny_badge('primary', 'Raw data', rlink)}"
+    if local:
+        html + f" {tiny_badge('info', 'HQ migration', mlink)}" \
+             + f" {tiny_badge('info', 'Author details', alink)}"
+    html += f" {obutton}</span><br>"
     if row:
         citations = s2_citation_count(doi, fmt='html')
         if citations:
