@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "27.1.0"
+__version__ = "27.2.0"
 # Database
 DB = {}
 # Custom queries
@@ -2177,8 +2177,8 @@ def show_doi_ui(doi):
     html += f"<h4>{chead}</h4><span class='citation'>{citation} {journal}.</span><br><br>"
     html += f"<span class='paperdata'>DOI: {link} {tiny_badge('primary', 'Raw data', rlink)}"
     if local:
-        html + f" {tiny_badge('info', 'HQ migration', mlink)}" \
-             + f" {tiny_badge('info', 'Author details', alink)}"
+        html += f" {tiny_badge('info', 'HQ migration', mlink)}" \
+                + f" {tiny_badge('info', 'Author details', alink)}"
     html += f" {obutton}</span><br>"
     if row:
         citations = s2_citation_count(doi, fmt='html')
@@ -3358,6 +3358,7 @@ def show_doiui_custom():
     html = "<table id='dois' class='tablesorter standard'><thead><tr>" \
            + ''.join([f"<th>{itm}</th>" for itm in header]) + "</tr></thead><tbody>"
     works = []
+    jorp = newsletter = 0
     for row in rows:
         published = DL.get_publishing_date(row)
         title = DL.get_title(row)
@@ -3365,6 +3366,10 @@ def show_doiui_custom():
             title = ""
         works.append({"published": published, "link": doi_link(row['doi']), "title": title,
                       "doi": row['doi']})
+        if 'jrc_newsletter' in row and row['jrc_newsletter']:
+            newsletter += 1
+        if DL.is_journal(row) or DL.is_preprint(row):
+            jorp += 1
     fileoutput = ""
     for row in sorted(works, key=lambda row: row['published'], reverse=True):
         html += "<tr><td>" + dloop(row, ['published', 'link', 'title'], "</td><td>") + "</td></tr>"
@@ -3372,7 +3377,8 @@ def show_doiui_custom():
         fileoutput += dloop(row, ['published', 'doi', 'title']) + "\n"
     html += '</tbody></table>'
     html = create_downloadable(ipd['field'], header, fileoutput) + html
-    html = f"DOIs: {len(works)}<br>" + html
+    html = f"DOIs: {len(works):,}<br>Journals/preprints: {jorp:,}<br>" \
+           + f"DOIs in newsletter: {newsletter:,}<br>" + html
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=ptitle, html=html,
                                          navbar=generate_navbar('DOIs')))
