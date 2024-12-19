@@ -641,7 +641,8 @@ def add_id_and_names_to_incomplete_orcid_record(employee, author, to_add, orcid_
             if write_arg:
                 doi_common.update_existing_orcid(
                     lookup=employee.id, 
-                    lookup_by='employeeId', 
+                    lookup_by='employeeId',
+                    coll=orcid_collection,
                     add=author.orcid)
                 doi_common.add_orcid_name(
                     lookup=employee.id, 
