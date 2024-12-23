@@ -181,6 +181,8 @@ def process_authors(authors, publications, cnt):
     if not (ARG.WRITE or ARG.TEST):
         return
     # Summary email
+    if not cnt:
+        return
     subject = "Emails have been sent to authors for recent publications"
     text = f"{subject}.<br>DOIs: {cnt}<br>Authors: {len(authors)}<br><br>"
     text += "<br><br>".join(publications)
