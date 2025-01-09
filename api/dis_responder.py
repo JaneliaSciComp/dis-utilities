@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "27.2.0"
+__version__ = "27.3.0"
 # Database
 DB = {}
 # Custom queries
@@ -2467,6 +2467,8 @@ def get_top_journals(year):
     journal = {}
     for row in rows:
         journal[row['_id']] = row['count']
+    if not journal:
+        return {}
     payload = [{"$unwind" : "$institution"},
                {"$match": match},
                {"$group": {"_id": "$institution.name", "count":{"$sum": 1}}},
@@ -2493,6 +2495,10 @@ def dois_journal(year='All', top=10):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get journal data from dois"),
                                message=error_message(err))
+    if not journal:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get journal data from dois"),
+                               message='No journals were found')
     html = '<table id="journals" class="tablesorter numberlast"><thead><tr>' \
            + '<th>Journal</th><th>Count</th></tr></thead><tbody>'
     data = {}
