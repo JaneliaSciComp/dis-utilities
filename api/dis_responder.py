@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "27.3.0"
+__version__ = "27.4.0"
 # Database
 DB = {}
 # Custom queries
@@ -48,7 +48,8 @@ NAV = {"Home": "",
                       "DOIs with lab head first/last authors": "doiui_group"},
        "Preprints": {"DOIs by preprint status": "dois_preprint",
                      "DOIs by preprint status by year": "dois_preprint_year"},
-       "Journals": {"Top journals": "dois_journal"},
+       "Journals": {"Top journals": "dois_journal",
+                    "Missing journal": "dois_nojournal",},
        "ORCID": {"Groups": "groups",
                  "Entries": "orcid_entry",
                  "Duplicates": "orcid_duplicates",
@@ -2520,7 +2521,46 @@ def dois_journal(year='All', top=10):
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title=title, html=html,
                                          chartscript=chartscript, chartdiv=chartdiv,
-                                         navbar=generate_navbar('DOIs')))
+                                         navbar=generate_navbar('Journals')))
+
+
+@app.route('/dois_nojournal/<string:year>')
+@app.route('/dois_nojournal')
+def dois_nojournal(year='All'):
+    ''' Show DOIs missing journal data
+    '''
+    payload = {"$and": [{"type": {"$in": ["journal-article", "posted-content", "Dataset"]}},
+                        {"$or": [{"short-container-title": {"$exists": False}},
+                                 {"short-container-title": []}]},
+                        {"$or": [{"container-title": {"$exists": False}}, {"container-title": []}]},
+                        {"$or": [{"institution": {"$exists": False}}, {"institution": ""}]}
+                       ]}
+    if year != 'All':
+        payload["$and"].append({"jrc_publishing_date": {"$regex": "^"+ year}})
+    try:
+        rows = DB['dis'].dois.find(payload).sort([("doi", 1)])
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get journal data from dois"),
+                               message=error_message(err))
+    html = '<table id="articles" class="tablesorter standard"><thead><tr>' \
+           + '<th>DOI</th><th>Title</th></tr></thead><tbody>'
+    cnt = 0
+    for row in rows:
+        cnt += 1
+        doi = row['doi']
+        html += f"<tr><td><a href='/doiui/{doi}'>{doi}</a></td><td>{DL.get_title(row)}</td></tr>"
+    html += '</tbody></table><br>' + year_pulldown('dois_nojournal')
+    if not cnt:
+        html = "<h5>No DOIs missing journal data</h5><br>" + year_pulldown('dois_nojournal')
+    title = "DOIs missing journals"
+    if year != 'All':
+        title += f" for {year}"
+    if cnt:
+        title += f" ({cnt})"
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=title, html=html,
+                                         navbar=generate_navbar('Journals')))
 
 
 @app.route('/dois_source/<string:year>')
