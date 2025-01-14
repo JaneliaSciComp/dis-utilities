@@ -228,6 +228,15 @@ div.codescroll {height: 180px;
    color: #0f0;
    background-color: #444;
 }
+.badge-author {
+   color: white;
+   background-color: #00a450;
+   border: 1px solid gold;
+}
+.badge-database {
+   color: #000;
+   background-color: #89c242;
+}
 .badge-name {
    color: #ffd700;
    background-color: #444;

@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "27.4.0"
+__version__ = "27.5.0"
 # Database
 DB = {}
 # Custom queries
@@ -535,7 +535,7 @@ def get_orcid_from_db(oid, use_eid=False, both=False, bare=False):
     html += "</table><br>"
     if 'orcid' in orc:
         olink = f"/orcidapi/{orc['orcid']}"
-        html += f" {tiny_badge('info', 'ORCID data', olink)}<br>"
+        html += f" {tiny_badge('info', 'Show ORCID data', olink)}<br>"
     try:
         if use_eid:
             oid = orc['employeeId']
@@ -1031,7 +1031,7 @@ def get_badges(auth):
     '''
     badges = []
     if 'in_database' in auth and auth['in_database']:
-        badges.append(f"{tiny_badge('success', 'In database')}")
+        badges.append(f"{tiny_badge('database', 'In database')}")
         if auth['alumni']:
             badges.append(f"{tiny_badge('alumni', 'Alumni')}")
         elif 'validated' not in auth or not auth['validated']:
@@ -1055,7 +1055,7 @@ def get_badges(auth):
     return badges
 
 
-def show_tagged_authors(authors):
+def show_tagged_authors(authors, confirmed):
     ''' Create a list of Janelian authors (with badges and tags)
         Keyword arguments:
           authors: list of detailed authors from a publication
@@ -1065,6 +1065,7 @@ def show_tagged_authors(authors):
     alist = []
     count = 0
     for auth in authors:
+        print(auth)
         if (not auth['janelian']) and (not auth['asserted']) and (not auth['alumni']):
             continue
         if auth['janelian'] or auth['asserted']:
@@ -1075,6 +1076,8 @@ def show_tagged_authors(authors):
         elif 'userIdO365' in auth and auth['userIdO365']:
             who = f"<a href='/userui/{auth['userIdO365']}'>{who}</a>"
         badges = get_badges(auth)
+        if 'employeeId' in auth and auth['employeeId'] in confirmed:
+            badges.insert(0, tiny_badge('author', 'Janelia author'))
         tags = []
         if 'group' in auth:
             tags.append(auth['group'])
@@ -1096,7 +1099,7 @@ def add_orcid_badges(orc):
           List of badges
     '''
     badges = []
-    badges.append(tiny_badge('success', 'In database'))
+    badges.append(tiny_badge('database', 'In database'))
     if 'duplicate_name' in orc:
         badges.append(tiny_badge('warning', 'Duplicate name'))
     if 'orcid' not in orc or not orc['orcid']:
@@ -2193,7 +2196,7 @@ def show_doi_ui(doi):
         except Exception as err:
             return inspect_error(err, 'Could not get author list details')
         if authors:
-            alist, count = show_tagged_authors(authors)
+            alist, count = show_tagged_authors(authors, row['jrc_author'] if 'jrc_author' in row else [])
             if alist:
                 html += f"<br><h4>Potential Janelia authors ({count})</h4>" \
                         + f"<div class='scroll'>{''.join(alist)}</div>"
@@ -2547,6 +2550,9 @@ def dois_nojournal(year='All'):
            + '<th>DOI</th><th>Title</th></tr></thead><tbody>'
     cnt = 0
     for row in rows:
+        # Really, eLife? Really?
+        if 'elife' in row['doi'] and row['subtype'] == 'preprint':
+            continue
         cnt += 1
         doi = row['doi']
         html += f"<tr><td><a href='/doiui/{doi}'>{doi}</a></td><td>{DL.get_title(row)}</td></tr>"
@@ -3104,7 +3110,7 @@ def dois_report(year=str(datetime.now().year)):
         rows = coll.aggregate(payload)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get jrc_authors"),
+                               title=render_warning("Could not get jrc_author"),
                                message=error_message(err))
     cnt = orc = 0
     for row in rows:
