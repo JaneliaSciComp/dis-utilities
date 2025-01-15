@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "27.5.0"
+__version__ = "27.6.0"
 # Database
 DB = {}
 # Custom queries
@@ -736,6 +736,26 @@ def add_relations(row):
                 html += f"This DOI {' '.join(wrd.lower() for wrd in words)} " \
                         + f"{doi_link(rel['relatedIdentifier'])}<br>"
     return html
+
+
+def get_top_authors(atype, year):
+    ''' Get the top authors for a given year
+        Keyword arguments:
+          atype: author type
+          year: year
+        Returns:
+          Top authors as a MongoDB object
+    '''
+    payload = [{"$match": {f"jrc_{atype}_author": {"$exists": 1},
+                           "type": {"$in": ["journal-article", "posted-content", "Dataset"]}}},
+               {"$unwind": f"$jrc_{atype}_author"},
+               {"$group": {"_id": f"$jrc_{atype}_author", "count": {"$sum": 1}}},
+               {"$sort" : {"count": -1}},
+               {"$limit": 10}
+              ]
+    if year != 'All':
+        payload[0]['$match']['jrc_publishing_date'] = {"$regex": "^"+ year}
+    return DB['dis'].dois.aggregate(payload)
 
 
 def get_migration_data(row):
@@ -2196,7 +2216,8 @@ def show_doi_ui(doi):
         except Exception as err:
             return inspect_error(err, 'Could not get author list details')
         if authors:
-            alist, count = show_tagged_authors(authors, row['jrc_author'] if 'jrc_author' in row else [])
+            alist, count = show_tagged_authors(authors, row['jrc_author'] \
+                if 'jrc_author' in row else [])
             if alist:
                 html += f"<br><h4>Potential Janelia authors ({count})</h4>" \
                         + f"<div class='scroll'>{''.join(alist)}</div>"
@@ -2373,6 +2394,44 @@ def dois_author(year='All'):
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title=title, html=html,
                                          chartscript=chartscript, chartdiv=chartdiv,
+                                         navbar=generate_navbar('Authorship')))
+
+
+@app.route('/dois_first_author/<string:year>')
+@app.route('/dois_first_author')
+def dois_first_author(year='All'):
+    ''' Show top first authors
+    '''
+    rows = get_top_authors('first', year)
+    html = "<table id='topauthors' class='tablesorter numbers'><thead></thead><tbody>" \
+           + "<tr><th>Author</th><th>DOIs</th></tr>"
+    for row in rows:
+        html += f"<tr><td>{row['_id']}</td><td>{row['count']}</td></tr>"
+    html += "</tbody></table><br>" + year_pulldown('dois_first_author')
+    title = "Top first authors"
+    if year != 'All':
+        title += f" ({year})"
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=title, html=html,
+                                         navbar=generate_navbar('Authorship')))
+
+
+@app.route('/dois_last_author/<string:year>')
+@app.route('/dois_last_author')
+def dois_last_author(year='All'):
+    ''' Show top last authors
+    '''
+    rows = get_top_authors('last', year)
+    html = "<table id='topauthors' class='tablesorter numbers'><thead></thead><tbody>" \
+           + "<tr><th>Author</th><th>DOIs</th></tr>"
+    for row in rows:
+        html += f"<tr><td>{row['_id']}</td><td>{row['count']}</td></tr>"
+    html += "</tbody></table><br>" + year_pulldown('dois_first_author')
+    title = "Top last authors"
+    if year != 'All':
+        title += f" ({year})"
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=title, html=html,
                                          navbar=generate_navbar('Authorship')))
 
 
