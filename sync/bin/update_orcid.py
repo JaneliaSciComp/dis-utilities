@@ -2,7 +2,7 @@
     Update the MongoDB orcid collection with ORCIDs and names for Janelia authors
 '''
 
-__version__ = '2.6.0'
+__version__ = '2.7.0'
 
 import argparse
 import collections
@@ -132,8 +132,14 @@ def get_name(oid):
     except Exception as err:
         terminate_program(err)
     try:
-        return resp.json()['person']['name']['family-name']['value'], \
-               resp.json()['person']['name']['given-names']['value']
+        name = resp.json()['person']['name']
+        if 'family-name' not in name or not name['family-name']:
+            LOGGER.warning(f"{oid} has no family name:\n{name}")
+            return None, None
+        if oid in DISCONFIG['orcid_ignore']:
+            LOGGER.error(f"{oid} is in the ignore list\n{name}")
+            return None, None
+        return name['family-name']['value'], name['given-names']['value']
     except Exception as err:
         LOGGER.warning(resp.json()['person']['name'])
         LOGGER.warning(err)
@@ -468,6 +474,8 @@ def update_orcid():
                    "author.ORCID": 1, "author.affiliation": 1, "doi": 1}
         recs = dcoll.find(payload, project)
         for rec in tqdm(recs, desc="Adding from doi collection"):
+            if rec['doi'] in DISCONFIG['doi_ignore']:
+                continue
             COUNT['records'] += 1
             for aut in rec['author']:
                 if 'ORCID' not in aut:
