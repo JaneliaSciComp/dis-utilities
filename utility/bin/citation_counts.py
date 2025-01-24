@@ -70,15 +70,15 @@ def s2_citation_count(doi, fmt='plain'):
     while loop <= 5:
         loop += 1
         try:
-            print(f"Try {loop}")
+            LOGGER.debug(f"Try {loop} for doi")
             resp = requests.get(url, headers=headers, timeout=10)
             if resp.status_code == 429:
-                LOGGER.warning("Rate limit exceeded")
+                #LOGGER.warning("Rate limit exceeded")
                 sleep(1)
                 continue
             elif resp.status_code == 404:
-                LOGGER.warning(f"{doi} was not found")
-                return None
+                #LOGGER.warning(f"{doi} was not found")
+                return 'DOI not found in S2'
             elif resp.status_code != 200:
                 LOGGER.warning(f"Failed {resp.status_code}")
                 return 0

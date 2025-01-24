@@ -21,7 +21,8 @@ import jrc_common.jrc_common as JRC
 DB = {}
 # General
 OUT = {'No Janelia DOIs': [], 'No other DOIs after': [], 'No affiliations': [],
-       'Left Janelia': [], 'Likely alumni': [], 'Potential name match': []}
+       'Left Janelia': [], 'Likely alumni': [], 'Potential name match': [],
+       'Is not active in Workday': []}
 # Counters
 COUNT = collections.defaultdict(lambda: 0, {})
 
@@ -200,6 +201,29 @@ def left_janelia(resp):
     return False
 
 
+def active_in_workday(row, workday):
+    ''' Check if the person is active in Workday
+        Keyword arguments:
+          row: row from orcid collection
+          workday: workday dict
+        Returns:
+          True if person is found and active in Workday
+    '''
+    for last in row['family']:
+        for first in row['given']:
+            key = f"{last}{first[0]}".lower()
+            if key in workday and workday[key]['first'] == first and workday[key]['last'] == last \
+               and workday[key]['active'] == 'N':
+                LOGGER.warning(f"Found {key} in workday")
+                return False
+            for tkey, tval in workday.items():
+                if tval['first'] == first and tval['last'] == last \
+                   and tval['active'] == 'N':
+                    LOGGER.warning(f"Found {tkey} in workday with {tval}")
+                    return False
+    return True
+
+
 def write_output():
     ''' Write output to files
         Keyword arguments:
@@ -226,6 +250,13 @@ def processing():
         Returns:
           None
     '''
+    workday  = {}
+    for key, val in WORKDAY.items():
+        if 'active' not in val:
+            val['active'] = 'N'
+        workday[key] = {'first': val['first'],
+                        'last': val['last'],
+                        'active': val['active']}
     set_flag = []
     payload = {"orcid": {"$exists": True},
                "employeeId": {"$exists": False},
@@ -244,6 +275,11 @@ def processing():
         gone = left_janelia(resp)
         if gone:
             set_output('Left Janelia', f"{row} left Janelia on {gone}")
+            set_flag.append(row['orcid'])
+            continue
+        work = active_in_workday(row, workday)
+        if not work:
+            set_output('Is not active in Workday', f"{row} is not active in Workday")
             set_flag.append(row['orcid'])
             continue
         eid, oname, pname = find_employee_id(row)
@@ -307,5 +343,6 @@ if __name__ == '__main__':
     LOGGER = JRC.setup_logging(ARG)
     initialize_program()
     REST = JRC.get_config("rest_services")
+    WORKDAY = JRC.simplenamespace_to_dict(JRC.get_config("workday"))
     processing()
     terminate_program()
