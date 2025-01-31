@@ -2,7 +2,7 @@
     Update the MongoDB orcid collection with ORCIDs and names for Janelia authors
 '''
 
-__version__ = '2.7.0'
+__version__ = '2.8.0'
 
 import argparse
 import collections
@@ -215,6 +215,13 @@ def update_group_status(rec, idresp):
             lab = team['supOrgName']
             rec['group'] = lab
             rec['group_code'] = team['supOrgCode']
+        else:
+            if 'managed' not in rec:
+                rec['managed'] = []
+            if team['supOrgName'] not in rec['managed'] and team['supOrgSubType'] != 'Lab':
+                rec['managed'].append(team['supOrgName'])
+    if 'managed' in rec and not rec['managed']:
+        del rec['managed']
 
 
 def get_person(people):
@@ -273,6 +280,7 @@ def add_people_information(first, surname, oids, oid):
                 update_group_status(oids[oid], idresp)
                 DL.get_name_combinations(idresp, oids[oid])
                 DL.get_affiliations(idresp, oids[oid])
+                LOGGER.debug(oids[oid])
         else:
             LOGGER.error(f"No usable record in People for {first} {surname}")
     return found
