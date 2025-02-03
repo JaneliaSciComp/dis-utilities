@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "28.1.0"
+__version__ = "28.2.0"
 # Database
 DB = {}
 # Custom queries
@@ -1249,7 +1249,7 @@ def get_tag_details(tag):
     for row in rows:
         pdict[row['_id']] = row['count']
     if not pdict and not acnt:
-        raise err
+        return ''
     parr = []
     pcnt = 0
     for key, val in pdict.items():
