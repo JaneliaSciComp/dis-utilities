@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block script %}
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jquery-cookie/1.4.1/jquery.cookie.min.js"></script>
+<script>
+function nav_post(field, value, source="") {
+  url = "/doiui/custom";
+  payload = '<input type="text" name="field" value="' + field + '" />' +
+            '<input type="text" name="value" value="' + value + '" />'
+  if (source) {
+    payload = payload +
+              '<input type="text" name="jrc_obtained_from" value="' + source + '" />'
+  }
+  var form = $('<form action="' + url + '" method="post">' +
+             payload + '</form>');
+  $('body').append(form);
+  form.submit();
+}
+</script>
+{% endblock %}
+{% block onload %}
+onload="tableInitialize();"
+{% endblock %}
+
+{% block content %}
+  <h2>{{title|safe}}</h2>
+  {{ recsec|safe }}
+  {{ doisec|safe }}
+  <div class="flexcontainer"><div class="flexrow">
+  <div class="flexitem">
+  <span style="font-size: 1.5rem;font-weight: 500;">Citation for {{cittype}}<span>
+  &nbsp;
+  </div>
+  <div class="flexitem">
+  <button id="toggle-to-short" type="button" class="btn btn-success btn-tiny">Show short citation</button>
+  <button id="toggle-to-full" type="button" class="btn btn-success btn-tiny">Show full citation</button>
+  </div>
+  </div>
+  </div>
+  {{ citsec|safe }}
+<script>
+const toggleToshort = document.getElementById("toggle-to-short");
+const toggleTofull = document.getElementById("toggle-to-full");
+const divf = document.getElementById("div-full");
+const divs = document.getElementById("div-short");
+const hide = el => el.style.setProperty("display", "none");
+const show = el => el.style.setProperty("display", "block");
+hide(toggleToshort);
+hide(divf);
+
+toggleToshort.addEventListener("click", () => {
+  hide(divf);
+  hide(toggleToshort);
+  show(toggleTofull);
+  show(divs);
+});
+
+toggleTofull.addEventListener("click", () => {
+  hide(divs);
+  hide(toggleTofull);
+  show(toggleToshort);
+  show(divf);
+});
+</script>
+  {{ html|safe }}
+{% endblock %}

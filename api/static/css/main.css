@@ -1,3 +1,11 @@
+div.abstract {height: 100px;
+              width: 90%;
+              overflow-y: scroll;
+              font: 13pt Times;
+              border: 1px solid #666;
+              padding: 8px;
+}
+
 .citation {
   font: 13pt Times;
 }
@@ -201,15 +209,19 @@ div.scroll {height: 200px;
 }
 
 div.codescroll {height: 180px;
-            width: 90%;
-            overflow: scroll;
-            border: 1px solid #666;
-            font: 14px monospace;
-            color: aqua;
-            padding: 8px;
+                width: 90%;
+                overflow: scroll;
+                border: 1px solid #666;
+                font: 14px monospace;
+                color: aqua;
+                padding: 8px;
 }
 
 /* Bootstrap */
+hr {border-color: #666;
+    border-style: solid;
+}
+
 .btn-tiny {
     padding: 2px 2px;
     font-size: 11px;
@@ -217,33 +229,51 @@ div.codescroll {height: 180px;
 }
 
 .badge-urgent {
-   color: #000;
-   background-color: #ff8c00;
+   color: black;
+   background-color: darkorange;
 }
 .badge-alumni {
-   color: #000;
-   background-color: #ff6347;
+   color: black;
+   background-color: orangered;
 }
 .badge-asserted {
    color: #0f0;
-   background-color: #444;
+   background-color: #454;
 }
 .badge-author {
    color: white;
    background-color: #00a450;
    border: 1px solid gold;
 }
+.badge-contingent {
+   color: black;
+   background-color: orange;
+}
 .badge-database {
-   color: #000;
+   color: black;
    background-color: #89c242;
 }
+.badge-lab {
+   color: white;
+   background-color: #8b008b;
+}
+.badge-managed {
+   color: #ddd;
+   background-color: mediumpurple;
+}
 .badge-name {
-   color: #ffd700;
-   background-color: #444;
+  color: #ffd700;
+  background-image0: linear-gradient(-45deg,#e3ebb9 25%,#f5baa6 0,#f5baa6 50%,#e3ebb9 0,#e3ebb9 75%,#f5baa6 0,#f5baa6);
+  background-image: linear-gradient(-45deg,#444 25%,#633 0,#633 50%,#444 0, #444 75%,#633 0,#633);
+  background-size: 30px 30px;
+}
+.badge-noorcid {
+   color: black;
+   background-color: coral;
 }
 .badge-orcid {
    color: #0f0;
-   background-color: #444;
+   background-color: #454;
 }
 
 /* General */
