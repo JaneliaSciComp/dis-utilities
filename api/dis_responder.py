@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "28.0.0"
+__version__ = "28.1.0"
 # Database
 DB = {}
 # Custom queries
@@ -726,6 +726,8 @@ def add_jrc_fields(row):
         if not re.match(prog, key) or key in app.config['DO_NOT_DISPLAY']:
             continue
         if isinstance(val, list) and key not in ('jrc_preprint'):
+            if not val:
+                continue
             try:
                 if isinstance(val[0], dict):
                     val = ", ".join(sorted(elem['name'] for elem in val))
@@ -733,6 +735,9 @@ def add_jrc_fields(row):
                     val = ", ".join(sorted(val))
             except TypeError:
                 val = json.dumps(val)
+            except Exception as err:
+                print(key, val)
+                print(f"Error in add_jrc_fields for {row['doi']}: {err}")
         jrc[key] = val
     if not jrc:
         return ""
