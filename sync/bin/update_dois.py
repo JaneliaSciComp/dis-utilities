@@ -116,12 +116,6 @@ def initialize_program():
     if ARG.TARGET == 'flyboy':
         return
     try:
-        rows = DB['dis'].project_map.find({})
-    except Exception as err:
-        terminate_program(err)
-    for row in rows:
-        PROJECT[row['name']] = row['project']
-    try:
         orgs = DL.get_supervisory_orgs()
     except Exception as err:
         terminate_program(err)
@@ -611,12 +605,16 @@ def get_tags(authors):
     '''
     new_tags = []
     for auth in authors:
+        print(auth)
+        # Add Lab for the Group Leader
         if 'group' in auth and auth['group'] not in new_tags:
             new_tags.append(auth['group'])
+        # Add tags for default departments and projects
         if 'tags' in auth:
             for dtag in DEFAULT_TAGS:
                 if dtag in auth['tags'] and dtag not in new_tags:
                     new_tags.append(dtag)
+        # Add project tags for names that are in the project_map collection
         if 'name' in auth:
             if auth['name'] not in PROJECT:
                 LOGGER.warning(f"Project {auth['name']} is not defined")
@@ -671,32 +669,36 @@ def add_tags(persist):
             rec = DB['dis'].dois.find_one({"doi": key})
         except Exception as err:
             terminate_program(err)
+        # Try to get the PMID if we don't have it
+        if 'jrc_pmid' not in rec:
+            pmid = JRC.get_pmid(key)
+            if pmid and 'status' in pmid and pmid['status'] == 'ok' \
+               and 'pmid' in pmid['records'][0]:
+                persist[key]['jrc_pmid'] = pmid['records'][0]['pmid']
         try:
             authors = DL.get_author_details(val, coll)
         except Exception as err:
             terminate_program(err)
         if not authors:
             continue
-        # Update jrc_tag
+        # Update jrc_tag using the authors
         new_tags = get_tags(authors)
         tags = []
         tag_names = []
+        # Populate tag_names with names only from new_tags
         if 'jrc_tag' in persist:
+            # We already have jrc_tag in the record
             tags.extend(persist['jrc_tag'])
-            for etag in tags:
-                if isinstance(etag, str):
-                    tag_names.append(etag)
-                else:
-                    tag_names.append(etag['name'])
-        else:
-            if rec and 'jrc_tag' in rec:
-                tags.extend(rec['jrc_tag'])
-                for etag in tags:
-                    if isinstance(etag, str):
-                        tag_names.append(etag)
-                    else:
-                        tag_names.append(etag['name'])
+        elif rec and 'jrc_tag' in rec:
+            # This will be a new jrc_tag field
+            tags.extend(rec['jrc_tag'])
+        for etag in tags:
+            if isinstance(etag, str):
+                tag_names.append(etag)
+            else:
+                tag_names.append(etag['name'])
         names = [etag['name'] for etag in tags]
+        # Add new tags to the record
         for tag in new_tags:
             if tag not in names:
                 code = get_suporg_code(tag)
