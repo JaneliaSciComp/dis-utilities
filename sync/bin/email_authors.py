@@ -132,35 +132,43 @@ def process_authors(authors, publications, cnt):
         name = ' '.join([resp['nameFirstPreferred'], resp['nameLastPreferred']])
         author_valid = valid_author(auth)
         if not author_valid:
-            LOGGER.warning(f"Skipping author {name}")
+            LOGGER.warning(f"Skipping alumnus {name}")
             alumni.append(name)
             continue
         email = DISCONFIG['developer'] if ARG.TEST else resp['email']
         subject = "Your recent publication" if len(val['citations']) == 1 \
                   else "Your recent publications"
-        text1 = "publication has been added" if len(val['citations']) == 1 \
-                else "publications have been added"
-        text = f"Hello {resp['nameFirstPreferred']},<br><br>" \
-               + "This is an automated email from Janelia’s Data and Information Services " \
-               + f"department (DIS). Your recent {text1} to our database. " \
-               + "Please review that the metadata below are correct. " \
-               + "<span style='font-weight: bold'>No action is required from you, but if you " \
-               + "see an error, please let us know</span>.<br><br>"
-        text += "<span style='font-weight: bold'>Tags:</span> There may be multiple redundant " \
-                + "tags for the same lab,  project team, or support team. This is fine. Just " \
-                + "let us know if there is a lab/team that is missing, or if we’ve included " \
-                + "a lab/team that doesn’t belong.<br><br>"
-        text += "<span style='font-weight: bold'>Janelia authors:</span> The employee names " \
-                + "listed below may not correspond perfectly to the author names on the paper " \
-                + "(e.g., Jane Doe / Janet P. Doe). This is fine. Just let us know if we’ve " \
-                + "missed anyone, or if we’ve included someone we shouldn’t have."
+        text1 = "publication" if len(val['citations']) == 1 else "publications"
+        text = f'''\
+Hello {resp['nameFirstPreferred']},<br><br>
+Janelia’s Data and Information Services department (DIS) has added your recent
+{text1} to our <a href='https://dis.janelia.org'>database</a>.
+<br><br>
+To ensure accuracy, review the metadata below and
+<em>let us know if they are incorrect by responding to this email</em>.
+<strong><em>There is no action required from you, unless you see an error</em></strong>.
+<br><br>
+<strong>FYI</strong>:
+<br><br>
+<strong>Tags</strong>:
+In the DIS publication database, there may be multiple redundant tags for the same lab,
+project team or support team. This is normal, but
+<em>please let us know if a lab/team is missing or if a lab/team doesn’t belong on the publication</em>.
+<br><br>
+<strong>Janelia authors</strong>:
+The Janelia author names listed below may not perfectly correspond to author names listed on the paper
+(e.g., Jane Doe / Janet P. Doe), which is normal. If we have missed any authors or included authors
+not affiliated with Janelia, please let us know.
+<br><br>
+        '''
         if isinstance(author_valid, bool):
             LOGGER.warning(f"Author {name} has no ORCID")
             missing_orcid = True
-            text += "<br><br><span style='font-weight: bold'>Note:</span> We could not find " \
-                    + "an ORCID for you. To create one, please visit " \
-                    + "<a href='https://orcid.org/register'>ORCID</a>."
-        text += "<br><br>Thank you!<br><br>"
+            text += "<strong>Note:</strong> We could not find " \
+                    + "an ORCID for you. We ask that you please create one with " \
+                    + "your Janelia affiliation. To create one, please visit " \
+                    + "<a href='https://orcid.org/register'>ORCID</a>.<br><br>"
+        text += "Thank you and have a great day,<br><br>The DIS Team<br><br>"
         for res in val['citations']:
             text += f"{res}"
             doi = val['dois'].pop(0)
