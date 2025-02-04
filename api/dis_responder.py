@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "28.3.0"
+__version__ = "28.4.0"
 # Database
 DB = {}
 # Custom queries
@@ -3834,8 +3834,6 @@ def show_oid_ui(oid):
         orc = DB['dis'].orcid.find_one({"orcid": oid})
     except Exception:
         return None
-    if orc and 'workerType' in orc and orc['workerType'] != 'Employee':
-        orciddata = f" {tiny_badge('contingent', orc['workerType'])} " + orciddata
     html = f"<h3>{who}</h3>{orciddata}"
     # Works
     if 'works' in data['activities-summary'] and data['activities-summary']['works']['group']:
