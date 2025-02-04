@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "28.2.0"
+__version__ = "28.3.0"
 # Database
 DB = {}
 # Custom queries
@@ -3156,7 +3156,7 @@ def dois_tag():
         if row['_id']['source'] not in tags[row['_id']['tag']]:
             tags[row['_id']['tag']][row['_id']['source']] = row['count']
     for tag, val in tags.items():
-        link = f"<a href='tag/{tag}'>{tag}</a>"
+        link = f"<a href='/tag/{escape(tag)}'>{tag}</a>"
         rclass = 'other'
         if tag in orgs:
             if 'active' in orgs[tag]:
@@ -3942,7 +3942,7 @@ def orcid_tag():
     count = 0
     for row in rows:
         count += 1
-        link = f"<a href='tag/{escape(row['_id'])}'>{row['_id']}</a>"
+        link = f"<a href='/tag/{escape(row['_id'])}'>{row['_id']}</a>"
         link2 = f"<a href='/tag/{escape(row['_id'])}'>{row['count']:,}</a>"
         rclass = 'other'
         if row['_id'] in orgs:
@@ -4038,7 +4038,7 @@ def orcid_entry():
                                          navbar=generate_navbar('ORCID')))
 
 
-@app.route('/tag/<string:aff>')
+@app.route('/tag/<path:aff>')
 def orcid_affiliation(aff):
     ''' Show ORCID tags (affiliations or progects) with counts
     '''
