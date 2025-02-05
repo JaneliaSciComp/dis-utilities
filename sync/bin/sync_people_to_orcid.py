@@ -57,6 +57,25 @@ def initialize_program():
             terminate_program(err)
 
 
+def update_preferred_name(idresp, row):
+    ''' Update preferred name
+        Keyword arguments:
+            idresp: response from People
+            row: record to update
+        Returns:
+            dirty: indicates if record is dirty
+    '''
+    dirty = False
+    name = {'given': 'nameFirstPreferred',
+            'family': 'nameLastPreferred'}
+    for key,val in name.items():
+        if val in idresp and idresp[val] and idresp[val] != row[key][0]:
+            row[key].remove(idresp[val])
+            row[key].insert(0, idresp[val])
+            dirty = True
+    return dirty
+
+
 def reset_record(row):
     ''' Reset affiliations and managed teams
         Keyword arguments:
@@ -80,6 +99,40 @@ def set_row(row, field):
     '''
     if field not in row:
         row[field] = []
+
+
+def update_affiliations(idresp, row):
+    ''' Update affiliations
+        Keyword arguments:
+            idresp: response from People
+            row: record to update
+        Returns:
+            dirty: indicates if record is dirty
+    '''
+    dirty = False
+    # Add affiliations from People
+    if 'affiliations' in idresp and idresp['affiliations']:
+        for aff in idresp['affiliations']:
+            set_row(row, 'affiliations')
+            if aff['supOrgName'] not in row['affiliations']:
+                row['affiliations'].append(aff['supOrgName'])
+                dirty = True
+        if dirty:
+            COUNT['affiliations'] += 1
+    # Add ccDescr if this person doesn't already have a group
+    if 'group' not in row and 'ccDescr' in idresp and idresp['ccDescr']:
+        set_row(row, 'affiliations')
+        if idresp['ccDescr'] not in row['affiliations']:
+            row['affiliations'].append(idresp['ccDescr'])
+            dirty = True
+    # Add supOrgName if the supOrgSubType isn't Company or Division
+    if 'supOrgName' in idresp and 'supOrgSubType' in idresp and \
+        idresp['supOrgSubType'] not in ['Company', 'Division']:
+        set_row(row, 'affiliations')
+        if idresp['supOrgName'] not in row['affiliations']:
+            row['affiliations'].append(idresp['supOrgName'])
+            dirty = True
+    return dirty
 
 
 def update_managed_teams(idresp, row):
@@ -145,6 +198,7 @@ def postprocessing(audit):
     '''
     print(f"Authors read from orcid: {COUNT['orcid']:,}")
     print(f"Authors updated:         {COUNT['updated']:,}")
+    print(f"  Names updated:         {COUNT['name']:,}")
     print(f"  Affiliations updated:  {COUNT['affiliations']:,}")
     print(f"  WorkerTypes updated:   {COUNT['workerType']:,}")
     print(f"  Managed teams updated: {COUNT['managed']:,}")
@@ -177,28 +231,15 @@ def update_orcid():
             reset_record(row)
         COUNT['orcid'] += 1
         idresp = JRC.call_people_by_id(row['employeeId'])
-        dirty = False
-        # Update affiliations
         if not idresp:
             LOGGER.error(f"No People record for {row}")
             continue
-        if 'affiliations' in idresp and idresp['affiliations']:
-            for aff in idresp['affiliations']:
-                set_row(row, 'affiliations')
-                if aff['supOrgName'] not in row['affiliations']:
-                    row['affiliations'].append(aff['supOrgName'])
-                    dirty = True
-            if dirty:
-                COUNT['affiliations'] += 1
-        # Add ccDescr if this person doesn't already have a group
-        if 'group' not in row and 'ccDescr' in idresp and idresp['ccDescr']:
-            set_row(row, 'affiliations')
-            if idresp['ccDescr'] not in row['affiliations']:
-                row['affiliations'].append(idresp['ccDescr'])
-        # Add supOrgName if we have no affiliations
-        if 'affiliations' not in row and 'supOrgName' in idresp:
-            row['affiliations'] = [idresp['supOrgName']]
-            dirty = True
+        # Update preferred name
+        pdirty = update_preferred_name(idresp, row)
+        if pdirty:
+            COUNT['name'] += 1
+        # Update affiliations
+        dirty = update_affiliations(idresp, row)
         # Update workerType
         if 'workerType' in idresp:
             if 'workerType' not in row or row['workerType'] != idresp['workerType']:
@@ -213,7 +254,7 @@ def update_orcid():
         if 'managed' in row and not row['managed']:
             del row['managed']
         LOGGER.debug(json.dumps(row, indent=4, default=str))
-        if dirty:
+        if dirty or pdirty:
             audit.append(row)
             COUNT['updated'] += 1
             write_record(row)

@@ -7,7 +7,7 @@
            to DIS MongoDB.
 """
 
-__version__ = '7.0.0'
+__version__ = '7.1.0'
 
 import argparse
 import configparser
@@ -670,7 +670,7 @@ def add_tags(persist):
         except Exception as err:
             terminate_program(err)
         # Try to get the PMID if we don't have it
-        if 'jrc_pmid' not in rec:
+        if 'jrc_pmid' not in val:
             pmid = JRC.get_pmid(key)
             if pmid and 'status' in pmid and pmid['status'] == 'ok' \
                and 'pmid' in pmid['records'][0]:
