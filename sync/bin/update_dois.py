@@ -7,7 +7,7 @@
            to DIS MongoDB.
 """
 
-__version__ = '7.1.0'
+__version__ = '7.2.0'
 
 import argparse
 import configparser
@@ -605,7 +605,6 @@ def get_tags(authors):
     '''
     new_tags = []
     for auth in authors:
-        print(auth)
         # Add Lab for the Group Leader
         if 'group' in auth and auth['group'] not in new_tags:
             new_tags.append(auth['group'])
