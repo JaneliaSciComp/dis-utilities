@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "28.4.0"
+__version__ = "29.0.0"
 # Database
 DB = {}
 # Custom queries
@@ -1219,14 +1219,22 @@ def add_orcid_badges(orc):
 # ******************************************************************************
 
 def get_tag_details(tag):
-    payload = {"affiliations": tag}
-    try:
-        acnt = DB['dis'].orcid.count_documents(payload)
-    except Exception as err:
-        raise err
+    ''' Generate details on a tag from the orcid and suporg collections
+        Keyword arguments:
+          tag: tsg to get details for
+        Returns:
+          HTML
+    '''
     payload = {"managed": tag}
     try:
         mgmt = DB['dis'].orcid.count_documents(payload)
+        if mgmt:
+            mgmt = DB['dis'].orcid.find_one(payload)
+    except Exception as err:
+        raise err
+    payload = {"affiliations": tag}
+    try:
+        acnt = DB['dis'].orcid.count_documents(payload)
     except Exception as err:
         raise err
     tagtype = "Affiliation" if acnt else ""
@@ -1245,6 +1253,8 @@ def get_tag_details(tag):
     except Exception as err:
         raise err
     html = "<table id='tagprops' class='proplist'><thead></thead><tbody>"
+    if mgmt:
+        html += f"<tr><td>Managed by</td><td>{mgmt['given'][0]} {mgmt['family'][0]}</td></tr>"
     pdict = {}
     for row in rows:
         pdict[row['_id']] = row['count']
@@ -1376,6 +1386,24 @@ def year_pulldown(prefix, all_years=True):
     html += "</div></div>"
     return html
 
+
+def journal_buttons(org, year, show):
+    ''' Generate journal display buttons
+        Keyword arguments:
+          None
+        Returns:
+          Button HTML
+    '''
+    if show == 'journal':
+        full = f"window.location.href='/doiui_org/{org}/{year}/full'"
+        html = '<div><button id="toggle-to-all" type="button" class="btn btn-success btn-tiny"' \
+               + f'onclick="{full}">Show all DOIs</button></div>'
+    else:
+        jour = f"window.location.href='/doiui_org/{org}/{year}/journal'"
+        html = '<div><button id="toggle-to-journal" type="button" ' \
+               + 'class="btn btn-success btn-tiny"' \
+               + f'onclick="{jour}">Show journals/preprints only</button></div>'
+    return html
 
 # *****************************************************************************
 # * Documentation                                                             *
@@ -3269,6 +3297,7 @@ def dois_report(year=str(datetime.now().year)):
     typed = counts_by_type(rows)
     first, last, anyauth = get_first_last_authors(year)
     stat = {}
+    sheet = []
     # Journal count
     payload = [{"$unwind" : "$container-title"},
                {"$match": {"container-title": {"$exists": True}, "type": "journal-article",
@@ -3287,7 +3316,6 @@ def dois_report(year=str(datetime.now().year)):
         if row['_id']:
             cnt += 1
     typed['Crossref'] = 0
-    sheet = []
     for key, val in pmap.items():
         if key in typed:
             if key not in ('DataCite', 'preprints'):
@@ -3600,10 +3628,10 @@ def show_insert(idate):
                                          title=f"DOIs inserted on or after {idate}", html=html,
                                          navbar=generate_navbar('DOIs')))
 
-
+@app.route('/doiui_org/<string:org_in>/<string:year>/<string:show>')
 @app.route('/doiui_org/<string:org_in>/<string:year>')
 @app.route('/doiui_org/<string:org_in>')
-def show_organization(org_in, year=str(datetime.now().year)):
+def show_organization(org_in, year=str(datetime.now().year), show="all"):
     '''
     Return DOIs for an organization
     '''
@@ -3627,6 +3655,8 @@ def show_organization(org_in, year=str(datetime.now().year)):
     payload = {"jrc_tag.name": {"$in": orgs}}
     if year != 'All':
         payload['jrc_publishing_date'] = {"$regex": "^"+ year}
+    if show == 'journal':
+        payload["$or"] = [{"type": "journal-article"}, {"subtype": "preprint"}]
     try:
         rows = DB['dis'].dois.find(payload).sort("jrc_publishing_date", -1)
     except Exception as err:
@@ -3635,9 +3665,9 @@ def show_organization(org_in, year=str(datetime.now().year)):
                                message=error_message(err))
     html = '<table id="dois" class="tablesorter standard"><thead><tr>' \
            + '<th>Published</th><th>DOI</th><th>Tags</th><th>Title</th></tr></thead><tbody>'
-    cnt = 0
+    dcnt = 0
     for row in rows:
-        cnt += 1
+        dcnt += 1
         published = DL.get_publishing_date(row)
         title = DL.get_title(row)
         if not title:
@@ -3652,17 +3682,28 @@ def show_organization(org_in, year=str(datetime.now().year)):
             if org in orgs and len(orgs) > 1:
                 orgcount[org] += 1
     if len(orgs) > 1:
-        subtitle += "<br><p style='line-height:1.1'>" \
-                    + "".join(["<br><span style='color: " \
-                               + f"{'white' if orgcount[org] else 'darkgray'}'>{org}: " \
-                               + f"{orgcount[org]:,}</span>" for org in orgs]) + "</p>"
+        subtitle += "<br><p style='line-height:1.1'>"
+        for org in orgs:
+            if not orgcount[org]:
+                continue
+            link = f"<a href='/tag/{org}/{year}'>{org}</a>"
+            subtitle += f"<br><span style='color: white'>{link}: {orgcount[org]:,}</span>"
+            count = DL.get_author_counts(org, year, show, DB['dis'].dois, DB['dis'].orcid)
+            for auth, cnt in sorted(count.items()):
+                subtitle += f"<br>&nbsp;&nbsp;{auth}: {cnt:,}"
+        subtitle += "</p>"
+        #subtitle += "<br><p style='line-height:1.1'>" \
+        #            + "".join(["<br><span style='color: " \
+        #                       + f"{'white' if orgcount[org] else 'darkgray'}'>{org}: " \
+        #                       + f"{orgcount[org]:,}</span>" for org in orgs]) + "</p>"
     html += '</tbody></table>'
-    if not cnt:
+    if not dcnt:
         html = year_pulldown(f"doiui_org/{org_in}") + subtitle \
-               + f"<br>No DOIs found for {org_in}"
+               + f"<br>No DOIs found for {org_in}" + journal_buttons(org_in, year, show)
     else:
         html = year_pulldown(f"doiui_org/{org_in}") + subtitle \
-               + f"DOIs found for {org_in}: {cnt:,}<br>" + html
+               + f"DOIs found for {org_in}: {dcnt:,}<br>" \
+               + journal_buttons(org_in, year, show) + html
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=ptitle, html=html,
                                          navbar=generate_navbar('DOIs')))
@@ -3830,10 +3871,6 @@ def show_oid_ui(oid):
         return render_template('warning.html', urlroot=request.url_root,
                                title=render_warning(f"Could not find ORCID ID {oid}", 'warning'),
                                message="Could not find any information for this ORCID ID")
-    try:
-        orc = DB['dis'].orcid.find_one({"orcid": oid})
-    except Exception:
-        return None
     html = f"<h3>{who}</h3>{orciddata}"
     # Works
     if 'works' in data['activities-summary'] and data['activities-summary']['works']['group']:
@@ -4036,8 +4073,9 @@ def orcid_entry():
                                          navbar=generate_navbar('ORCID')))
 
 
+@app.route('/tag/<path:aff>/<string:year>')
 @app.route('/tag/<path:aff>')
-def orcid_affiliation(aff):
+def orcid_affiliation(aff, year='All'):
     ''' Show ORCID tags (affiliations or progects) with counts
     '''
     # Authors
@@ -4045,7 +4083,7 @@ def orcid_affiliation(aff):
     try:
         cnt = DB['dis'].orcid.count_documents(payload)
         if cnt:
-            rows = DB['dis'].orcid.find(payload).collation({"locale": "en"}).sort("family", 1)
+            rows = DB['dis'].orcid.find(payload).sort("family", 1)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not find affiliations " \
@@ -4057,20 +4095,29 @@ def orcid_affiliation(aff):
         additional, _ = generate_user_table(rows)
         html += additional
     # DOIs
-    payload = {"$or": [{"jrc_tag.name": aff},
-                       {"author.name": aff},
-                       {"creators.name": aff}]}
+    if year == 'All':
+        payload = {"$or": [{"jrc_tag.name": aff},
+                           {"author.name": aff},
+                           {"creators.name": aff}]}
+    else:
+        payload = {"$and": [{"jrc_publishing_date": {"$regex": "^"+ year}},
+                            {"$or": [{"jrc_tag.name": aff},
+                                     {"author.name": aff},
+                                     {"creators.name": aff}]}
+                           ]}
     try:
         cnt = DB['dis'].dois.count_documents(payload)
         if cnt:
-            rows = DB['dis'].dois.find(payload).collation({"locale": "en"}).sort("jrc_publishing_date", -1)
+            rows = DB['dis'].dois.find(payload).sort("jrc_publishing_date", -1)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not find affiliations " \
+                               title=render_warning("Could not find tags " \
                                                     + "in dois collection"),
                                message=error_message(err))
+    html += "<hr>" + year_pulldown(f"tag/{aff}")
+    note = f" for {year}" if year != 'All' else ""
+    html += f"<p>Number of tagged DOIs{note}: {cnt:,}</p>"
     if cnt:
-        html += f"<hr><p>Number of tagged DOIs: {cnt:,}</p>"
         html += standard_doi_table(rows)
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=aff,
