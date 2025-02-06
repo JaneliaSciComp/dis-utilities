@@ -2,7 +2,7 @@
     Update the MongoDB orcid collection with data from the People system.
 '''
 
-__version__ = '1.0.0'
+__version__ = '2.0.0'
 
 import argparse
 import collections
@@ -66,6 +66,8 @@ def update_preferred_name(idresp, row):
             dirty: indicates if record is dirty
     '''
     dirty = False
+    old_given = row['given']
+    old_family = row['family']
     name = {'given': 'nameFirstPreferred',
             'family': 'nameLastPreferred'}
     for key,val in name.items():
@@ -73,6 +75,16 @@ def update_preferred_name(idresp, row):
             row[key].remove(idresp[val])
             row[key].insert(0, idresp[val])
             dirty = True
+    if not dirty:
+        return dirty
+    if sorted(old_given) == sorted(row['given']) and sorted(old_family) == sorted(row['family']):
+        dirty = False
+    if dirty:
+        COUNT['name'] += 1
+        if sorted(old_given) != sorted(row['given']):
+            LOGGER.warning(f"{old_given} -> {row['given']}")
+        if sorted(old_family) != sorted(row['family']):
+            LOGGER.warning(f"{old_family} -> {row['family']}")
     return dirty
 
 
@@ -83,10 +95,9 @@ def reset_record(row):
         Returns:
             None
     '''
-    if 'affiliations' in row:
-        del row['affiliations']
-    if 'managed' in row:
-        del row['managed']
+    for key in ['affiliations', 'group', 'group_code', 'managed']:
+        if key in row:
+            del row[key]
 
 
 def set_row(row, field):
@@ -147,6 +158,7 @@ def update_managed_teams(idresp, row):
         return False
     dirty = False
     lab = ''
+    old_managed = row['managed'] if 'managed' in row else []
     for team in idresp['managedTeams']:
         if team['supOrgSubType'] == 'Lab' and team['supOrgName'].endswith(' Lab'):
             if team['supOrgCode'] in DISCONFIG['sup_ignore']:
@@ -162,17 +174,28 @@ def update_managed_teams(idresp, row):
             set_row(row, 'affiliations')
             if team['supOrgName'] not in row['affiliations']:
                 row['affiliations'].append(team['supOrgName'])
+                COUNT['affiliations'] += 1
+                dirty = True
         else:
             set_row(row, 'managed')
             if team['supOrgName'] not in row['managed'] and team['supOrgSubType']:
-                if team['supOrgSubType'] != 'Lab':
+                if team['supOrgSubType'] != 'Lab' or not team['supOrgName'].endswith(' Lab'):
                     row['managed'].append(team['supOrgName'])
+                    if not dirty:
+                        COUNT['managed'] += 1
+                        dirty = True
                 set_row(row, 'affiliations')
                 if team['supOrgName'] not in row['affiliations']:
                     row['affiliations'].append(team['supOrgName'])
-                if not dirty:
-                    COUNT['managed'] += 1
+                    COUNT['affiliations'] += 1
                     dirty = True
+    if not dirty or 'managed' not in row:
+        return dirty
+    if sorted(old_managed) == sorted(row['managed']):
+        COUNT['managed'] -= 1
+        dirty = False
+    if dirty:
+        LOGGER.warning(f"{row['given'][0]} {row['family'][0]}: {old_managed} -> {row['managed']}")
     return dirty
 
 
