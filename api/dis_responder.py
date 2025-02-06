@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "29.0.0"
+__version__ = "30.0.0"
 # Database
 DB = {}
 # Custom queries
@@ -446,7 +446,7 @@ def author_doi_count(given, family):
           Number of DOIs
     '''
     payload = name_search_payload(given, family)
-    rows = DB['dis'].dois.find(payload, {"author": 1, "creators": 1})
+    rows = DB['dis'].dois.find(payload, {"doi": 1, "author": 1, "creators": 1})
     dois = 0
     for row in rows:
         field = 'author' if 'author' in row else 'creators'
@@ -464,31 +464,24 @@ def author_doi_count(given, family):
     return ""
 
 
-def get_dois_for_orcid(oid, orc, use_eid, both):
+def get_dois_for_orcid(oid, orc):
     ''' Generate DOIs for a single user
         Keyword arguments:
           oid: ORCID or employeeId
           orc: orcid record
-          use_eid: use employeeId boolean
-          both: search by both ORCID and employeeId
         Returns:
           HTML and a list of DOIs
     '''
     try:
-        if use_eid:
-            payload = {"jrc_author": oid}
-        elif both:
-            eid = orc['employeeId'] if 'employeeId' in orc else None
-            payload = orcid_payload(oid, orc, eid)
-        else:
-            payload = orcid_payload(oid, orc)
+        eid = orc['employeeId'] if 'employeeId' in orc else None
+        payload = orcid_payload(oid, orc, eid)
         rows = DB['dis'].dois.find(payload)
     except Exception as err:
         raise CustomException(err, "Could not find in dois collection by name.") from err
     return rows
 
 
-def generate_works_table(rows, name=None):
+def generate_works_table(rows, name=None, show="full"):
     ''' Generate table HTML for a person's works
         Keyword arguments:
           rows: rows from dois collection
@@ -502,6 +495,9 @@ def generate_works_table(rows, name=None):
     html = ""
     fileoutput = ""
     for row in rows:
+        if show == "journal" and not (("type" in row and row['type'] == "journal-article") \
+                                  or ("subtype" in row and row['subtype'] == "preprint")):
+            continue
         doi = doi_link(row['doi']) if row['doi'] else "&nbsp;"
         if 'title' in row and isinstance(row['title'], str):
             title = row['title']
@@ -540,15 +536,14 @@ def generate_works_table(rows, name=None):
     return html, dois
 
 
-def get_orcid_from_db(oid, use_eid=False, both=False, bare=False):
+def get_orcid_from_db(oid, use_eid=False, bare=False, show="full"):
     ''' Generate HTML for an ORCID or employeeId that is in the orcid collection
         Keyword arguments:
           oid: ORCID or employeeId
           use_eid: use employeeId boolean
-          both: search by both ORCID and employeeId
           bare: entry has no ORCID or employeeId
         Returns:
-          HTML and a list of DOIs
+          HTML, a list of DOIs, and full name
     '''
     try:
         if bare:
@@ -559,13 +554,17 @@ def get_orcid_from_db(oid, use_eid=False, both=False, bare=False):
     except Exception as err:
         raise CustomException(err, "Could not find_one in orcid collection by ORCID ID.") from err
     if not orc:
-        return "", []
+        return "", [], ""
+    full_name = " ".join([orc['given'][0], orc['family'][0]])
     html = "<br><table class='borderless'>"
     if use_eid and 'orcid' in orc:
         html += f"<tr><td>ORCID:</td><td><a href='https://orcid.org/{orc['orcid']}'>" \
                 + f"{orc['orcid']}</a></td></tr>"
     html += f"<tr><td>Given name:</td><td>{', '.join(sorted(orc['given']))}</td></tr>"
     html += f"<tr><td>Family name:</td><td>{', '.join(sorted(orc['family']))}</td></tr>"
+    if 'orcid' in orc:
+        html += f"<tr><td>ORCID:</td><td><a href='https://orcid.org/{orc['orcid']}'>" \
+                + f"{orc['orcid']}</a></td></tr>"
     if 'userIdO365' in orc:
         link = "<a href='" + f"{app.config['WORKDAY']}{orc['userIdO365']}" \
                + f"' target='_blank'>{orc['userIdO365']}</a>"
@@ -583,16 +582,16 @@ def get_orcid_from_db(oid, use_eid=False, both=False, bare=False):
     try:
         if use_eid:
             oid = orc['employeeId']
-        rows = get_dois_for_orcid(oid, orc, use_eid, both)
+        rows = get_dois_for_orcid(oid, orc)
     except Exception as err:
         raise err
-    tablehtml, dois = generate_works_table(rows)
+    tablehtml, dois = generate_works_table(rows, name=None, show=show)
     sad = DL.get_single_author_details(orc, DB['dis'].orcid)
     if tablehtml:
         html = f"{' '.join(get_badges(sad, True))}{html}{tablehtml}"
     else:
         html = f"{' '.join(get_badges(sad, True))}{html}<br>No works found in dois collection."
-    return html, dois
+    return html, dois, full_name
 
 
 def add_orcid_works(data, dois, return_html=True):
@@ -654,7 +653,7 @@ def generate_user_table(rows):
     for row in rows:
         count += 1
         if 'orcid' in row:
-            link = f"<a href='/orcidui/{row['orcid']}'>{row['orcid']}</a>"
+            link = f"<a href='/userui/{row['orcid']}'>{row['orcid']}</a>"
         elif 'userIdO365' in row:
             link = f"<a href='/userui/{row['userIdO365']}'>No ORCID found</a>"
         else:
@@ -800,7 +799,7 @@ def add_relations(row):
 
 
 def get_top_authors(atype, year):
-    ''' Get the top authors for a given year
+    ''' Get the top authors for a given year for articles and DataCite entries
         Keyword arguments:
           atype: author type
           year: year
@@ -1090,16 +1089,19 @@ def standard_doi_table(rows):
     html = "<table id='dois' class='tablesorter standard'><thead><tr>" \
            + ''.join([f"<th>{itm}</th>" for itm in header]) + "</tr></thead><tbody>"
     fileoutput = ""
+    cnt = 0
     for row in rows:
         row['published'] = DL.get_publishing_date(row)
         row['link'] = doi_link(row['doi'])
         row['title'] = DL.get_title(row)
         html += "<tr><td>" + dloop(row, ['published', 'link', 'title'], "</td><td>") + "</td></tr>"
-        row['title'] = row['title'].replace("\n", " ")
+        if row['title']:
+            row['title'] = row['title'].replace("\n", " ")
+        cnt += 1
         fileoutput += dloop(row, ['published', 'doi', 'title']) + "\n"
     html += '</tbody></table>'
     html = create_downloadable('standard', header, fileoutput) + html
-    return html
+    return html, cnt
 
 # ******************************************************************************
 # * Badge utility functions                                                    *
@@ -1176,7 +1178,7 @@ def show_tagged_authors(authors, confirmed):
             count += 1
         who = f"{auth['given']} {auth['family']}"
         if 'orcid' in auth and auth['orcid']:
-            who = f"<a href='/orcidui/{auth['orcid']}'>{who}</a>"
+            who = f"<a href='/userui/{auth['orcid']}'>{who}</a>"
         elif 'userIdO365' in auth and auth['userIdO365']:
             who = f"<a href='/userui/{auth['userIdO365']}'>{who}</a>"
         badges = get_badges(auth)
@@ -1387,19 +1389,20 @@ def year_pulldown(prefix, all_years=True):
     return html
 
 
-def journal_buttons(org, year, show):
+def journal_buttons(show, prefix):
     ''' Generate journal display buttons
         Keyword arguments:
-          None
+          show: display type
+          prefix: navigation prefix
         Returns:
           Button HTML
     '''
     if show == 'journal':
-        full = f"window.location.href='/doiui_org/{org}/{year}/full'"
+        full = f"window.location.href='{prefix}/full'"
         html = '<div><button id="toggle-to-all" type="button" class="btn btn-success btn-tiny"' \
                + f'onclick="{full}">Show all DOIs</button></div>'
     else:
-        jour = f"window.location.href='/doiui_org/{org}/{year}/journal'"
+        jour = f"window.location.href='{prefix}/journal'"
         html = '<div><button id="toggle-to-journal" type="button" ' \
                + 'class="btn btn-success btn-tiny"' \
                + f'onclick="{jour}">Show journals/preprints only</button></div>'
@@ -2253,7 +2256,7 @@ def show_orcidworks(oid):
     '''
     result = initialize_result()
     try:
-        _, dois = get_orcid_from_db(oid)
+        _, dois, _ = get_orcid_from_db(oid)
     except Exception as err:
         raise InvalidUsage(str(err), 500) from err
     janelia_dois = []
@@ -3213,12 +3216,14 @@ def dois_tag():
                                          navbar=generate_navbar('Tag/affiliation')))
 
 
-@app.route('/dois_top', defaults={'num': 10})
-@app.route('/dois_top/<int:num>')
-def dois_top(num):
+@app.route('/dois_top/<string:show>/<int:num>')
+@app.route('/dois_top/<string:show>')
+@app.route('/dois_top')
+def dois_top(show="journal", num=10):
     ''' Show a chart of DOIs by top tags
     '''
     payload = [{"$unwind" : "$jrc_tag"},
+               {"$match": {}},
                {"$project": {"_id": 0, "jrc_tag.name": 1, "jrc_publishing_date": 1}},
                {"$group": {"_id": {"tag": "$jrc_tag.name",
                                    "year": {"$substrBytes": ["$jrc_publishing_date", 0, 4]}},
@@ -3226,6 +3231,8 @@ def dois_top(num):
                 },
                {"$sort": {"_id.year": 1, "_id.tag": 1}}
               ]
+    if show == 'journal':
+        payload[1]["$match"] = {"$or": [{"type": "journal-article"}, {"subtype": "preprint"}]}
     try:
         rows = DB['dis'].dois.aggregate(payload)
     except Exception as err:
@@ -3267,8 +3274,9 @@ def dois_top(num):
     chartscript, chartdiv = DP.stacked_bar_chart(data, f"DOIs published by year for top {num} tags",
                                                  xaxis="years", yaxis=top, width=900, height=height,
                                                  colors=colors)
+    title = f"DOI tags{' for journal articles/preprints' if show =='journal' else ''} by year/tag"
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
-                                         title="DOI tags by year/tag", html=html,
+                                         title=title, html=html,
                                          chartscript=chartscript, chartdiv=chartdiv,
                                          navbar=generate_navbar('Tag/affiliation')))
 
@@ -3631,7 +3639,7 @@ def show_insert(idate):
 @app.route('/doiui_org/<string:org_in>/<string:year>/<string:show>')
 @app.route('/doiui_org/<string:org_in>/<string:year>')
 @app.route('/doiui_org/<string:org_in>')
-def show_organization(org_in, year=str(datetime.now().year), show="all"):
+def show_organization(org_in, year=str(datetime.now().year), show="full"):
     '''
     Return DOIs for an organization
     '''
@@ -3699,11 +3707,13 @@ def show_organization(org_in, year=str(datetime.now().year), show="all"):
     html += '</tbody></table>'
     if not dcnt:
         html = year_pulldown(f"doiui_org/{org_in}") + subtitle \
-               + f"<br>No DOIs found for {org_in}" + journal_buttons(org_in, year, show)
+               + f"<br>No DOIs found for {org_in}" \
+               + journal_buttons(show, f"/doiui_org/{org_in}/{year}")
     else:
         html = year_pulldown(f"doiui_org/{org_in}") + subtitle \
+               + f"{'Journal/preprint ' if show == 'journal' else ''}" \
                + f"DOIs found for {org_in}: {dcnt:,}<br>" \
-               + journal_buttons(org_in, year, show) + html
+               + journal_buttons(show, f"/doiui_org/{org_in}/{year}") + html
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=ptitle, html=html,
                                          navbar=generate_navbar('DOIs')))
@@ -3803,29 +3813,15 @@ def show_journal_ui(jname, year='All'):
                            {"institution.name": jname}]}
         if year != 'All':
             payload['jrc_publishing_date'] = {"$regex": "^"+ year}
-        rows = DB['dis'].dois.find(payload,
-                                   {"jrc_publishing_date": 1, "doi": 1,
-                                    "title": 1}).sort("jrc_publishing_date", -1)
+        rows = DB['dis'].dois.find(payload).sort("jrc_publishing_date", -1)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get DOIs for journal"),
                                message=error_message(err))
-    header = ['Published', 'DOI', 'Title']
-    html = "<table id='dois' class='tablesorter standard'><thead><tr><th>"
-    html += "</th><th>".join(header)
-    html += "</th></tr></thead><tbody>"
-    cnt = 0
-    fileoutput = ""
-    for row in rows:
-        cnt += 1
-        html += f"<tr><td>{row['jrc_publishing_date']}</td><td>{doi_link(row['doi'])}</td>" \
-                + f"<td>{row['title'][0]}</td></tr>"
-        fileoutput += f"{row['jrc_publishing_date']}\t{row['doi']}\t{row['title'][0]}\n"
-    html += '</tbody></table>'
+    html, cnt = standard_doi_table(rows)
     fname = 'journals'
     if year != 'All':
         fname += f"_{year}"
-    html = create_downloadable(fname, header, fileoutput) + html
     title = f"DOIs for {jname} ({cnt})"
     if year != 'All':
         title += f" (year={year})"
@@ -3862,7 +3858,7 @@ def show_oid_ui(oid):
     else:
         who = f"{name['given-names']['value']} {name['family-name']['value']}"
     try:
-        orciddata, dois = get_orcid_from_db(oid, use_eid=bool('userIdO365' in oid), both=True)
+        orciddata, dois, _ = get_orcid_from_db(oid, use_eid=bool('userIdO365' in oid))
     except CustomException as err:
         return render_template('error.html', urlroot=request.url_root,
                                 title=render_warning(f"Could not find ORCID ID {oid}", 'error'),
@@ -3880,13 +3876,16 @@ def show_oid_ui(oid):
                                                + f"target='_blank'>{oid}</a>", html=html,
                                          navbar=generate_navbar('ORCID')))
 
-
+@app.route('/userui/<string:eid>/<string:show>')
 @app.route('/userui/<string:eid>')
-def show_user_ui(eid):
-    ''' Show user record by employeeId
+def show_user_ui(eid, show='full'):
+    ''' Show user record by employeeId (user ID)
     '''
     try:
-        orciddata, _ = get_orcid_from_db(eid, use_eid=True)
+        if "@" in eid:
+            orciddata, _, full_name = get_orcid_from_db(eid, use_eid=True, bare=False, show=show)
+        else:
+            orciddata, _, full_name = get_orcid_from_db(eid, use_eid=False, bare=False, show=show)
     except CustomException as err:
         return render_template('error.html', urlroot=request.url_root,
                                 title=render_warning(f"Could not find user ID {eid}",
@@ -3896,8 +3895,11 @@ def show_user_ui(eid):
         return render_template('warning.html', urlroot=request.url_root,
                                title=render_warning(f"Could not find user ID {eid}", 'warning'),
                                message="Could not find any information for this employee ID")
+    buttons = journal_buttons(show, f"/userui/{eid}")
+    if "DOIs:" in orciddata:
+        orciddata = re.sub(r"(DOIs: [0-9,]+)", r"<br>\1" + buttons, orciddata)
     return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title=f"User ID {eid}", html=orciddata,
+                                         title=full_name, html=orciddata,
                                          navbar=generate_navbar('ORCID')))
 
 
@@ -3906,7 +3908,7 @@ def show_unvaluser_ui(iid):
     ''' Show user record by orcid collection ID
     '''
     try:
-        orciddata, _ = get_orcid_from_db(iid, bare=True)
+        orciddata, _, _ = get_orcid_from_db(iid, bare=True)
     except CustomException as err:
         return render_template('error.html', urlroot=request.url_root,
                                 title=render_warning(f"Could not find orcid collection ID {iid}",
@@ -4057,7 +4059,7 @@ def orcid_entry():
         for row in rows:
             name = f"{row['given'][0]} {row['family'][0]}"
             dois = author_doi_count(row['given'], row['family'])
-            html += f"<a href='/orcidui/{row['orcid']}'>{name}</a> {dois}<br>"
+            html += f"<a href='/userui/{row['orcid']}'>{name}</a> {dois}<br>"
         html += "</p>"
         payload = {"orcid": {"$exists": False}, "alumni": {"$exists": False}}
         rows = DB['dis'].orcid.find(payload).sort("family", 1)
@@ -4089,11 +4091,11 @@ def orcid_affiliation(aff, year='All'):
                                title=render_warning("Could not find affiliations " \
                                                     + "in orcid collection"),
                                message=error_message(err))
-    html = get_tag_details(aff) + "<br>"
+    htmlp = get_tag_details(aff) + "<br>"
     if cnt:
-        html += f"<hr><p>Number of authors: {cnt:,}</p>"
+        htmlp += f"<hr><p>Number of authors: {cnt:,}</p>"
         additional, _ = generate_user_table(rows)
-        html += additional
+        htmlp += additional
     # DOIs
     if year == 'All':
         payload = {"$or": [{"jrc_tag.name": aff},
@@ -4106,19 +4108,19 @@ def orcid_affiliation(aff, year='All'):
                                      {"creators.name": aff}]}
                            ]}
     try:
-        cnt = DB['dis'].dois.count_documents(payload)
-        if cnt:
-            rows = DB['dis'].dois.find(payload).sort("jrc_publishing_date", -1)
+        rows = DB['dis'].dois.find(payload).sort("jrc_publishing_date", -1)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not find tags " \
                                                     + "in dois collection"),
                                message=error_message(err))
-    html += "<hr>" + year_pulldown(f"tag/{aff}")
+    htmlp += "<hr>" + year_pulldown(f"tag/{aff}")
     note = f" for {year}" if year != 'All' else ""
-    html += f"<p>Number of tagged DOIs{note}: {cnt:,}</p>"
+    html, cnt = standard_doi_table(rows)
     if cnt:
-        html += standard_doi_table(rows)
+        html = htmlp + f"<p>Number of tagged DOIs{note}: {cnt:,}</p>" + html
+    else:
+        html = f"{htmlp}<br>No DOIs found for {aff}"
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=aff,
                                          html=html,
@@ -4391,7 +4393,7 @@ def show_labs():
         count += 1
         if 'affiliations' not in row:
             row['affiliations'] = ''
-        link = f"<a href='/orcidui/{row['orcid']}'>{row['orcid']}</a>" if 'orcid' in row else ''
+        link = f"<a href='/userui/{row['orcid']}'>{row['orcid']}</a>" if 'orcid' in row else ''
         html += f"<tr><td>{row['given'][0]} {row['family'][0]}</td>" \
                 + f"<td style='width: 180px'>{link}</td><td>{row['group']}</td>" \
                 + f"<td>{', '.join(row['affiliations'])}</td></tr>"
