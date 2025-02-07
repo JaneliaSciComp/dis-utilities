@@ -40,13 +40,14 @@ class Author:
     employee id to the data structure. His methods of matching are either
     exact name match or ORCID match.
     """
-    def __init__(self, name, orcid=None, in_database=False, match_method=None, first_pass_employee_id=None, affiliations=None):
+    def __init__(self, name, orcid=None, in_database=False, match_method=None, first_pass_employee_id=None, affiliations=None, alumni=None):
         self.name = name
         self.orcid = orcid
         self.in_database = in_database
         self.match_method = match_method # a string, either "name" or "ORCID"
         self.first_pass_employee_id = first_pass_employee_id
         self.affiliations = affiliations if affiliations is not None else [] # Need to avoid the python mutable arguments trap
+        self.alumni = True if alumni is not None else False
 
 class Employee:
     """ Employees are constructed from information found in the HHMI People database. """
@@ -108,7 +109,8 @@ def create_author(author_info):
     match_method = extract_from_dict('match')
     first_pass_employee_id = extract_from_dict('employeeId')
     affiliations = author_info['affiliations'] if author_info['asserted'] is True else None
-    return Author(name, orcid, in_database, match_method, first_pass_employee_id, affiliations)
+    alumni = True if 'alumni' in author_info and author_info['alumni'] else None
+    return Author(name, orcid, in_database, match_method, first_pass_employee_id, affiliations, alumni)
 
 
 def create_employee(id):
@@ -163,14 +165,7 @@ def create_guess(employee, name=None, score=None):
     )
 
 
-
-
-
-
-
-
 ### Functions for matching authors to employees
-
 
 
 def run_name_match(arg, doi_collection, orcid_collection):
@@ -228,8 +223,6 @@ def run_name_match(arg, doi_collection, orcid_collection):
                 ))
 
 
-
-
 # Functions for determining which authors we will try to match to employees
 
 def get_author_objects(doi, doi_record, orcid_collection):
@@ -249,7 +242,7 @@ def set_author_possible_employee_attr(all_authors, orcid_collection):
     new_author_list = all_authors
     if not any([a.affiliations for a in all_authors]):
         for author in new_author_list:
-            setattr(author, 'possible_employee', True)
+            setattr(author, 'possible_employee', not author.alumni)
     else:
         pattern = re.compile(
         r'(?i)(janelia|'  # (?i) means case-insensitive; pattern matches "Janelia" in any form, e.g., "Janelia", "thejaneliafarm", etc.
@@ -263,20 +256,17 @@ def set_author_possible_employee_attr(all_authors, orcid_collection):
 def is_janelian(author, pattern, orcid_collection):
     """ 
     Determine whether an author is Janelian: they must be in the orcid collection, 
-    based on orcid ID on the paper, or have Janelia in their affiliations.
+    based alumni status, on orcid ID on the paper, or have Janelia in their affiliations.
     """
     result = False
+    if author.alumni:
+        return False
     if author.orcid:
         if doi_common.single_orcid_lookup(author.orcid, orcid_collection, 'orcid'):
             result = True
     if bool(re.search(pattern, " ".join(author.affiliations))):
         result = True
     return result
-
-
-
-
-
 
 
 # Functions for matching authors to corresponding employees
@@ -341,7 +331,6 @@ def get_corresponding_employee(author, orcid_collection, verbose_arg, write_arg)
                     coll=orcid_collection)
 
     return final_choice
-
 
 
 def guess_employee(author, inform_message, verbose_arg):
@@ -473,7 +462,6 @@ def fuzzy_match(author, candidate_employees):
         return [ Guess(exists=False) ]
 
 
-
 def evaluate_candidates(author, candidates, inform_message, verbose=False):
     """ 
     A function that lets the user manually evaluate the best-guess employee for a given author. 
@@ -540,7 +528,7 @@ def evaluate_candidates(author, candidates, inform_message, verbose=False):
         best_guess = candidates[0]
         if not best_guess.exists:
             if verbose:
-                print(f"A Janelian named {author.name} could not be found in the HHMI People API. No action to take.\n")
+                print(f"An author named {author.name} could not be found in the HHMI People API. No action to take.\n")
             return best_guess
         if float(best_guess.score) < 85.0:
             if verbose:
@@ -592,8 +580,6 @@ def evaluate_candidates(author, candidates, inform_message, verbose=False):
             else:
                 print(f"No action will be taken for {author.name}.\n")
                 return Guess(exists=False)
-
-
 
 
 
@@ -746,9 +732,6 @@ def overwrite_jrc_author(doi, revised_jrc_authors):
     payload = {'jrc_author': id_list}
     doi_common.update_jrc_fields(doi, doi_collection, payload)
     print(colored( ('jrc_author field has been updated.'), 'green' ))
-
-
-
 
 
 
