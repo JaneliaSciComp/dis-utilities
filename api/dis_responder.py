@@ -1126,6 +1126,7 @@ def get_badges(auth, ignore_match=False):
     ''' Create a list of badges for an author
         Keyword arguments:
           auth: detailed author record
+          ignore_match: ignore match status
         Returns:
           List of HTML badges
     '''
@@ -1166,6 +1167,7 @@ def show_tagged_authors(authors, confirmed):
     ''' Create a list of Janelian authors (with badges and tags)
         Keyword arguments:
           authors: list of detailed authors from a publication
+          confirmed: list of confirmed authors
         Returns:
           List of HTML authors
     '''
