@@ -2,7 +2,7 @@
     Update the MongoDB orcid collection with data from the People system.
 '''
 
-__version__ = '2.0.0'
+__version__ = '2.0.1'
 
 import argparse
 import collections
@@ -19,6 +19,10 @@ import jrc_common.jrc_common as JRC
 DB = {}
 # Counters
 COUNT = collections.defaultdict(lambda: 0, {})
+# Global variables
+LOGGER = None
+ARG = None
+DISCONFIG = None
 
 def terminate_program(msg=None):
     ''' Terminate the program gracefully
@@ -89,7 +93,7 @@ def update_preferred_name(idresp, row):
 
 
 def reset_record(row):
-    ''' Reset affiliations and managed teams
+    ''' Reset affiliations, managed teams, and group
         Keyword arguments:
             row: record to reset
         Returns:
@@ -171,11 +175,6 @@ def update_managed_teams(idresp, row):
                 dirty = True
             row['group'] = lab
             row['group_code'] = team['supOrgCode']
-            set_row(row, 'affiliations')
-            if team['supOrgName'] not in row['affiliations']:
-                row['affiliations'].append(team['supOrgName'])
-                COUNT['affiliations'] += 1
-                dirty = True
         else:
             set_row(row, 'managed')
             if team['supOrgName'] not in row['managed'] and team['supOrgSubType']:
@@ -184,11 +183,11 @@ def update_managed_teams(idresp, row):
                     if not dirty:
                         COUNT['managed'] += 1
                         dirty = True
-                set_row(row, 'affiliations')
-                if team['supOrgName'] not in row['affiliations']:
-                    row['affiliations'].append(team['supOrgName'])
-                    COUNT['affiliations'] += 1
-                    dirty = True
+        set_row(row, 'affiliations')
+        if team['supOrgName'] not in row['affiliations']:
+            row['affiliations'].append(team['supOrgName'])
+            COUNT['affiliations'] += 1
+            dirty = True
     if not dirty or 'managed' not in row:
         return dirty
     if sorted(old_managed) == sorted(row['managed']):
@@ -301,7 +300,7 @@ if __name__ == '__main__':
                         default=False, help='Flag, Very chatty')
     ARG = PARSER.parse_args()
     LOGGER = JRC.setup_logging(ARG)
-    initialize_program()
     DISCONFIG = JRC.simplenamespace_to_dict(JRC.get_config("dis"))
+    initialize_program()
     update_orcid()
     terminate_program()
