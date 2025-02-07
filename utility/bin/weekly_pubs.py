@@ -73,6 +73,7 @@ def copy_arg_for_sync(ARG):
         with open('to_sync.txt', 'w') as outF:
             outF.write("\n".join(dois_to_sync) )
         arg_copy.FILE = 'to_sync.txt'
+        LOGGER.info(f"Wrote {len(dois_to_sync)} DOIs to {arg_copy.FILE}")
     return(arg_copy)
 
 def get_dois_from_user_input(ARG):
