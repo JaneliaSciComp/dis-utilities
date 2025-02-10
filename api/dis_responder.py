@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "30.1.0"
+__version__ = "30.2.0"
 # Database
 DB = {}
 # Custom queries
@@ -1223,15 +1223,21 @@ def add_orcid_badges(orc):
 # * Journal utility functions                                                  *
 # ******************************************************************************
 
-def get_top_journals(year):
+def get_top_journals(year, maxpub=False):
     ''' Get top journals
+        Keyword arguments:
+          year: year to get data for
+          maxpub: if True, get max publishing date
+        Returns:
+          Journal data
     '''
     match = {"container-title": {"$exists": True, "$ne" : ""}}
     if year != 'All':
         match["jrc_publishing_date"] = {"$regex": "^"+ year}
     payload = [{"$unwind" : "$container-title"},
                {"$match": match},
-               {"$group": {"_id": "$container-title", "count":{"$sum": 1}}},
+               {"$group": {"_id": "$container-title", "count":{"$sum": 1},
+                           "maxpub": {"$max": "$jrc_publishing_date"}}},
               ]
     try:
         rows = DB['dis'].dois.aggregate(payload)
@@ -1239,19 +1245,26 @@ def get_top_journals(year):
         raise err
     journal = {}
     for row in rows:
-        journal[row['_id']] = row['count']
+        if maxpub:
+            journal[row['_id']] = {"count": row['count'], "maxpub": row['maxpub']}
+        else:
+            journal[row['_id']] = row['count']
     if not journal:
         return {}
     payload = [{"$unwind" : "$institution"},
                {"$match": match},
-               {"$group": {"_id": "$institution.name", "count":{"$sum": 1}}},
+               {"$group": {"_id": "$institution.name", "count":{"$sum": 1},
+                           "maxpub": {"$max": "$jrc_publishing_date"}}},
               ]
     try:
         rows = DB['dis'].dois.aggregate(payload)
     except Exception as err:
         raise err
     for row in rows:
-        journal[row['_id']] = row['count']
+        if maxpub:
+            journal[row['_id']] = {"count": row['count'], "maxpub": row['maxpub']}
+        else:
+            journal[row['_id']] = row['count']
     return journal
 
 # ******************************************************************************
@@ -3734,7 +3747,7 @@ def show_journals(year='All'):
     ''' Show journals in a table
     '''
     try:
-        journal = get_top_journals(year)
+        journal = get_top_journals(year, maxpub=True)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get journal data from dois"),
@@ -3744,10 +3757,10 @@ def show_journals(year='All'):
                                title=render_warning("Could not get journal data from dois"),
                                message='No journals were found')
     html = '<table id="journals" class="tablesorter numberlast"><thead><tr>' \
-           + '<th>Journal</th><th>Count</th></tr></thead><tbody>'
-    for key in sorted(journal, key=journal.get, reverse=True):
-        val = journal[key]
-        html += f"<tr><td><a href='/journal/{key}/{year}'>{key}</a></td><td>{val:,}</td></tr>"
+           + '<th>Journal</th><th>Count</th><th>Last published to</th></tr></thead><tbody>'
+    for key in sorted(journal, key=lambda x: journal[x]['count'], reverse=True):
+        html += f"<tr><td><a href='/journal/{key}/{year}'>{key}</a></td>" \
+                + f"<td>{journal[key]['count']:,}</td><td>{journal[key]['maxpub']}</td></tr>"
     html += '</tbody></table>'
     title = "DOIs by journal"
     if year != 'All':
