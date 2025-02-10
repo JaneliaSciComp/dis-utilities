@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "30.0.0"
+__version__ = "30.1.0"
 # Database
 DB = {}
 # Custom queries
@@ -50,7 +50,8 @@ NAV = {"Home": "",
                       "Top last authors": "dois_last_author"},
        "Preprints": {"DOIs by preprint status": "dois_preprint",
                      "DOIs by preprint status by year": "dois_preprint_year"},
-       "Journals": {"Top journals": "dois_journal",
+       "Journals": {"DOIs by journal": "journals",
+                    "Top journals": "top_journals",
                     "Missing journal": "dois_nojournal",},
        "ORCID": {"Labs": "labs",
                  "Entries": "orcid_entry",
@@ -1215,6 +1216,41 @@ def add_orcid_badges(orc):
     if 'employeeId' not in orc:
         badges.append(tiny_badge('warning', 'Not validated'))
     return badges
+
+# ******************************************************************************
+# * Journal utility functions                                                  *
+# ******************************************************************************
+
+def get_top_journals(year):
+    ''' Get top journals
+    '''
+    match = {"container-title": {"$exists": True, "$ne" : ""}}
+    if year != 'All':
+        match["jrc_publishing_date"] = {"$regex": "^"+ year}
+    payload = [{"$unwind" : "$container-title"},
+               {"$match": match},
+               {"$group": {"_id": "$container-title", "count":{"$sum": 1}}},
+              ]
+    try:
+        rows = DB['dis'].dois.aggregate(payload)
+    except Exception as err:
+        raise err
+    journal = {}
+    for row in rows:
+        journal[row['_id']] = row['count']
+    if not journal:
+        return {}
+    payload = [{"$unwind" : "$institution"},
+               {"$match": match},
+               {"$group": {"_id": "$institution.name", "count":{"$sum": 1}}},
+              ]
+    try:
+        rows = DB['dis'].dois.aggregate(payload)
+    except Exception as err:
+        raise err
+    for row in rows:
+        journal[row['_id']] = row['count']
+    return journal
 
 # ******************************************************************************
 # * Tag utility functions                                                      *
@@ -2732,121 +2768,6 @@ def doiui_group(year='All'):
                                          navbar=generate_navbar('Authorship')))
 
 
-def get_top_journals(year):
-    ''' Get top journals
-    '''
-    match = {"container-title": {"$exists": True, "$ne" : ""}}
-    if year != 'All':
-        match["jrc_publishing_date"] = {"$regex": "^"+ year}
-    payload = [{"$unwind" : "$container-title"},
-               {"$match": match},
-               {"$group": {"_id": "$container-title", "count":{"$sum": 1}}},
-              ]
-    try:
-        rows = DB['dis'].dois.aggregate(payload)
-    except Exception as err:
-        raise err
-    journal = {}
-    for row in rows:
-        journal[row['_id']] = row['count']
-    if not journal:
-        return {}
-    payload = [{"$unwind" : "$institution"},
-               {"$match": match},
-               {"$group": {"_id": "$institution.name", "count":{"$sum": 1}}},
-              ]
-    try:
-        rows = DB['dis'].dois.aggregate(payload)
-    except Exception as err:
-        raise err
-    for row in rows:
-        journal[row['_id']] = row['count']
-    return journal
-
-
-@app.route('/dois_journal/<string:year>/<int:top>')
-@app.route('/dois_journal/<string:year>')
-@app.route('/dois_journal')
-def dois_journal(year='All', top=10):
-    ''' Show journals
-    '''
-    top = min(top, 20)
-    try:
-        journal = get_top_journals(year)
-    except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get journal data from dois"),
-                               message=error_message(err))
-    if not journal:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get journal data from dois"),
-                               message='No journals were found')
-    html = '<table id="journals" class="tablesorter numberlast"><thead><tr>' \
-           + '<th>Journal</th><th>Count</th></tr></thead><tbody>'
-    data = {}
-    for key in sorted(journal, key=journal.get, reverse=True):
-        val = journal[key]
-        if len(data) >= top:
-            continue
-        data[key] = val
-        html += f"<tr><td><a href='/journal/{key}/{year}'>{key}</a></td><td>{val:,}</td></tr>"
-    html += '</tbody></table><br>' + year_pulldown('dois_journal')
-    title = "DOIs by journal"
-    if year != 'All':
-        title += f" ({year})"
-    chartscript, chartdiv = DP.pie_chart(data, title, "source", width=875, height=550,
-                                         colors='Category20')
-    title = f"Top {top} DOI journals"
-    if year != 'All':
-        title += f" ({year})"
-    return make_response(render_template('bokeh.html', urlroot=request.url_root,
-                                         title=title, html=html,
-                                         chartscript=chartscript, chartdiv=chartdiv,
-                                         navbar=generate_navbar('Journals')))
-
-
-@app.route('/dois_nojournal/<string:year>')
-@app.route('/dois_nojournal')
-def dois_nojournal(year='All'):
-    ''' Show DOIs missing journal data
-    '''
-    # The payload is somewhat coarse and won't get everything (thanks, eLife...)
-    payload = {"$and": [{"type": {"$in": app.config['ARTICLES']}},
-                        {"$or": [{"short-container-title": {"$exists": False}},
-                                 {"short-container-title": []}]},
-                        {"$or": [{"container-title": {"$exists": False}}, {"container-title": []}]},
-                        {"$or": [{"institution": {"$exists": False}}, {"institution": ""}]}
-                       ]}
-    if year != 'All':
-        payload["$and"].append({"jrc_publishing_date": {"$regex": "^"+ year}})
-    try:
-        rows = DB['dis'].dois.find(payload).sort([("doi", 1)])
-    except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get journal data from dois"),
-                               message=error_message(err))
-    html = '<table id="articles" class="tablesorter standard"><thead><tr>' \
-           + '<th>DOI</th><th>Title</th></tr></thead><tbody>'
-    cnt = 0
-    for row in rows:
-        if DL.get_journal(row):
-            continue
-        cnt += 1
-        doi = row['doi']
-        html += f"<tr><td><a href='/doiui/{doi}'>{doi}</a></td><td>{DL.get_title(row)}</td></tr>"
-    html += '</tbody></table><br>' + year_pulldown('dois_nojournal')
-    if not cnt:
-        html = "<h5>No DOIs missing journal data</h5><br>" + year_pulldown('dois_nojournal')
-    title = "DOIs missing journals"
-    if year != 'All':
-        title += f" for {year}"
-    if cnt:
-        title += f" ({cnt})"
-    return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title=title, html=html,
-                                         navbar=generate_navbar('Journals')))
-
-
 @app.route('/dois_source/<string:year>')
 @app.route('/dois_source')
 def dois_source(year='All'):
@@ -3636,6 +3557,7 @@ def show_insert(idate):
                                          title=f"DOIs inserted on or after {idate}", html=html,
                                          navbar=generate_navbar('DOIs')))
 
+
 @app.route('/doiui_org/<string:org_in>/<string:year>/<string:show>')
 @app.route('/doiui_org/<string:org_in>/<string:year>')
 @app.route('/doiui_org/<string:org_in>')
@@ -3803,6 +3725,120 @@ def show_doiui_custom():
 # ******************************************************************************
 # * UI endpoints (journals)                                                    *
 # ******************************************************************************
+
+@app.route('/journals/<string:year>')
+@app.route('/journals')
+def show_journals(year='All'):
+    ''' Show journals in a table
+    '''
+    try:
+        journal = get_top_journals(year)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get journal data from dois"),
+                               message=error_message(err))
+    if not journal:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get journal data from dois"),
+                               message='No journals were found')
+    html = '<table id="journals" class="tablesorter numberlast"><thead><tr>' \
+           + '<th>Journal</th><th>Count</th></tr></thead><tbody>'
+    for key in sorted(journal, key=journal.get, reverse=True):
+        val = journal[key]
+        html += f"<tr><td><a href='/journal/{key}/{year}'>{key}</a></td><td>{val:,}</td></tr>"
+    html += '</tbody></table>'
+    title = "DOIs by journal"
+    if year != 'All':
+        title += f" ({year})"
+    html = year_pulldown('journals') + html
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=title, html=html,
+                                         navbar=generate_navbar('Journals')))
+
+
+@app.route('/top_journals/<string:year>/<int:top>')
+@app.route('/top_journals/<string:year>')
+@app.route('/top_journals')
+def top_journals(year='All', top=10):
+    ''' Show top journals
+    '''
+    top = min(top, 20)
+    try:
+        journal = get_top_journals(year)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get journal data from dois"),
+                               message=error_message(err))
+    if not journal:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get journal data from dois"),
+                               message='No journals were found')
+    html = '<table id="journals" class="tablesorter numberlast"><thead><tr>' \
+           + '<th>Journal</th><th>Count</th></tr></thead><tbody>'
+    data = {}
+    for key in sorted(journal, key=journal.get, reverse=True):
+        val = journal[key]
+        if len(data) >= top:
+            continue
+        data[key] = val
+        html += f"<tr><td><a href='/journal/{key}/{year}'>{key}</a></td><td>{val:,}</td></tr>"
+    html += '</tbody></table><br>' + year_pulldown('top_journals')
+    title = "DOIs by journal"
+    if year != 'All':
+        title += f" ({year})"
+    chartscript, chartdiv = DP.pie_chart(data, title, "source", width=875, height=550,
+                                         colors='Category20')
+    title = f"Top {top} DOI journals"
+    if year != 'All':
+        title += f" ({year})"
+    return make_response(render_template('bokeh.html', urlroot=request.url_root,
+                                         title=title, html=html,
+                                         chartscript=chartscript, chartdiv=chartdiv,
+                                         navbar=generate_navbar('Journals')))
+
+
+@app.route('/dois_nojournal/<string:year>')
+@app.route('/dois_nojournal')
+def dois_nojournal(year='All'):
+    ''' Show DOIs missing journal data
+    '''
+    # The payload is somewhat coarse and won't get everything (thanks, eLife...)
+    payload = {"$and": [{"type": {"$in": app.config['ARTICLES']}},
+                        {"$or": [{"short-container-title": {"$exists": False}},
+                                 {"short-container-title": []}]},
+                        {"$or": [{"container-title": {"$exists": False}}, {"container-title": []}]},
+                        {"$or": [{"institution": {"$exists": False}}, {"institution": ""}]}
+                       ]}
+    if year != 'All':
+        payload["$and"].append({"jrc_publishing_date": {"$regex": "^"+ year}})
+    try:
+        rows = DB['dis'].dois.find(payload).sort([("doi", 1)])
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get journal data from dois"),
+                               message=error_message(err))
+    html = '<table id="articles" class="tablesorter standard"><thead><tr>' \
+           + '<th>DOI</th><th>Title</th></tr></thead><tbody>'
+    cnt = 0
+    for row in rows:
+        if DL.get_journal(row):
+            continue
+        cnt += 1
+        doi = row['doi']
+        html += f"<tr><td><a href='/doiui/{doi}'>{doi}</a></td><td>{DL.get_title(row)}</td></tr>"
+    html += '</tbody></table><br>' + year_pulldown('dois_nojournal')
+    if not cnt:
+        html = "<h5>No DOIs missing journal data</h5><br>" + year_pulldown('dois_nojournal')
+    title = "DOIs missing journals"
+    if year != 'All':
+        title += f" for {year}"
+    if cnt:
+        title += f" ({cnt})"
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=title, html=html,
+                                         navbar=generate_navbar('Journals')))
+
+
 @app.route('/journal/<string:jname>/<string:year>')
 @app.route('/journal/<string:jname>')
 def show_journal_ui(jname, year='All'):
