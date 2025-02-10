@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "30.2.0"
+__version__ = "30.3.0"
 # Database
 DB = {}
 # Custom queries
@@ -3556,10 +3556,11 @@ def show_insert(idate):
             rclass = 'candidate'
         else:
             rclass = 'other'
+        jpd = row['jrc_publishing_date'] if row['jrc_publishing_date'] >= str(limit) else \
+              f"<span style='color: gray'>{row['jrc_publishing_date']}</span>"
         html += f"<tr class='{rclass}'><td>" \
                 + "</td><td>".join([doi_link(row['doi']), row['jrc_obtained_from'], typ,
-                                    row['jrc_publishing_date'], source,
-                                    str(row['jrc_inserted']), version,
+                                    jpd, source, str(row['jrc_inserted']), version,
                                     news]) + "</td></tr>"
         frow = "\t".join([row['doi'], row['jrc_obtained_from'], typ, row['jrc_publishing_date'],
                           source, str(row['jrc_inserted']), version, news])
