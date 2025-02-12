@@ -180,7 +180,9 @@ table.property {
 }
 
 .flexitem {
-  flex-basis:  | auto;
+  flex: 1;
+  min-width: 150px;
+  max-width: 280px;
 }
 
 .flexrow {

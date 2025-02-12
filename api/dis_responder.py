@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "30.3.0"
+__version__ = "30.4.0"
 # Database
 DB = {}
 # Custom queries
@@ -3047,12 +3047,17 @@ def dois_pending():
                                          title="DOIs awaiting processing", html=html,
                                          navbar=generate_navbar('DOIs')))
 
-
+@app.route('/dois_publisher/<string:year>')
 @app.route('/dois_publisher')
-def dois_publisher():
+def dois_publisher(year='All'):
     ''' Show publishers with counts
     '''
-    payload = [{"$group": {"_id": {"publisher": "$publisher", "source": "$jrc_obtained_from"},
+    if year == 'All':
+        match = {}
+    else:
+        match = {"jrc_publishing_date": {"$regex": "^"+ year}}
+    payload = [{"$match": match},
+               {"$group": {"_id": {"publisher": "$publisher", "source": "$jrc_obtained_from"},
                            "count":{"$sum": 1}}},
                {"$sort": {"_id.publisher": 1}}
               ]
@@ -3086,8 +3091,13 @@ def dois_publisher():
             html += f"<td>{link}</td>"
         html += "</tr>"
     html += '</tbody></table>'
+    html = year_pulldown('dois_publisher') + html
+    title = "DOI publishers"
+    if year != 'All':
+        title += f" for {year}"
+    title += f" ({len(pubs):,})"
     return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title=f"DOI publishers ({len(pubs):,})", html=html,
+                                         title=title, html=html,
                                          navbar=generate_navbar('DOIs')))
 
 
@@ -3757,7 +3767,7 @@ def show_journals(year='All'):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get journal data from dois"),
                                message='No journals were found')
-    html = '<table id="journals" class="tablesorter numberlast"><thead><tr>' \
+    html = '<table id="journals" class="tablesorter numbers"><thead><tr>' \
            + '<th>Journal</th><th>Count</th><th>Last published to</th></tr></thead><tbody>'
     for key in sorted(journal, key=lambda x: journal[x]['count'], reverse=True):
         html += f"<tr><td><a href='/journal/{key}/{year}'>{key}</a></td>" \
