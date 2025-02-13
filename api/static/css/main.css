@@ -185,6 +185,11 @@ table.property {
   max-width: 280px;
 }
 
+.flexitemauto {
+  flex: 0 0 auto;
+  width: auto;
+}
+
 .flexrow {
   display: flex;
   flex-direction: row;

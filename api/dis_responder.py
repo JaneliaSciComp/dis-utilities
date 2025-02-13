@@ -2439,7 +2439,7 @@ def show_doi_ui(doi):
     citations = DL.short_citation(doi, True)
     # DOI section
     alink = f"/doi/authors/{doi}"
-    link = f"<a href='https://dx.doi.org/{doi}' target='_blank'>{doi}</a>"
+    link = f"<a href='https://doi.org/{doi}' target='_blank'>{doi}</a>"
     rlink = f"/doi/{doi}"
     mlink = f"/doi/migration/{doi}"
     doisec += f"<span class='paperdata'>DOI: {link}"
