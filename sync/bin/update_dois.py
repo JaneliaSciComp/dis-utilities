@@ -7,7 +7,7 @@
            to DIS MongoDB.
 """
 
-__version__ = '7.2.0'
+__version__ = '7.3.0'
 
 import argparse
 import configparser
@@ -40,6 +40,7 @@ WRITE = {'doi': "INSERT INTO doi_data (doi,title,first_author,"
         }
 # Configuration
 CKEY = {"flyboy": "dois"}
+ALUMNI = {}
 CROSSREF = {}
 DATACITE = {}
 CROSSREF_CALL = {}
@@ -47,6 +48,7 @@ DATACITE_CALL = {}
 INSERTED = {}
 UPDATED = {}
 MISSING = {}
+NO_AUTHOR = {}
 TO_BE_PROCESSED = []
 MAX_CROSSREF_TRIES = 3
 # General
@@ -635,14 +637,22 @@ def persist_author(key, authors, persist):
     '''
     # Update jrc_author
     jrc_author = []
+    alumni = []
     for auth in authors:
         if auth['janelian'] and 'employeeId' in auth and auth['employeeId']:
             jrc_author.append(auth['employeeId'])
+        elif 'alumni' in auth and auth['alumni']:
+            alumni.append(f"{auth['given'][0]} {auth['family'][0]} is alumni")
     if jrc_author:
         LOGGER.debug(f"Added jrc_author {jrc_author} to {key}")
         persist[key]['jrc_author'] = jrc_author
+    elif alumni:
+        LOGGER.warning(f"No Janelia authors for {key} (alumni)")
+        ALUMNI[key] = json.dumps(authors, indent=2 ,default=str)
     else:
         LOGGER.warning(f"No Janelia authors for {key}")
+        if authors:
+            NO_AUTHOR[key] = json.dumps(authors, indent=2 ,default=str)
 
 
 def get_suporg_code(name):
@@ -960,13 +970,13 @@ def post_activities():
         # Write files
         timestamp = strftime("%Y%m%dT%H%M%S")
         for ftype in ('INSERTED', 'UPDATED', 'CROSSREF', 'DATACITE',
-                      'CROSSREF_CALL', 'DATACITE_CALL', 'MISSING'):
+                      'CROSSREF_CALL', 'DATACITE_CALL', 'MISSING', 'NO_AUTHOR', 'ALUMNI'):
             if not globals()[ftype]:
                 continue
             fname = f"doi_{ftype.lower()}_{timestamp}.txt"
             with open(fname, 'w', encoding='ascii') as outstream:
                 for key, val in globals()[ftype].items():
-                    if ftype in ('INSERTED', 'UPDATED'):
+                    if ftype in ('INSERTED', 'NO_AUTHOR', 'ALUMNI', 'UPDATED'):
                         outstream.write(f"{key}\t{val}\n")
                     else:
                         outstream.write(f"{key}\n")
