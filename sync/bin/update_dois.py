@@ -316,7 +316,9 @@ def get_dois():
     if ARG.DOI:
         return {"dois": [ARG.DOI]}
     if ARG.FILE:
-        return {"dois": ARG.FILE.read().splitlines()}
+        dois = ARG.FILE.read().splitlines()
+        LOGGER.info(f"Got {len(dois):,} DOIs from {ARG.FILE.name}")
+        return {"dois": dois}
     if ARG.PIPE:
         # Handle input from STDIN
         inp = ""
@@ -801,7 +803,7 @@ def update_mongodb(persist):
         if key not in EXISTING:
             val['jrc_inserted'] = datetime.today().replace(microsecond=0)
         val['jrc_updated'] = datetime.today().replace(microsecond=0)
-        LOGGER.debug(val)
+        # LOGGER.debug(val)
         if ARG.WRITE:
             if ARG.DOI or ARG.FILE:
                 val['jrc_load_source'] = "Manual"

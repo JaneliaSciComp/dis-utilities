@@ -848,7 +848,6 @@ def get_migration_data(row):
     if row['jrc_obtained_from'] == 'Crossref' and 'abstract' in row:
         rec['abstract'] = row['abstract']
     rec['journal'] = DL.get_journal(row)
-
     rec['title'] = DL.get_title(row)
     if 'URL' in row:
         rec['url'] = row['URL']
