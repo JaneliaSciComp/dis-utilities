@@ -545,7 +545,7 @@ def evaluate_candidates(author, candidates, inform_message, verbose=False):
                     "black", "on_green"))
                 quest = [inquirer.List('decision',
                                        message="Do you believe this employee corresponds to this author?",
-                                       choices=['Yes', 'No'])]
+                                       choices=['Yes', 'No'], default='No')]
                 ans = inquirer.prompt(quest, theme=BlueComposure())
                 if ans['decision'] == 'Yes':
                     candidate_from_exact_name_match.approved = True
@@ -561,7 +561,8 @@ def evaluate_candidates(author, candidates, inform_message, verbose=False):
                 ))
             quest = [inquirer.List('decision',
                                    message=f"Add {best_guess.name} to this paper's Janelia authors?",
-                                   choices=['Yes', 'No'])]
+                                   choices=['Yes', 'No'],
+                                   default='Yes' if float(best_guess.score) >= 90.0 else 'No')]
             ans = inquirer.prompt(quest, theme=BlueComposure())
             if ans['decision'] == 'Yes':
                 best_guess.approved = True
