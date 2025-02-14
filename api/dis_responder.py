@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "30.5.0"
+__version__ = "31.0.0"
 # Database
 DB = {}
 # Custom queries
@@ -1685,12 +1685,15 @@ def show_doi_migrations(idate):
         isodate = datetime.strptime(idate,'%Y-%m-%d')
     except Exception as err:
         raise InvalidUsage(str(err), 400) from err
+    payload = {"jrc_author": {"$exists": True},
+               "jrc_inserted": {"$gte" : isodate},
+               "subtype": {"$ne": "other"},
+               "$or": [{"types.resourceTypeGeneral": "Preprint"},
+                       {"type": {"$in": ["journal-article", "peer-review"]}}
+                      ]
+              }
     try:
-        rows = DB['dis'].dois.find({"jrc_author": {"$exists": True},
-                                    "jrc_inserted": {"$gte" : isodate},
-                                    "types.resourceTypeGeneral": {"$ne": "Dataset"}
-                                   },
-                                    {'_id': 0})
+        rows = DB['dis'].dois.find(payload, {'_id': 0})
     except Exception as err:
         raise InvalidUsage(str(err), 500) from err
     result['rest']['row_count'] = 0
