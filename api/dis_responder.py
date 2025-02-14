@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "30.3.0"
+__version__ = "30.4.0"
 # Database
 DB = {}
 # Custom queries
@@ -1127,6 +1127,7 @@ def get_badges(auth, ignore_match=False):
     ''' Create a list of badges for an author
         Keyword arguments:
           auth: detailed author record
+          ignore_match: ignore match status
         Returns:
           List of HTML badges
     '''
@@ -1167,6 +1168,7 @@ def show_tagged_authors(authors, confirmed):
     ''' Create a list of Janelian authors (with badges and tags)
         Keyword arguments:
           authors: list of detailed authors from a publication
+          confirmed: list of confirmed authors
         Returns:
           List of HTML authors
     '''
@@ -2437,7 +2439,7 @@ def show_doi_ui(doi):
     citations = DL.short_citation(doi, True)
     # DOI section
     alink = f"/doi/authors/{doi}"
-    link = f"<a href='https://dx.doi.org/{doi}' target='_blank'>{doi}</a>"
+    link = f"<a href='https://doi.org/{doi}' target='_blank'>{doi}</a>"
     rlink = f"/doi/{doi}"
     mlink = f"/doi/migration/{doi}"
     doisec += f"<span class='paperdata'>DOI: {link}"
@@ -3045,12 +3047,17 @@ def dois_pending():
                                          title="DOIs awaiting processing", html=html,
                                          navbar=generate_navbar('DOIs')))
 
-
+@app.route('/dois_publisher/<string:year>')
 @app.route('/dois_publisher')
-def dois_publisher():
+def dois_publisher(year='All'):
     ''' Show publishers with counts
     '''
-    payload = [{"$group": {"_id": {"publisher": "$publisher", "source": "$jrc_obtained_from"},
+    if year == 'All':
+        match = {}
+    else:
+        match = {"jrc_publishing_date": {"$regex": "^"+ year}}
+    payload = [{"$match": match},
+               {"$group": {"_id": {"publisher": "$publisher", "source": "$jrc_obtained_from"},
                            "count":{"$sum": 1}}},
                {"$sort": {"_id.publisher": 1}}
               ]
@@ -3084,8 +3091,13 @@ def dois_publisher():
             html += f"<td>{link}</td>"
         html += "</tr>"
     html += '</tbody></table>'
+    html = year_pulldown('dois_publisher') + html
+    title = "DOI publishers"
+    if year != 'All':
+        title += f" for {year}"
+    title += f" ({len(pubs):,})"
     return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title=f"DOI publishers ({len(pubs):,})", html=html,
+                                         title=title, html=html,
                                          navbar=generate_navbar('DOIs')))
 
 
@@ -3558,8 +3570,7 @@ def show_insert(idate):
               f"<span style='color: gray'>{row['jrc_publishing_date']}</span>"
         html += f"<tr class='{rclass}'><td>" \
                 + "</td><td>".join([doi_link(row['doi']), row['jrc_obtained_from'], typ,
-                                    jpd, source,
-                                    str(row['jrc_inserted']), version,
+                                    jpd, source, str(row['jrc_inserted']), version,
                                     news]) + "</td></tr>"
         frow = "\t".join([row['doi'], row['jrc_obtained_from'], typ, row['jrc_publishing_date'],
                           source, str(row['jrc_inserted']), version, news])
@@ -3756,7 +3767,7 @@ def show_journals(year='All'):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get journal data from dois"),
                                message='No journals were found')
-    html = '<table id="journals" class="tablesorter numberlast"><thead><tr>' \
+    html = '<table id="journals" class="tablesorter numbers"><thead><tr>' \
            + '<th>Journal</th><th>Count</th><th>Last published to</th></tr></thead><tbody>'
     for key in sorted(journal, key=lambda x: journal[x]['count'], reverse=True):
         html += f"<tr><td><a href='/journal/{key}/{year}'>{key}</a></td>" \
