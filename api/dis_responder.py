@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "30.4.0"
+__version__ = "30.5.0"
 # Database
 DB = {}
 # Custom queries
@@ -839,13 +839,16 @@ def get_migration_data(row):
     if tags:
         rec['tags'] = tags
     # Additional data
+    for key in ['jrc_publishing_date', 'publisher', 'type', 'subtype']:
+        if key in row:
+            rec[key] = row[key]
+    if row['jrc_obtained_from'] == 'DataCite' and 'types' in row:
+        if 'resourceTypeGeneral' in row['types']:
+            rec['type'] = row['types']['resourceTypeGeneral']
     if row['jrc_obtained_from'] == 'Crossref' and 'abstract' in row:
         rec['abstract'] = row['abstract']
     rec['journal'] = DL.get_journal(row)
-    if 'jrc_publishing_date' in row:
-        rec['jrc_publishing_date'] = row['jrc_publishing_date']
-    if 'publisher' in row:
-        rec['publisher'] = row['publisher']
+
     rec['title'] = DL.get_title(row)
     if 'URL' in row:
         rec['url'] = row['URL']
@@ -1684,7 +1687,10 @@ def show_doi_migrations(idate):
         raise InvalidUsage(str(err), 400) from err
     try:
         rows = DB['dis'].dois.find({"jrc_author": {"$exists": True},
-                                    "jrc_inserted": {"$gte" : isodate}}, {'_id': 0})
+                                    "jrc_inserted": {"$gte" : isodate},
+                                    "types.resourceTypeGeneral": {"$ne": "Dataset"}
+                                   },
+                                    {'_id': 0})
     except Exception as err:
         raise InvalidUsage(str(err), 500) from err
     result['rest']['row_count'] = 0
