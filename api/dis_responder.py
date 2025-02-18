@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "31.0.0"
+__version__ = "31.1.0"
 # Database
 DB = {}
 # Custom queries
@@ -4464,7 +4464,10 @@ def show_labs():
         if 'affiliations' not in row:
             row['affiliations'] = ''
         link = f"<a href='/userui/{row['orcid']}'>{row['orcid']}</a>" if 'orcid' in row else ''
-        html += f"<tr><td>{row['given'][0]} {row['family'][0]}</td>" \
+        name = " ".join([row['given'][0], row['family'][0]])
+        if 'alumni' in row and row['alumni']:
+            name += (f" {tiny_badge('alumni', 'Alumni')}")
+        html += f"<tr><td>{name}</td>" \
                 + f"<td style='width: 180px'>{link}</td><td>{row['group']}</td>" \
                 + f"<td>{', '.join(row['affiliations'])}</td></tr>"
     html += '</tbody></table>'
