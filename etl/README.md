@@ -4,6 +4,9 @@
 
 | Name                   | Description                                                            |
 | ---------------------- | ---------------------------------------------------------------------- |
+| add_hq_newsletter.py   | Add jrc_newsletter dates to DOIs                                       |
+| add_hq_tags.py         | Add tags from HQ database used to populate janelia.org                 |
+| convert_tags.py        | Convert tag lists to tag dictionaries                                  |
 | fix_jrc_author.py      | Add jrc_author field to DOIs that don't have it                        |
 | fix_middle_names.py    | Expand given names in the orcid collection                             |
 
