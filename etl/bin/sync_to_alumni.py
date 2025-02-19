@@ -9,7 +9,6 @@ from operator import attrgetter
 import sys
 from tqdm import tqdm
 import jrc_common.jrc_common as JRC
-#import doi_common.doi_common as DL
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation
 
@@ -66,13 +65,49 @@ def get_orcid_record(payload):
         Keyword arguments:
           payload: MongoDB payload
         Returns:
-          None
+          Row
     '''
     try:
         row = DB['dis']['orcid'].find_one(payload)
     except Exception as err:
         terminate_program(err)
     return row
+
+
+def count_orcid_records(payload):
+    ''' Get an orcid record count
+        Keyword arguments:
+          payload: MongoDB payload
+        Returns:
+          Count, records
+    '''
+    recs = []
+    try:
+        cnt = DB['dis']['orcid'].count_documents(payload)
+        if cnt:
+            rows = DB['dis']['orcid'].find(payload)
+            for row in rows:
+                recs.append(row)
+    except Exception as err:
+        terminate_program(err)
+    return cnt, recs
+
+
+def update_record(row, eid, add_to_orcid):
+    filt = {"_id": row["_id"]}
+    payload = {"$set": {"employeeId": eid}}
+    display = {"_id": row["_id"], "employeeId": eid}
+    LOGGER.debug(display)
+    add_to_orcid.append(json.dumps(display, indent=2, default=str))
+    COUNT['set_eid'] += 1
+    if not ARG.WRITE:
+        return
+    try:
+        result = DB['dis']['orcid'].update_one(filt, payload)
+    except Exception as err:
+        terminate_program(err)
+    if hasattr(result, 'modified_count') and result.modified_count:
+        COUNT['updated'] += 1
 
 
 def write_new_record(val, add_to_orcid):
@@ -92,9 +127,7 @@ def write_new_record(val, add_to_orcid):
               }
     if val['organization'] == 'Group Leader/Lab Head':
         payload['group'] = f"{val['first']} {val['last']} Lab"
-    COUNT['set_orcid'] += 1
-    if 'Brenner' not in payload['family']:
-        return
+    COUNT['new'] += 1
     add_to_orcid.append(json.dumps(payload, indent=2, default=str))
     if not ARG.WRITE:
         return
@@ -134,8 +167,10 @@ def process_alumni():
             continue
         row = get_orcid_record({'employeeId': eid})
         if row:
-            # If they're in ORCID with an employee ID, skip them
+            # If they're in ORCID with an employee ID or ORCID, skip them
             COUNT['eid_in_orcid'] += 1
+            if 'orcid' in row and row['orcid']:
+                    COUNT['orcid_in_orcid'] += 1
             continue
         row = get_orcid_record({'given': val['first'], 'family': val['last']})
         if row:
@@ -148,12 +183,18 @@ def process_alumni():
                 LOGGER.warning(f"{name} {eid} {row}")
                 continue
             # Set EID
-            COUNT['set_eid'] += 1
+            update_record(row, eid, add_to_orcid)
             continue
         if 'organization' not in val or not val['organization']:
             terminate_program(f"No organization for {name}")
         if val['organization'] in DISCARD:
             COUNT['group_discarded'] += 1
+            continue
+        cnt, recs = count_orcid_records({'given': {"$regex": f"^{val['first'][0]}"},
+                                         'family': {"$regex": val['last']}})
+        if cnt:
+            LOGGER.warning(f"Possible duplicate {name} {eid} {cnt}\n{recs}")
+            COUNT['duplicate'] += 1
             continue
         write_new_record(val, add_to_orcid)
     # Write output file and show stats
@@ -163,12 +204,14 @@ def process_alumni():
     print(f"Janelians in Workday: {COUNT['janelians']:,}")
     print(f"EIDs in People:       {COUNT['eid_in_people']:,}")
     print(f"EIDs in ORCID:        {COUNT['eid_in_orcid']:,}")
+    print(f"ORCIDs in ORCID:      {COUNT['orcid_in_orcid']:,}")
     print(f"Names in ORCID:       {COUNT['name_in_orcid']:,}")
+    print(f"Possible duplicates:  {COUNT['duplicate']:,}")
     print(f"Discarded (group):    {COUNT['group_discarded']:,}")
+    print(f"New records:          {COUNT['new']:,}")
     print(f"EIDs set:             {COUNT['set_eid']:,}")
-    print(f"ORCIDs set:           {COUNT['set_orcid']:,}")
     print(f"ORCIDs inserted:      {COUNT['inserted']:,}")
-
+    print(f"ORCIDs updated:       {COUNT['updated']:,}")
 # -----------------------------------------------------------------------------
 
 if __name__ == '__main__':

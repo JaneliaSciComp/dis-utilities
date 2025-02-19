@@ -207,7 +207,7 @@ def processing():
         Returns:
           None
     '''
-    with open(ARG.FILE, 'r', encoding='ascii') as instream:
+    with open(ARG.FILE, 'r', encoding='utf-8') as instream:
         data = json.load(instream)
     for node in tqdm(data['nodes']):
         COUNT['read'] += 1
@@ -285,7 +285,7 @@ def processing():
                     LOGGER.error(f"Could not write {repr(doi)} to {filename}")
     if TITLE:
         filename = 'missing_doi.txt'
-        with open(filename, 'w', encoding='ascii') as outstream:
+        with open(filename, 'w', encoding='utf-8') as outstream:
             for title in TITLE:
                 try:
                     outstream.write(f"{title}\n")
