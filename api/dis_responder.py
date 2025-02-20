@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "31.1.0"
+__version__ = "31.2.0"
 # Database
 DB = {}
 # Custom queries
@@ -1526,7 +1526,7 @@ def show_doi_authors(doi):
     '''
     Return a DOI's authors
     Return information on authors for a given DOI.
-    ---
+    # Do not display
     tags:
       - DOI
     parameters:
@@ -1583,7 +1583,7 @@ def show_doi_janelians(doi):
     '''
     Return a DOI's Janelia authors
     Return information on Janelia authors for a given DOI.
-    ---
+    # Do not display
     tags:
       - DOI
     parameters:
@@ -1622,7 +1622,7 @@ def show_doi_migration(doi):
     '''
     Return a DOI's migration record
     Return migration information for a given DOI.
-    ---
+    # Do not display
     tags:
       - DOI
     parameters:
@@ -1663,7 +1663,7 @@ def show_doi_migrations(idate):
     '''
     Return migration records for DOIs inserted since a specified date
     Return migration records for DOIs inserted since a specified date.
-    ---
+    # Do not display
     tags:
       - DOI
     parameters:
@@ -2203,7 +2203,7 @@ def show_oids():
     '''
     Show saved ORCID IDs
     Return information for saved ORCID IDs
-    ---
+    # Do not display
     tags:
       - ORCID
     responses:
@@ -2230,7 +2230,7 @@ def show_oid(oid):
     '''
     Show an ORCID ID
     Return information for an ORCID ID or name
-    ---
+    # Do not display
     tags:
       - ORCID
     parameters:
@@ -2449,10 +2449,7 @@ def show_doi_ui(doi):
     except Exception as err:
         citations = f"Could not generate short citation for {doi} ({err})"
     # DOI section
-    alink = f"/doi/authors/{doi}"
     link = f"<a href='https://doi.org/{doi}' target='_blank'>{doi}</a>"
-    rlink = f"/doi/{doi}"
-    mlink = f"/doi/migration/{doi}"
     doisec += f"<span class='paperdata'>DOI: {link}"
     oresp = JRC.call_oa(doi)
     if oresp:
@@ -2462,9 +2459,12 @@ def show_doi_ui(doi):
         if 'jrc_pmid' in row:
             plink = f"{app.config['PMID']}{row['jrc_pmid']}/"
             doisec += f" {tiny_badge('primary', 'PMID', plink)}"
+        rlink = f"/doi/{doi}"
         doisec += f" {tiny_badge('info', 'Raw data', rlink)}"
-        doisec += f" {tiny_badge('info', 'HQ migration', mlink)}" \
-                  + f" {tiny_badge('info', 'Author details', alink)}"
+        #mlink = f"/doi/migration/{doi}"
+        #doisec += f" {tiny_badge('info', 'HQ migration', mlink)}"
+        #alink = f"/doi/authors/{doi}"
+        #doisec += f" {tiny_badge('info', 'Author details', alink)}"
     doisec += "</span><br>"
     if row:
         citcnt = s2_citation_count(doi, fmt='html')
@@ -4359,7 +4359,7 @@ def peoplerec(eid):
                                title=render_warning(f"Could not find People record for {eid}"),
                                message="No record found")
     title = f"{rec['nameFirstPreferred']} {rec['nameLastPreferred']}"
-    for field in ['employeeId', 'managerId']:
+    for field in ['employeeId', 'managerId']: # Remove employeeId
         if field in rec:
             del rec[field]
     if 'photoURL' in rec:
@@ -4456,6 +4456,8 @@ def show_labs():
         result['rest']['source'] = 'mongo'
         result['data'] = []
         for row in rows:
+            if 'employeeId' in row: # Remove employeeId
+                del row['employeeId']
             result['data'].append(row)
         result['rest']['row_count'] = len(result['data'])
         return generate_response(result)
