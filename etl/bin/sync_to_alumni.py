@@ -94,6 +94,14 @@ def count_orcid_records(payload):
 
 
 def update_record(row, eid, add_to_orcid):
+    ''' Update a record in the orcid collection
+        Keyword arguments:
+          row: MongoDB row
+          eid: employee ID
+          add_to_orcid: list of records to add to orcid
+        Returns:
+          None
+    '''
     filt = {"_id": row["_id"]}
     payload = {"$set": {"employeeId": eid}}
     display = {"_id": row["_id"], "employeeId": eid}
@@ -170,7 +178,7 @@ def process_alumni():
             # If they're in ORCID with an employee ID or ORCID, skip them
             COUNT['eid_in_orcid'] += 1
             if 'orcid' in row and row['orcid']:
-                    COUNT['orcid_in_orcid'] += 1
+                COUNT['orcid_in_orcid'] += 1
             continue
         row = get_orcid_record({'given': val['first'], 'family': val['last']})
         if row:
@@ -193,7 +201,10 @@ def process_alumni():
         cnt, recs = count_orcid_records({'given': {"$regex": f"^{val['first'][0]}"},
                                          'family': {"$regex": val['last']}})
         if cnt:
-            LOGGER.warning(f"Possible duplicate {name} {eid} {cnt}\n{recs}")
+            names = []
+            for rec in recs:
+                names.append(f"{rec['given']} {rec['family']}")
+            LOGGER.warning(f"Possible duplicate {name} {eid} {cnt}\n{' ; '.join(names)}")
             COUNT['duplicate'] += 1
             continue
         write_new_record(val, add_to_orcid)
