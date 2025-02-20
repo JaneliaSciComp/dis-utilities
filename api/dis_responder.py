@@ -2444,7 +2444,10 @@ def show_doi_ui(doi):
         #                        title=render_warning("Could not find journal"),
         #                        message=f"Could not find journal for {doi}")
     citationf = f"{authors} {title}."
-    citations = DL.short_citation(doi, True)
+    try:
+        citations = DL.short_citation(doi, True)
+    except Exception as err:
+        citations = f"Could not generate short citation for {doi} ({err})"
     # DOI section
     alink = f"/doi/authors/{doi}"
     link = f"<a href='https://doi.org/{doi}' target='_blank'>{doi}</a>"
