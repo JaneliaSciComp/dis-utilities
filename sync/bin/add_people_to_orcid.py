@@ -81,6 +81,13 @@ def call_responder(server, endpoint):
 
 
 def add_middle_name(rec, given):
+    ''' Add middle name to given name
+        Keyword arguments:
+          rec: person record from People
+          given: list of given names
+        Returns:
+          None
+    '''
     if rec["nameMiddlePreferred"]:
         temp = given.copy()
         for first in temp:
@@ -141,6 +148,65 @@ def add_new_record(person, output):
         terminate_program(err)
 
 
+def unset_alumni(person, output):
+    ''' Unset the alumni flag in orcid
+        Keyword arguments:
+          person: person record from People
+          output: output dictionary
+        Returns:
+          None
+    '''
+    name = f"{person['nameFirstPreferred']} {person['nameLastPreferred']}"
+    try:
+        rec = DB['dis']['orcid'].find_one({'employeeId': person['employeeId']})
+    except Exception as err:
+        terminate_program(err)
+    if not rec:
+        terminate_program(f"No orcid record found for {name}")
+    COUNT['boomerang'] += 1
+    LOGGER.warning(f"Unsetting alumni flag for {name}")
+    output['boomerang'].append(json.dumps(person, indent=2))
+    if not ARG.WRITE:
+        return
+    try:
+        result = DB['dis']['orcid'].update_one({'employeeId': person['employeeId']},
+                                               {'$unset': {'alumni': None}})
+        if hasattr(result, 'modified_count') and result.modified_count:
+            COUNT['update'] += 1
+    except Exception as err:
+        terminate_program(err)
+
+def set_alumni(person, orcid):
+    ''' Set the alumni flag in orcid
+        Keyword arguments:
+          person: person record from People
+          orcid: orcid dictionary
+        Returns:
+          None
+    '''
+    if person['employeeId'] in orcid and not orcid[person['employeeId']]:
+        COUNT['people_alumni'] += 1
+        return
+    name = f"{person['nameFirstPreferred']} {person['nameLastPreferred']}"
+    try:
+        rec = DB['dis']['orcid'].find_one({'employeeId': person['employeeId']})
+    except Exception as err:
+        terminate_program(err)
+    if not rec:
+        terminate_program(f"No orcid record found for {name}")
+    COUNT['set_alumni'] += 1
+    LOGGER.warning(f"Setting alumni flag for {name}")
+    if not ARG.WRITE:
+        return
+    try:
+        result = DB['dis']['orcid'].update_one({'employeeId': person['employeeId']},
+                                      {'$set': {'alumni': True}})
+        if hasattr(result, 'modified_count') and result.modified_count:
+            COUNT['update'] += 1
+    except Exception as err:
+        terminate_program(err)
+
+
 def update_orcid():
     ''' Add people to the orcid collection
         Keyword arguments:
@@ -169,14 +235,16 @@ def update_orcid():
         if eid in orcid:
             if orcid[eid]:
                 # Person is active in orcid
-                COUNT['already_active'] += 1
+                if person['businessTitle'] == 'JRC Alumni':
+                    set_alumni(person, orcid)
+                else:
+                    COUNT['already_active'] += 1
             elif person['businessTitle'] != 'JRC Alumni':
                 # People says active, orcid says alumni - boomerang!
-                COUNT['boomerang'] += 1
-                output['boomerang'].append(json.dumps(person, indent=2))
+                unset_alumni(person, output)
             else:
-                # People and orcid say alumni - take no action
-                COUNT['people_alumni'] += 1
+                # People says alumni - update the flag in orcid if necessary
+                set_alumni(person, orcid)
         else:
             # Person is in People but not orcid - insert record
             add_new_record(person, output)
@@ -186,16 +254,17 @@ def update_orcid():
         if val:
             fname = f"{timestamp}_{key}.json"
             with open(fname, "w", encoding="utf-8") as outfile:
-                outfile.write("\n".join(val))
+                outfile.write("[" + ",\n".join(val) + "]")
     print(f"Records from People:    {COUNT['people']:,}")
     print(f"Already active:         {COUNT['already_active']:,}")
     print(f"Skipped (organization): {COUNT['skipped']:,}")
     print(f"Not at Janelia:         {COUNT['not_janelia']:,}")
     print(f"JRC Alumni:             {COUNT['people_alumni']:,}")
+    print(f"JRC Alumni set:         {COUNT['set_alumni']:,}")
     print(f"Boomerangs:             {COUNT['boomerang']:,}")
     print(f"New employees:          {COUNT['new']:,}")
     print(f"Records inserted:       {COUNT['insert']:,}")
-
+    print(f"Records updated:        {COUNT['update']:,}")
 # -----------------------------------------------------------------------------
 
 if __name__ == '__main__':
