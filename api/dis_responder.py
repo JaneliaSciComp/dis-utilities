@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "31.4.0"
+__version__ = "31.5.0"
 # Database
 DB = {}
 # Custom queries
@@ -4025,7 +4025,8 @@ def show_names_ui(name):
 def orcid_tag():
     ''' Show ORCID tags (affiliations) with counts
     '''
-    payload = [{"$unwind" : "$affiliations"},
+    payload = [{"$match": {"affiliations": {"$ne": None}}},
+               {"$unwind" : "$affiliations"},
                {"$project": {"_id": 0, "affiliations": 1, "orcid": 1}},
                {"$group": {"_id": "$affiliations", "count":{"$sum": 1},
                            "orcid": {"$push": "$orcid"}}},
