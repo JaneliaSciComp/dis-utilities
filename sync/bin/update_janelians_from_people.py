@@ -1,5 +1,6 @@
-''' sync_people_to_orcid.py
-    Update the MongoDB orcid collection with data from the People system.
+''' update_janelians_from_people.py
+    Update active Janelians in the MongoDB orcid collection with
+    data (names, affiliation, employee types, teams) from the People system.
 '''
 
 __version__ = '2.0.1'
