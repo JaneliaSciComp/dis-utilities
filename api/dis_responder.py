@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "31.2.0"
+__version__ = "31.3.0"
 # Database
 DB = {}
 # Custom queries
@@ -4096,6 +4096,14 @@ def orcid_entry():
         cnte = DB['dis'].orcid.count_documents(payload)
         cntj = DB['dis'].orcid.count_documents({"alumni": {"$exists": False}})
         cnta = DB['dis'].orcid.count_documents({"alumni": {"$exists": True}})
+        cntaok = DB['dis'].orcid.count_documents({"alumni": {"$exists": True}, "orcid": {"$exists": True},
+                                                  "employeeId": {"$exists": True}})
+        cntane = DB['dis'].orcid.count_documents({"alumni": {"$exists": True}, "orcid": {"$exists": True},
+                                                  "employeeId": {"$exists": False}})
+        cntano = DB['dis'].orcid.count_documents({"alumni": {"$exists": True}, "orcid": {"$exists": False},
+                                                  "employeeId": {"$exists": True}})
+        cntax = DB['dis'].orcid.count_documents({"alumni": {"$exists": True}, "orcid": {"$exists": False},
+                                                  "employeeId": {"$exists": False}})
         payload = {"$and": [{"affiliations": {"$exists": False}}, {"group": {"$exists": False}},
                             {"alumni": {"$exists": False}}]}
         cntf = DB['dis'].orcid.count_documents(payload)
@@ -4109,18 +4117,26 @@ def orcid_entry():
     html = '<table id="types" class="tablesorter standard"><tbody>'
     html += f"<tr><td>Entries in collection</td><td>{total:,}</td></tr>"
     html += f"<tr><td>Current Janelians</td><td>{cntj:,} ({cntj/total*100:.2f}%)</td></tr>"
-    html += f"<tr><td>&nbsp;&nbsp;Janelians with ORCID and employee ID</td><td>{cntb:,}" \
+    html += f"<tr><td>&nbsp;&nbsp;Janelians with ORCID and employee ID</td><td>&nbsp;&nbsp;{cntb:,}" \
             + f" ({cntb/cntj*100:.2f}%)</td></tr>"
     data['Janelians with ORCID and employee ID'] = cntb
-    html += f"<tr><td>&nbsp;&nbsp;Janelians with ORCID only</td><td>{cnto:,}" \
+    html += f"<tr><td>&nbsp;&nbsp;Janelians with ORCID only</td><td>&nbsp;&nbsp;{cnto:,}" \
             + f" ({cnto/cntj*100:.2f}%)</td></tr>"
     data['Janelians with ORCID only'] = cnto
-    html += f"<tr><td>&nbsp;&nbsp;Janelians with employee ID only</td><td>{cnte:,}" \
+    html += f"<tr><td>&nbsp;&nbsp;Janelians with employee ID only</td><td>&nbsp;&nbsp;{cnte:,}" \
             + f" ({cnte/cntj*100:.2f}%)</td></tr>"
     data['Janelians with employee ID only'] = cnte
-    html += f"<tr><td>&nbsp;&nbsp;Janelians without affiliations/groups</td><td>{cntf:,}</td></tr>"
+    html += f"<tr><td>Janelians without affiliations/groups</td><td>{cntf:,}</td></tr>"
     html += f"<tr><td>Alumni</td><td>{cnta:,} ({cnta/total*100:.2f}%)</td></tr>"
     data['Alumni'] = cnta
+    html += f"<tr><td>&nbsp;&nbsp;Alumni with ORCID and employee ID</td><td>&nbsp;&nbsp;{cntaok:,} " \
+            + f"({cntaok/cnta*100:.2f}%)</td></tr>"
+    html += f"<tr><td>&nbsp;&nbsp;Alumni with ORCID only</td><td>&nbsp;&nbsp;{cntane:,} " \
+            + f"({cntane/cnta*100:.2f}%)</td></tr>"
+    html += f"<tr><td>&nbsp;&nbsp;Alumni with employee ID only</td><td>&nbsp;&nbsp;{cntano:,} " \
+            + f"({cntano/cnta*100:.2f}%)</td></tr>"
+    html += f"<tr><td>&nbsp;&nbsp;No ORCID or employee ID</td><td>&nbsp;&nbsp;{cntax:,} " \
+            + f"({cntax/cnta*100:.2f}%)</td></tr>"
     html += '</tbody></table>'
     chartscript, chartdiv = DP.pie_chart(data, "ORCID entries", "type", height=500, width=600,
                                          colors=DP.TYPE_PALETTE, location="top_right")
