@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "31.1.0"
+__version__ = "32.0.0"
 # Database
 DB = {}
 # Custom queries
@@ -55,7 +55,8 @@ NAV = {"Home": "",
                     "Missing journal": "dois_nojournal",},
        "ORCID": {"Labs": "labs",
                  "Entries": "orcid_entry",
-                 "Duplicates": "orcid_duplicates",
+                 "Authors with multiple ORCIDs": "orcid_duplicates",
+                 "Duplicate authors": "duplicate_authors"
                 },
        "Tag/affiliation": {"DOIs by tag": "dois_tag",
                            "Top DOI tags by year": "dois_top",
@@ -401,6 +402,30 @@ def get_work_doi(work):
         if 'external-id-value' in eid:
             return eid['external-id-url']['value']
     return ''
+
+
+def add_to_name(given, name, grow):
+    ''' Add a name to the given dictionary
+        Keyword arguments:
+          given: dictionary of names
+          name: name to add
+          grow: single orcid record
+        Returns:
+          None
+    '''
+    if name not in given:
+        given[name] = []
+    comp = []
+    if 'userIdO365' in grow:
+        comp.append(f"User ID: <a href='/peoplerec/{grow['userIdO365']}'>{grow['userIdO365']}</a>")
+    if 'orcid' in grow:
+        comp.append(f"ORCID: {grow['orcid']}")
+    if 'affiliations' in grow:
+        comp.append("Affiliations: " + ", ".join(grow['affiliations']))
+    if 'alumni' in grow:
+        comp.append(f"{tiny_badge('alumni', 'Alumni')}")
+    given[name].append(' '.join(comp))
+
 
 
 def name_search_payload(given, family):
@@ -4203,7 +4228,7 @@ def orcid_affiliation(aff, year='All'):
 
 @app.route('/orcid_duplicates')
 def orcid_duplicates():
-    ''' Show ORCID duplicate records
+    ''' Show authors with multiple ORCIDs or employee IDs
     '''
     html = ""
     for check in ("employeeId", "orcid"):
@@ -4245,9 +4270,47 @@ def orcid_duplicates():
         if not html:
             html = "<p>No duplicates found</p>"
     return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title="ORCID duplicates", html=html,
+                                         title="Authors with multiple ORCIDs", html=html,
                                          navbar=generate_navbar('ORCID')))
 
+
+@app.route('/duplicate_authors')
+def author_duplicates():
+    ''' Show possible duplicate author records
+    '''
+    html = ""
+    payload = [{"$group" : { "_id": "$family", "count": {"$sum": 1}}},
+               {"$match": {"_id": {"$ne" : None} , "count" : {"$gt": 1}}},
+               {"$sort": {"count" : -1}},
+               {"$project": {"family" : "$_id", "count": 1, "_id" : 0}}
+]
+    try:
+        frows = DB['dis'].orcid.aggregate(payload)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get family names from " \
+                                                    + "orcid collection"),
+                               message=error_message(err))
+    given = {}
+    for frow in frows:
+        try:
+            grows = DB['dis'].orcid.find({"family": frow['family'][0]})
+        except Exception as err:
+            return render_template('error.html', urlroot=request.url_root,
+                                   title=render_warning("Could not get given names from " \
+                                                        + "orcid collection"),
+                                   message=error_message(err))
+        for grow in grows:
+            for giv in grow['given']:
+                name = f"{giv} {frow['family'][0]}"
+                add_to_name(given, name, grow)
+    for name, occur in sorted(given.items(), key=lambda x: x[0].split(' ')[-1]):
+        if len(occur) > 1:
+            html += f"{name}<br>"
+            html += "<br>".join(f"&nbsp;&nbsp;&nbsp;&nbsp;{o}" for o in occur) + "<br>"
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="Duplicate authors", html=html,
+                                         navbar=generate_navbar('ORCID')))
 
 # ******************************************************************************
 # * UI endpoints (People)                                                      *
