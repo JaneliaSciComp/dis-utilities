@@ -873,7 +873,6 @@ def get_migration_data(row):
     if row['jrc_obtained_from'] == 'Crossref' and 'abstract' in row:
         rec['abstract'] = row['abstract']
     rec['journal'] = DL.get_journal(row)
-
     rec['title'] = DL.get_title(row)
     if 'URL' in row:
         rec['url'] = row['URL']
@@ -1552,7 +1551,7 @@ def show_doi_authors(doi):
     '''
     Return a DOI's authors
     Return information on authors for a given DOI.
-    ---
+    # Do not display
     tags:
       - DOI
     parameters:
@@ -1609,7 +1608,7 @@ def show_doi_janelians(doi):
     '''
     Return a DOI's Janelia authors
     Return information on Janelia authors for a given DOI.
-    ---
+    # Do not display
     tags:
       - DOI
     parameters:
@@ -1648,7 +1647,7 @@ def show_doi_migration(doi):
     '''
     Return a DOI's migration record
     Return migration information for a given DOI.
-    ---
+    # Do not display
     tags:
       - DOI
     parameters:
@@ -1689,7 +1688,7 @@ def show_doi_migrations(idate):
     '''
     Return migration records for DOIs inserted since a specified date
     Return migration records for DOIs inserted since a specified date.
-    ---
+    # Do not display
     tags:
       - DOI
     parameters:
@@ -2229,7 +2228,7 @@ def show_oids():
     '''
     Show saved ORCID IDs
     Return information for saved ORCID IDs
-    ---
+    # Do not display
     tags:
       - ORCID
     responses:
@@ -2256,7 +2255,7 @@ def show_oid(oid):
     '''
     Show an ORCID ID
     Return information for an ORCID ID or name
-    ---
+    # Do not display
     tags:
       - ORCID
     parameters:
@@ -2475,10 +2474,7 @@ def show_doi_ui(doi):
     except Exception as err:
         citations = f"Could not generate short citation for {doi} ({err})"
     # DOI section
-    alink = f"/doi/authors/{doi}"
     link = f"<a href='https://doi.org/{doi}' target='_blank'>{doi}</a>"
-    rlink = f"/doi/{doi}"
-    mlink = f"/doi/migration/{doi}"
     doisec += f"<span class='paperdata'>DOI: {link}"
     oresp = JRC.call_oa(doi)
     if oresp:
@@ -2488,9 +2484,12 @@ def show_doi_ui(doi):
         if 'jrc_pmid' in row:
             plink = f"{app.config['PMID']}{row['jrc_pmid']}/"
             doisec += f" {tiny_badge('primary', 'PMID', plink)}"
+        rlink = f"/doi/{doi}"
         doisec += f" {tiny_badge('info', 'Raw data', rlink)}"
-        doisec += f" {tiny_badge('info', 'HQ migration', mlink)}" \
-                  + f" {tiny_badge('info', 'Author details', alink)}"
+        #mlink = f"/doi/migration/{doi}"
+        #doisec += f" {tiny_badge('info', 'HQ migration', mlink)}"
+        #alink = f"/doi/authors/{doi}"
+        #doisec += f" {tiny_badge('info', 'Author details', alink)}"
     doisec += "</span><br>"
     if row:
         citcnt = s2_citation_count(doi, fmt='html')
@@ -4051,7 +4050,8 @@ def show_names_ui(name):
 def orcid_tag():
     ''' Show ORCID tags (affiliations) with counts
     '''
-    payload = [{"$unwind" : "$affiliations"},
+    payload = [{"$match": {"affiliations": {"$ne": None}}},
+               {"$unwind" : "$affiliations"},
                {"$project": {"_id": 0, "affiliations": 1, "orcid": 1}},
                {"$group": {"_id": "$affiliations", "count":{"$sum": 1},
                            "orcid": {"$push": "$orcid"}}},
@@ -4122,6 +4122,14 @@ def orcid_entry():
         cnte = DB['dis'].orcid.count_documents(payload)
         cntj = DB['dis'].orcid.count_documents({"alumni": {"$exists": False}})
         cnta = DB['dis'].orcid.count_documents({"alumni": {"$exists": True}})
+        cntaok = DB['dis'].orcid.count_documents({"alumni": {"$exists": True}, "orcid": {"$exists": True},
+                                                  "employeeId": {"$exists": True}})
+        cntane = DB['dis'].orcid.count_documents({"alumni": {"$exists": True}, "orcid": {"$exists": True},
+                                                  "employeeId": {"$exists": False}})
+        cntano = DB['dis'].orcid.count_documents({"alumni": {"$exists": True}, "orcid": {"$exists": False},
+                                                  "employeeId": {"$exists": True}})
+        cntax = DB['dis'].orcid.count_documents({"alumni": {"$exists": True}, "orcid": {"$exists": False},
+                                                  "employeeId": {"$exists": False}})
         payload = {"$and": [{"affiliations": {"$exists": False}}, {"group": {"$exists": False}},
                             {"alumni": {"$exists": False}}]}
         cntf = DB['dis'].orcid.count_documents(payload)
@@ -4135,18 +4143,26 @@ def orcid_entry():
     html = '<table id="types" class="tablesorter standard"><tbody>'
     html += f"<tr><td>Entries in collection</td><td>{total:,}</td></tr>"
     html += f"<tr><td>Current Janelians</td><td>{cntj:,} ({cntj/total*100:.2f}%)</td></tr>"
-    html += f"<tr><td>&nbsp;&nbsp;Janelians with ORCID and employee ID</td><td>{cntb:,}" \
+    html += f"<tr><td>&nbsp;&nbsp;Janelians with ORCID and employee ID</td><td>&nbsp;&nbsp;{cntb:,}" \
             + f" ({cntb/cntj*100:.2f}%)</td></tr>"
     data['Janelians with ORCID and employee ID'] = cntb
-    html += f"<tr><td>&nbsp;&nbsp;Janelians with ORCID only</td><td>{cnto:,}" \
+    html += f"<tr><td>&nbsp;&nbsp;Janelians with ORCID only</td><td>&nbsp;&nbsp;{cnto:,}" \
             + f" ({cnto/cntj*100:.2f}%)</td></tr>"
     data['Janelians with ORCID only'] = cnto
-    html += f"<tr><td>&nbsp;&nbsp;Janelians with employee ID only</td><td>{cnte:,}" \
+    html += f"<tr><td>&nbsp;&nbsp;Janelians with employee ID only</td><td>&nbsp;&nbsp;{cnte:,}" \
             + f" ({cnte/cntj*100:.2f}%)</td></tr>"
     data['Janelians with employee ID only'] = cnte
-    html += f"<tr><td>&nbsp;&nbsp;Janelians without affiliations/groups</td><td>{cntf:,}</td></tr>"
+    html += f"<tr><td>Janelians without affiliations/groups</td><td>{cntf:,}</td></tr>"
     html += f"<tr><td>Alumni</td><td>{cnta:,} ({cnta/total*100:.2f}%)</td></tr>"
     data['Alumni'] = cnta
+    html += f"<tr><td>&nbsp;&nbsp;Alumni with ORCID and employee ID</td><td>&nbsp;&nbsp;{cntaok:,} " \
+            + f"({cntaok/cnta*100:.2f}%)</td></tr>"
+    html += f"<tr><td>&nbsp;&nbsp;Alumni with ORCID only</td><td>&nbsp;&nbsp;{cntane:,} " \
+            + f"({cntane/cnta*100:.2f}%)</td></tr>"
+    html += f"<tr><td>&nbsp;&nbsp;Alumni with employee ID only</td><td>&nbsp;&nbsp;{cntano:,} " \
+            + f"({cntano/cnta*100:.2f}%)</td></tr>"
+    html += f"<tr><td>&nbsp;&nbsp;No ORCID or employee ID</td><td>&nbsp;&nbsp;{cntax:,} " \
+            + f"({cntax/cnta*100:.2f}%)</td></tr>"
     html += '</tbody></table>'
     chartscript, chartdiv = DP.pie_chart(data, "ORCID entries", "type", height=500, width=600,
                                          colors=DP.TYPE_PALETTE, location="top_right")
@@ -4166,7 +4182,8 @@ def orcid_entry():
         for row in rows:
             name = f"{row['given'][0]} {row['family'][0]}"
             dois = author_doi_count(row['given'], row['family'])
-            html += f"<a href='/userui/{row['userIdO365']}'>{name} {dois}</a><br>"
+            if dois:
+                html += f"<a href='/userui/{row['userIdO365']}'>{name} {dois}</a><br>"
         html += "</p>"
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title="ORCID entries", html=html,
@@ -4423,7 +4440,7 @@ def peoplerec(eid):
                                title=render_warning(f"Could not find People record for {eid}"),
                                message="No record found")
     title = f"{rec['nameFirstPreferred']} {rec['nameLastPreferred']}"
-    for field in ['employeeId', 'managerId']:
+    for field in ['employeeId', 'managerId']: # Remove employeeId
         if field in rec:
             del rec[field]
     if 'photoURL' in rec:
@@ -4520,6 +4537,8 @@ def show_labs():
         result['rest']['source'] = 'mongo'
         result['data'] = []
         for row in rows:
+            if 'employeeId' in row: # Remove employeeId
+                del row['employeeId']
             result['data'].append(row)
         result['rest']['row_count'] = len(result['data'])
         return generate_response(result)
@@ -4531,7 +4550,10 @@ def show_labs():
         if 'affiliations' not in row:
             row['affiliations'] = ''
         link = f"<a href='/userui/{row['orcid']}'>{row['orcid']}</a>" if 'orcid' in row else ''
-        html += f"<tr><td>{row['given'][0]} {row['family'][0]}</td>" \
+        name = " ".join([row['given'][0], row['family'][0]])
+        if 'alumni' in row and row['alumni']:
+            name += (f" {tiny_badge('alumni', 'Alumni')}")
+        html += f"<tr><td>{name}</td>" \
                 + f"<td style='width: 180px'>{link}</td><td>{row['group']}</td>" \
                 + f"<td>{', '.join(row['affiliations'])}</td></tr>"
     html += '</tbody></table>'
