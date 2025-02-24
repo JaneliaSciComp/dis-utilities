@@ -142,7 +142,7 @@ def process_authors(authors, publications, cnt):
         text = f'''\
 Hello {resp['nameFirstPreferred']},<br><br>
 Janelia’s Data and Information Services department (DIS) has added your recent
-{text1} to our <a href='https://dis.janelia.org'>database</a>.
+{text1} to our <a href='https://dis.int.janelia.org'>database</a>.
 <br><br>
 To ensure accuracy, review the metadata below and
 <em>let us know if they are incorrect by responding to this email</em>.
