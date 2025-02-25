@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "32.0.0"
+__version__ = "32.1.0"
 # Database
 DB = {}
 # Custom queries
@@ -4183,7 +4183,11 @@ def orcid_entry():
             name = f"{row['given'][0]} {row['family'][0]}"
             dois = author_doi_count(row['given'], row['family'])
             if dois:
-                html += f"<a href='/userui/{row['userIdO365']}'>{name} {dois}</a><br>"
+                if 'workerType' in row and row['workerType'] and row['workerType'] != 'Employee':
+                    badge = (f"{tiny_badge('contingent', row['workerType'])}")
+                else:
+                    badge = ""
+                html += f"<a href='/userui/{row['userIdO365']}'>{name} {dois} {badge}</a><br>"
         html += "</p>"
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title="ORCID entries", html=html,
