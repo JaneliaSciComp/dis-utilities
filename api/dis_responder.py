@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "32.1.0"
+__version__ = "33.0.0"
 # Database
 DB = {}
 # Custom queries
@@ -315,6 +315,7 @@ def initialize_result():
           decoded partially populated result dictionary
     '''
     result = {"rest": {"requester": request.remote_addr,
+                       "authorized": False,
                        "url": request.url,
                        "endpoint": request.endpoint,
                        "error": False,
@@ -324,6 +325,9 @@ def initialize_result():
     if app.config["LAST_TRANSACTION"]:
         print(f"Seconds since last transaction: {time() - app.config['LAST_TRANSACTION']}")
     app.config["LAST_TRANSACTION"] = time()
+    if "Authorization" in request.headers:
+        token = re.sub(r'Bearer\s+', "", request.headers["Authorization"])
+        result['rest']['authorized'] = bool(token in app.config['KEYS'].values())
     return result
 
 
@@ -1586,6 +1590,8 @@ def show_doi_authors(doi):
         orgs = DL.get_supervisory_orgs(DB['dis'].suporg)
     except Exception as err:
         raise InvalidUsage("Could not get supervisory orgs: " + str(err), 500) from err
+    if not result['rest']['authorized'] and 'jrc_author' in row:
+        del row['jrc_author']
     if 'jrc_tag' in row:
         for atag in row['jrc_tag']:
             if atag['name'] not in tagname:
@@ -1677,13 +1683,17 @@ def show_doi_migration(doi):
         except Exception as err:
             raise InvalidUsage(str(err), 500) from err
         rec['doi'] = doi
+    if not result['rest']['authorized']:
+        for fld in app.config['DO_NOT_DISPLAY']:
+            if fld in rec:
+                del rec[fld]
     result['data'] = rec
     result['rest']['source'] = 'mongo'
     result['rest']['row_count'] = len(result['data'])
     return generate_response(result)
 
 
-@app.route('/doi/migrations/<string:idate>')
+@app.route('/doi/migrations/<string:idate>', methods=['GET'])
 def show_doi_migrations(idate):
     '''
     Return migration records for DOIs inserted since a specified date
@@ -1728,6 +1738,8 @@ def show_doi_migrations(idate):
             doi = row['doi']
             rec = get_migration_data(row)
             rec['doi'] = doi
+            #if not result['rest']['authorized'] and 'jrc_author' in rec: #PLUG
+            #    del rec['jrc_author']
             result['data'].append(rec)
         except Exception as err:
             raise InvalidUsage(str(err), 500) from err

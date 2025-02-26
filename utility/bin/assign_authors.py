@@ -7,6 +7,7 @@ __version__ = '1.0.0'
 import argparse
 import json
 from operator import attrgetter
+import os
 import sys
 from colorama import Fore, Back, Style
 import inquirer
@@ -149,7 +150,9 @@ def set_author_payload():
           payload to set/unset first/last author data
     '''
     try:
-        authors = requests.get(f"{REST['dis']['url']}doi/authors/{ARG.DOI}", timeout=10).json()
+        headers = {"Authorization": f"Bearer {os.environ['DIS_JWT']}"}
+        authors = requests.get(f"{REST['dis']['url']}doi/authors/{ARG.DOI}",
+                               headers=headers, timeout=10).json()
     except Exception as err:
         terminate_program(err)
     first = []
@@ -192,7 +195,9 @@ def processing():
     except Exception as err:
         terminate_program(err)
     try:
-        authors = requests.get(f"{REST['dis']['url']}doi/authors/{ARG.DOI}", timeout=10).json()
+        headers = {"Authorization": f"Bearer {os.environ['DIS_JWT']}"}
+        authors = requests.get(f"{REST['dis']['url']}doi/authors/{ARG.DOI}",
+                               headers=headers, timeout=10).json()
     except Exception as err:
         terminate_program(err)
     jrc_authors = get_authors(authors['data'], original)
@@ -237,6 +242,8 @@ if __name__ == '__main__':
                         default=False, help='Flag, Very chatty')
     ARG = PARSER.parse_args()
     LOGGER = JRC.setup_logging(ARG)
+    if "DIS_JWT" not in os.environ:
+        terminate_program("Missing token - set in DIS_JWT environment variable")
     REST = JRC.simplenamespace_to_dict(JRC.get_config("rest_services"))
     initialize_program()
     processing()
