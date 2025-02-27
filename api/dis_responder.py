@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "33.0.0"
+__version__ = "33.1.0"
 # Database
 DB = {}
 # Custom queries
@@ -365,6 +365,31 @@ def get_custom_payload(ipd, display_value):
 # ******************************************************************************
 # * ORCID utility functions                                                    *
 # ******************************************************************************
+
+def get_dup_color(occur):
+    ''' Get a background color for a duplicate author
+        Keyword arguments:
+          occur: list of occurrences of an author name
+        Returns:
+          Background color  
+    '''
+    orcid = []
+    affiliation = []
+    for occ in occur:
+        if 'Affiliations' in occ:
+            match = re.search(r"Affiliations: (\S*)", occ)
+            if match and match.group(0) not in affiliation:
+                affiliation.append(match.group(0))
+        if 'ORCID' in occ:
+            match = re.search(r"ORCID: (\S*)", occ)
+            if match and match.group(0) not in orcid:
+                orcid.append(match.group(0))
+    if len(affiliation) == len(occur):
+        return "gold"
+    if len(orcid) == len(occur):
+        return "lightsalmon"
+    return "red"
+
 
 def get_work_publication_date(wsumm):
     ''' Get a publication date from an ORCID work summary
@@ -4134,13 +4159,17 @@ def orcid_entry():
         cnte = DB['dis'].orcid.count_documents(payload)
         cntj = DB['dis'].orcid.count_documents({"alumni": {"$exists": False}})
         cnta = DB['dis'].orcid.count_documents({"alumni": {"$exists": True}})
-        cntaok = DB['dis'].orcid.count_documents({"alumni": {"$exists": True}, "orcid": {"$exists": True},
+        cntaok = DB['dis'].orcid.count_documents({"alumni": {"$exists": True},
+                                                  "orcid": {"$exists": True},
                                                   "employeeId": {"$exists": True}})
-        cntane = DB['dis'].orcid.count_documents({"alumni": {"$exists": True}, "orcid": {"$exists": True},
+        cntane = DB['dis'].orcid.count_documents({"alumni": {"$exists": True},
+                                                  "orcid": {"$exists": True},
                                                   "employeeId": {"$exists": False}})
-        cntano = DB['dis'].orcid.count_documents({"alumni": {"$exists": True}, "orcid": {"$exists": False},
+        cntano = DB['dis'].orcid.count_documents({"alumni": {"$exists": True},
+                                                  "orcid": {"$exists": False},
                                                   "employeeId": {"$exists": True}})
-        cntax = DB['dis'].orcid.count_documents({"alumni": {"$exists": True}, "orcid": {"$exists": False},
+        cntax = DB['dis'].orcid.count_documents({"alumni": {"$exists": True},
+                                                 "orcid": {"$exists": False},
                                                   "employeeId": {"$exists": False}})
         payload = {"$and": [{"affiliations": {"$exists": False}}, {"group": {"$exists": False}},
                             {"alumni": {"$exists": False}}]}
@@ -4155,8 +4184,8 @@ def orcid_entry():
     html = '<table id="types" class="tablesorter standard"><tbody>'
     html += f"<tr><td>Entries in collection</td><td>{total:,}</td></tr>"
     html += f"<tr><td>Current Janelians</td><td>{cntj:,} ({cntj/total*100:.2f}%)</td></tr>"
-    html += f"<tr><td>&nbsp;&nbsp;Janelians with ORCID and employee ID</td><td>&nbsp;&nbsp;{cntb:,}" \
-            + f" ({cntb/cntj*100:.2f}%)</td></tr>"
+    html += f"<tr><td>&nbsp;&nbsp;Janelians with ORCID and employee ID</td>" \
+            + f"<td>&nbsp;&nbsp;{cntb:,} ({cntb/cntj*100:.2f}%)</td></tr>"
     data['Janelians with ORCID and employee ID'] = cntb
     html += f"<tr><td>&nbsp;&nbsp;Janelians with ORCID only</td><td>&nbsp;&nbsp;{cnto:,}" \
             + f" ({cnto/cntj*100:.2f}%)</td></tr>"
@@ -4167,8 +4196,8 @@ def orcid_entry():
     html += f"<tr><td>Janelians without affiliations/groups</td><td>{cntf:,}</td></tr>"
     html += f"<tr><td>Alumni</td><td>{cnta:,} ({cnta/total*100:.2f}%)</td></tr>"
     data['Alumni'] = cnta
-    html += f"<tr><td>&nbsp;&nbsp;Alumni with ORCID and employee ID</td><td>&nbsp;&nbsp;{cntaok:,} " \
-            + f"({cntaok/cnta*100:.2f}%)</td></tr>"
+    html += f"<tr><td>&nbsp;&nbsp;Alumni with ORCID and employee ID</td>" \
+            + f"<td>&nbsp;&nbsp;{cntaok:,} ({cntaok/cnta*100:.2f}%)</td></tr>"
     html += f"<tr><td>&nbsp;&nbsp;Alumni with ORCID only</td><td>&nbsp;&nbsp;{cntane:,} " \
             + f"({cntane/cnta*100:.2f}%)</td></tr>"
     html += f"<tr><td>&nbsp;&nbsp;Alumni with employee ID only</td><td>&nbsp;&nbsp;{cntano:,} " \
@@ -4196,7 +4225,7 @@ def orcid_entry():
             dois = author_doi_count(row['given'], row['family'])
             if dois:
                 if 'workerType' in row and row['workerType'] and row['workerType'] != 'Employee':
-                    badge = (f"{tiny_badge('contingent', row['workerType'])}")
+                    badge = f"{tiny_badge('contingent', row['workerType'])}"
                 else:
                     badge = ""
                 html += f"<a href='/userui/{row['userIdO365']}'>{name} {dois} {badge}</a><br>"
@@ -4337,10 +4366,14 @@ def author_duplicates():
             for giv in grow['given']:
                 name = f"{giv} {frow['family'][0]}"
                 add_to_name(given, name, grow)
+    inner = []
     for name, occur in sorted(given.items(), key=lambda x: x[0].split(' ')[-1]):
-        if len(occur) > 1:
-            html += f"{name}<br>"
-            html += "<br>".join(f"&nbsp;&nbsp;&nbsp;&nbsp;{o}" for o in occur) + "<br>"
+        if len(occur) == 1:
+            continue
+        bcolor = get_dup_color(occur)
+        inner.append(f"<div class='rounded' style='background-color: {bcolor};'>{name}<br>" \
+                     + "<br>".join(f"&nbsp;&nbsp;&nbsp;&nbsp;{o}" for o in occur) + "</div>")
+    html += "".join(inner)
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="Duplicate authors", html=html,
                                          navbar=generate_navbar('ORCID')))
