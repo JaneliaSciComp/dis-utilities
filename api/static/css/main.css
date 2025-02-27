@@ -224,6 +224,13 @@ div.codescroll {height: 180px;
                 padding: 8px;
 }
 
+div.rounded {border: 1px solid gray;
+             padding: 5px;
+             margin: 4px;
+             color: black;
+             border-radius: 20px;
+}
+
 /* Bootstrap */
 hr {border-color: #666;
     border-style: solid;
