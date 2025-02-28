@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "33.1.0"
+__version__ = "34.0.0"
 # Database
 DB = {}
 # Custom queries
@@ -375,7 +375,12 @@ def get_dup_color(occur):
     '''
     orcid = []
     affiliation = []
+    email = []
     for occ in occur:
+        if 'User ID' in occ:
+            match = re.search(r"User ID: (\S*)", occ)
+            if match and match.group(0) not in email:
+                email.append(match.group(0))
         if 'Affiliations' in occ:
             match = re.search(r"Affiliations: (\S*)", occ)
             if match and match.group(0) not in affiliation:
@@ -388,6 +393,9 @@ def get_dup_color(occur):
         return "gold"
     if len(orcid) == len(occur):
         return "lightsalmon"
+    print(email)
+    if len(email) == 1:
+        return "orange"
     return "red"
 
 
@@ -571,7 +579,9 @@ def generate_works_table(rows, name=None, show="full"):
                 for auth in alist:
                     if "family" in auth and "given" in auth \
                        and auth["family"].lower() == name.lower():
-                        authors[f"{auth['given']} {auth['family']}"] = True
+                        aname = f"{auth['given']} {auth['family']}"
+                        authors[aname] = f"<a href=/doisui_name/{auth['family']}/" \
+                                         + f"{auth['given'].replace(' ', '%20')}>{aname}</a>"
             else:
                 print(f"Could not get author details for {row['doi']}")
     if not works:
@@ -584,7 +594,7 @@ def generate_works_table(rows, name=None, show="full"):
     if dois:
         html += "</tbody></table>"
     if authors:
-        html = f"<br>Authors found: {', '.join(sorted(authors.keys()))}<br>" \
+        html = f"<br>Authors found: {', '.join(sorted(authors.values()))}<br>" \
                + f"This may include non-Janelia authors<br>{html}"
     html = create_downloadable('works', ['Published', 'DOI', 'Title'], fileoutput) + html
     html = f"DOIs: {len(works):,}<br>" + html
@@ -2569,25 +2579,32 @@ def show_doi_ui(doi):
                                          navbar=generate_navbar('DOIs')))
 
 
-@app.route('/doisui_name/<string:name>')
-def show_doi_by_name_ui(name):
+@app.route('/doisui_name/<string:family>')
+@app.route('/doisui_name/<string:family>/<string:given>')
+def show_doi_by_name_ui(family, given=None):
     ''' Show DOIs for a family name
     '''
-    payload = {'$or': [{"author.family": {"$regex": f"^{name}$", "$options" : "i"}},
-                       {"creators.familyName": {"$regex": f"^{name}$", "$options" : "i"}},
-                       {"creators.name": {"$regex": f"{name}$", "$options" : "i"}},
+    payload = {'$or': [{"author.family": {"$regex": f"^{family}$", "$options" : "i"}},
+                       {"creators.familyName": {"$regex": f"^{family}$", "$options" : "i"}},
+                       {"creators.name": {"$regex": f"^{family}$", "$options" : "i"}},
                       ]}
+    if given:
+        payload['$or'][0]["author.given"] = {"$regex": f"^{given}$", "$options" : "i"}
+        payload['$or'][1]["creators.givenName"] = {"$regex": f"^{given}$", "$options" : "i"}
+        payload['$or'][2]["creators.name"] = {"$regex": f"^{given}$", "$options" : "i"}
     try:
         rows = DB['dis'].dois.find(payload).collation({"locale": "en"}).sort("doi", 1)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get DOIs from dois collection"),
                                message=error_message(err))
-    html, _ = generate_works_table(rows, name)
+    html, _ = generate_works_table(rows, family)
     if not html:
         return render_template('warning.html', urlroot=request.url_root,
                                title=render_warning("Could not find DOIs", 'warning'),
-                               message=f"Could not find any DOIs with author name matching {name}")
+                               message="Could not find any DOIs with author name matching " \
+                                       + f"{family} {given}")
+    name = f"{given} {family}" if given else family
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=f"DOIs for {name}", html=html,
                                          navbar=generate_navbar('DOIs')))
@@ -4184,7 +4201,7 @@ def orcid_entry():
     html = '<table id="types" class="tablesorter standard"><tbody>'
     html += f"<tr><td>Entries in collection</td><td>{total:,}</td></tr>"
     html += f"<tr><td>Current Janelians</td><td>{cntj:,} ({cntj/total*100:.2f}%)</td></tr>"
-    html += f"<tr><td>&nbsp;&nbsp;Janelians with ORCID and employee ID</td>" \
+    html += "<tr><td>&nbsp;&nbsp;Janelians with ORCID and employee ID</td>" \
             + f"<td>&nbsp;&nbsp;{cntb:,} ({cntb/cntj*100:.2f}%)</td></tr>"
     data['Janelians with ORCID and employee ID'] = cntb
     html += f"<tr><td>&nbsp;&nbsp;Janelians with ORCID only</td><td>&nbsp;&nbsp;{cnto:,}" \
@@ -4196,7 +4213,7 @@ def orcid_entry():
     html += f"<tr><td>Janelians without affiliations/groups</td><td>{cntf:,}</td></tr>"
     html += f"<tr><td>Alumni</td><td>{cnta:,} ({cnta/total*100:.2f}%)</td></tr>"
     data['Alumni'] = cnta
-    html += f"<tr><td>&nbsp;&nbsp;Alumni with ORCID and employee ID</td>" \
+    html += "<tr><td>&nbsp;&nbsp;Alumni with ORCID and employee ID</td>" \
             + f"<td>&nbsp;&nbsp;{cntaok:,} ({cntaok/cnta*100:.2f}%)</td></tr>"
     html += f"<tr><td>&nbsp;&nbsp;Alumni with ORCID only</td><td>&nbsp;&nbsp;{cntane:,} " \
             + f"({cntane/cnta*100:.2f}%)</td></tr>"
