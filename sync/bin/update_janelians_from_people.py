@@ -3,7 +3,7 @@
     data (names, affiliation, employee types, teams) from the People system.
 '''
 
-__version__ = '2.0.1'
+__version__ = '3.0.0'
 
 import argparse
 import collections
@@ -71,13 +71,14 @@ def update_preferred_name(idresp, row):
             dirty: indicates if record is dirty
     '''
     dirty = False
-    old_given = row['given']
-    old_family = row['family']
+    old_given = row['given'].copy()
+    old_family = row['family'].copy()
     name = {'given': 'nameFirstPreferred',
             'family': 'nameLastPreferred'}
     for key,val in name.items():
         if val in idresp and idresp[val] and idresp[val] != row[key][0]:
-            row[key].remove(idresp[val])
+            if idresp[val] in row[key]:
+                row[key].remove(idresp[val])
             row[key].insert(0, idresp[val])
             dirty = True
     if not dirty:
@@ -87,9 +88,9 @@ def update_preferred_name(idresp, row):
     if dirty:
         COUNT['name'] += 1
         if sorted(old_given) != sorted(row['given']):
-            LOGGER.warning(f"{old_given} -> {row['given']}")
+            LOGGER.warning(f"Given name changed: {old_given} -> {row['given']}")
         if sorted(old_family) != sorted(row['family']):
-            LOGGER.warning(f"{old_family} -> {row['family']}")
+            LOGGER.warning(f"Family name changed: {old_family} -> {row['family']}")
     return dirty
 
 
