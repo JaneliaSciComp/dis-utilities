@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "34.0.0"
+__version__ = "34.1.0"
 # Database
 DB = {}
 # Custom queries
@@ -460,7 +460,7 @@ def add_to_name(given, name, grow):
     if 'affiliations' in grow:
         comp.append("Affiliations: " + ", ".join(grow['affiliations']))
     if 'alumni' in grow:
-        comp.append(f"{tiny_badge('alumni', 'Alumni')}")
+        comp.append(f"{tiny_badge('alumni', 'Former employee')}")
     given[name].append(' '.join(comp))
 
 
@@ -1201,7 +1201,7 @@ def get_badges(auth, ignore_match=False):
     if 'in_database' in auth and auth['in_database']:
         #badges.append(f"{tiny_badge('database', 'In database')}")
         if auth['alumni']:
-            badges.append(f"{tiny_badge('alumni', 'Alumni')}")
+            badges.append(f"{tiny_badge('alumni', 'Former employee')}")
         elif 'validated' not in auth or not auth['validated']:
             badges.append(f"{tiny_badge('warning', 'Not validated')}")
         if 'orcid' not in auth or not auth['orcid']:
@@ -1280,7 +1280,7 @@ def add_orcid_badges(orc):
     if 'orcid' not in orc or not orc['orcid']:
         badges.append(f"{tiny_badge('noorcid', 'No ORCID')}")
     if 'alumni' in orc:
-        badges.append(tiny_badge('alumni', 'Alumni'))
+        badges.append(tiny_badge('alumni', 'Former employee'))
     if 'employeeId' not in orc:
         badges.append(tiny_badge('warning', 'Not validated'))
     return badges
@@ -4211,13 +4211,13 @@ def orcid_entry():
             + f" ({cnte/cntj*100:.2f}%)</td></tr>"
     data['Janelians with employee ID only'] = cnte
     html += f"<tr><td>Janelians without affiliations/groups</td><td>{cntf:,}</td></tr>"
-    html += f"<tr><td>Alumni</td><td>{cnta:,} ({cnta/total*100:.2f}%)</td></tr>"
-    data['Alumni'] = cnta
-    html += "<tr><td>&nbsp;&nbsp;Alumni with ORCID and employee ID</td>" \
+    html += f"<tr><td>Former employees</td><td>{cnta:,} ({cnta/total*100:.2f}%)</td></tr>"
+    data['Former employees'] = cnta
+    html += "<tr><td>&nbsp;&nbsp;Former employees with ORCID and employee ID</td>" \
             + f"<td>&nbsp;&nbsp;{cntaok:,} ({cntaok/cnta*100:.2f}%)</td></tr>"
-    html += f"<tr><td>&nbsp;&nbsp;Alumni with ORCID only</td><td>&nbsp;&nbsp;{cntane:,} " \
+    html += f"<tr><td>&nbsp;&nbsp;Former employees with ORCID only</td><td>&nbsp;&nbsp;{cntane:,} " \
             + f"({cntane/cnta*100:.2f}%)</td></tr>"
-    html += f"<tr><td>&nbsp;&nbsp;Alumni with employee ID only</td><td>&nbsp;&nbsp;{cntano:,} " \
+    html += f"<tr><td>&nbsp;&nbsp;Former employees with employee ID only</td><td>&nbsp;&nbsp;{cntano:,} " \
             + f"({cntano/cnta*100:.2f}%)</td></tr>"
     html += f"<tr><td>&nbsp;&nbsp;No ORCID or employee ID</td><td>&nbsp;&nbsp;{cntax:,} " \
             + f"({cntax/cnta*100:.2f}%)</td></tr>"
@@ -4618,7 +4618,7 @@ def show_labs():
         link = f"<a href='/userui/{row['orcid']}'>{row['orcid']}</a>" if 'orcid' in row else ''
         name = " ".join([row['given'][0], row['family'][0]])
         if 'alumni' in row and row['alumni']:
-            name += (f" {tiny_badge('alumni', 'Alumni')}")
+            name += (f" {tiny_badge('alumni', 'Former employee')}")
         html += f"<tr><td>{name}</td>" \
                 + f"<td style='width: 180px'>{link}</td><td>{row['group']}</td>" \
                 + f"<td>{', '.join(row['affiliations'])}</td></tr>"
