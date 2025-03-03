@@ -3,7 +3,7 @@
     data (names, affiliation, employee types, teams) from the People system.
 '''
 
-__version__ = '3.0.0'
+__version__ = '3.2.0'
 
 import argparse
 import collections
@@ -220,19 +220,52 @@ def postprocessing(audit):
         Returns:
           None
     '''
-    print(f"Authors read from orcid: {COUNT['orcid']:,}")
-    print(f"Authors updated:         {COUNT['updated']:,}")
-    print(f"  Names updated:         {COUNT['name']:,}")
-    print(f"  Affiliations updated:  {COUNT['affiliations']:,}")
-    print(f"  WorkerTypes updated:   {COUNT['workerType']:,}")
-    print(f"  Managed teams updated: {COUNT['managed']:,}")
-    print(f"Authors written:         {COUNT['written']:,}")
+    print(f"Authors read from orcid:  {COUNT['orcid']:,}")
+    print(f"Authors updated:          {COUNT['updated']:,}")
+    print(f"  Names updated:          {COUNT['name']:,}")
+    print(f"  Affiliations updated:   {COUNT['affiliations']:,}")
+    print(f"  WorkerTypes updated:    {COUNT['workerType']:,}")
+    print(f"  Managed teams updated:  {COUNT['managed']:,}")
+    print(f"  Set to former employee: {COUNT['alumni']:,}")
+    print(f"Authors written:          {COUNT['written']:,}")
     if audit:
         filename = 'people_orcid_updates.txt'
         with open(filename, 'w', encoding='utf-8') as outfile:
             for row in audit:
                 outfile.write(f"{json.dumps(row, indent=4, default=str)}\n")
         LOGGER.info(f"Wrote {len(audit)} updates to {filename}")
+
+
+def record_updates(idresp, row):
+    ''' Record updates
+        Keyword arguments:
+          idresp: response from People
+          row: record to update
+        Returns:
+          dirty: indicates if record is dirty
+    '''
+    dirty = False
+    # Update preferred name
+    pdirty = update_preferred_name(idresp, row)
+    if pdirty:
+        COUNT['name'] += 1
+    # Update affiliations
+    udirty = update_affiliations(idresp, row)
+    # Update workerType
+    if 'workerType' in idresp:
+        if 'workerType' not in row or row['workerType'] != idresp['workerType']:
+            row['workerType'] = idresp['workerType']
+            dirty = True
+            COUNT['workerType'] += 1
+    # Update managed teams
+    mdirty = update_managed_teams(idresp, row)
+    if 'affiliations' in row and not row['affiliations']:
+        del row['affiliations']
+    if 'managed' in row and not row['managed']:
+        del row['managed']
+    if pdirty or udirty or mdirty:
+        dirty = True
+    return dirty
 
 
 def update_orcid():
@@ -257,28 +290,13 @@ def update_orcid():
         idresp = JRC.call_people_by_id(row['employeeId'])
         if not idresp:
             LOGGER.error(f"No People record for {row}")
-            continue
-        # Update preferred name
-        pdirty = update_preferred_name(idresp, row)
-        if pdirty:
-            COUNT['name'] += 1
-        # Update affiliations
-        dirty = update_affiliations(idresp, row)
-        # Update workerType
-        if 'workerType' in idresp:
-            if 'workerType' not in row or row['workerType'] != idresp['workerType']:
-                row['workerType'] = idresp['workerType']
-                dirty = True
-                COUNT['workerType'] += 1
-        # Update managed teams
-        if update_managed_teams(idresp, row):
+            row['alumni'] = True
+            COUNT['alumni'] += 1
             dirty = True
-        if 'affiliations' in row and not row['affiliations']:
-            del row['affiliations']
-        if 'managed' in row and not row['managed']:
-            del row['managed']
+        else:
+            dirty = record_updates(idresp, row)
         LOGGER.debug(json.dumps(row, indent=4, default=str))
-        if dirty or pdirty:
+        if dirty:
             audit.append(row)
             COUNT['updated'] += 1
             write_record(row)
