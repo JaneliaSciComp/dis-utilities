@@ -2,7 +2,7 @@
     Update tags for selected DOIs
 """
 
-__version__ = '3.1.0'
+__version__ = '3.2.0'
 
 import argparse
 import collections
@@ -66,7 +66,7 @@ def initialize_program():
     for row in rows:
         PROJECT[row['name']] = row['project']
     try:
-        orgs = DL.get_supervisory_orgs()
+        orgs = DL.get_supervisory_orgs(coll=DB['dis'].suporg)
     except Exception as err:
         terminate_program(err)
     for key, val in orgs.items():
@@ -198,7 +198,7 @@ def add_non_author_tags(payload):
         Returns:
           None
     """
-    orgs = DL.get_supervisory_orgs()
+    orgs = DL.get_supervisory_orgs(coll=DB['dis'].suporg)
     if 'jrc_tag' in payload:
         tags = [tag['name'] for tag in payload['jrc_tag']]
         for tag in tags:
