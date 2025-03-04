@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "34.1.0"
+__version__ = "34.2.0"
 # Database
 DB = {}
 # Custom queries
@@ -61,6 +61,7 @@ NAV = {"Home": "",
        "Tag/affiliation": {"DOIs by tag": "dois_tag",
                            "Top DOI tags by year": "dois_top",
                            "Author affiliations": "orcid_tag",
+                           "Projects": "projects",
                           },
        "Stats" : {"Database": "stats_database"
                  },
@@ -4451,9 +4452,6 @@ def peoporgsle():
                                          html=html, navbar=generate_navbar('External systems')))
 
 
-# ******************************************************************************
-# * UI endpoints (People)                                                      *
-# ******************************************************************************
 @app.route('/people/<string:name>')
 @app.route('/people')
 def people(name=None):
@@ -4517,6 +4515,30 @@ def peoplerec(eid):
                                          title=title, html=html,
                                          navbar=generate_navbar('External systems')))
 
+# ******************************************************************************
+# * UI endpoints (projects)                                                    *
+# ******************************************************************************
+
+@app.route('/projects')
+def projects():
+    ''' Show information on projects
+    '''
+    try:
+        rows = DB['dis'].project_map.find({"$and": [{"project": {"$ne": ""}},
+                                                    {"project":{"$ne": "$name"}}]}).sort("project", 1)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get projects from " \
+                                                    + "orcid collection"),
+                               message=error_message(err))
+    html = "<table id='projects' class='tablesorter standard'><thead><tr><th>Project</th>" \
+           + "<th>Alias</th></tr></thead><tbody>"
+    for row in rows:
+        html += f"<tr><td>{row['project']}</td><td>{row['name']}</td></tr>"
+    html += "</tbody></table>"
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="Projects", html=html,
+                                         navbar=generate_navbar('Tags/affiliation')))
 # ******************************************************************************
 # * UI endpoints (stats)                                                       *
 # ******************************************************************************
