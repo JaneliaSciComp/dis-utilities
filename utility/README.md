@@ -6,12 +6,16 @@
 | -------------------------- | ----------------------------------------------------------------------------------- |
 | add_newsletter.py          | Add, change, or remove a DOI's newsletter date                                      |
 | add_preprint.py            | Add a preprint relationship for a particular preprint-article pair                  |
+| assign_authors.py          | Add/remove JRC authors for a given DOI                                              |
+| create_api_key.pl          | Create a JWT token for a user                                                       |
+| delete_dois.py             | Delete DOIs from the dois collection                                                |
 | edit_orcid.py              | Edit a record in the orcid collection                                               |
 | find_missing_orcids.py     | Find entries in the People system with groups (lab heads) but no ORCID              |
 | get_citation.py            | Print citations to the terminal in Janelia newsletter format                        |
 | name_match.py              | Interactively curate the list of Janelia authors (jrc_author) for one or more DOIs  |
 | search_people.py           | Search for a name in the People system                                              |
 | set_alumni.py              | Add an alumni tag to a Janelian's metadata in the orcid collection                  |
+| update_name.py             | GUI to update names in the orcid table                                              |
 | update_tags.py             | Modify tags (and optionally add newletter date) to DOIs                             |
 | weekly_pubs.py             | A wrapper for the whole weekly curation pipeline                                    |
 
