@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "34.2.0"
+__version__ = "34.3.0"
 # Database
 DB = {}
 # Custom queries
@@ -66,7 +66,7 @@ NAV = {"Home": "",
        "Stats" : {"Database": "stats_database"
                  },
        "External systems": {"Search People system": "people",
-                            "Supervisory Organizations": "orgs",
+                            "Supervisory Organizations": "orgs/full",
                            }
       }
 # Sources
@@ -2465,12 +2465,12 @@ def show_home(doi=None):
         plist.append(row['name'])
         if row['project'] and row['project'] not in plist:
             plist.append(row['project'])
-    projects = '<option>'
-    projects += '</option><option>'.join(sorted(plist))
-    projects += '</option>'
+    proj = '<option>'
+    proj += '</option><option>'.join(sorted(plist))
+    proj += '</option>'
     return make_response(render_template('home.html', urlroot=request.url_root,
                                          journals=journals, orgs=orgs,
-                                         projects=projects,
+                                         projects=proj,
                                          navbar=generate_navbar('Home')))
 
 # ******************************************************************************
@@ -4216,10 +4216,10 @@ def orcid_entry():
     data['Former employees'] = cnta
     html += "<tr><td>&nbsp;&nbsp;Former employees with ORCID and employee ID</td>" \
             + f"<td>&nbsp;&nbsp;{cntaok:,} ({cntaok/cnta*100:.2f}%)</td></tr>"
-    html += f"<tr><td>&nbsp;&nbsp;Former employees with ORCID only</td><td>&nbsp;&nbsp;{cntane:,} " \
-            + f"({cntane/cnta*100:.2f}%)</td></tr>"
-    html += f"<tr><td>&nbsp;&nbsp;Former employees with employee ID only</td><td>&nbsp;&nbsp;{cntano:,} " \
-            + f"({cntano/cnta*100:.2f}%)</td></tr>"
+    html += "<tr><td>&nbsp;&nbsp;Former employees with ORCID only</td>" \
+            + f"<td>&nbsp;&nbsp;{cntane:,} ({cntane/cnta*100:.2f}%)</td></tr>"
+    html += "<tr><td>&nbsp;&nbsp;Former employees with employee ID only</td>" \
+            + f"<td>&nbsp;&nbsp;{cntano:,} ({cntano/cnta*100:.2f}%)</td></tr>"
     html += f"<tr><td>&nbsp;&nbsp;No ORCID or employee ID</td><td>&nbsp;&nbsp;{cntax:,} " \
             + f"({cntax/cnta*100:.2f}%)</td></tr>"
     html += '</tbody></table>'
@@ -4257,7 +4257,7 @@ def orcid_entry():
 @app.route('/tag/<path:aff>/<string:year>')
 @app.route('/tag/<path:aff>')
 def orcid_affiliation(aff, year='All'):
-    ''' Show ORCID tags (affiliations or progects) with counts
+    ''' Show ORCID tags (affiliations or projects) with counts
     '''
     # Authors
     payload = {"affiliations": aff}
@@ -4400,7 +4400,8 @@ def author_duplicates():
 # * UI endpoints (People)                                                      *
 # ******************************************************************************
 @app.route('/orgs')
-def peoporgsle():
+@app.route('/orgs/<string:full>')
+def peoporgsle(full=None):
     ''' Show information on supervisory orgs
     '''
     payload = [{"$unwind": "$affiliations"},
@@ -4439,16 +4440,32 @@ def peoporgsle():
         tag[row['_id']] = row['count']
     html = "<table id='orgs' class='tablesorter numbers'><thead><tr><th>Name</th><th>Code</th>" \
            + "<th>Authors</th><th>DOI tags</th></tr></thead><tbody>"
+    cnt = 0
     for key, val in sorted(orgs.items()):
         alink = f"<a href='/tag/{escape(key)}'>{aff[key]}</a>" if key in aff else ''
         tlink = ""
         if key in tag:
             onclick = "onclick='nav_post(\"jrc_tag.name\",\"" + key + "\")'"
             tlink = f"<a href='#' {onclick}>{tag[key]}</a>"
+        if not full and not tlink:
+            continue
         html += f"<tr><td>{key}</td><td>{val}</td><td>{alink}</td><td>{tlink}</td></tr>"
+        cnt += 1
     html += "</tbody></table>"
+    if full:
+        default = "window.location.href='/orgs'"
+        phtml = '<div><button id="toggle-to-all" type="button" class="btn btn-success btn-tiny"' \
+               + f'onclick="{default}">Show suporgs with DOIs</button></div>'
+        title = "Supervisory organizations"
+    else:
+        full = "window.location.href='/orgs/full'"
+        phtml = '<div><button id="toggle-to-journal" type="button" ' \
+               + 'class="btn btn-success btn-tiny"' \
+               + f'onclick="{full}">Show all suporgs</button></div>'
+        title = "Supervisory organizations with DOIs"
+    html = phtml + html
     return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title=f"Supervisory organizations ({len(orgs):,})",
+                                         title=f"{title} ({cnt:,})",
                                          html=html, navbar=generate_navbar('External systems')))
 
 
@@ -4523,9 +4540,10 @@ def peoplerec(eid):
 def projects():
     ''' Show information on projects
     '''
+    payload = {"$and": [{"project": {"$ne": ""}},
+                        {"project": {"$ne": "$name"}}]}
     try:
-        rows = DB['dis'].project_map.find({"$and": [{"project": {"$ne": ""}},
-                                                    {"project":{"$ne": "$name"}}]}).sort("project", 1)
+        rows = DB['dis'].project_map.find(payload).sort("project", 1)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get projects from " \
@@ -4539,6 +4557,7 @@ def projects():
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="Projects", html=html,
                                          navbar=generate_navbar('Tags/affiliation')))
+
 # ******************************************************************************
 # * UI endpoints (stats)                                                       *
 # ******************************************************************************
