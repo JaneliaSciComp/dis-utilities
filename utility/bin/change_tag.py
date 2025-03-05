@@ -71,7 +71,7 @@ def update_doi(row, suporg):
         if tag['name'] != ARG.OLD:
             names.append(tag['name'])
             new_tags.append(tag)
-    if suporg['name'] not in names:
+    if ARG.NEW and suporg['name'] not in names:
         new_tags.append({'name': ARG.NEW, 'code': suporg['code'], 'type': 'suporg'})
     row['jrc_tag'] = sorted(new_tags, key=lambda x: x['name'])
     LOGGER.debug(row['doi'] + "\n" + json.dumps(row['jrc_tag'], indent=2, default=str))
@@ -98,12 +98,13 @@ def processing():
         rows = DB['dis']['dois'].find({'jrc_tag.name': ARG.OLD})
     except Exception as err:
         terminate_program(err)
-    try:
-        suporg = DB['dis']['suporg'].find_one({'name': ARG.NEW})
-        if not suporg:
-            terminate_program(f"Suporg {ARG.NEW} was not found")
-    except Exception as err:
-        terminate_program(err)
+    if ARG.NEW:
+        try:
+            suporg = DB['dis']['suporg'].find_one({'name': ARG.NEW})
+            if not suporg:
+                terminate_program(f"Suporg {ARG.NEW} was not found")
+        except Exception as err:
+            terminate_program(err)
     for row in tqdm.tqdm(rows, desc="Processing DOIs", total=cnt):
         update_doi(row, suporg)
     print(f"DOIs found:   {COUNT['old']}")
@@ -118,7 +119,7 @@ if __name__ == '__main__':
     PARSER.add_argument('--old', dest='OLD', action='store',
                         required=True, help='Old tag')
     PARSER.add_argument('--new', dest='NEW', action='store',
-                        required=True, help='New tag')
+                        help='New tag (optional)')
     PARSER.add_argument('--manifold', dest='MANIFOLD', action='store',
                         default='prod', choices=['dev', 'prod'],
                         help='MongoDB manifold (dev, [prod])')
