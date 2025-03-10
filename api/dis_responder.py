@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "34.3.0"
+__version__ = "35.0.0"
 # Database
 DB = {}
 # Custom queries
@@ -1335,6 +1335,32 @@ def get_top_journals(year, maxpub=False):
     return journal
 
 # ******************************************************************************
+# * Suporg utility functions                                                   *
+# ******************************************************************************
+
+def get_suporgs():
+    ''' Get supervisory orgs
+        Keyword arguments:
+          None
+        Returns:
+          hqorgs: mapping of HQ suporg name to code
+          suporgs: mapping of all suporgs to code and active status
+    '''
+    try:
+        hqorgs = DL.get_supervisory_orgs()
+    except Exception as err:
+        raise err
+    try:
+        rows = DB['dis'].suporg.find({})
+    except Exception as err:
+        raise err
+    suporgs = {}
+    for row in rows:
+        suporgs[row['name']] = {"code": row['code'],
+                                "active": bool(row['name'] in hqorgs)}
+    return hqorgs, suporgs
+
+# ******************************************************************************
 # * Tag utility functions                                                      *
 # ******************************************************************************
 
@@ -2454,23 +2480,8 @@ def show_home(doi=None):
     orgs = '<option>'
     orgs += '</option><option>'.join(sorted(olist))
     orgs += '</option>'
-    try:
-        rows = DB['dis']['project_map'].find({}).collation({"locale": "en"}).sort("name", 1)
-    except Exception as err:
-        return render_template('warning.html', urlroot=request.url_root,
-                                title=render_warning("Could not find project names", 'error'),
-                                message=error_message(err))
-    plist = []
-    for row in rows:
-        plist.append(row['name'])
-        if row['project'] and row['project'] not in plist:
-            plist.append(row['project'])
-    proj = '<option>'
-    proj += '</option><option>'.join(sorted(plist))
-    proj += '</option>'
     return make_response(render_template('home.html', urlroot=request.url_root,
                                          journals=journals, orgs=orgs,
-                                         projects=proj,
                                          navbar=generate_navbar('Home')))
 
 # ******************************************************************************
@@ -4239,14 +4250,12 @@ def orcid_entry():
         rows = DB['dis'].orcid.find(payload).sort("family", 1)
         html += "<h5>Users with no ORCID</h5><p style='line-height:1.1'>"
         for row in rows:
+            if 'workerType' in row and row['workerType'] and row['workerType'] != 'Employee':
+                continue
             name = f"{row['given'][0]} {row['family'][0]}"
             dois = author_doi_count(row['given'], row['family'])
             if dois:
-                if 'workerType' in row and row['workerType'] and row['workerType'] != 'Employee':
-                    badge = f"{tiny_badge('contingent', row['workerType'])}"
-                else:
-                    badge = ""
-                html += f"<a href='/userui/{row['userIdO365']}'>{name} {dois} {badge}</a><br>"
+                html += f"<a href='/userui/{row['userIdO365']}'>{name} {dois}</a><br>"
         html += "</p>"
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title="ORCID entries", html=html,
@@ -4537,25 +4546,84 @@ def peoplerec(eid):
 # ******************************************************************************
 
 @app.route('/projects')
-def projects():
+@app.route('/projects/<string:option>')
+def projects(option=None):
     ''' Show information on projects
     '''
-    payload = {"$and": [{"project": {"$ne": ""}},
-                        {"project": {"$ne": "$name"}}]}
     try:
-        rows = DB['dis'].project_map.find(payload).sort("project", 1)
+        rows = DB['dis'].project_map.find({})
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get projects from " \
                                                     + "orcid collection"),
                                message=error_message(err))
-    html = "<table id='projects' class='tablesorter standard'><thead><tr><th>Project</th>" \
-           + "<th>Alias</th></tr></thead><tbody>"
+    proj = {}
     for row in rows:
-        html += f"<tr><td>{row['project']}</td><td>{row['name']}</td></tr>"
+        if 'doNotUse' in row and not option:
+            continue
+        proj[row['name']] = row['project']
+    try:
+        dproj = DL.get_projects_from_dois(DB['dis'].dois,
+                                          DB['dis'].orcid if option != 'full' else None)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get projects from " \
+                                                    + "orcid collection"),
+                               message=error_message(err))
+    html = "<table id='projects' class='tablesorter numbers'><thead><tr><th>Author</th>" \
+           + "<th>Count</th><th>Project tag</th><th>Tag status</th></tr></thead><tbody>"
+    cnt = 0
+    _, suporgs = get_suporgs()
+    for key, val in sorted(dproj.items()):
+        if key not in proj and option is None:
+            continue
+        if option == 'unknown' and key in proj:
+            continue
+        tag = proj[key] if key in proj else ""
+        tlink = f"<a href='/tag/{escape(tag)}'>{tag}</a>" if tag else ""
+        plink = f"<a href='/project/{escape(key)}'>{val}</a>"
+        if tag in suporgs:
+            status = 'Active' if suporgs[tag]['active'] else 'Inactive'
+            color = 'lime' if suporgs[tag]['active'] else 'yellow'
+        else:
+            status = 'UNKNOWN'
+            color = 'red'
+        status = f"<span style='color:{color}'>{status}</span>"
+        html += f"<tr><td>{key}</td><td>{plink}</td><td>{tlink}</td><td>{status}</td></tr>"
+        cnt += 1
     html += "</tbody></table>"
+    if not cnt:
+        html = "<p>No projects found</p>"
+    title = "Projects"
+    if option == 'unknown':
+        title += " (unknown)"
+    elif option == 'full':
+        title += " (all)"
     return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title="Projects", html=html,
+                                         title=title, html=html,
+                                         navbar=generate_navbar('Tags/affiliation')))
+
+
+@app.route('/project/<string:name>')
+def project(name):
+    ''' Show information on a single project
+    '''
+    payload = {"$or": [{"author.name": name},
+                       {"creators.name": name}]}
+    try:
+        rows = DB['dis'].dois.find(payload)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get projects from " \
+                                                    + "orcid collection"),
+                               message=error_message(err))
+    html, cnt = standard_doi_table(rows)
+    if cnt:
+        html = f"<p>Number of DOIs: {cnt:,}</p>" + html
+    else:
+        html = f"<br>No DOIs found for {name}"
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=f"Project: {name}", html=html,
                                          navbar=generate_navbar('Tags/affiliation')))
 
 # ******************************************************************************

@@ -3,7 +3,7 @@
     data (names, affiliation, employee types, teams) from the People system.
 '''
 
-__version__ = '3.2.0'
+__version__ = '3.3.0'
 
 import argparse
 import collections
@@ -127,6 +127,7 @@ def update_affiliations(idresp, row):
             dirty: indicates if record is dirty
     '''
     dirty = False
+    bumped = False
     # Add affiliations from People
     if 'affiliations' in idresp and idresp['affiliations']:
         for aff in idresp['affiliations']:
@@ -135,6 +136,7 @@ def update_affiliations(idresp, row):
                 row['affiliations'].append(aff['supOrgName'])
                 dirty = True
         if dirty:
+            bumped = True
             COUNT['affiliations'] += 1
     # Add ccDescr if this person doesn't already have a group
     if 'group' not in row and 'ccDescr' in idresp and idresp['ccDescr']:
@@ -142,6 +144,9 @@ def update_affiliations(idresp, row):
         if idresp['ccDescr'] not in row['affiliations']:
             row['affiliations'].append(idresp['ccDescr'])
             dirty = True
+            if not bumped:
+                bumped = True
+                COUNT['affiliations'] += 1
     # Add supOrgName if the supOrgSubType isn't Company or Division
     if 'supOrgName' in idresp and 'supOrgSubType' in idresp and \
         idresp['supOrgSubType'] not in ['Company', 'Division']:
@@ -149,6 +154,9 @@ def update_affiliations(idresp, row):
         if idresp['supOrgName'] not in row['affiliations']:
             row['affiliations'].append(idresp['supOrgName'])
             dirty = True
+            if not bumped:
+                bumped = True
+                COUNT['affiliations'] += 1
     return dirty
 
 

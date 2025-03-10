@@ -20,9 +20,6 @@ $(document).on('keypress', 'input', function(e) {
     else if (eid == 'input-journallist') {
         find_journals();
     }
-    else if (eid == 'input-projectlist') {
-        find_projects();
-    }
     else if (eid == 'input-orglist') {
         find_orgs();
     }
@@ -66,14 +63,6 @@ $(document).on('keypress', 'input', function(e) {
       return;
     }
     url = "/journal/" + $("#input-journallist").val();
-    window.location = url;
-  }
-  function find_projects() {
-    if (!$('#input-projectlist').val()) {
-      alert("You must enter a project");
-      return;
-    }
-    url = "/tag/" + $("#input-projectlist").val();
     window.location = url;
   }
   function find_orgs() {
@@ -187,28 +176,6 @@ onload="tableInitialize();"
   </div>
   <div class="flexitem">
     <button type="submit" id="doio" class="btn btn-primary btn-md" onclick="find_orgs(); return false;" href="#">Look up</button>
-  </div>
-</div>
-<br>
-<div class="flexcontainer">
-  <div class="flexitem">
-  <span class="form-control-lg">Find DOIs by project:</span>
-  </div>
-  <div class="flexitem">
-    <div class="form-group">
-      <input type="text" class="form-control" placeholder="Select a project" list="list-project" id="input-projectlist">
-      <datalist id="list-project">
-        {{ projects | safe }}
-      </datalist>
-  </div>
-  <script>
-      document.addEventListener('DOMContentLoaded', e => {
-          $('#input-projectlist').autocomplete()
-      }, false);
-  </script>
-  </div>
-  <div class="flexitem">
-    <button type="submit" id="doip" class="btn btn-primary btn-md" onclick="find_projects(); return false;" href="#">Look up</button>
   </div>
 </div>
 <br>
