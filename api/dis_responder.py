@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "35.0.0"
+__version__ = "35.1.0"
 # Database
 DB = {}
 # Custom queries
@@ -545,6 +545,18 @@ def get_dois_for_orcid(oid, orc):
     return rows
 
 
+def get_work_title(row):
+    ''' Get a work title
+        Keyword arguments:
+          row: row from dois collection
+        Returns:
+          title
+    '''
+    if 'title' in row and isinstance(row['title'], str):
+        return row['title']
+    return DL.get_title(row)
+
+
 def generate_works_table(rows, name=None, show="full"):
     ''' Generate table HTML for a person's works
         Keyword arguments:
@@ -563,14 +575,10 @@ def generate_works_table(rows, name=None, show="full"):
                                   or ("subtype" in row and row['subtype'] == "preprint")):
             continue
         doi = doi_link(row['doi']) if row['doi'] else "&nbsp;"
-        if 'title' in row and isinstance(row['title'], str):
-            title = row['title']
-        else:
-            title = DL.get_title(row)
         dois.append(row['doi'])
         payload = {"date":  DL.get_publishing_date(row),
                    "doi": doi,
-                   "title": title
+                   "title": get_work_title(row)
                   }
         works.append(payload)
         fileoutput += f"{payload['date']}\t{row['doi']}\t{payload['title']}\n"
@@ -4574,7 +4582,7 @@ def projects(option=None):
            + "<th>Count</th><th>Project tag</th><th>Tag status</th></tr></thead><tbody>"
     cnt = 0
     _, suporgs = get_suporgs()
-    for key, val in sorted(dproj.items()):
+    for key, val in sorted(dproj.items(), key=lambda x: (proj.get(x[0], '') or x[0], x[0])):
         if key not in proj and option is None:
             continue
         if option == 'unknown' and key in proj:
