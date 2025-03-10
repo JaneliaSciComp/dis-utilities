@@ -7,7 +7,7 @@
            to DIS MongoDB.
 """
 
-__version__ = '7.3.0'
+__version__ = '8.0.0'
 
 import argparse
 import configparser
@@ -600,7 +600,7 @@ def update_config_database(persist):
                 COUNT['update'] += rest['rest']['updated']
 
 
-def get_tags(authors):
+def get_tags_and_projects(authors):
     ''' Find tags for a DOI using the authors
         Keyword arguments:
           authors: list of detailed authors
@@ -608,6 +608,7 @@ def get_tags(authors):
           List of tags
     '''
     new_tags = []
+    projects = []
     for auth in authors:
         # Add Lab for the Group Leader
         if 'group' in auth and auth['group'] not in new_tags:
@@ -623,7 +624,8 @@ def get_tags(authors):
                 LOGGER.warning(f"Project {auth['name']} is not defined")
             elif PROJECT[auth['name']] and auth['name'] not in new_tags:
                 new_tags.append(PROJECT[auth['name']])
-    return new_tags
+                projects.append(PROJECT[auth['name']])
+    return new_tags, projects
 
 
 def persist_author(key, authors, persist):
@@ -693,7 +695,7 @@ def add_tags(persist):
         if not authors:
             continue
         # Update jrc_tag using the authors
-        new_tags = get_tags(authors)
+        new_tags, projects = get_tags_and_projects(authors)
         tags = []
         tag_names = []
         # Populate tag_names with names only from new_tags
@@ -716,8 +718,11 @@ def add_tags(persist):
                 tagtype = 'suporg' if code else 'affiliation'
                 tags.append({"name": tag, "code": code, "type": tagtype})
         if tags:
-            LOGGER.debug(f"Added jrc_tag {tags} to {key}")
+            LOGGER.debug(f"Added jrc_tag {list(t['name'] for t in tags)} to {key}")
             persist[key]['jrc_tag'] = tags
+        if projects:
+            LOGGER.debug(f"Added jrc_project {projects} to {key}")
+            persist[key]['jrc_project'] = projects
         if rec and 'jrc_newsletter' in rec:
             LOGGER.warning(f"Skipping jrc_author update for {key}")
         else:
