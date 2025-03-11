@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "35.1.0"
+__version__ = "35.2.0"
 # Database
 DB = {}
 # Custom queries
@@ -4247,24 +4247,29 @@ def orcid_entry():
     # Notifications
     if cnte:
         payload = {"employeeId": {"$exists": False}, "alumni": {"$exists": False}}
-        rows = DB['dis'].orcid.find(payload).sort("family", 1)
-        html += "<h5>Users with no employee ID</h5><p style='line-height:1.1'>"
-        for row in rows:
-            name = f"{row['given'][0]} {row['family'][0]}"
-            dois = author_doi_count(row['given'], row['family'])
-            html += f"<a href='/userui/{row['orcid']}'>{name}</a> {dois}<br>"
-        html += "</p>"
+        cnt = DB['dis'].orcid.count_documents(payload)
+        if cnt:
+            rows = DB['dis'].orcid.find(payload).sort("family", 1)
+            html += "<h5>Users with no employee ID</h5><p style='line-height:1.1'>"
+            for row in rows:
+                name = f"{row['given'][0]} {row['family'][0]}"
+                dois = author_doi_count(row['given'], row['family'])
+                html += f"<a href='/userui/{row['orcid']}'>{name}</a> {dois}<br>"
+            html += "</p>"
         payload = {"orcid": {"$exists": False}, "alumni": {"$exists": False}}
         rows = DB['dis'].orcid.find(payload).sort("family", 1)
-        html += "<h5>Users with no ORCID</h5><p style='line-height:1.1'>"
+        noorc = ""
+        cnt = 0
         for row in rows:
             if 'workerType' in row and row['workerType'] and row['workerType'] != 'Employee':
                 continue
             name = f"{row['given'][0]} {row['family'][0]}"
             dois = author_doi_count(row['given'], row['family'])
             if dois:
-                html += f"<a href='/userui/{row['userIdO365']}'>{name} {dois}</a><br>"
-        html += "</p>"
+                noorc += f"<a href='/userui/{row['userIdO365']}'>{name} {dois}</a><br>"
+                cnt += 1
+        noorc += "</p>"
+        html += f"<h5>Users with no ORCID ({cnt:,})</h5><p style='line-height:1.1'>{noorc}"
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title="ORCID entries", html=html,
                                          chartscript=chartscript, chartdiv=chartdiv,
