@@ -3,7 +3,7 @@
     data (names, affiliation, employee types, teams) from the People system.
 '''
 
-__version__ = '3.3.0'
+__version__ = '3.4.0'
 
 import argparse
 import collections
@@ -237,7 +237,7 @@ def postprocessing(audit):
     print(f"  Set to former employee: {COUNT['alumni']:,}")
     print(f"Authors written:          {COUNT['written']:,}")
     if audit:
-        filename = 'people_orcid_updates.txt'
+        filename = 'people_orcid_updates.json'
         with open(filename, 'w', encoding='utf-8') as outfile:
             for row in audit:
                 outfile.write(f"{json.dumps(row, indent=4, default=str)}\n")
