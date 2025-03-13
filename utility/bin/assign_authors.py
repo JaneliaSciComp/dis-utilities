@@ -2,7 +2,7 @@
     Add/remove JRC authors for a given DOI
 """
 
-__version__ = '1.0.0'
+__version__ = '1.1.0'
 
 import argparse
 import json
@@ -113,8 +113,8 @@ def get_payload(jrc_authors):
           payload to set/unset jrc_author
     '''
     if not jrc_authors:
-        payload = {'jrc_author': None, 'jrc_first_author': None, 'jrc_last_author': None,
-                   'jrc_first_id': None, 'jrc_last_id': None}
+        payload = {"$unset": {'jrc_author': 1, 'jrc_first_author': 1, 'jrc_last_author': 1,
+                   'jrc_first_id': 1, 'jrc_last_id': 1}}
     else:
         payload = {'$set': {'jrc_author': jrc_authors}}
     return payload
