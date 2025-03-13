@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "35.2.0"
+__version__ = "35.3.0"
 # Database
 DB = {}
 # Custom queries
@@ -3732,6 +3732,7 @@ def show_organization(org_in, year=str(datetime.now().year), show="full"):
     html = '<table id="dois" class="tablesorter standard"><thead><tr>' \
            + '<th>Published</th><th>DOI</th><th>Tags</th><th>Title</th></tr></thead><tbody>'
     dcnt = 0
+    content = ""
     for row in rows:
         dcnt += 1
         published = DL.get_publishing_date(row)
@@ -3744,6 +3745,7 @@ def show_organization(org_in, year=str(datetime.now().year), show="full"):
                 tags.append(tag['name'])
         html += f"<tr><td>{published}</td><td>{doi_link(row['doi'])}</td>" \
                 + f"<td>{', '.join(sorted(tags))}</td><td>{title}</td></tr>"
+        content += f"{published}\t{row['doi']}\t{', '.join(sorted(tags))}\t{title}\n"
         for org in [tag['name'] for tag in row['jrc_tag']]:
             if org in orgs and len(orgs) > 1:
                 orgcount[org] += 1
@@ -3768,10 +3770,16 @@ def show_organization(org_in, year=str(datetime.now().year), show="full"):
                + f"<br>No DOIs found for {org_in}" \
                + journal_buttons(show, f"/doiui_org/{org_in}/{year}")
     else:
+        header = ['Published', 'DOI', 'Tags', 'Title']
+        buttons = "<div class='flexrow'><div class='flexcol'>" \
+                  + journal_buttons(show, f"/doiui_org/{org_in}/{year}") \
+                  + f"</div><div class='flexcol'>{'&nbsp;'*5}</div><div class='flexcol'>" \
+                  + create_downloadable(f"{org_in.replace(' ', '_')}_{year}", header, content) \
+                  + "</div></div>"
         html = year_pulldown(f"doiui_org/{org_in}") + subtitle \
                + f"{'Journal/preprint ' if show == 'journal' else ''}" \
                + f"DOIs found for {org_in}: {dcnt:,}<br>" \
-               + journal_buttons(show, f"/doiui_org/{org_in}/{year}") + html
+               + buttons + html
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=ptitle, html=html,
                                          navbar=generate_navbar('DOIs')))
