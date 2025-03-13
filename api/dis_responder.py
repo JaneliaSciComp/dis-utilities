@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "35.3.0"
+__version__ = "36.0.0"
 # Database
 DB = {}
 # Custom queries
@@ -572,6 +572,8 @@ def generate_works_table(rows, name=None, show="full"):
     fileoutput = ""
     for row in rows:
         if show == "journal" and not (("type" in row and row['type'] == "journal-article") \
+                                  or ("types" in row and "resourceTypeGeneral" in row["types"] \
+                                      and row["types"]["resourceTypeGeneral"] == "Preprint") \
                                   or ("subtype" in row and row['subtype'] == "preprint")):
             continue
         doi = doi_link(row['doi']) if row['doi'] else "&nbsp;"
@@ -3288,7 +3290,8 @@ def dois_top(show="journal", num=10):
                {"$sort": {"_id.year": 1, "_id.tag": 1}}
               ]
     if show == 'journal':
-        payload[1]["$match"] = {"$or": [{"type": "journal-article"}, {"subtype": "preprint"}]}
+        payload[1]["$match"] = {"$or": [{"type": "journal-article"}, {"subtype": "preprint"},
+                                        {"types.resourceTypeGeneral": "Preprint"}]}
     try:
         rows = DB['dis'].dois.aggregate(payload)
     except Exception as err:
@@ -3722,7 +3725,8 @@ def show_organization(org_in, year=str(datetime.now().year), show="full"):
     if year != 'All':
         payload['jrc_publishing_date'] = {"$regex": "^"+ year}
     if show == 'journal':
-        payload["$or"] = [{"type": "journal-article"}, {"subtype": "preprint"}]
+        payload["$or"] = [{"type": "journal-article"}, {"types.resourceTypeGeneral": "Preprint"},
+                           {"subtype": "preprint"}]
     try:
         rows = DB['dis'].dois.find(payload).sort("jrc_publishing_date", -1)
     except Exception as err:
@@ -3745,7 +3749,8 @@ def show_organization(org_in, year=str(datetime.now().year), show="full"):
                 tags.append(tag['name'])
         html += f"<tr><td>{published}</td><td>{doi_link(row['doi'])}</td>" \
                 + f"<td>{', '.join(sorted(tags))}</td><td>{title}</td></tr>"
-        content += f"{published}\t{row['doi']}\t{', '.join(sorted(tags))}\t{title}\n"
+        authors = DL.get_author_list(row)
+        content += f"{published}\t{row['doi']}\t{', '.join(sorted(tags))}\t{title}\t{authors}\n"
         for org in [tag['name'] for tag in row['jrc_tag']]:
             if org in orgs and len(orgs) > 1:
                 orgcount[org] += 1
@@ -3770,7 +3775,7 @@ def show_organization(org_in, year=str(datetime.now().year), show="full"):
                + f"<br>No DOIs found for {org_in}" \
                + journal_buttons(show, f"/doiui_org/{org_in}/{year}")
     else:
-        header = ['Published', 'DOI', 'Tags', 'Title']
+        header = ['Published', 'DOI', 'Tags', 'Title', 'Authors']
         buttons = "<div class='flexrow'><div class='flexcol'>" \
                   + journal_buttons(show, f"/doiui_org/{org_in}/{year}") \
                   + f"</div><div class='flexcol'>{'&nbsp;'*5}</div><div class='flexcol'>" \
