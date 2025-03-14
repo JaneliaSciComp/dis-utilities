@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "36.0.0"
+__version__ = "36.1.0"
 # Database
 DB = {}
 # Custom queries
@@ -3153,7 +3153,9 @@ def dois_pending():
         else:
             etime = f"{elapsed.seconds // 3600:02}:{elapsed.seconds // 60 % 60:02}:" \
                     + f"{elapsed.seconds % 60:02}"
-        html += f"<tr><td>{doi_link(row['doi'])}</td><td>{row['inserted']}</td><td>{etime}</td>"
+        url = f"<a href='{row['url']}' target='_blank'>{row['doi']}</a>" \
+              if 'url' in row and row['url'] else doi_link(row['doi'])
+        html += f"<tr><td>{url}</td><td>{row['inserted']}</td><td>{etime}</td>"
     html += '</tbody></table>'
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="DOIs awaiting processing", html=html,
