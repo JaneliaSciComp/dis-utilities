@@ -114,6 +114,9 @@ def process_author(aut, oids, source="crossref"):
         if 'Janelia' in aff['name']:
             oid = re.sub(r'.*/', '', aut['ORCID'])
             if source == "crossref":
+                if oid in DISCONFIG['orcid_ignore']:
+                    LOGGER.error(f"{oid} is in the ignore list")
+                    break
                 add_name(oid, oids, aut['family'], aut['given'])
             break
 
