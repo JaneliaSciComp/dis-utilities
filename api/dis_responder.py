@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "36.1.0"
+__version__ = "36.2.0"
 # Database
 DB = {}
 # Custom queries
@@ -3843,7 +3843,7 @@ def show_doiui_custom():
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("DOIs not found"),
                                message=f"No DOIs were found for {ipd['field']}={display_value}")
-    header = ['Published', 'DOI', 'Title']
+    header = ['Published', 'DOI', 'Title', 'Newsletter']
     html = "<table id='dois' class='tablesorter standard'><thead><tr>" \
            + ''.join([f"<th>{itm}</th>" for itm in header]) + "</tr></thead><tbody>"
     works = []
@@ -3854,16 +3854,18 @@ def show_doiui_custom():
         if not title:
             title = ""
         works.append({"published": published, "link": doi_link(row['doi']), "title": title,
-                      "doi": row['doi']})
+                      "doi": row['doi'], \
+                      "newsletter": row['jrc_newsletter'] if 'jrc_newsletter' in row else ""})
         if 'jrc_newsletter' in row and row['jrc_newsletter']:
             newsletter += 1
         if DL.is_journal(row) or DL.is_preprint(row):
             jorp += 1
     fileoutput = ""
     for row in sorted(works, key=lambda row: row['published'], reverse=True):
-        html += "<tr><td>" + dloop(row, ['published', 'link', 'title'], "</td><td>") + "</td></tr>"
+        html += "<tr><td>" + dloop(row, ['published', 'link', 'title', 'newsletter'], "</td><td>") \
+            + "</td></tr>"
         row['title'] = row['title'].replace("\n", " ")
-        fileoutput += dloop(row, ['published', 'doi', 'title']) + "\n"
+        fileoutput += dloop(row, ['published', 'doi', 'title', 'newsletter']) + "\n"
     html += '</tbody></table>'
     html = create_downloadable(ipd['field'], header, fileoutput) + html
     html = f"DOIs: {len(works):,}<br>Journals/preprints: {jorp:,}<br>" \
