@@ -7,7 +7,7 @@
            to DIS MongoDB.
 """
 
-__version__ = '8.0.0'
+__version__ = '8.1.0'
 
 import argparse
 import configparser
@@ -52,10 +52,11 @@ NO_AUTHOR = {}
 TO_BE_PROCESSED = []
 MAX_CROSSREF_TRIES = 3
 # General
+ARG = CONFIG = DISCONFIG = EXISTING = LOGGER = REST = START_TIME = None
 PROJECT = {}
 SUPORG = {}
 DEFAULT_TAGS = ['Janelia Experimental Technology (jET)', 'Scientific Computing Software']
-COUNT = {'crossref': 0, 'datacite': 0, 'duplicate': 0, 'found': 0, 'foundc': 0, 'foundd': 0,
+COUNT = {'crossref': 0, 'datacite': 0, 'found': 0, 'foundc': 0, 'foundd': 0,
          'notfound': 0, 'noupdate': 0, 'noauthor': 0,
          'insert': 0, 'update': 0, 'delete': 0, 'foundfb': 0, 'flyboy': 0}
 
@@ -177,7 +178,6 @@ def get_dois_from_crossref():
             doi = rec['doi'] = rec['DOI']
             rec['jrc_obtained_from'] = 'Crossref'
             if doi in CROSSREF:
-                COUNT['duplicate'] += 1
                 continue
             dlist.append(doi)
             CROSSREF[doi] = {"message": rec}
@@ -210,7 +210,6 @@ def get_dois_from_datacite(query):
             rec['jrc_obtained_from'] = 'DataCite'
             doi = rec['attributes']['doi']
             if doi in DATACITE:
-                COUNT['duplicate'] += 1
                 continue
             dlist.append(doi)
             DATACITE[doi] = {"data": {"attributes": rec['attributes']}}
@@ -246,6 +245,23 @@ def add_to_be_processed(dlist):
     if TO_BE_PROCESSED:
         LOGGER.info(f"Got {len(TO_BE_PROCESSED):,} DOIs from dois_to_process")
 
+def add_alps_releases(dlist):
+    ''' Add ALPS releases to the list of DOIs to process
+        Keyword arguments:
+          dlist: list of DOIs
+        Returns:
+          None
+    '''
+    releases = JRC.simplenamespace_to_dict(JRC.get_config('releases'))
+    cnt = 0
+    for val in releases.values():
+        if 'doi' in val:
+            for dtype in ('dataset', 'preprint', 'publication'):
+                if dtype in val['doi'] and val['doi'][dtype] not in dlist:
+                    cnt += 1
+                    dlist.append(val['doi'][dtype])
+    LOGGER.info(f"Got {cnt:,} DOIs from ALPS releases")
+
 
 def get_dois_for_dis(flycore):
     ''' Get a list of DOIs to process for an update of the DIS database. Sources are:
@@ -272,15 +288,7 @@ def get_dois_for_dis(flycore):
         if doi not in dlist and 'in prep' not in doi:
             dlist.append(doi)
     # ALPS releases
-    releases = JRC.simplenamespace_to_dict(JRC.get_config('releases'))
-    cnt = 0
-    for val in releases.values():
-        if 'doi' in val:
-            for dtype in ('dataset', 'preprint', 'publication'):
-                if dtype in val['doi'] and val['doi'][dtype] not in dlist:
-                    cnt += 1
-                    dlist.append(val['doi'][dtype])
-    LOGGER.info(f"Got {cnt:,} DOIs from ALPS releases")
+    add_alps_releases(dlist)
     # EM datasets
     emdois = JRC.simplenamespace_to_dict(JRC.get_config('em_dois'))
     cnt = 0
@@ -443,6 +451,21 @@ def convert_timestamp(stamp):
     return re.sub(r'\.\d+Z', 'Z', stamp)
 
 
+def too_old(doi, msg):
+    """ Determine if a DOI was published before 2006-04
+        Keyword arguments:
+          doi: DOI
+          msg: record from Crossref or DataCite
+        Returns:
+          True or False
+    """
+    pdate = DL.get_publishing_date(msg)
+    if pdate < '2006-04-01':
+        LOGGER.warning(f"Skipping {doi} because it was published before 2006-04")
+        return True
+    return False
+
+
 def crossref_needs_update(doi, msg):
     """ Determine if a Crossref DOI needs updating on our system
         Keyword arguments:
@@ -451,6 +474,8 @@ def crossref_needs_update(doi, msg):
         Returns:
           True or False
     """
+    if too_old(doi, msg):
+        return False
     if 'deposited' not in msg or 'date-time' not in msg['deposited']:
         return True
     if doi not in EXISTING:
@@ -481,6 +506,8 @@ def datacite_needs_update(doi, msg):
     """
     if 'attributes' not in msg or 'updated' not in msg['attributes']:
         return True
+    if too_old(doi, msg['attributes']):
+        return False
     if doi not in EXISTING:
         return True
     rec = EXISTING[doi]
@@ -669,6 +696,38 @@ def get_suporg_code(name):
     return None
 
 
+def add_pmid(key, persist):
+    ''' Add the PMID to a DOI record
+        Keyword arguments:
+          key: DOI
+          persist: dict keyed by DOI with value of the Crossref/DataCite record
+        Returns:
+          None
+    '''
+    pmid = JRC.get_pmid(key)
+    if pmid and 'status' in pmid and pmid['status'] == 'ok' \
+       and 'pmid' in pmid['records'][0]:
+        persist[key]['jrc_pmid'] = pmid['records'][0]['pmid']
+
+
+def get_tags(persist, rec):
+    ''' Get tags and names from a DOI record
+        Keyword arguments:
+          persist: dict keyed by DOI with value of the Crossref/DataCite record
+          rec: Crossref/DataCite record
+        Returns:
+          List of tags
+    '''
+    tags = []
+    if 'jrc_tag' in persist:
+        # We already have jrc_tag in the record
+        tags.extend(persist['jrc_tag'])
+    elif rec and 'jrc_tag' in rec:
+        # This will be a new jrc_tag field
+        tags.extend(rec['jrc_tag'])
+    return tags
+
+
 def add_tags(persist):
     ''' Add tags to DOI records that will be persisted (jrc_author, jrc_tag)
         Keyword arguments:
@@ -682,12 +741,9 @@ def add_tags(persist):
             rec = DB['dis'].dois.find_one({"doi": key})
         except Exception as err:
             terminate_program(err)
-        # Try to get the PMID if we don't have it
+        # Try to add the PMID if we don't have it
         if 'jrc_pmid' not in val:
-            pmid = JRC.get_pmid(key)
-            if pmid and 'status' in pmid and pmid['status'] == 'ok' \
-               and 'pmid' in pmid['records'][0]:
-                persist[key]['jrc_pmid'] = pmid['records'][0]['pmid']
+            add_pmid(key, persist)
         try:
             authors = DL.get_author_details(val, coll)
         except Exception as err:
@@ -696,20 +752,7 @@ def add_tags(persist):
             continue
         # Update jrc_tag using the authors
         new_tags, projects = get_tags_and_projects(authors)
-        tags = []
-        tag_names = []
-        # Populate tag_names with names only from new_tags
-        if 'jrc_tag' in persist:
-            # We already have jrc_tag in the record
-            tags.extend(persist['jrc_tag'])
-        elif rec and 'jrc_tag' in rec:
-            # This will be a new jrc_tag field
-            tags.extend(rec['jrc_tag'])
-        for etag in tags:
-            if isinstance(etag, str):
-                tag_names.append(etag)
-            else:
-                tag_names.append(etag['name'])
+        tags = get_tags(persist, rec)
         names = [etag['name'] for etag in tags]
         # Add new tags to the record
         for tag in new_tags:
@@ -902,8 +945,6 @@ def process_dois():
         doi = odoi if ARG.TARGET == 'flyboy' else odoi.lower().strip()
         COUNT['found'] += 1
         if doi in specified:
-            COUNT['duplicate'] += 1
-            LOGGER.debug(f"{doi} appears in input more than once")
             continue
         specified[doi] = True
         if ARG.INSERT:
@@ -912,11 +953,15 @@ def process_dois():
             if DL.is_datacite(doi):
                 msg = get_doi_record(doi)
                 if msg:
+                    if too_old(doi, msg['data']['attributes']):
+                        continue
                     persist[doi] = msg['data']['attributes']
                     persist[doi]['jrc_obtained_from'] = 'DataCite'
             else:
                 msg = get_doi_record(doi)
                 if msg:
+                    if too_old(doi, msg['message']):
+                        continue
                     persist[doi] = msg['message']
                     persist[doi]['jrc_obtained_from'] = 'Crossref'
             continue
@@ -996,7 +1041,6 @@ def post_activities():
     print(f"DOIs found in DataCite:          {COUNT['foundd']:,}")
     print(f"DOIs with no author:             {COUNT['noauthor']:,}")
     print(f"DOIs not found:                  {COUNT['notfound']:,}")
-    print(f"Duplicate DOIs:                  {COUNT['duplicate']:,}")
     print(f"DOIs not needing updates:        {COUNT['noupdate']:,}")
     if ARG.TARGET == 'flyboy':
         print(f"DOIs found in FlyBoy:            {COUNT['foundfb']:,}")
