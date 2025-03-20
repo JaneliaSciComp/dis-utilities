@@ -2,7 +2,7 @@
     Add/remove JRC authors for a given DOI
 """
 
-__version__ = '1.1.0'
+__version__ = '1.2.0'
 
 import argparse
 import json
@@ -75,6 +75,8 @@ def get_potential_authors(authors, original):
         notes = ''
         if 'alumni' in auth and auth['alumni']:
             notes = f" {Fore.YELLOW}{Back.BLACK}Alumni{Style.RESET_ALL}"
+        elif 'workerType' in auth and auth['workerType'] != 'Employee':
+            notes = f" {Fore.YELLOW}{Back.BLACK}{auth['workerType']}{Style.RESET_ALL}"
         if 'tags' in auth and auth['tags']:
             notes = ' '.join([notes, ', '.join(auth['tags'])])
         if 'employeeId' in auth and auth['employeeId'] in original:
