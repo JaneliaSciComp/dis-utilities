@@ -121,7 +121,7 @@ def add_new_record(person, output):
           None
     '''
     rec = JRC.call_people_by_id(person['employeeId'])
-    if rec['supOrgName'] in DIS['group_ignore']:
+    if not rec['supOrgName'] or rec['supOrgName'] in DIS['group_ignore']:
         COUNT['skipped'] += 1
         return
     COUNT['new'] += 1
@@ -175,6 +175,7 @@ def unset_alumni(person, output):
             COUNT['update'] += 1
     except Exception as err:
         terminate_program(err)
+
 
 def set_alumni(person, orcid):
     ''' Set the alumni flag in orcid
