@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "36.3.0"
+__version__ = "36.4.0"
 # Database
 DB = {}
 # Custom queries
@@ -53,7 +53,8 @@ NAV = {"Home": "",
                      "DOIs by preprint status by year": "dois_preprint_year"},
        "Journals": {"DOIs by journal": "journals",
                     "Top journals": "top_journals",
-                    "Missing journal": "dois_nojournal",},
+                    "DOIs missing journals": "dois_nojournal",
+                    "Journals referenced": "journals_referenced"},
        "ORCID": {"Labs": "labs",
                  "Entries": "orcid_entry",
                  "Authors with multiple ORCIDs": "orcid_duplicates",
@@ -1019,6 +1020,7 @@ def get_first_last_authors(year):
                 if 'preprints' not in stat[which]:
                     stat[which]['preprints'] = 0
                 stat[which]['preprints'] += row['count']
+    print(json.dumps(stat, indent=2))
     return stat['first'], stat['last'], stat['any']
 
 
@@ -2920,7 +2922,7 @@ def dois_report(year=str(datetime.now().year)):
     stat['Author'] += f"<span style='font-weight: bold'>{total-cnt:,}</span> " \
                       + "entries with at least one external collaborator<br>"
     stat['Author'] += f"<span style='font-weight: bold'>{middle:,}</span> " \
-                      + "entries with no Janelia  first or last authors<br>"
+                      + "entries with no Janelia first or last authors<br>"
     sheet.append(f"Entries with all Janelia authors\t{cnt}")
     sheet.append(f"Entries with external collaborators\t{total-cnt}")
     sheet.append(f"Entries with no Janelia first or last authors\t{middle}")
@@ -3935,6 +3937,42 @@ def show_journal_ui(jname, year='All'):
                                             title=title, html=html,
                                             navbar=generate_navbar('Journals')))
 
+
+@app.route('/journals_referenced/<string:year>')
+@app.route('/journals_referenced')
+def journals_referenced(year='All'):
+    '''
+    Return a report of journals referenced in DOIs
+    '''
+    ptitle = "Journals referenced by Crossref DOIs"
+    if year != 'All':
+        ptitle += f" in {year}"
+    payload = [{"$match": {"reference.journal-title": {"$exists": True, "$ne": None}}},
+               {"$unwind": "$reference"},
+               {"$group": {"_id": "$reference.journal-title", "count": {"$sum": 1}}},
+               {"$sort": {"count": -1, "_id": 1}}
+    ]
+    if year != 'All':
+        payload[0]['$match']['jrc_publishing_date'] = {"$regex": "^"+ year}
+    try:
+        rows = DB['dis'].dois.aggregate(payload)
+        # , collation={"locale": "en"}
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get DOIs"),
+                               message=error_message(err))
+    journals = refs = 0
+    fileoutput = ""
+    for row in rows:
+        journals += 1
+        refs += row['count']
+        fileoutput += f"{row['_id']}\t{row['count']}\n"
+    html = year_pulldown(f"journals_referenced") + "<br><br>" \
+           + create_downloadable('journals', ['Journal', 'References'], fileoutput) \
+           + f"<br><br>Journals: {journals:,}<br>References: {refs:,}"
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=ptitle, html=html,
+                                         navbar=generate_navbar('Journals')))
 
 # ******************************************************************************
 # * UI endpoints (ORCID)                                                       *
