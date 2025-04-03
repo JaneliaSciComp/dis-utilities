@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "36.4.0"
+__version__ = "36.5.0"
 # Database
 DB = {}
 # Custom queries
@@ -4187,58 +4187,6 @@ def orcid_entry():
                                          navbar=generate_navbar('ORCID')))
 
 
-@app.route('/tag/<path:aff>/<string:year>')
-@app.route('/tag/<path:aff>')
-def orcid_affiliation(aff, year='All'):
-    ''' Show ORCID tags (affiliations or projects) with counts
-    '''
-    # Authors
-    payload = {"affiliations": aff}
-    try:
-        cnt = DB['dis'].orcid.count_documents(payload)
-        if cnt:
-            rows = DB['dis'].orcid.find(payload).sort("family", 1)
-    except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not find affiliations " \
-                                                    + "in orcid collection"),
-                               message=error_message(err))
-    htmlp = get_tag_details(aff) + "<br>"
-    if cnt:
-        htmlp += f"<hr><p>Number of authors: {cnt:,}</p>"
-        additional, _ = generate_user_table(rows)
-        htmlp += additional
-    # DOIs
-    if year == 'All':
-        payload = {"$or": [{"jrc_tag.name": aff},
-                           {"author.name": aff},
-                           {"creators.name": aff}]}
-    else:
-        payload = {"$and": [{"jrc_publishing_date": {"$regex": "^"+ year}},
-                            {"$or": [{"jrc_tag.name": aff},
-                                     {"author.name": aff},
-                                     {"creators.name": aff}]}
-                           ]}
-    try:
-        rows = DB['dis'].dois.find(payload).sort("jrc_publishing_date", -1)
-    except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not find tags " \
-                                                    + "in dois collection"),
-                               message=error_message(err))
-    htmlp += "<hr>" + year_pulldown(f"tag/{aff}")
-    note = f" for {year}" if year != 'All' else ""
-    html, cnt = standard_doi_table(rows)
-    if cnt:
-        html = htmlp + f"<p>Number of tagged DOIs{note}: {cnt:,}</p>" + html
-    else:
-        html = f"{htmlp}<br>No DOIs found for {aff}"
-    return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title=aff,
-                                         html=html,
-                                         navbar=generate_navbar('ORCID')))
-
-
 @app.route('/orcid_duplicates')
 def orcid_duplicates():
     ''' Show authors with multiple ORCIDs or employee IDs
@@ -4738,6 +4686,58 @@ def project(name):
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=f"Project: {name}", html=html,
                                          navbar=generate_navbar('Tags/affiliation')))
+
+
+@app.route('/tag/<path:aff>/<string:year>')
+@app.route('/tag/<path:aff>')
+def orcid_affiliation(aff, year='All'):
+    ''' Show ORCID tags (affiliations or projects) with counts
+    '''
+    # Authors
+    payload = {"affiliations": aff}
+    try:
+        cnt = DB['dis'].orcid.count_documents(payload)
+        if cnt:
+            rows = DB['dis'].orcid.find(payload).sort("family", 1)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not find affiliations " \
+                                                    + "in orcid collection"),
+                               message=error_message(err))
+    htmlp = get_tag_details(aff) + "<br>"
+    if cnt:
+        htmlp += f"<hr><p>Number of authors: {cnt:,}</p>"
+        additional, _ = generate_user_table(rows)
+        htmlp += additional
+    # DOIs
+    if year == 'All':
+        payload = {"$or": [{"jrc_tag.name": aff},
+                           {"author.name": aff},
+                           {"creators.name": aff}]}
+    else:
+        payload = {"$and": [{"jrc_publishing_date": {"$regex": "^"+ year}},
+                            {"$or": [{"jrc_tag.name": aff},
+                                     {"author.name": aff},
+                                     {"creators.name": aff}]}
+                           ]}
+    try:
+        rows = DB['dis'].dois.find(payload).sort("jrc_publishing_date", -1)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not find tags " \
+                                                    + "in dois collection"),
+                               message=error_message(err))
+    htmlp += "<hr>" + year_pulldown(f"tag/{aff}")
+    note = f" for {year}" if year != 'All' else ""
+    html, cnt = standard_doi_table(rows)
+    if cnt:
+        html = htmlp + f"<p>Number of tagged DOIs{note}: {cnt:,}</p>" + html
+    else:
+        html = f"{htmlp}<br>No DOIs found for {aff}"
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=aff,
+                                         html=html,
+                                         navbar=generate_navbar('Tag/affiliation')))
 
 # ******************************************************************************
 # * UI endpoints (stats)                                                       *

@@ -105,6 +105,7 @@ def get_dois_from_biorxiv():
                     continue
                 check[item['doi'].lower()] = item
     LOGGER.info(f"Got {len(check):,} DOIs from bioRxiv in {parts} part(s)")
+    COUNT['read'] = len(check)
     return check
 
 
