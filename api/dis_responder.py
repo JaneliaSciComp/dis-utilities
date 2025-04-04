@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "36.5.0"
+__version__ = "37.0.0"
 # Database
 DB = {}
 # Custom queries
@@ -2558,6 +2558,8 @@ def show_doi_ui(doi):
             doisec += f" {tiny_badge('primary', 'PMID', plink)}"
         rlink = f"/doi/{doi}"
         doisec += f" {tiny_badge('info', 'Raw data', rlink)}"
+        if '/protocols.io.' in doi:
+            doisec += f" {tiny_badge('info', 'protocols.io', f'/raw/protocols.io/{doi}')}"
         #mlink = f"/doi/migration/{doi}"
         #doisec += f" {tiny_badge('info', 'HQ migration', mlink)}"
         #alink = f"/doi/authors/{doi}"
@@ -3674,6 +3676,23 @@ def dois_no_janelia(year='All'):
                                          title=title, html=html,
                                          navbar=generate_navbar('Authorship')))
 
+
+@app.route('/raw/<string:resource>/<path:doi>')
+def show_raw(resource=None, doi=None):
+    ''' Raw resource metadata for a DOI
+    '''
+    result = initialize_result()
+    response = None
+    if resource == 'protocols.io':
+        suffix = f"protocols/{doi}"
+        try:
+            response = JRC.call_protocolsio(suffix)
+        except Exception as err:
+            raise InvalidUsage(str(err), 500) from err
+    if response:
+        result['data'] = response
+    return generate_response(result)
+
 # ******************************************************************************
 # * UI endpoints (Preprints)                                                  *
 # ******************************************************************************
@@ -3967,7 +3986,7 @@ def journals_referenced(year='All'):
         journals += 1
         refs += row['count']
         fileoutput += f"{row['_id']}\t{row['count']}\n"
-    html = year_pulldown(f"journals_referenced") + "<br><br>" \
+    html = year_pulldown("journals_referenced") + "<br><br>" \
            + create_downloadable('journals', ['Journal', 'References'], fileoutput) \
            + f"<br><br>Journals: {journals:,}<br>References: {refs:,}"
     return make_response(render_template('general.html', urlroot=request.url_root,
