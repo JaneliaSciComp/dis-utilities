@@ -289,6 +289,14 @@ hr {border-color: #666;
    color: #0f0;
    background-color: #454;
 }
+.badge-pdf {
+   color: white;
+   background-color: green;
+}
+.badge-source {
+   color: white;
+   background-color: #0000b0;
+}
 
 /* General */
 body {

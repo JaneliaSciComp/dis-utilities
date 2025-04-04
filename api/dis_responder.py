@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "37.0.0"
+__version__ = "38.0.0"
 # Database
 DB = {}
 # Custom queries
@@ -2548,22 +2548,32 @@ def show_doi_ui(doi):
     # DOI section
     link = f"<a href='https://doi.org/{doi}' target='_blank'>{doi}</a>"
     doisec += f"<span class='paperdata'>DOI: {link}"
-    oresp = JRC.call_oa(doi)
-    if oresp:
-        olink = f"{app.config['OA']}{doi}"
-        doisec += f" {tiny_badge('primary', 'OA data', olink)}"
     if local:
         if 'jrc_pmid' in row:
             plink = f"{app.config['PMID']}{row['jrc_pmid']}/"
             doisec += f" {tiny_badge('primary', 'PMID', plink)}"
-        rlink = f"/doi/{doi}"
-        doisec += f" {tiny_badge('info', 'Raw data', rlink)}"
-        if '/protocols.io.' in doi:
-            doisec += f" {tiny_badge('info', 'protocols.io', f'/raw/protocols.io/{doi}')}"
-        #mlink = f"/doi/migration/{doi}"
-        #doisec += f" {tiny_badge('info', 'HQ migration', mlink)}"
-        #alink = f"/doi/authors/{doi}"
-        #doisec += f" {tiny_badge('info', 'Author details', alink)}"
+    if '/protocols.io.' in doi:
+        doisec += f" {tiny_badge('source', 'protocols.io', f'/raw/protocols.io/{doi}')}"
+    rlink = f"/doi/{doi}"
+    if local:
+        jour = DL.get_journal(data)
+        if jour:
+            if 'bioRxiv' in jour:
+                doisec += f" {tiny_badge('source', 'bioRxiv', f'/raw/bioRxiv/{doi}')}"
+        if '/janelia.' in doi:
+            doisec += f" {tiny_badge('source', 'figshare', f'/raw/figshare/{doi}')}"
+        doisec += f" {tiny_badge('source', row['jrc_obtained_from'], rlink)}"
+    else:
+        doisec += f" {tiny_badge('source', 'Raw data', rlink)}"
+    oresp = JRC.call_oa(doi)
+    if oresp:
+        olink = f"{app.config['OA']}{doi}"
+        doisec += f" {tiny_badge('source', 'OA data', olink)}"
+    if local:
+        if 'bioRxiv' in jour:
+            pbase = f"{app.config['BIORXIV']}{doi}.full.pdf"
+            doisec += f" {tiny_badge('pdf', 'PDF', pbase)}"
+        #doisec += f" {tiny_badge('info', 'HQ migration', f'/doi/migration/{doi}')}"
     doisec += "</span><br>"
     if row:
         citcnt = s2_citation_count(doi, fmt='html')
@@ -3683,7 +3693,24 @@ def show_raw(resource=None, doi=None):
     '''
     result = initialize_result()
     response = None
-    if resource == 'protocols.io':
+    if resource == 'bioRxiv':
+        try:
+            response = JRC.call_biorxiv(doi)
+        except Exception as err:
+            raise InvalidUsage(str(err), 500) from err
+    elif resource == 'figshare':
+        try:
+            response = JRC.call_figshare(doi)
+            if response and 'url' in response[0] and response[0]['url']:
+                try:
+                    response2 = requests.get(response[0]['url'], timeout=10)
+                    if response2.status_code == 200:
+                        response = response2.json()
+                except Exception:
+                    pass
+        except Exception as err:
+            raise InvalidUsage(str(err), 500) from err
+    elif resource == 'protocols.io':
         suffix = f"protocols/{doi}"
         try:
             response = JRC.call_protocolsio(suffix)
