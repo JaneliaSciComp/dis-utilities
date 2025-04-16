@@ -805,7 +805,8 @@ def add_first_last_authors(rec):
                 try:
                     janelian = DL.is_janelia_author(auth, DB['dis'].orcid, PROJECT)
                 except Exception as err:
-                    LOGGER.error(f"Could not process {rec['doi']}")
+                    LOGGER.error(auth)
+                    LOGGER.error(f"Could not process author in for DL.is_janelia_author {rec['doi']}")
                     terminate_program(err)
                 if janelian:
                     first.append(janelian)
