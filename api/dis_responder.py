@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "38.0.0"
+__version__ = "39.0.0"
 # Database
 DB = {}
 # Custom queries
@@ -67,8 +67,9 @@ NAV = {"Home": "",
                           },
        "Stats" : {"Database": "stats_database"
                  },
-       "External systems": {"Search People system": "people",
-                            "Supervisory Organizations": "orgs/full",
+       "External systems": {"Search HHMI People system": "people",
+                            "HHMI Supervisory Organizations": "orgs/full",
+                            "ROR": "ror",
                            }
       }
 # Sources
@@ -4458,6 +4459,49 @@ def peoplerec(eid):
     html = f"<div class='scroll' style='height:750px'><pre>{json.dumps(rec, indent=2)}</pre></div>"
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
+                                         navbar=generate_navbar('External systems')))
+
+
+@app.route('/ror/<string:rorid>')
+@app.route('/ror')
+def ror(rorid=None):
+    ''' Show information from ROR
+    '''
+    if not rorid:
+        return make_response(render_template('ror.html', urlroot=request.url_root,
+                                             title="Search ROR", content="",
+                                             navbar=generate_navbar('External systems')))
+    try:
+        resp = requests.get(f"https://api.ror.org/v2/organizations/{rorid}", timeout=10).json()
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning(f"Could not get ROR data for {rorid}"),
+                               message=error_message(err))
+    if not resp or 'errors' in resp:
+        msg = '<br>'.join(resp['errors']) if 'errors' in resp else "No ROR ID found"
+        return make_response(render_template('ror.html', urlroot=request.url_root,
+                                             title="Search ROR",
+                                             content=f"<br><h3>{msg}</h3>",
+                                             navbar=generate_navbar('External systems')))
+    link = f"<a href='{resp['id']}'>{resp['id']}</a>"
+    html = f"<br><h3>{link}</h3>"
+    for idx, name in enumerate(resp['names']):
+        if 'ror_display' in name['types']:
+            html += f"<h3>{resp['names'].pop(idx)['value']}</h3><br>"
+            break
+    if resp['names']:
+        html += "<h4>Other names</h4><ul>"
+        for name in resp['names']:
+            html += f"<li>{name['value']}</li>"
+        html += "</ul>"
+    if 'relationships' in resp:
+        html += "<h4>Relationships</h4><ul>"
+        for rel in resp['relationships']:
+            link = f"<a href='{rel['id'].split('/')[-1]}'>{rel['label']}</a>"
+            html += f"<li>{rel['type']}: {link}</li>"
+        html += "</ul>"
+    return make_response(render_template('ror.html', urlroot=request.url_root,
+                                         title="Search ROR", content=html,
                                          navbar=generate_navbar('External systems')))
 
 # ******************************************************************************
