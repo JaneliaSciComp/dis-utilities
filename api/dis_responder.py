@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "39.0.0"
+__version__ = "39.1.0"
 # Database
 DB = {}
 # Custom queries
@@ -2570,7 +2570,7 @@ def show_doi_ui(doi):
     if oresp:
         olink = f"{app.config['OA']}{doi}"
         doisec += f" {tiny_badge('source', 'OA data', olink)}"
-    if local:
+    if local and jour:
         if 'bioRxiv' in jour:
             pbase = f"{app.config['BIORXIV']}{doi}.full.pdf"
             doisec += f" {tiny_badge('pdf', 'PDF', pbase)}"
