@@ -2,7 +2,7 @@
     
 '''
 
-__version__ = '1.0.0'
+__version__ = '1.0.1'
 
 import argparse
 import collections
@@ -260,7 +260,7 @@ def update_orcid():
     print(f"Already active:         {COUNT['already_active']:,}")
     print(f"Skipped (organization): {COUNT['skipped']:,}")
     print(f"Not at Janelia:         {COUNT['not_janelia']:,}")
-    print(f"JRC Alumni:             {COUNT['people_alumni']:,}")
+    print(f"JRC Alumni (no emp ID): {COUNT['people_alumni']:,}")
     print(f"JRC Alumni set:         {COUNT['set_alumni']:,}")
     print(f"Boomerangs:             {COUNT['boomerang']:,}")
     print(f"New employees:          {COUNT['new']:,}")
