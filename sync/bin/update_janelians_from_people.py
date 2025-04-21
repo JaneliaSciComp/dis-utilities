@@ -3,7 +3,7 @@
     data (names, affiliation, employee types, teams) from the People system.
 '''
 
-__version__ = '3.4.0'
+__version__ = '3.5.0'
 
 import argparse
 import collections
@@ -21,9 +21,7 @@ DB = {}
 # Counters
 COUNT = collections.defaultdict(lambda: 0, {})
 # Global variables
-LOGGER = None
-ARG = None
-DISCONFIG = None
+ARG = DIS = LOGGER = None
 
 def terminate_program(msg=None):
     ''' Terminate the program gracefully
@@ -175,7 +173,7 @@ def update_managed_teams(idresp, row):
     old_managed = row['managed'] if 'managed' in row else []
     for team in idresp['managedTeams']:
         if team['supOrgSubType'] == 'Lab' and team['supOrgName'].endswith(' Lab'):
-            if team['supOrgCode'] in DISCONFIG['sup_ignore']:
+            if team['supOrgCode'] in DIS['sup_ignore']:
                 continue
             if lab:
                 terminate_program(f"Multiple labs found for {idresp['nameFirstPreferred']} " \
@@ -221,29 +219,6 @@ def write_record(row):
             COUNT['written'] += result.matched_count
 
 
-def postprocessing(audit):
-    ''' Print counts and write audit file
-        Keyword arguments:
-          audit: list of updates
-        Returns:
-          None
-    '''
-    print(f"Authors read from orcid:  {COUNT['orcid']:,}")
-    print(f"Authors updated:          {COUNT['updated']:,}")
-    print(f"  Names updated:          {COUNT['name']:,}")
-    print(f"  Affiliations updated:   {COUNT['affiliations']:,}")
-    print(f"  WorkerTypes updated:    {COUNT['workerType']:,}")
-    print(f"  Managed teams updated:  {COUNT['managed']:,}")
-    print(f"  Set to former employee: {COUNT['alumni']:,}")
-    print(f"Authors written:          {COUNT['written']:,}")
-    if audit:
-        filename = 'people_orcid_updates.json'
-        with open(filename, 'w', encoding='utf-8') as outfile:
-            for row in audit:
-                outfile.write(f"{json.dumps(row, indent=4, default=str)}\n")
-        LOGGER.info(f"Wrote {len(audit)} updates to {filename}")
-
-
 def record_updates(idresp, row):
     ''' Record updates
         Keyword arguments:
@@ -274,6 +249,39 @@ def record_updates(idresp, row):
     if pdirty or udirty or mdirty:
         dirty = True
     return dirty
+
+
+def postprocessing(audit):
+    ''' Print counts and write audit file
+        Keyword arguments:
+          audit: list of updates
+        Returns:
+          None
+    '''
+    msg = f"Authors read from orcid:  {COUNT['orcid']:,}\n" \
+          + f"Authors updated:          {COUNT['updated']:,}\n" \
+          + f"  Names updated:          {COUNT['name']:,}\n" \
+          + f"  Affiliations updated:   {COUNT['affiliations']:,}\n" \
+          + f"  WorkerTypes updated:    {COUNT['workerType']:,}\n" \
+          + f"  Managed teams updated:  {COUNT['managed']:,}\n" \
+          + f"  Set to former employee: {COUNT['alumni']:,}\n" \
+          + f"Authors written:          {COUNT['written']:,}"
+    print(msg)
+    filename = 'people_orcid_updates.json' #PLUG
+    if audit:
+        filename = 'people_orcid_updates.json'
+        with open(filename, 'w', encoding='utf-8') as outfile:
+            for row in audit:
+                outfile.write(f"{json.dumps(row, indent=4, default=str)}\n")
+        LOGGER.info(f"Wrote {len(audit)} updates to {filename}")
+    if not (ARG.TEST or ARG.WRITE):
+        return
+    text = f"<pre>The orcid collection has been updated from the People system.\n\n{msg}</pre>"
+    text += "<br><br>Please see the attached file for the new records."
+    subject = "Janelians updated from People system"
+    email = DIS['developer'] if ARG.TEST else DIS['receivers']
+    JRC.send_email(text, DIS['sender'], email, subject,
+                   attachment=filename, mime='html')
 
 
 def update_orcid():
@@ -320,6 +328,8 @@ if __name__ == '__main__':
                         help='MongoDB manifold (dev, prod)')
     PARSER.add_argument('--reset', dest='RESET', action='store_true',
                         default=False, help='Reset affiliations and managesTeams')
+    PARSER.add_argument('--test', dest='TEST', action='store_true',
+                        default=False, help='Send email to developer')
     PARSER.add_argument('--write', dest='WRITE', action='store_true',
                         default=False, help='Write to database/config system')
     PARSER.add_argument('--verbose', dest='VERBOSE', action='store_true',
@@ -328,7 +338,10 @@ if __name__ == '__main__':
                         default=False, help='Flag, Very chatty')
     ARG = PARSER.parse_args()
     LOGGER = JRC.setup_logging(ARG)
-    DISCONFIG = JRC.simplenamespace_to_dict(JRC.get_config("dis"))
+    try:
+        DIS = JRC.simplenamespace_to_dict(JRC.get_config("dis"))
+    except Exception as err:
+        terminate_program(err)
     initialize_program()
     update_orcid()
     terminate_program()
