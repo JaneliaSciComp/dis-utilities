@@ -1,8 +1,8 @@
 ''' add_people_to_orcid.py
-    
+    Add new employees to the orcid collection from the People system.
 '''
 
-__version__ = '1.0.1'
+__version__ = '2.0.0'
 
 import argparse
 import collections
@@ -208,6 +208,20 @@ def set_alumni(person, orcid):
         terminate_program(err)
 
 
+def email_new(fname):
+    ''' Email the new records
+        Keyword arguments:
+          fname: filename
+        Returns:
+          None
+    '''
+    text = f"New employees: {COUNT['new']:,}\nPlease see the attached file for the new records."
+    subject = "Janelians added to orcid collection from People system"
+    email = DIS['developer'] if ARG.TEST else DIS['receivers']
+    JRC.send_email(text, DIS['sender'], email, subject,
+                   attachment=fname)
+
+
 def update_orcid():
     ''' Add people to the orcid collection
         Keyword arguments:
@@ -256,6 +270,8 @@ def update_orcid():
             fname = f"{timestamp}_{key}.json"
             with open(fname, "w", encoding="utf-8") as outfile:
                 outfile.write("[" + ",\n".join(val) + "]")
+            if key == 'new' and (ARG.WRITE or ARG.TEST):
+                email_new(fname)
     print(f"Records from People:    {COUNT['people']:,}")
     print(f"Already active:         {COUNT['already_active']:,}")
     print(f"Skipped (organization): {COUNT['skipped']:,}")
@@ -276,6 +292,8 @@ if __name__ == '__main__':
                         help='MongoDB manifold (dev, prod)')
     PARSER.add_argument('--reset', dest='RESET', action='store_true',
                         default=False, help='Reset affiliations and managesTeams')
+    PARSER.add_argument('--test', dest='TEST', action='store_true',
+                        default=False, help='Send email to developer')
     PARSER.add_argument('--write', dest='WRITE', action='store_true',
                         default=False, help='Write to database/config system')
     PARSER.add_argument('--verbose', dest='VERBOSE', action='store_true',
@@ -284,8 +302,11 @@ if __name__ == '__main__':
                         default=False, help='Flag, Very chatty')
     ARG = PARSER.parse_args()
     LOGGER = JRC.setup_logging(ARG)
-    DIS = JRC.simplenamespace_to_dict(JRC.get_config("dis"))
-    REST = JRC.get_config("rest_services")
+    try:
+        DIS = JRC.simplenamespace_to_dict(JRC.get_config("dis"))
+        REST = JRC.get_config("rest_services")
+    except Exception as err:
+        terminate_program(err)
     initialize_program()
     update_orcid()
     terminate_program()
