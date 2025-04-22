@@ -56,6 +56,7 @@ the "sandbox-220614" project space.
 3. The following keys must be present in the run environment:
     - CONFIG_SERVER_URL: base URL for Configuration system
     - PEOPLE_API_KEY: API key for HHMI People system
+    - PROTOCOLS_API_TOKEN: API key for protocols.io
 4. The *config.ini* file must have the latest URL bases and suffixes for Crossref, DataCite, FigShare, and ORCID.
 
 ## ORCID
