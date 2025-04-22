@@ -11,6 +11,7 @@
 | pull_bioRxiv.py| Produce a list of bioRxiv DOIs eligible for insertion | [Every morning](https://jenkins.int.janelia.org/view/DIS/job/DIS-sync-pull_bioarxiv/) |
 | pull_figshare.py | Produce a list of figshare DOIs eligible for insertion | [Every morning](https://jenkins.int.janelia.org/view/DIS/job/DIS-sync-pull_figshare/) |
 | pull_oa.py | Produce a list of OA.Works DOIs eligible for insertion | [Every morning](https://jenkins.int.janelia.org/view/DIS/job/DIS-sync-pull_oa/) |
+| pull_protocolsio.py| Produce a list of protocols.io DOIs eligible for insertion | [Every morning](https://jenkins.int.janelia.org/view/DIS/job/DIS-sync-pull_protocolsio/) |
 | sync_pmid_to_dois.py | Add PubMed IDs to DOIs that don't have them | [Every morning](https://jenkins.int.janelia.org/view/DIS/job/DIS-sync-pmids/) |
 | sync_suporg_to_org_group.py | Sync organization structures to the org_group table | |
 | update_dois.py | Synchronize DOI information from Crossref/DataCite | [Every morning](https://jenkins.int.janelia.org/view/DIS/job/DIS-sync-dis-update_dois/) |
@@ -118,7 +119,7 @@ collection) are reprocessed. Results of a typical run are below:
     DOI calls to Crossref: 2,140
     DOI calls to DataCite: 51
 ```
-Any newly-inserted DOIs are emailed to Virginia and Rob.
+Any newly-inserted DOIs are emailed to DIS staff.
 
 ### FlyCore processing 
 A list of DOIs is retrieved from the FLYF2 database using the
@@ -156,7 +157,7 @@ New DOIs are inserted. Results of a typical run are below:
     DOIs ready for processing:       0
     DOIs requiring review:           1
 ```
-Any newly-inserted DOIs are emailed to Virginia and Rob.
+Any newly-inserted DOIs are emailed to DIS staff.
 
 ### bioRxiv
 Potentially relevant DOIs are found in the bioRxiv repository:
@@ -171,7 +172,7 @@ New DOIs are inserted. Results of a typical run are below:
     DOIs ready for processing:       0
     DOIs requiring review:           4
 ```
-Any newly-inserted DOIs are emailed to Virginia and Rob.
+Any newly-inserted DOIs are emailed to DIS staff.
 
 ### figshare
 Relevant DOIs are found in the figshare repository:
@@ -183,7 +184,7 @@ New DOIs are inserted. Results of a typical run are below:
     DOIs already in database:  1,563
     DOIs ready for processing: 0
 ```
-Any newly-inserted DOIs are emailed to Virginia and Rob.
+Any newly-inserted DOIs are emailed to DIS staff.
 
 ### OA.Works
 DOIs are found in the OA.Works repository. **All** DOIs from this repository are relevant. There will be some without current 
@@ -197,7 +198,22 @@ New DOIs are inserted. Results of a typical run are below:
     DOIs with no Janelian authors:   193
     DOIs ready for processing:       193
 ```
-Any newly-inserted DOIs are emailed to Virginia and Rob.
+Any newly-inserted DOIs are emailed to DIS staff.
+
+### protocols.io
+Potentially relevant DOIs are found in the arXiv repository:
+- At least one author has an affiliation containing "Janelia" or an ORCID in the orcid collection
+New DOIs are inserted. Results of a typical run are below:
+```
+    DOIs read from protocols.io:     44
+    DOIs already in database:        27
+    DOIs not in Crossref:            0
+    DOIs with no Janelian authors:   3
+    DOIs with alumni authors:        11
+    DOIs ready for processing:       0
+    DOIs requiring review:           3
+```
+Any newly-inserted DOIs are emailed to DIS staff.
 
 ### Notifying authors of curated resources 
 Resources (with the exception of DataCite datasets) that have been curated (jrc_newsletter date is set) are found,
@@ -213,7 +229,7 @@ Results of a typical run (with --verbose) are below:
     INFO:root:Email sent to Barry Dickson (dicksonb@janelia.hhmi.org)
     INFO:root:Email sent to David Stern (sternd@janelia.hhmi.org)
 ```
-A summary is emailed to Virginia and Rob.
+A summary is emailed to DIS staff.
 
 ### Finding preprint relations 
 MAtches between preprints and journal articles are searched for using all available DOIs in the dois collection. DOIs will
