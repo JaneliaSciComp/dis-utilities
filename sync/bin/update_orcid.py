@@ -2,7 +2,7 @@
     Update the MongoDB orcid collection with ORCIDs and names for Janelia authors
 '''
 
-__version__ = '2.8.0'
+__version__ = '2.9.0'
 
 import argparse
 import collections
@@ -143,9 +143,13 @@ def get_name(oid):
             LOGGER.error(f"{oid} is in the ignore list\n{name}")
             return None, None
         return name['family-name']['value'], name['given-names']['value']
+    except JSONDecodeError as err:
+        LOGGER.warning(f"Could not decode response for {oid}: {err}")
+        LOGGER.warning(resp.text)
+        return None, None
     except Exception as err:
-        LOGGER.warning(resp.json()['person']['name'])
-        LOGGER.warning(err)
+        LOGGER.warning(f"Could not get response for {oid}: {err}")
+        LOGGER.warning(resp.text)
         return None, None
 
 
