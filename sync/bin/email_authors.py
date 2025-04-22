@@ -168,7 +168,7 @@ not affiliated with Janelia, please let us know.
                     + "an ORCID for you. We ask that you please create one with " \
                     + "your Janelia affiliation. To create one, please visit " \
                     + "<a href='https://orcid.org/register'>ORCID</a>.<br><br>"
-        text += "Thank you and have a great day,<br><br>The DIS Team<br><br>"
+        text += "Thank you and have a great day,<br><br>Lauren Acquarole<br>Andy Burnim<br><br>"
         for res in val['citations']:
             text += f"{res}"
             doi = val['dois'].pop(0)
