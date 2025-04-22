@@ -6,6 +6,7 @@
 | -------------------------- | ------------------------------------------------------ | ---------------------- |
 | add_people_to_orcid.py | Sync new entries in the People system to the orcid table | |
 | email_authors.py | Email information on newly-curated DOIs to authors | [Every Monday morning](https://jenkins.int.janelia.org/view/DIS/job/DIS-sync-dis-email_authors/)
+| email_orcids.py | Email Janelians that don't have an ORCID to encourage them to get one | |
 | find_unloaded_relations.py | Find referenced DOIS that are not in the database | [Immediately following a scheduled run of *update_dois.py*](https://jenkins.int.janelia.org/view/DIS/job/DIS-sync-find_unloaded/) |
 | group_search.py | Find resources authored by group (lab) heads | |
 | pull_arxiv.py  | Produce a list of aRxiv DOIs eligible for insertion | [Every morning](https://jenkins.int.janelia.org/view/DIS/job/DIS-sync-pull_arxiv/) |
