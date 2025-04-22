@@ -4,6 +4,7 @@
 
 | Name                       | Description                                            | Run frequency          |
 | -------------------------- | ------------------------------------------------------ | ---------------------- |
+| add_people_to_orcid.py | Sync new entries in the People system to the orcid table | |
 | email_authors.py | Email information on newly-curated DOIs to authors | [Every Monday morning](https://jenkins.int.janelia.org/view/DIS/job/DIS-sync-dis-email_authors/)
 | find_unloaded_relations.py | Find referenced DOIS that are not in the database | [Immediately following a scheduled run of *update_dois.py*](https://jenkins.int.janelia.org/view/DIS/job/DIS-sync-find_unloaded/) |
 | group_search.py | Find resources authored by group (lab) heads | |
@@ -15,7 +16,7 @@
 | sync_pmid_to_dois.py | Add PubMed IDs to DOIs that don't have them | [Every morning](https://jenkins.int.janelia.org/view/DIS/job/DIS-sync-pmids/) |
 | sync_suporg_to_org_group.py | Sync organization structures to the org_group table | |
 | update_dois.py | Synchronize DOI information from Crossref/DataCite | [Every morning](https://jenkins.int.janelia.org/view/DIS/job/DIS-sync-dis-update_dois/) |
-| update_janelians_from_people.py | Sync new entries in the People system to the orcid table | |
+| update_janelians_from_people.py | Sync record updates in the People system to the orcid table | |
 | update_orcid.py | Synchronize ORCID names and IDs | [Every morning](https://jenkins.int.janelia.org/view/DIS/job/DIS-sync-dis-update_orcid/) |
 | update_preprints.py | Update preprint relations | [Immediately following a scheduled run of *update_dois.py*](https://jenkins.int.janelia.org/view/DIS/job/DIS-sync-dis-update_preprints/) |
 
