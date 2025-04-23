@@ -7,7 +7,7 @@
            to DIS MongoDB.
 """
 
-__version__ = '8.1.0'
+__version__ = '9.0.0'
 
 import argparse
 import configparser
@@ -50,7 +50,7 @@ UPDATED = {}
 MISSING = {}
 NO_AUTHOR = {}
 TO_BE_PROCESSED = []
-MAX_CROSSREF_TRIES = 3
+MAX_DOI_TRIES = 3
 # General
 ARG = CONFIG = DISCONFIG = EXISTING = LOGGER = REST = START_TIME = None
 PROJECT = {}
@@ -349,6 +349,11 @@ def get_dois():
     # Default is to pull from FlyCore
     return flycore
 
+class DOINotFound(Exception):
+    """ DOINotFound exception
+    """
+    pass
+
 
 def call_crossref(doi):
     """ Get DOI information from crossref
@@ -358,12 +363,14 @@ def call_crossref(doi):
     try:
         req = JRC.call_crossref(doi)
     except requests.exceptions.RequestException as err:
+        if type(err).__name__ in ['ConnectTimeout', 'ReadTimeout']:
+            raise err
         terminate_program(err)
     if req:
         return req
     COUNT['notfound'] += 1
     MISSING[f"Could not find {doi} in Crossref"] = True
-    raise Exception(f"Could not find {doi} in Crossref")
+    raise DOINotFound(f"Could not find {doi} in Crossref")
 
 
 def call_crossref_with_retry(doi):
@@ -373,26 +380,23 @@ def call_crossref_with_retry(doi):
         Returns:
           msg: response from crossref.org
     """
-    attempt = MAX_CROSSREF_TRIES
+    attempt = MAX_DOI_TRIES
     msg = None
     while attempt:
         try:
             msg = call_crossref(doi)
+            return msg
+        except DOINotFound as err:
+            raise err
         except Exception as err:
+            if type(err).__name__ in ['ConnectTimeout', 'ReadTimeout']:
+                attempt -= 1
+                if not attempt:
+                    raise Exception(f"Could not find {doi} in Crossref: multiple timeouts")
+                LOGGER.warning(f"crossref.org timeout for {doi}: retrying ({attempt})")
+                sleep(1)
+                continue
             raise Exception(err) from err
-        if 'title' in msg['message']:
-            if 'author' in msg['message']:
-                break
-            MISSING[f"No author for {doi}"] = True
-            LOGGER.warning(f"No author for {doi}")
-            COUNT['noauthor'] += 1
-            return None
-        LOGGER.warning(f"No title for {doi}")
-        MISSING[f"No title for {doi}"] = True
-        attempt -= 1
-        LOGGER.warning(f"Missing data from crossref.org for {doi}: retrying ({attempt})")
-        sleep(0.5)
-    return msg
 
 
 def call_datacite(doi):
@@ -402,12 +406,41 @@ def call_datacite(doi):
         Returns:
           rec: response from crossref.org
     """
-    rec = DATACITE[doi] if doi in DATACITE else JRC.call_datacite(doi)
+    try:
+        rec = DATACITE[doi] if doi in DATACITE else JRC.call_datacite(doi)
+    except requests.exceptions.RequestException as err:
+        if type(err).__name__ in ['ConnectTimeout', 'ReadTimeout']:
+            raise err
+        terminate_program(err)
     if rec:
         return rec
     COUNT['notfound'] += 1
     MISSING[f"Could not find {doi} in DataCite"] = True
     raise Exception(f"Could not find {doi} in DataCite")
+
+
+def call_datacite_with_retry(doi):
+    """ Looping function for call_datacite
+        Keyword arguments:
+          doi: DOI
+        Returns:
+          msg: response from datacite.org
+    """
+    attempt = MAX_DOI_TRIES
+    msg = None
+    while attempt:
+        try:
+            msg = call_datacite(doi)
+            return msg
+        except Exception as err:
+            if type(err).__name__ in ['ConnectTimeout', 'ReadTimeout']:
+                attempt -= 1
+                if not attempt:
+                    raise Exception(f"Could not find {doi} in DataCite: multiple timeouts")
+                LOGGER.warning(f"datacite.org timeout for {doi}: retrying ({attempt})")
+                sleep(1)
+                continue
+            raise Exception(err) from err
 
 
 def get_doi_record(doi):
@@ -424,10 +457,10 @@ def get_doi_record(doi):
             msg = DATACITE[doi]
         else:
             try:
-                msg = call_datacite(doi)
+                msg = call_datacite_with_retry(doi)
                 DATACITE_CALL[doi] = True
             except Exception as err:
-                LOGGER.warning(err)
+                terminate_program(err)
     else:
         # Crossref
         if doi in CROSSREF:
@@ -435,9 +468,20 @@ def get_doi_record(doi):
         else:
             try:
                 msg = call_crossref_with_retry(doi)
+                if 'author' not in msg['message'] and 'editor' not in msg['message']:
+                    MISSING[f"No author for {doi}"] = True
+                    LOGGER.warning(f"No author for {doi}")
+                    COUNT['noauthor'] += 1
+                    return None
+                if 'title' not in msg['message']:
+                    LOGGER.warning(f"No title for {doi}")
+                    MISSING[f"No title for {doi}"] = True
+                    return None
                 CROSSREF_CALL[doi] = True
-            except Exception as err:
+            except DOINotFound as err:
                 LOGGER.warning(err)
+            except Exception as err:
+                terminate_program(err)
     return msg
 
 
