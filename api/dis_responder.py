@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "39.1.0"
+__version__ = "39.2.0"
 # Database
 DB = {}
 # Custom queries
@@ -42,6 +42,7 @@ NAV = {"Home": "",
                 "DOIs by source": "dois_source",
                 "DOIs by year": "dois_year",
                 "DOIs by month": "dois_month",
+                "Data DOIs": "dois_data",
                 "DOI yearly report": "dois_report"
             },
        "Authorship": {"DOIs by authorship": "dois_author",
@@ -1160,10 +1161,11 @@ def s2_citation_count(doi, fmt='plain'):
         return 0
 
 
-def standard_doi_table(rows):
+def standard_doi_table(rows, prefix=None):
     ''' Create a standard table of DOIs
         Keyword arguments:
           rows: rows from dois collection
+          year: prefix for year pulldown
         Returns:
           HTML
     '''
@@ -1182,7 +1184,11 @@ def standard_doi_table(rows):
         cnt += 1
         fileoutput += dloop(row, ['published', 'doi', 'title']) + "\n"
     html += '</tbody></table>'
-    html = create_downloadable('standard', header, fileoutput) + html
+    if prefix:
+        html = year_pulldown(prefix) + "&nbsp;"*5 \
+               + create_downloadable('standard', header, fileoutput) + html
+    else:
+        html = create_downloadable('standard', header, fileoutput) + html
     return html, cnt
 
 # ******************************************************************************
@@ -2732,17 +2738,21 @@ def dois_source(year='All'):
     html = '<table id="types" class="tablesorter numberlast"><thead><tr>' \
            + '<th>Source</th><th>Type</th><th>Subtype</th><th>Count</th>' \
            + '</tr></thead><tbody>'
+    total = 0
     for key, val in sorted(hdict.items(), key=itemgetter(1), reverse=True):
         src, typ, sub = key.split('_')
         if not sub:
             sub = 'None'
+        total += val
         if year == 'All':
             val = f"<a href='/doisui_type/{src}/{typ}/{sub}'>{val}</a>"
         else:
             val = f"<a href='/doisui_type/{src}/{typ}/{sub}/{year}'>{val}</a>"
         html += f"<tr><td>{src}</td><td>{typ}</td><td>{sub if sub != 'None' else ''}</td>" \
                 + f"<td>{val}</td></tr>"
-    html += '</tbody></table><br>' + year_pulldown('dois_source')
+    html += f"</tbody><tfoot><tr><td colspan='3'>TOTAL</td><td>{total:,}</td>" \
+            + "</tr></tfoot></table><br>"
+    html += year_pulldown('dois_source')
     title = "DOIs by source"
     if year != 'All':
         title += f" ({year})"
@@ -2775,6 +2785,64 @@ def dois_source(year='All'):
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title=title, html=html,
                                          chartscript=chartscript, chartdiv=chartdiv,
+                                         navbar=generate_navbar('DOIs')))
+
+
+@app.route('/dois_data/<string:dtype>/<string:pub>/<string:year>')
+@app.route('/dois_data/<string:dtype>/<string:pub>')
+def dois_datad(dtype=None, pub=None, year='All'):
+    ''' Show data DOIs
+    '''
+    payload = {"jrc_obtained_from": "DataCite",
+               "types.resourceTypeGeneral": dtype, "publisher": pub}
+    if year != 'All':
+        payload['jrc_publishing_date'] = {"$regex": "^"+ year}
+    coll = DB['dis'].dois
+    try:
+        rows = coll.find(payload).sort("jrc_publishing_date", -1)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get data DOIs"),
+                               message=error_message(err))
+    html, cnt = standard_doi_table(rows, prefix=f"dois_data/{dtype}/{pub}")
+    title = f"DOIs for {pub} {dtype} ({cnt:,})"
+    if year != 'All':
+        title += f" (year={year})"
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=title, html=html,
+                                         navbar=generate_navbar('DOIs')))
+
+
+@app.route('/dois_data')
+def dois_data():
+    ''' Show data DOIs
+    '''
+    payload = [{"$match": {"jrc_obtained_from": "DataCite",
+                           "types.resourceTypeGeneral": {"$nin": ["Preprint"]}}},
+               {"$group": {"_id": {"type": "$types.resourceTypeGeneral",
+                                   "pub": "$publisher"}, "count": {"$sum": 1}}},
+               {"$sort": {"count": -1}}
+              ]
+    coll = DB['dis'].dois
+    try:
+        rows = coll.aggregate(payload)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get data DOIs"),
+                               message=error_message(err))
+    html = '<table id="data" class="tablesorter numberlast"><thead><tr>' \
+           + '<th>Type</th><th>Publisher</th><th>Count</th>' \
+           + '</tr></thead><tbody>'
+    total = 0
+    for row in rows:
+        total += row['count']
+        link = f"/dois_data/{row['_id']['type']}/{row['_id']['pub']}"
+        html += f"<td>{row['_id']['type']}</td><td>{row['_id']['pub']}</td>" \
+                + f"<td><a href='{link}'>{row['count']}</a></td></tr>"
+    html += "</tbody><tfoot><tr><td colspan='2'>TOTAL</td>" \
+            + f"<td>{total:,}</td></tr></tfoot></table><br>"
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="Data DOIs", html=html,
                                          navbar=generate_navbar('DOIs')))
 
 
@@ -3974,9 +4042,6 @@ def show_journal_ui(jname, year='All'):
                                title=render_warning("Could not get DOIs for journal"),
                                message=error_message(err))
     html, cnt = standard_doi_table(rows)
-    fname = 'journals'
-    if year != 'All':
-        fname += f"_{year}"
     title = f"DOIs for {jname} ({cnt})"
     if year != 'All':
         title += f" (year={year})"
