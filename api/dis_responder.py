@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "39.2.0"
+__version__ = "39.3.0"
 # Database
 DB = {}
 # Custom queries
@@ -2793,8 +2793,12 @@ def dois_source(year='All'):
 def dois_datad(dtype=None, pub=None, year='All'):
     ''' Show data DOIs
     '''
-    payload = {"jrc_obtained_from": "DataCite",
-               "types.resourceTypeGeneral": dtype, "publisher": pub}
+    if pub == 'protocols.io':
+        payload = {"jrc_obtained_from": "Crossref",
+                   "doi": {"$regex": "/protocols.io"}}
+    else:
+        payload = {"jrc_obtained_from": "DataCite",
+                   "types.resourceTypeGeneral": dtype, "publisher": pub}
     if year != 'All':
         payload['jrc_publishing_date'] = {"$regex": "^"+ year}
     coll = DB['dis'].dois
@@ -2817,11 +2821,22 @@ def dois_datad(dtype=None, pub=None, year='All'):
 def dois_data():
     ''' Show data DOIs
     '''
+    coll = DB['dis'].dois
     payload = [{"$match": {"jrc_obtained_from": "DataCite",
                            "types.resourceTypeGeneral": {"$nin": ["Preprint"]}}},
                {"$group": {"_id": {"type": "$types.resourceTypeGeneral",
                                    "pub": "$publisher"}, "count": {"$sum": 1}}},
-               {"$sort": {"count": -1}}
+               {"$sort": {"count": -1}},
+               {"$unionWith": {
+                   "coll": "dois",
+                   "pipeline": [
+                       {"$match": {"jrc_obtained_from": "Crossref",
+                                   "doi": {"$regex": "/protocols.io"}}},
+                       {"$group": {"_id": {"type": "$subtype", "pub": "protocols.io"},
+                                   "count": {"$sum": 1}}},
+                       {"$sort": {"count": -1}}
+                   ]
+               }}
               ]
     coll = DB['dis'].dois
     try:
@@ -2830,11 +2845,14 @@ def dois_data():
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get data DOIs"),
                                message=error_message(err))
+    dois = []
+    for row in rows:
+        dois.append(row)
     html = '<table id="data" class="tablesorter numberlast"><thead><tr>' \
            + '<th>Type</th><th>Publisher</th><th>Count</th>' \
            + '</tr></thead><tbody>'
     total = 0
-    for row in rows:
+    for row in sorted(dois, key=lambda x: x['count'], reverse=True):
         total += row['count']
         link = f"/dois_data/{row['_id']['type']}/{row['_id']['pub']}"
         html += f"<td>{row['_id']['type']}</td><td>{row['_id']['pub']}</td>" \
