@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "39.3.0"
+__version__ = "39.4.0"
 # Database
 DB = {}
 # Custom queries
@@ -781,14 +781,17 @@ def get_doi(doi):
           source: data source
           data: data from response
     '''
-    if DL.is_datacite(doi):
-        resp = JRC.call_datacite(doi)
-        source = 'datacite'
-        data = resp['data']['attributes'] if 'data' in resp else {}
-    else:
-        resp = JRC.call_crossref(doi)
-        source = 'crossref'
-        data = resp['message'] if 'message' in resp else {}
+    try:
+        if DL.is_datacite(doi):
+            resp = JRC.call_datacite(doi)
+            source = 'datacite'
+            data = resp['data']['attributes'] if 'data' in resp else {}
+        else:
+            resp = JRC.call_crossref(doi)
+            source = 'crossref'
+            data = resp['message'] if 'message' in resp else {}
+    except Exception as err:
+        raise err
     return source, data
 
 
@@ -1862,7 +1865,10 @@ def show_doi(doi):
         result['rest']['source'] = 'mongo'
         result['data'] = row
         return generate_response(result)
-    result['rest']['source'], result['data'] = get_doi(doi)
+    try:
+        result['rest']['source'], result['data'] = get_doi(doi)
+    except Exception as err:
+        raise InvalidUsage(str(err), 500) from err
     if result['data']:
         result['rest']['row_count'] = 1
     return generate_response(result)
@@ -2526,7 +2532,12 @@ def show_doi_ui(doi):
     else:
         recsec = '<h5 style="color:red">This DOI is not saved locally in the ' \
                  + 'Janelia database</h5><br>'
-    _, data = get_doi(doi)
+    try:
+        _, data = get_doi(doi)
+    except Exception as err:
+        return render_template('warning.html', urlroot=request.url_root,
+                                title=render_warning("Could not get DOI", 'error'),
+                                message=str(err))
     if not data:
         return render_template('warning.html', urlroot=request.url_root,
                                 title=render_warning("Could not find DOI", 'warning'),
