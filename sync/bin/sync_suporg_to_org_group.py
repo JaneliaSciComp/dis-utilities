@@ -110,7 +110,10 @@ def process_people_by_org(code, name):
     managed_teams = {}
     while True:
         LOGGER.debug(f"Getting people for {code} {name} ({page})")
-        rec = JRC.call_people_by_suporg(code, page)
+        try:
+            rec = JRC.call_people_by_suporg(code, page)
+        except Exception as err:
+            terminate_program(err)
         if not rec or 'people' not in rec or len(rec['people']) == 0:
             break
         for person in rec['people']:

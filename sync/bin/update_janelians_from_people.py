@@ -3,7 +3,7 @@
     data (names, affiliation, employee types, teams) from the People system.
 '''
 
-__version__ = '3.5.0'
+__version__ = '3.6.0'
 
 import argparse
 import collections
@@ -11,6 +11,7 @@ import json
 from operator import attrgetter
 import os
 import sys
+import requests
 from tqdm import tqdm
 import jrc_common.jrc_common as JRC
 
@@ -22,6 +23,8 @@ DB = {}
 COUNT = collections.defaultdict(lambda: 0, {})
 # Global variables
 ARG = DIS = LOGGER = None
+TIMEOUT = (requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout,
+           requests.exceptions.Timeout)
 
 def terminate_program(msg=None):
     ''' Terminate the program gracefully
@@ -274,7 +277,7 @@ def postprocessing(audit):
             for row in audit:
                 outfile.write(f"{json.dumps(row, indent=4, default=str)}\n")
         LOGGER.info(f"Wrote {len(audit)} updates to {filename}")
-    if not (ARG.TEST or ARG.WRITE):
+    if (not COUNT['updated']) or (not (ARG.TEST or ARG.WRITE)):
         return
     text = f"<pre>The orcid collection has been updated from the People system.\n\n{msg}</pre>"
     text += "<br><br>Please see the attached file for the new records."
@@ -303,9 +306,14 @@ def update_orcid():
         if ARG.RESET:
             reset_record(row)
         COUNT['orcid'] += 1
-        idresp = JRC.call_people_by_id(row['employeeId'])
+        try:
+            idresp = JRC.call_people_by_id(row['employeeId'])
+        except TIMEOUT as err:
+            terminate_program(f"Request failed after multiple retries: {err}")
+        except Exception as err:
+            terminate_program(f"Error calling People by id: {err}")
         if not idresp:
-            LOGGER.error(f"No People record for {row}")
+            LOGGER.warning(f"No People record for {row}")
             row['alumni'] = True
             COUNT['alumni'] += 1
             dirty = True
