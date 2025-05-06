@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "40.0.0"
+__version__ = "40.1.0"
 # Database
 DB = {}
 # Custom queries
@@ -1825,6 +1825,59 @@ def show_doi_migrations(idate):
             rec['doi'] = doi
             #if not result['rest']['authorized'] and 'jrc_author' in rec: #PLUG
             #    del rec['jrc_author']
+            result['data'].append(rec)
+        except Exception as err:
+            raise InvalidUsage(str(err), 500) from err
+    result['rest']['row_count'] = len(result['data'])
+    return generate_response(result)
+
+
+@app.route('/doi/published/<string:start>/<string:end>', methods=['GET'])
+def show_published_dois(start, end):
+    '''
+    Return DOI records for DOIs by date range
+    Return DOI records for DOIs with a publishing date in a specified date range.
+    # Do not display
+    tags:
+      - DOI
+    parameters:
+      - in: path
+        name: start
+        schema:
+          type: string
+        required: true
+        description: Earliest publishing date in ISO format (YYYY-MM-DD)
+      - in: path
+        name: end
+        schema:
+          type: string
+        required: true
+        description: Latest publishing date in ISO format (YYYY-MM-DD)
+    responses:
+      200:
+        description: DOI data
+      500:
+        description: MongoDB error
+    '''
+    result = initialize_result()
+    try:
+        _ = datetime.strptime(start,'%Y-%m-%d')
+        _ = datetime.strptime(end,'%Y-%m-%d')
+    except Exception as err:
+        raise InvalidUsage(str(err), 400) from err
+    payload = {"jrc_publishing_date": {"$gte" : start, "$lte" : end}}
+    try:
+        rows = DB['dis'].dois.find(payload, {'_id': 0})
+    except Exception as err:
+        raise InvalidUsage(str(err), 500) from err
+    result['rest']['row_count'] = 0
+    result['rest']['source'] = 'mongo'
+    result['data'] = []
+    for row in rows:
+        try:
+            rec = row
+            if not result['rest']['authorized'] and 'jrc_author' in rec:
+                del rec['jrc_author']
             result['data'].append(rec)
         except Exception as err:
             raise InvalidUsage(str(err), 500) from err
@@ -5047,7 +5100,7 @@ def show_labs():
             name += (f" {tiny_badge('alumni', 'Former employee')}")
         try:
             grow = DB['dis'].suporg.find_one({"name": row['group']})
-        except Exception as err:
+        except Exception:
             grow = None
         glink = f"<a href='/tag/{row['group']}'>{row['group']}</a>" if grow else row['group']
         html += f"<tr><td>{name}</td>" \
