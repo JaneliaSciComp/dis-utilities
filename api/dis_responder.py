@@ -16,7 +16,7 @@ import sys
 from time import time
 from bokeh.palettes import all_palettes, plasma
 import bson
-from flask import (Flask, make_response, render_template, request, jsonify, send_file)
+from flask import (Flask, make_response, render_template, request, jsonify, redirect, send_file)
 from flask_cors import CORS
 from flask_swagger import swagger
 import requests
@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "39.4.0"
+__version__ = "40.0.0"
 # Database
 DB = {}
 # Custom queries
@@ -2634,6 +2634,22 @@ def show_doi_ui(doi):
                                          navbar=generate_navbar('DOIs')))
 
 
+@app.route('/pmidui/<string:pmid>')
+def show_pmid_ui(pmid):
+    ''' Show PMID
+    '''
+    pmid = pmid.lstrip('/').rstrip('/').lower()
+    try:
+        row = DB['dis'].dois.find_one({"jrc_pmid": pmid})
+    except Exception as err:
+        return inspect_error(err, 'Could not get DOI')
+    if not row:
+        return render_template('warning.html', urlroot=request.url_root,
+                               title=render_warning("Could not find PMID", 'warning'),
+                               message=f"Could not find PMID {pmid}")
+    return redirect(f"/doiui/{row['doi']}")
+
+
 @app.route('/doisui_name/<string:family>')
 @app.route('/doisui_name/<string:family>/<string:given>')
 def show_doi_by_name_ui(family, given=None):
@@ -3406,6 +3422,7 @@ def show_doiui_custom():
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=ptitle, html=html,
                                          navbar=generate_navbar('DOIs')))
+
 
 @app.route('/dois_month/<string:year>')
 @app.route('/dois_month')
@@ -5021,13 +5038,21 @@ def show_labs():
         count += 1
         if 'affiliations' not in row:
             row['affiliations'] = ''
-        link = f"<a href='/userui/{row['orcid']}'>{row['orcid']}</a>" if 'orcid' in row else ''
-        name = " ".join([row['given'][0], row['family'][0]])
+        name = ' '.join([row['given'][0], row['family'][0]])
+        if 'userIdO365' in row:
+            name = f"<a href='/userui/{row['userIdO365']}'>{name}</a>"
+        elif 'orcid' in row:
+            name = f"<a href='/userui/{row['orcid']}'>{name}</a>"
         if 'alumni' in row and row['alumni']:
             name += (f" {tiny_badge('alumni', 'Former employee')}")
+        try:
+            grow = DB['dis'].suporg.find_one({"name": row['group']})
+        except Exception as err:
+            grow = None
+        glink = f"<a href='/tag/{row['group']}'>{row['group']}</a>" if grow else row['group']
         html += f"<tr><td>{name}</td>" \
-                + f"<td style='width: 180px'>{link}</td><td>{row['group']}</td>" \
-                + f"<td>{', '.join(row['affiliations'])}</td></tr>"
+                + f"<td style='width: 180px'>{row['orcid'] if 'orcid' in row else ''}</td>" \
+                + f"<td>{glink}</td><td>{', '.join(row['affiliations'])}</td></tr>"
     html += '</tbody></table>'
     return render_template('general.html', urlroot=request.url_root, title=f"Labs ({count:,})",
                            html=html, navbar=generate_navbar('ORCID'))
