@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "41.0.0"
+__version__ = "41.1.0"
 # Database
 DB = {}
 # Custom queries
@@ -4132,7 +4132,7 @@ def show_journals_dois(year='All'):
     if year != 'All':
         title += f" ({year})"
     html = "Note: not all subscriptions are currently tracked<br>" \
-           + year_pulldown('journals') + html
+           + year_pulldown('journals_dois') + html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
