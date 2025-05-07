@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "40.1.0"
+__version__ = "41.0.0"
 # Database
 DB = {}
 # Custom queries
@@ -52,10 +52,14 @@ NAV = {"Home": "",
                       "DOIs without Janelia authors": "dois_no_janelia"},
        "Preprints": {"DOIs by preprint status": "dois_preprint",
                      "DOIs by preprint status by year": "dois_preprint_year"},
-       "Journals": {"DOIs by journal": "journals",
+       "Journals": {"DOIs by journal": "journals_dois",
                     "Top journals": "top_journals",
                     "DOIs missing journals": "dois_nojournal",
                     "Journals referenced": "journals_referenced"},
+       "Subscriptions": {"Journals": "journals",
+                         "Books": "journals/Book",
+                         "Book series": "journals/Book series",
+                         "Monographs": "journals/Monograph"},
        "ORCID": {"Labs": "labs",
                  "Entries": "orcid_entry",
                  "Authors with multiple ORCIDs": "orcid_duplicates",
@@ -66,7 +70,8 @@ NAV = {"Home": "",
                            "Author affiliations": "orcid_tag",
                            "Projects": "projects",
                           },
-       "Stats" : {"Database": "stats_database"
+       "Stats" : {"Database": "stats_database",
+                  "Endpoints": "stats_endpoints"
                  },
        "External systems": {"Search HHMI People system": "people",
                             "HHMI Supervisory Organizations": "orgs/full",
@@ -2559,6 +2564,7 @@ def show_home(doi=None):
     orgs = '<option>'
     orgs += '</option><option>'.join(sorted(olist))
     orgs += '</option>'
+    endpoint_access()
     return make_response(render_template('home.html', urlroot=request.url_root,
                                          journals=journals, orgs=orgs,
                                          navbar=generate_navbar('Home')))
@@ -2681,6 +2687,7 @@ def show_doi_ui(doi):
                 html += f"<br><h4>Potential Janelia authors ({count})</h4>" \
                         + f"<div class='scroll'>{''.join(alist)}</div>"
     doititle = f"{doi} (PMID: {row['jrc_pmid']})" if row and 'jrc_pmid' in row else doi
+    endpoint_access()
     return make_response(render_template('doi.html', urlroot=request.url_root,
                                          title=doititle, recsec=recsec, doisec=doisec,
                                          cittype=cittype, citsec=citsec, html=html,
@@ -2729,6 +2736,7 @@ def show_doi_by_name_ui(family, given=None):
                                message="Could not find any DOIs with author name matching " \
                                        + f"{family} {given}")
     name = f"{given} {family}" if given else family
+    endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=f"DOIs for {name}", html=html,
                                          navbar=generate_navbar('DOIs')))
@@ -2762,6 +2770,7 @@ def show_doi_by_type_ui(src, typ, sub, year):
                                title=render_warning("Could not find DOIs", 'warning'),
                                message="Could not find any DOIs with type/subtype matching " \
                                        + desc)
+    endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=f"DOIs for {desc}", html=html,
                                          navbar=generate_navbar('DOIs')))
@@ -2798,6 +2807,7 @@ def show_doi_by_title_ui(title):
         return render_template('warning.html', urlroot=request.url_root,
                                title=render_warning("Could not find DOIs", 'warning'),
                                message=f"Could not find any DOIs with title matching {title}")
+    endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=f"DOIs for {title}", html=html,
                                          navbar=generate_navbar('DOIs')))
@@ -2862,6 +2872,7 @@ def dois_source(year='All'):
     title = "DOI sources"
     if year != 'All':
         title += f" ({year})"
+    endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title=title, html=html,
                                          chartscript=chartscript, chartdiv=chartdiv,
@@ -2892,6 +2903,7 @@ def dois_datad(dtype=None, pub=None, year='All'):
     title = f"DOIs for {pub} {dtype} ({cnt:,})"
     if year != 'All':
         title += f" (year={year})"
+    endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
                                          navbar=generate_navbar('DOIs')))
@@ -2939,6 +2951,7 @@ def dois_data():
                 + f"<td><a href='{link}'>{row['count']}</a></td></tr>"
     html += "</tbody><tfoot><tr><td colspan='2'>TOTAL</td>" \
             + f"<td>{total:,}</td></tr></tfoot></table><br>"
+    endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="Data DOIs", html=html,
                                          navbar=generate_navbar('DOIs')))
@@ -3161,6 +3174,7 @@ def dois_report(year=str(datetime.now().year)):
     html = f"<div class='titlestat'>{year} YEAR IN REVIEW</div>{sheet}<br>" \
            + f"<div class='yearstat'>{html}</div>"
     html += '<br>' + year_pulldown('dois_report', all_years=False)
+    endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=f"{year}", html=html,
                                          navbar=generate_navbar('DOIs')))
@@ -3214,6 +3228,7 @@ def dois_year():
     chartscript, chartdiv = DP.stacked_bar_chart(data, "DOIs published by year/source",
                                                  xaxis="years", yaxis=app.config['SOURCES'],
                                                  colors=DP.SOURCE_PALETTE)
+    endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title="DOIs published by year", html=html,
                                          chartscript=chartscript, chartdiv=chartdiv,
@@ -3296,6 +3311,7 @@ def show_insert(idate):
     cbutton = "<button class=\"btn btn-outline-warning\" " \
               + "onclick=\"$('.other').toggle();\">Filter for candidate DOIs</button>"
     html = create_downloadable("jrc_inserted", None, fileoutput) + f" &nbsp;{cbutton}{html}"
+    endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=f"DOIs inserted on or after {idate}", html=html,
                                          navbar=generate_navbar('DOIs')))
@@ -3389,6 +3405,7 @@ def show_organization(org_in, year=str(datetime.now().year), show="full"):
                + f"{'Journal/preprint ' if show == 'journal' else ''}" \
                + f"DOIs found for {org_in}: {dcnt:,}<br>" \
                + buttons + html
+    endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=ptitle, html=html,
                                          navbar=generate_navbar('DOIs')))
@@ -3472,6 +3489,7 @@ def show_doiui_custom():
     html = create_downloadable(ipd['field'], header, fileoutput) + html
     html = f"DOIs: {len(works):,}<br>Journals/preprints: {jorp:,}<br>" \
            + f"DOIs in newsletter: {newsletter:,}<br>" + html
+    endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=ptitle, html=html,
                                          navbar=generate_navbar('DOIs')))
@@ -3521,6 +3539,7 @@ def dois_month(year=str(datetime.now().year)):
                                                  xaxis="months",
                                                  yaxis=('Crossref', 'DataCite'),
                                                  colors=DP.SOURCE_PALETTE)
+    endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title=title, html=html,
                                          chartscript=chartscript, chartdiv=chartdiv,
@@ -3561,6 +3580,7 @@ def dois_pending():
               if 'url' in row and row['url'] else doi_link(row['doi'])
         html += f"<tr><td>{url}</td><td>{row['inserted']}</td><td>{etime}</td>"
     html += '</tbody></table>'
+    endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="DOIs awaiting processing", html=html,
                                          navbar=generate_navbar('DOIs')))
@@ -3614,6 +3634,7 @@ def dois_publisher(year='All'):
     if year != 'All':
         title += f" for {year}"
     title += f" ({len(pubs):,})"
+    endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
                                          navbar=generate_navbar('DOIs')))
@@ -3691,6 +3712,7 @@ def dois_author(year='All'):
     title = "DOI authorship"
     if year != 'All':
         title += f" ({year})"
+    endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title=title, html=html,
                                          chartscript=chartscript, chartdiv=chartdiv,
@@ -3711,6 +3733,7 @@ def dois_first_author(year='All'):
     title = "Top first authors"
     if year != 'All':
         title += f" ({year})"
+    endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
                                          navbar=generate_navbar('Authorship')))
@@ -3730,6 +3753,7 @@ def dois_last_author(year='All'):
     title = "Top last authors"
     if year != 'All':
         title += f" ({year})"
+    endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
                                          navbar=generate_navbar('Authorship')))
@@ -3807,6 +3831,7 @@ def doiui_group(year='All'):
     title = "DOIs with lab head first/last authors"
     if year != 'All':
         title += f" ({year})"
+    endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title=title, html=html,
                                          chartscript=chartscript, chartdiv=chartdiv,
@@ -3850,6 +3875,7 @@ def dois_no_janelia(year='All'):
     if year != 'All':
         title += f" for {year}"
     title += f" ({cnt:,})"
+    endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
                                          navbar=generate_navbar('Authorship')))
@@ -3952,6 +3978,7 @@ def dois_preprint(year='All'):
     title = "DOI preprint status"
     if year != 'All':
         title += f" ({year})"
+    endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title=title, html=html,
                                          chartscript=chartscript, chartdiv=chartdiv,
@@ -4003,40 +4030,110 @@ def dois_preprint_year():
                                                  xaxis="years",
                                                  yaxis=('Journal article', 'Preprint'),
                                                  colors=DP.SOURCE_PALETTE)
+    endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title="DOIs preprint status by year", html=html,
                                          chartscript=chartscript, chartdiv=chartdiv,
                                          navbar=generate_navbar('Preprints')))
 
+def endpoint_access():
+    ''' Access endpoint
+    '''
+    endpoint = str(request.url_rule).split('/')[1]
+    coll = DB['dis'].api_endpoint
+    try:
+        row = coll.find_one({"endpoint": endpoint})
+        if row:
+            coll.update_one({"endpoint": endpoint}, {"$inc": {"count": 1}})
+        else:
+            coll.insert_one({"endpoint": endpoint, "count": 1})
+    except Exception:
+        pass
+
 # ******************************************************************************
 # * UI endpoints (Journals)                                                    *
 # ******************************************************************************
 
-@app.route('/journals/<string:year>')
+@app.route('/journals/<string:jtype>')
 @app.route('/journals')
-def show_journals(year='All'):
+def show_journals(jtype='Journal'):
+    ''' Show journals, books, etc. in a table
+    '''
+    errmsg = "Could not get journal data from journal collection"
+    try:
+        cnt = DB['dis'].journal.count_documents({"type": jtype})
+        rows = DB['dis'].journal.find({"type": jtype})
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning(errmsg),
+                               message=error_message(err))
+    if not rows:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning(errmsg),
+                               message='No journals were found')
+    html = '<table id="journals" class="tablesorter standard"><thead><tr>' \
+           + '<th>Title</th><th>Publisher</th><th>Provider</th></tr></thead><tbody>'
+    fileoutput = ""
+    for row in rows:
+        jour = f"<a href='{row['url']}'>{row['title']}</a>"
+        html += f"<tr><td>{jour}</td><td>{row['publisher']}</td>" \
+                + f"<td>{row['provider']}</td></tr>"
+        fileoutput += f"{row['title']}\t{row['publisher']}\t{row['provider']}\n"
+    html += '</tbody></table>'
+    title = f"{jtype} ({cnt:,})"
+    dwnload = create_downloadable(jtype, ['Title', 'Publisher', 'Provider'], fileoutput)
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=title, html=dwnload + html,
+                                         navbar=generate_navbar('Journals')))
+
+
+@app.route('/journals_dois/<string:year>')
+@app.route('/journals_dois')
+def show_journals_dois(year='All'):
     ''' Show journals in a table
     '''
+    errmsg = "Could not get journal data from journal collection"
+    try:
+        rows = DB['dis'].journal.find({"type": "Journal"})
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning(errmsg),
+                               message=error_message(err))
+    subscribed = {}
+    for row in rows:
+        subscribed[row['title']] = row
     try:
         journal = get_top_journals(year, maxpub=True)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get journal data from dois"),
+                               title=render_warning(errmsg),
                                message=error_message(err))
     if not journal:
         return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get journal data from dois"),
+                               title=render_warning(errmsg),
                                message='No journals were found')
     html = '<table id="journals" class="tablesorter numbers"><thead><tr>' \
-           + '<th>Journal</th><th>Count</th><th>Last published to</th></tr></thead><tbody>'
+           + '<th>Journal</th><th>Publisher</th><th>Count</th><th>Last published to</th>' \
+           + '<th>Subscription</th></tr></thead><tbody>'
     for key in sorted(journal, key=lambda x: journal[x]['count'], reverse=True):
-        html += f"<tr><td><a href='/journal/{key}/{year}'>{key}</a></td>" \
-                + f"<td>{journal[key]['count']:,}</td><td>{journal[key]['maxpub']}</td></tr>"
+        if key in subscribed:
+            jour = f"<a href='{subscribed[key]['url']}'>{key}</a>"
+            publisher = subscribed[key]['publisher']
+            sub = '<span style="color: lime">YES</span>'
+        else:
+            jour = key
+            publisher = sub = ''
+        html += f"<tr><td>{jour}</td><td>{publisher}</td>" \
+                + f"<td><a href='/journal/{key}/{year}'>{journal[key]['count']:,}</a></td>" \
+                + f"<td>{journal[key]['maxpub']}</td><td>{sub}</td></tr>"
     html += '</tbody></table>'
     title = "DOIs by journal"
     if year != 'All':
         title += f" ({year})"
-    html = year_pulldown('journals') + html
+    html = "Note: not all subscriptions are currently tracked<br>" \
+           + year_pulldown('journals') + html
+    endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
                                          navbar=generate_navbar('Journals')))
@@ -4077,6 +4174,7 @@ def top_journals(year='All', top=10):
     title = f"Top {top} DOI journals"
     if year != 'All':
         title += f" ({year})"
+    endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title=title, html=html,
                                          chartscript=chartscript, chartdiv=chartdiv,
@@ -4120,6 +4218,7 @@ def dois_nojournal(year='All'):
         title += f" for {year}"
     if cnt:
         title += f" ({cnt})"
+    endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
                                          navbar=generate_navbar('Journals')))
@@ -4144,6 +4243,7 @@ def show_journal_ui(jname, year='All'):
     title = f"DOIs for {jname} ({cnt})"
     if year != 'All':
         title += f" (year={year})"
+    endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                             title=title, html=html,
                                             navbar=generate_navbar('Journals')))
@@ -4181,6 +4281,7 @@ def journals_referenced(year='All'):
     html = year_pulldown("journals_referenced") + "<br><br>" \
            + create_downloadable('journals', ['Journal', 'References'], fileoutput) \
            + f"<br><br>Journals: {journals:,}<br>References: {refs:,}"
+    endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=ptitle, html=html,
                                          navbar=generate_navbar('Journals')))
@@ -4226,6 +4327,7 @@ def show_oid_ui(oid):
     # Works
     if 'works' in data['activities-summary'] and data['activities-summary']['works']['group']:
         html += add_orcid_works(data, dois)
+    endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=f"<a href='https://orcid.org/{oid}' " \
                                                + f"target='_blank'>{oid}</a>", html=html,
@@ -4253,6 +4355,7 @@ def show_user_ui(eid, show='full'):
     buttons = journal_buttons(show, f"/userui/{eid}")
     if "DOIs:" in orciddata:
         orciddata = re.sub(r"(DOIs: [0-9,]+)", r"<br>\1" + buttons, orciddata)
+    endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=full_name, html=orciddata,
                                          navbar=generate_navbar('ORCID')))
@@ -4274,6 +4377,7 @@ def show_unvaluser_ui(iid):
                                title=render_warning(f"Could not find ID {iid}", 'warning'),
                                message="Could not find any information for this orcid " \
                                        + "collection ID")
+    endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="User has no ORCID or employee ID",
                                          html=orciddata, navbar=generate_navbar('ORCID')))
@@ -4298,6 +4402,7 @@ def show_names_ui(name):
                                message=error_message(err))
     html, count = generate_user_table(rows)
     html = f"Search term: {name}<br>" + html
+    endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=f"Authors: {count:,}", html=html,
                                          navbar=generate_navbar('ORCID')))
@@ -4392,6 +4497,7 @@ def orcid_entry():
                 cnt += 1
         noorc += "</p>"
         html += f"<h5>Users with no ORCID ({cnt:,})</h5><p style='line-height:1.1'>{noorc}"
+    endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title="ORCID entries", html=html,
                                          chartscript=chartscript, chartdiv=chartdiv,
@@ -4441,6 +4547,7 @@ def orcid_duplicates():
             html += '</tbody></table>'
         if not html:
             html = "<p>No duplicates found</p>"
+    endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="Authors with multiple ORCIDs", html=html,
                                          navbar=generate_navbar('ORCID')))
@@ -4484,6 +4591,7 @@ def author_duplicates():
         inner.append(f"<div class='rounded' style='background-color: {bcolor};'>{name}<br>" \
                      + "<br>".join(f"&nbsp;&nbsp;&nbsp;&nbsp;{o}" for o in occur) + "</div>")
     html += "".join(inner)
+    endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="Duplicate authors", html=html,
                                          navbar=generate_navbar('ORCID')))
@@ -4557,6 +4665,7 @@ def peoporgsle(full=None):
                + f'onclick="{full}">Show all suporgs</button></div>'
         title = "Supervisory organizations with DOIs"
     html = phtml + html
+    endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=f"{title} ({cnt:,})",
                                          html=html, navbar=generate_navbar('External systems')))
@@ -4594,6 +4703,7 @@ def people(name=None):
             loc = f"<span style='color:lime'>{loc}</span>"
         html += f"<tr><td>{link}</td><td>{rec['businessTitle']}</td><td>{loc}</td></tr>"
     html += "</tbody></table>"
+    endpoint_access()
     return make_response(render_template('people.html', urlroot=request.url_root,
                                          title="Search People system", content=html,
                                          navbar=generate_navbar('External systems')))
@@ -4621,6 +4731,7 @@ def peoplerec(eid):
         title += f"&nbsp;<img src='{rec['photoURL']}' width=100 height=100 " \
                  + f"alt='Photo of {rec['nameFirstPreferred']}'>"
     html = f"<div class='scroll' style='height:750px'><pre>{json.dumps(rec, indent=2)}</pre></div>"
+    endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
                                          navbar=generate_navbar('External systems')))
@@ -4664,6 +4775,7 @@ def ror(rorid=None):
             link = f"<a href='{rel['id'].split('/')[-1]}'>{rel['label']}</a>"
             html += f"<li>{rel['type']}: {link}</li>"
         html += "</ul>"
+    endpoint_access()
     return make_response(render_template('ror.html', urlroot=request.url_root,
                                          title="Search ROR", content=html,
                                          navbar=generate_navbar('External systems')))
@@ -4728,6 +4840,7 @@ def dois_tag():
     cbutton = "<button class=\"btn btn-outline-warning\" " \
               + "onclick=\"$('.other').toggle();\">Filter for active SupOrgs</button>"
     html = cbutton + html
+    endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=f"DOI tags ({len(tags):,})", html=html,
                                          navbar=generate_navbar('Tag/affiliation')))
@@ -4789,6 +4902,7 @@ def orcid_tag():
         html += f"<tr class={rclass}><td>{link}</td><td>{org}</td><td>{link2}</td>" \
                 + f"<td>{perc}</td></tr>"
     html += '</tbody></table>'
+    endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=f"Author affiliations ({count:,})", html=html,
                                          navbar=generate_navbar('Tag/affiliation')))
@@ -4854,6 +4968,7 @@ def dois_top(show="journal", num=10):
                                                  xaxis="years", yaxis=top, width=900, height=height,
                                                  colors=colors)
     title = f"DOI tags{' for journal articles/preprints' if show =='journal' else ''} by year/tag"
+    endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title=title, html=html,
                                          chartscript=chartscript, chartdiv=chartdiv,
@@ -4914,6 +5029,7 @@ def projects(option=None):
         title += " (unknown)"
     elif option == 'full':
         title += " (all)"
+    endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
                                          navbar=generate_navbar('Tags/affiliation')))
@@ -4937,6 +5053,7 @@ def project(name):
         html = f"<p>Number of DOIs: {cnt:,}</p>" + html
     else:
         html = f"<br>No DOIs found for {name}"
+    endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=f"Project: {name}", html=html,
                                          navbar=generate_navbar('Tags/affiliation')))
@@ -4988,6 +5105,7 @@ def orcid_affiliation(aff, year='All'):
         html = htmlp + f"<p>Number of tagged DOIs{note}: {cnt:,}</p>" + html
     else:
         html = f"{htmlp}<br>No DOIs found for {aff}"
+    endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=aff,
                                          html=html,
@@ -5041,8 +5159,29 @@ def stats_database():
                     "</th><th style='text-align:center'>") + "</th></tr>"
     html += '</tfoot>'
     html += '</table>'
+    endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="Database statistics", html=html,
+                                         navbar=generate_navbar('Stats')))
+
+@app.route('/stats_endpoints')
+def stats_endpoints():
+    ''' Show endpoint stats
+    '''
+    try:
+        rows = DB['dis'].api_endpoint.find().sort("endpoint", 1)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get endpoint stats"),
+                               message=error_message(err))
+    html = '<table class="tablesorter numbercenter"><thead><tr><th>Endpoint</th>' \
+           + '<th>Count</th></tr></thead><tbody>'
+    for row in rows:
+        html += f"<tr><td>{row['endpoint']}</td><td>{row['count']}</td></tr>"
+    html += '</tbody></table>'
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="Endpoint access counts", html=html,
                                          navbar=generate_navbar('Stats')))
 
 # ******************************************************************************
@@ -5107,6 +5246,7 @@ def show_labs():
                 + f"<td style='width: 180px'>{row['orcid'] if 'orcid' in row else ''}</td>" \
                 + f"<td>{glink}</td><td>{', '.join(row['affiliations'])}</td></tr>"
     html += '</tbody></table>'
+    endpoint_access()
     return render_template('general.html', urlroot=request.url_root, title=f"Labs ({count:,})",
                            html=html, navbar=generate_navbar('ORCID'))
 
