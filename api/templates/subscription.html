@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block script %}
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jquery-cookie/1.4.1/jquery.cookie.min.js"></script>
+<script src="/static/bootstrap-autocomplete/autocomplete.js"></script>
+<script>
+$(document).on('keypress', 'input', function(e) {
+  if (e.which === 13) {
+    var focusedElement = $(':focus');
+    var eid = focusedElement.attr('id');
+    e.preventDefault();
+    if (eid == 'input-titlelist') {
+        find_by_title();
+    }
+    if (eid == 'input-publist') {
+        find_by_publisher();
+    }
+  }
+  return;
+});
+  function find_by_title() {
+    if (!$('#input-titlelist').val()) {
+      return;
+    }
+    url = "/subscriptionlist/" + $("#input-titlelist").val() + "/"
+          + $("#sub").val() + "/title";
+    window.location = url;
+  }
+  function find_by_publisher() {
+    if (!$('#input-publist').val()) {
+      return;
+    }
+    url = "/subscriptionlist/" + $("#input-publist").val() + "/"
+          + $("#sub").val() + "/publisher";
+    window.location = url;
+  }
+</script>
+{% endblock %}
+
+{% block content %}
+<h2>{{title|safe}}</h2>
+{{ html|safe }}
+<br><br>
+<form>
+<h5>Find subscription:</h5>
+<div class="flexcontainer">
+  <div class="flexitem">
+  <span class="form-control-lg">By title:</span>
+  </div>
+  <div class="flexitem">
+    <div class="form-group">
+      <input type="text" class="form-control" placeholder="Select a title" list="list-title" id="input-titlelist">
+      <datalist id="list-title">
+        {{ titles | safe }}
+      </datalist>
+  </div>
+  <script>
+      document.addEventListener('DOMContentLoaded', e => {
+          $('#input-titlelist').autocomplete()
+      }, false);
+  </script>
+  </div>
+  <div class="flexitem">
+    <button type="submit" id="doij" class="btn btn-primary btn-md" onclick="find_by_title(); return false;" href="#">Look up</button>
+  </div>
+</div>
+<br>
+<div class="flexcontainer">
+  <div class="flexitem">
+  <span class="form-control-lg">By publisher:</span>
+  </div>
+  <div class="flexitem">
+    <div class="form-group">
+      <input type="text" class="form-control" placeholder="Select a publisher" list="list-pub" id="input-publist">
+      <datalist id="list-pub">
+        {{ pubs | safe }}
+      </datalist>
+  </div>
+  <script>
+      document.addEventListener('DOMContentLoaded', e => {
+          $('#input-publist').autocomplete()
+      }, false);
+  </script>
+  </div>
+  <div class="flexitem">
+    <button type="submit" id="subp" class="btn btn-primary btn-md" onclick="find_by_publisher(); return false;" href="#">Look up</button>
+  </div>
+</div>
+<input type="hidden" id="sub" name="sub" value="{{sub}}">
+</form>
+{% endblock %}

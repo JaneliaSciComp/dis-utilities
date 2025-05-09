@@ -11,9 +11,6 @@ $(document).on('keypress', 'input', function(e) {
     if (eid == 'doi') {
         find_doi();
     }
-    else if (eid == 'pmid') {
-        find_pmid();
-    }
     else if (eid == 'doiname') {
         find_dois();
     }
@@ -38,19 +35,10 @@ $(document).on('keypress', 'input', function(e) {
   function find_doi() {
     var focusedElement = $(':focus');
     if (!$('#doi').val()) {
-      alert("You must enter a DOI");
+      alert("You must enter a DOI or PMID");
       return;
     }
     url = "/doiui/" + $("#doi").val();
-    window.location = url;
-  }
-  function find_pmid() {
-    var focusedElement = $(':focus');
-    if (!$('#pmid').val()) {
-      alert("You must enter a PMID");
-      return;
-    }
-    url = "/pmidui/" + $("#pmid").val();
     window.location = url;
   }
   function find_dois() {
@@ -113,25 +101,13 @@ onload="tableInitialize();"
 <form>
 <div class="flexcontainer">
   <div class="flexitem">
-  <span class="form-control-lg">Find a DOI:</span>
+  <span class="form-control-lg">Find a DOI or PMID:</span>
   </div>
   <div class="flexitem">
     <input type="text" class="form-control form-control-lg" id="doi" size=28>
   </div>
   <div class="flexitem">
     <button type="submit" id="doib" class="btn btn-primary btn-md" onclick="find_doi(); return false;" href="#">Look up</button>
-  </div>
-</div>
-<br>
-<div class="flexcontainer">
-  <div class="flexitem">
-  <span class="form-control-lg">Find a PMID:</span>
-  </div>
-  <div class="flexitem">
-    <input type="text" class="form-control form-control-lg" id="pmid" size=28>
-  </div>
-  <div class="flexitem">
-    <button type="submit" id="pmib" class="btn btn-primary btn-md" onclick="find_pmid(); return false;" href="#">Look up</button>
   </div>
 </div>
 <br>
