@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "41.1.0"
+__version__ = "42.0.0"
 # Database
 DB = {}
 # Custom queries
@@ -43,8 +43,7 @@ NAV = {"Home": "",
                 "DOIs by year": "dois_year",
                 "DOIs by month": "dois_month",
                 "Data DOIs": "dois_data",
-                "DOI yearly report": "dois_report"
-            },
+                "DOI yearly report": "dois_report"},
        "Authorship": {"DOIs by authorship": "dois_author",
                       "DOIs with lab head first/last authors": "doiui_group",
                       "Top first authors": "dois_first_author",
@@ -56,27 +55,23 @@ NAV = {"Home": "",
                     "Top journals": "top_journals",
                     "DOIs missing journals": "dois_nojournal",
                     "Journals referenced": "journals_referenced"},
-       "Subscriptions": {"Journals": "journals",
-                         "Books": "journals/Book",
-                         "Book series": "journals/Book series",
-                         "Monographs": "journals/Monograph"},
+       "Subscriptions": {"Journals": "subscriptions",
+                         "Books": "subscriptions/Book",
+                         "Book series": "subscriptions/Book series",
+                         "Monographs": "subscriptions/Monograph"},
        "ORCID": {"Labs": "labs",
                  "Entries": "orcid_entry",
                  "Authors with multiple ORCIDs": "orcid_duplicates",
-                 "Duplicate authors": "duplicate_authors"
-                },
+                 "Duplicate authors": "duplicate_authors"},
        "Tag/affiliation": {"DOIs by tag": "dois_tag",
                            "Top DOI tags by year": "dois_top",
                            "Author affiliations": "orcid_tag",
-                           "Projects": "projects",
-                          },
+                           "Projects": "projects"},
        "Stats" : {"Database": "stats_database",
-                  "Endpoints": "stats_endpoints"
-                 },
+                  "Endpoints": "stats_endpoints"},
        "External systems": {"Search HHMI People system": "people",
                             "HHMI Supervisory Organizations": "orgs/full",
-                            "ROR": "ror",
-                           }
+                            "ROR": "ror"}
       }
 # Sources
 
@@ -284,6 +279,7 @@ def generate_navbar(active):
                 if itm == 'divider':
                     nav += "<div class='dropdown-divider'></div>"
                     continue
+                print(itm, type(val))
                 link = f"/{val}" if val else ('/' + itm.replace(" ", "_")).lower()
                 nav += f"<a class='dropdown-item' href='{link}'>{itm}</a>"
             nav += '</div></li>'
@@ -293,6 +289,7 @@ def generate_navbar(active):
             nav += f"<a class='nav-link' href='{link}'>{heading}</a></li>"
     nav += '</ul></div></nav>'
     return nav
+
 
 # ******************************************************************************
 # * Payload utility functions                                                  *
@@ -724,6 +721,25 @@ def add_orcid_works(data, dois, return_html=True):
     return html if return_html else results
 
 
+def endpoint_access():
+    ''' Increment an endpoint counter
+        Keyword arguments:
+          None
+        Returns:
+          None
+    '''
+    endpoint = str(request.url_rule).split('/')[1]
+    coll = DB['dis'].api_endpoint
+    try:
+        row = coll.find_one({"endpoint": endpoint})
+        if row:
+            coll.update_one({"endpoint": endpoint}, {"$inc": {"count": 1}})
+        else:
+            coll.insert_one({"endpoint": endpoint, "count": 1})
+    except Exception:
+        pass
+
+
 def generate_user_table(rows):
     ''' Generate HTML for a list of users
         Keyword arguments:
@@ -850,14 +866,23 @@ def add_jrc_fields(row):
     return html
 
 
-def add_relations(row):
-    ''' Create a list of relations
+def make_link(url):
+    ''' Create a link from a URL
+        Keyword arguments:
+          url: URL
+        Returns:
+          HTML link
+    '''
+    return f"<a href='{url}' target='_blank'>{url}</a>"
+
+
+def get_relations_from_row(row):
+    ''' Get relations from a row
         Keyword arguments:
           row: DOI record
         Returns:
-          HTML
+          relations
     '''
-    html = ""
     relations = {}
     if "relation" in row and row['relation']:
         # Crossref relations
@@ -877,6 +902,21 @@ def add_relations(row):
                 if rel['relationType'] not in relations:
                     relations[rel['relationType']] = []
                 relations[rel['relationType']].append(doi_link(rel['relatedIdentifier']))
+            elif 'relatedIdentifierType' in rel and rel['relatedIdentifierType'] == 'URL':
+                if rel['relationType'] not in relations:
+                    relations[rel['relationType']] = []
+                relations[rel['relationType']].append(make_link(rel['relatedIdentifier']))
+    return relations
+
+
+def add_relations(row):
+    ''' Create a list of relations
+        Keyword arguments:
+          row: DOI record
+        Returns:
+          HTML
+    '''
+    relations = get_relations_from_row(row)
     html = ""
     for rel, val in relations.items():
         if '-' not in rel:
@@ -1317,6 +1357,23 @@ def add_orcid_badges(orc):
 # ******************************************************************************
 # * Journal utility functions                                                  *
 # ******************************************************************************
+
+def get_subscriptions(stype='Journal'):
+    ''' Get subscriptions
+        Keyword arguments:
+          stype: type to get data for
+        Returns:
+          Subscription data
+    '''
+    try:
+        rows = DB['dis'].subscription.find({"type": stype})
+    except Exception as err:
+        raise err
+    sub = {}
+    for row in rows:
+        sub[row['title']] = True
+    return sub
+
 
 def get_top_journals(year, maxpub=False):
     ''' Get top journals
@@ -2578,6 +2635,17 @@ def show_doi_ui(doi):
     '''
     # pylint: disable=too-many-return-statements
     doi = doi.lstrip('/').rstrip('/').lower()
+    if doi.isdigit():
+        pmid = doi.lstrip('/').rstrip('/').lower()
+        try:
+            row = DB['dis'].dois.find_one({"jrc_pmid": pmid})
+        except Exception as err:
+            return inspect_error(err, 'Could not get PMID')
+        if not row:
+            return render_template('warning.html', urlroot=request.url_root,
+                                   title=render_warning("Could not find DOI", 'warning'),
+                                   message=f"Could not find DOI from PMID {pmid}")
+        doi = row['doi']
     try:
         row = DB['dis'].dois.find_one({"doi": doi})
     except Exception as err:
@@ -4036,66 +4104,18 @@ def dois_preprint_year():
                                          chartscript=chartscript, chartdiv=chartdiv,
                                          navbar=generate_navbar('Preprints')))
 
-def endpoint_access():
-    ''' Access endpoint
-    '''
-    endpoint = str(request.url_rule).split('/')[1]
-    coll = DB['dis'].api_endpoint
-    try:
-        row = coll.find_one({"endpoint": endpoint})
-        if row:
-            coll.update_one({"endpoint": endpoint}, {"$inc": {"count": 1}})
-        else:
-            coll.insert_one({"endpoint": endpoint, "count": 1})
-    except Exception:
-        pass
-
 # ******************************************************************************
 # * UI endpoints (Journals)                                                    *
 # ******************************************************************************
-
-@app.route('/journals/<string:jtype>')
-@app.route('/journals')
-def show_journals(jtype='Journal'):
-    ''' Show journals, books, etc. in a table
-    '''
-    errmsg = "Could not get journal data from journal collection"
-    try:
-        cnt = DB['dis'].journal.count_documents({"type": jtype})
-        rows = DB['dis'].journal.find({"type": jtype})
-    except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning(errmsg),
-                               message=error_message(err))
-    if not rows:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning(errmsg),
-                               message='No journals were found')
-    html = '<table id="journals" class="tablesorter standard"><thead><tr>' \
-           + '<th>Title</th><th>Publisher</th><th>Provider</th></tr></thead><tbody>'
-    fileoutput = ""
-    for row in rows:
-        jour = f"<a href='{row['url']}'>{row['title']}</a>"
-        html += f"<tr><td>{jour}</td><td>{row['publisher']}</td>" \
-                + f"<td>{row['provider']}</td></tr>"
-        fileoutput += f"{row['title']}\t{row['publisher']}\t{row['provider']}\n"
-    html += '</tbody></table>'
-    title = f"{jtype} ({cnt:,})"
-    dwnload = create_downloadable(jtype, ['Title', 'Publisher', 'Provider'], fileoutput)
-    endpoint_access()
-    return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title=title, html=dwnload + html,
-                                         navbar=generate_navbar('Journals')))
-
 
 @app.route('/journals_dois/<string:year>')
 @app.route('/journals_dois')
 def show_journals_dois(year='All'):
     ''' Show journals in a table
     '''
-    errmsg = "Could not get journal data from journal collection"
+    errmsg = "Could not get journal data from subscription collection"
     try:
-        rows = DB['dis'].journal.find({"type": "Journal"})
+        rows = DB['dis'].subscription.find({"type": "Journal"})
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning(errmsg),
@@ -4119,8 +4139,11 @@ def show_journals_dois(year='All'):
     for key in sorted(journal, key=lambda x: journal[x]['count'], reverse=True):
         if key in subscribed:
             jour = f"<a href='{subscribed[key]['url']}'>{key}</a>"
+            jour = f"<a href='/subscription/{str(subscribed[key]['_id'])}'>{key}</a>"
             publisher = subscribed[key]['publisher']
-            sub = '<span style="color: lime">YES</span>'
+            sub = '<span style="color: lime">YES</span>' \
+                  if subscribed[key]['access'] == 'Subscription' \
+                  else f"<span style='color: yellowgreen'>{subscribed[key]['access']}</span>"
         else:
             jour = key
             publisher = sub = ''
@@ -4131,7 +4154,8 @@ def show_journals_dois(year='All'):
     title = "DOIs by journal"
     if year != 'All':
         title += f" ({year})"
-    html = "Note: not all subscriptions are currently tracked<br>" \
+    html = "Note: not all subscriptions are currently tracked - " \
+           + "Subscription tracking is a work in process<br>" \
            + year_pulldown('journals_dois') + html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
@@ -4287,6 +4311,114 @@ def journals_referenced(year='All'):
                                          navbar=generate_navbar('Journals')))
 
 # ******************************************************************************
+# * UI endpoints (subscriptions)                                               *
+# ******************************************************************************
+
+@app.route('/subscriptions/<string:jtype>')
+@app.route('/subscriptions')
+def show_subscriptions(jtype='Journal'):
+    ''' Show journals, books, etc. in a table
+    '''
+    errmsg = "Could not get data from subscription collection"
+    try:
+        cnt = DB['dis'].subscription.count_documents({"type": jtype})
+        rows = DB['dis'].subscription.find({"type": jtype})
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning(errmsg),
+                               message=error_message(err))
+    if not rows:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning(errmsg),
+                               message='No journals were found')
+    html = '<table id="journals" class="tablesorter standard"><thead><tr>' \
+           + '<th>Title</th><th>Publisher</th><th>Provider</th></tr></thead><tbody>'
+    fileoutput = ""
+    jlist = {}
+    publist = {}
+    for row in rows:
+        jlist[row['title']] = True
+        publist[row['publisher']] = True
+        publist[row['publisher']] = True
+        jour = f"<a href='{row['url']}'>{row['title']}</a>"
+        jour = f"<a href='/subscription/{str(row['_id'])}'>{row['title']}</a>"
+        html += f"<tr><td>{jour}</td><td>{row['publisher']}</td>" \
+                + f"<td>{row['provider']}</td></tr>"
+        fileoutput += f"{row['title']}\t{row['publisher']}\t{row['provider']}\n"
+    html += '</tbody></table>'
+    title = f"{jtype} subscriptions ({cnt:,})"
+    html = create_downloadable(jtype, ['Title', 'Publisher', 'Provider'], fileoutput)
+    titles = '<option>' + '</option><option>'.join(sorted(jlist.keys())) + '</option>'
+    pubs = '<option>' + '</option><option>'.join(sorted(publist.keys())) + '</option>'
+    endpoint_access()
+    return make_response(render_template('subscription.html', urlroot=request.url_root,
+                                         title=title, titles=titles, pubs=pubs,
+                                         html = html, sub=jtype,
+                                         navbar=generate_navbar('Subscriptions')))
+
+
+@app.route('/subscriptionlist/<string:sub>/<string:stype>/<string:field>')
+def show_subscriptionlist(sub, stype='Journal', field='title'):
+    ''' Show subscription list for a title
+    '''
+    errmsg = "Could not get data from subscription collection"
+    try:
+        cnt = DB['dis'].subscription.count_documents({field: sub, "type": stype})
+        rows = DB['dis'].subscription.find({field: sub, "type": stype})
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning(errmsg),
+                               message=error_message(err))
+    if not cnt:
+        return render_template('warning.html', urlroot=request.url_root,
+                               title=render_warning(errmsg),
+                               message=f"No subscriptions were found for {sub}")
+    if cnt == 1:
+        return redirect(f"/subscription/{rows[0]['_id']}")
+    html = "<table id='journals' class='tablesorter standard'><thead><tr>" \
+           + '<th>Title</th><th>Publisher</th><th>Provider</th><th>Title ID</th>' \
+           + '</tr></thead><tbody>'
+    for row in rows:
+        link = f"<a href='/subscription/{str(row['_id'])}'>{row['title']}</a>"
+        html += f"<tr><td>{link}</td><td>{row['publisher']}</td>" \
+                + f"<td>{row['provider']}</td><td>{row['title-id']}</td></tr>"
+    html += '</tbody></table>'
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=f"{stype} subscriptions for {field} {sub} ({cnt:,})", html=html,
+                                         navbar=generate_navbar('Subscriptions')))
+
+
+@app.route('/subscription/<string:sid>')
+def show_subscription(sid):
+    ''' Show subscription
+    '''
+    errmsg = "Could not get data from subscription collection"
+    try:
+        row = DB['dis'].subscription.find_one({"_id": bson.ObjectId(sid)})
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning(errmsg),
+                               message=error_message(err))
+    if not row:
+        return render_template('warning.html', urlroot=request.url_root,
+                               title=render_warning(errmsg),
+                               message=f"No subscription was found for {sid}")
+    html = f"<table class='proplist'><tr><td>Publisher</td><td>{row['publisher']}</td></tr>" \
+           + f"<tr><td>Type</td><td>{row['type']}</td></tr>" \
+           + f"<tr><td>Access</td><td>{row['access']}</td></tr>" \
+           + f"<tr><td>Provider</td><td>{row['provider']}</td></tr>" \
+           + f"<tr><td>Title ID</td><td>{row['title-id']}</td></tr>"
+    html += "</table>"
+    link = f"window.location.href=\'{row['url']}\'"
+    html += '<br><div><button id="toggle-to-all" type="button" class="btn btn-success btn-small"' \
+            + f"onclick=\"{link}\">Access {row['type']}</button></div>"
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=row['title'], html=html,
+                                         navbar=generate_navbar('Subscriptions')))
+
+# ******************************************************************************
 # * UI endpoints (ORCID)                                                       *
 # ******************************************************************************
 @app.route('/orcidui/<string:oid>')
@@ -4332,6 +4464,7 @@ def show_oid_ui(oid):
                                          title=f"<a href='https://orcid.org/{oid}' " \
                                                + f"target='_blank'>{oid}</a>", html=html,
                                          navbar=generate_navbar('ORCID')))
+
 
 @app.route('/userui/<string:eid>/<string:show>')
 @app.route('/userui/<string:eid>')
