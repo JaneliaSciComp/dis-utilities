@@ -7,7 +7,7 @@
            to DIS MongoDB.
 """
 
-__version__ = '9.0.0'
+__version__ = '10.0.0'
 
 import argparse
 import configparser
@@ -312,6 +312,16 @@ def get_dois_for_dis(flycore):
     return {"dois": dlist}
 
 
+def split_raw_doi(doi_string):
+    """ Split a raw DOI string into multiple DOIs
+        Keyword arguments:
+          doi: DOI
+        Returns:
+          dois: list of DOIs
+    """
+    return re.split(r"\s*\|\s*", doi_string)
+
+
 def get_dois():
     ''' Get a list of DOIs to process. This will be one of four things:
         - a single DOI from ARG.DOI
@@ -347,7 +357,14 @@ def get_dois():
     if ARG.TARGET == 'dis':
         return get_dois_for_dis(flycore)
     # Default is to pull from FlyCore
-    return flycore
+    pflycore = []
+    for doistring in flycore['dois']:
+        dois = split_raw_doi(doistring)
+        for doi in dois:
+            if 'in prep' not in doi and doi not in pflycore:
+                pflycore.append(doi)
+    return {'dois': pflycore}
+
 
 class DOINotFound(Exception):
     """ DOINotFound exception
