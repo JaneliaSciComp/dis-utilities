@@ -4629,7 +4629,8 @@ def orcid_entry():
                 noorc += f"<a href='/userui/{row['userIdO365']}'>{name} {dois}</a><br>"
                 cnt += 1
         noorc += "</p>"
-        html += f"<h5>Users with no ORCID ({cnt:,})</h5><p style='line-height:1.1'>{noorc}"
+        html += f"<h5>Published authors with no ORCID ({cnt:,})</h5>" \
+                + f"<p style='line-height:1.1'>{noorc}"
     endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title="ORCID entries", html=html,

@@ -129,6 +129,7 @@ def update_affiliations(idresp, row):
     '''
     dirty = False
     bumped = False
+    old_affiliations = row['affiliations'] if 'affiliations' in row else []
     # Add affiliations from People
     if 'affiliations' in idresp and idresp['affiliations']:
         for aff in idresp['affiliations']:
@@ -139,6 +140,7 @@ def update_affiliations(idresp, row):
         if dirty:
             bumped = True
             COUNT['affiliations'] += 1
+            LOGGER.warning(f"{row['given'][0]} {row['family'][0]}: {old_affiliations} -> {row['affiliations']}")
     # Add ccDescr if this person doesn't already have a group
     if 'group' not in row and 'ccDescr' in idresp and idresp['ccDescr']:
         set_row(row, 'affiliations')
@@ -148,6 +150,7 @@ def update_affiliations(idresp, row):
             if not bumped:
                 bumped = True
                 COUNT['affiliations'] += 1
+                LOGGER.warning(f"{row['given'][0]} {row['family'][0]}: {old_affiliations} -> {row['affiliations']}")
     # Add supOrgName if the supOrgSubType isn't Company or Division
     if 'supOrgName' in idresp and 'supOrgSubType' in idresp and \
         idresp['supOrgSubType'] not in ['Company', 'Division']:
@@ -158,6 +161,7 @@ def update_affiliations(idresp, row):
             if not bumped:
                 bumped = True
                 COUNT['affiliations'] += 1
+                LOGGER.warning(f"{row['given'][0]} {row['family'][0]}: {old_affiliations} -> {row['affiliations']}")
     return dirty
 
 
@@ -173,6 +177,7 @@ def update_managed_teams(idresp, row):
         return False
     dirty = False
     lab = ''
+    old_affiliations = row['affiliations'] if 'affiliations' in row else []
     old_managed = row['managed'] if 'managed' in row else []
     for team in idresp['managedTeams']:
         if team['supOrgSubType'] == 'Lab' and team['supOrgName'].endswith(' Lab'):
@@ -198,6 +203,7 @@ def update_managed_teams(idresp, row):
         if team['supOrgName'] not in row['affiliations']:
             row['affiliations'].append(team['supOrgName'])
             COUNT['affiliations'] += 1
+            LOGGER.warning(f"{row['given'][0]} {row['family'][0]}: {old_affiliations} -> {row['affiliations']}")
             dirty = True
     if not dirty or 'managed' not in row:
         return dirty
