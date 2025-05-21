@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "42.0.0"
+__version__ = "42.1.0"
 # Database
 DB = {}
 # Custom queries
@@ -893,7 +893,12 @@ def get_relations_from_row(row):
                     continue
                 if rel not in relations:
                     relations[rel] = []
-                relations[rel].append(doi_link(itm['id']))
+                if itm['id-type'] == 'uri':
+                    relations[rel].append(f"<a href='{itm['id']}'>(Other resource)</a>")
+                elif itm['id-type'] == 'doi':
+                    relations[rel].append(doi_link(itm['id']))
+                else:
+                    relations[rel].append(itm['id'])
                 used.append(itm['id'])
     elif 'relatedIdentifiers' in row and row['relatedIdentifiers']:
         # DataCite relations
