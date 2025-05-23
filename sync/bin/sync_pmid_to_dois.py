@@ -3,12 +3,13 @@
     DOI needs to be in the PubMed Central archive.
 '''
 
-__version__ = '1.0.0'
+__version__ = '2.0.0'
 
 import argparse
 import collections
 import json
 from operator import attrgetter
+import os
 import sys
 from tqdm import tqdm
 import jrc_common.jrc_common as JRC
@@ -22,6 +23,7 @@ COUNT = collections.defaultdict(lambda: 0, {})
 # Search parms
 ALLOWED_TYPES = ["book-chapter", "journal-article", "posted-content", "proceedings-article"]
 ARG = LOGGER = None
+ENTREZ_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed"
 
 def terminate_program(msg=None):
     ''' Terminate the program gracefully
@@ -44,6 +46,8 @@ def initialize_program():
         Returns:
           None
     '''
+    if "NCBI_API_KEY" not in os.environ:
+        terminate_program("Missing API key - set in NCBI_API_KEY environment variable")
     try:
         dbconfig = JRC.get_config("databases")
     except Exception as err:
@@ -95,6 +99,20 @@ def postprocessing(audit, error):
         LOGGER.info(f"Wrote {len(error):,} errors to {filename}")
 
 
+def update_pmid(row, pmid, audit):
+    ''' Update PMID
+        Keyword arguments:
+          row: record to update
+          pmid: PMID to update
+          audit: list of updates
+    '''
+    payload = {"jrc_pmid": pmid}
+    COUNT['updated'] += 1
+    write_record(row, payload)
+    payload["doi"] = row['doi']
+    audit.append(payload)
+
+
 def update_dois():
     ''' Sync NCBI PMIDs to the dois collection
         Keyword arguments:
@@ -103,7 +121,6 @@ def update_dois():
           None
     '''
     payload = {"jrc_pmid": {"$exists": False},
-               "jrc_obtained_from": "Crossref",
                "type": {"$in": ALLOWED_TYPES}}
     try:
         cnt = DB['dis']['dois'].count_documents(payload)
@@ -114,17 +131,16 @@ def update_dois():
     error = []
     for row in tqdm(rows, total=cnt, desc="Syncing PMIDs"):
         COUNT['doi'] += 1
-        pmid = JRC.get_pmid(row['doi'])
-        if pmid and 'status' in pmid and pmid['status'] == 'ok' \
-            and 'pmid' in pmid['records'][0]:
-            payload = {"jrc_pmid": pmid['records'][0]['pmid']}
-            COUNT['updated'] += 1
-            write_record(row, payload)
-            payload["doi"] = row['doi']
-            audit.append(payload)
-        else:
-            if pmid:
-                error.append(pmid)
+        try:
+            pmid = JRC.get_pmid(row['doi'])
+        except JRC.PMIDNotFound as err:
+            error.append({"doi": row['doi'], "error": err.details})
+            continue
+        except Exception as err:
+            terminate_program(err)
+        if pmid:
+            LOGGER.info(f"Found PMID {pmid} for {row['doi']}")
+            update_pmid(row, pmid, audit)
     postprocessing(audit, error)
 
 # -----------------------------------------------------------------------------
