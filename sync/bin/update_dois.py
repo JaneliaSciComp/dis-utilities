@@ -7,7 +7,7 @@
            to DIS MongoDB.
 """
 
-__version__ = '10.0.0'
+__version__ = '10.1.0'
 
 import argparse
 import configparser
@@ -765,10 +765,14 @@ def add_pmid(key, persist):
         Returns:
           None
     '''
-    pmid = JRC.get_pmid(key)
-    if pmid and 'status' in pmid and pmid['status'] == 'ok' \
-       and 'pmid' in pmid['records'][0]:
-        persist[key]['jrc_pmid'] = pmid['records'][0]['pmid']
+    try:
+        pmid = JRC.get_pmid(key)
+    except JRC.PMIDNotFound:
+        return
+    except Exception as err:
+        terminate_program(err)
+    if pmid:
+        persist[key]['jrc_pmid'] = pmid
 
 
 def get_tags(persist, rec):
@@ -867,7 +871,8 @@ def add_first_last_authors(rec):
                     janelian = DL.is_janelia_author(auth, DB['dis'].orcid, PROJECT)
                 except Exception as err:
                     LOGGER.error(auth)
-                    LOGGER.error(f"Could not process author in for DL.is_janelia_author {rec['doi']}")
+                    LOGGER.error("Could not process author in for DL.is_janelia_author" \
+                                 + rec['doi'])
                     terminate_program(err)
                 if janelian:
                     first.append(janelian)
