@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "42.1.0"
+__version__ = "43.0.0"
 # Database
 DB = {}
 # Custom queries
@@ -55,7 +55,8 @@ NAV = {"Home": "",
                     "Top journals": "top_journals",
                     "DOIs missing journals": "dois_nojournal",
                     "Journals referenced": "journals_referenced"},
-       "Subscriptions": {"Journals": "subscriptions",
+       "Subscriptions": {"Summary": "subscriptions",
+                         "Journals": "subscriptions/Journal",
                          "Books": "subscriptions/Book",
                          "Book series": "subscriptions/Book series",
                          "Monographs": "subscriptions/Monograph"},
@@ -4319,9 +4320,44 @@ def journals_referenced(year='All'):
 # * UI endpoints (subscriptions)                                               *
 # ******************************************************************************
 
-@app.route('/subscriptions/<string:jtype>')
 @app.route('/subscriptions')
-def show_subscriptions(jtype='Journal'):
+def show_subscription_summary():
+    ''' Show subscription summary
+    '''
+    errmsg = "Could not get data from subscription collection"
+    try:
+        cnt = DB['dis'].subscription.count_documents({})
+        oacnt = DB['dis'].subscription.count_documents({"access": "Open access"})
+        pubs = DB['dis'].subscription.aggregate([{"$group": {"_id": "$publisher",
+                                                             "count": {"$sum": 1}}},
+                                                 {"$sort": {"_id": 1}}])
+        typs = DB['dis'].subscription.aggregate([{"$group": {"_id": "$type", "count": {"$sum": 1}}},
+                                                 {"$sort": {"_id": 1}}])
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning(errmsg),
+                               message=error_message(err))
+    publisher = {}
+    fileoutput = ""
+    for row in pubs:
+        publisher[row['_id']] = row['count']
+        fileoutput += f"{row['_id']}\t{row['count']}\n"
+    html = f"<h4>Found {cnt:,} subscriptions ({oacnt:,} open access) across " \
+           + f"{len(publisher):,} publishers</h4>"
+    html += create_downloadable('subscriptions', ['Publisher', 'Count'], fileoutput)
+    html += "<table id='journals' class='tablesorter numbers'><thead><tr>" \
+            + '<th>Subscription type</th><th>Count</th></tr></thead><tbody>'
+    for row in typs:
+        html += f"<tr><td><a href='/subscriptions/{row['_id']}'>{row['_id']}</a></td>" \
+                + f"<td>{row['count']}</td></tr>"
+    html += '</tbody></table>'
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title='Subscription summary', html=html,
+                                         navbar=generate_navbar('Subscriptions')))
+
+
+@app.route('/subscriptions/<string:jtype>')
+def show_subscriptions(jtype):
     ''' Show journals, books, etc. in a table
     '''
     errmsg = "Could not get data from subscription collection"
@@ -4358,7 +4394,7 @@ def show_subscriptions(jtype='Journal'):
     endpoint_access()
     return make_response(render_template('subscription.html', urlroot=request.url_root,
                                          title=title, titles=titles, pubs=pubs,
-                                         html = html, sub=jtype,
+                                         html=html, sub=jtype,
                                          navbar=generate_navbar('Subscriptions')))
 
 
@@ -4390,7 +4426,8 @@ def show_subscriptionlist(sub, stype='Journal', field='title'):
     html += '</tbody></table>'
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title=f"{stype} subscriptions for {field} {sub} ({cnt:,})", html=html,
+                                         title=f"{stype} subscriptions for {field} " \
+                                               + f"{sub} ({cnt:,})", html=html,
                                          navbar=generate_navbar('Subscriptions')))
 
 
