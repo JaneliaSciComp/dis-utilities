@@ -1541,8 +1541,6 @@ def find_full_text(doi, jour, row):
               plink = f"{app.config['ELIFE']}{num}"
           except Exception as _:
               pass
-        else:
-          plink = f"{app.config['JOURNAL']}{doi}"
         return f" {tiny_badge('pdf', 'Full text', plink)}"
     if 'jrc_pmid' in row:
         plink = f"{app.config['PMC']}articles/pmid/{row['jrc_pmid']}"
