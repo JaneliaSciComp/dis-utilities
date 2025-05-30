@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "43.0.0"
+__version__ = "44.0.0"
 # Database
 DB = {}
 # Custom queries
@@ -280,7 +280,6 @@ def generate_navbar(active):
                 if itm == 'divider':
                     nav += "<div class='dropdown-divider'></div>"
                     continue
-                print(itm, type(val))
                 link = f"/{val}" if val else ('/' + itm.replace(" ", "_")).lower()
                 nav += f"<a class='dropdown-item' href='{link}'>{itm}</a>"
             nav += '</div></li>'
@@ -1524,6 +1523,30 @@ def get_tag_details(tag):
 # * General utility functions                                                  *
 # ******************************************************************************
 
+def find_full_text(doi, jour, row):
+    ''' Find full text for a DOI
+        Keyword arguments:
+          doi: DOI
+          jour: journal
+          row: row from the dois table
+        Returns:
+          URL for full text
+    '''
+    if jour and 'bioRxiv' in jour:
+        plink = f"{app.config['BIORXIV']}{doi}.full.pdf"
+        return f" {tiny_badge('pdf', 'Full text', plink)}"
+    if 'jrc_pmid' in row:
+        plink = f"{app.config['PMC']}articles/pmid/{row['jrc_pmid']}"
+        #try:
+        #    pmcid = JRC.convert_pmid(row['jrc_pmid'])
+        #    if pmcid:
+        #        plink = f"{app.config['PMC']}articles/{pmcid}"
+        #except Exception as _:
+        #    pass
+        return f" {tiny_badge('pdf', 'Full text', plink)}"
+    return ""
+
+
 def random_string(strlen=8):
     ''' Generate a random string of letters and digits
         Keyword arguments:
@@ -2720,10 +2743,8 @@ def show_doi_ui(doi):
     if oresp:
         olink = f"{app.config['OA']}{doi}"
         doisec += f" {tiny_badge('source', 'OA data', olink)}"
-    if local and jour:
-        if 'bioRxiv' in jour:
-            pbase = f"{app.config['BIORXIV']}{doi}.full.pdf"
-            doisec += f" {tiny_badge('pdf', 'PDF', pbase)}"
+    if local:
+        doisec += find_full_text(doi, jour, row)
         #doisec += f" {tiny_badge('info', 'HQ migration', f'/doi/migration/{doi}')}"
     doisec += "</span><br>"
     if row:
