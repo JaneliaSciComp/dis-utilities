@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "44.0.0"
+__version__ = "45.0.0"
 # Database
 DB = {}
 # Custom queries
@@ -1532,8 +1532,17 @@ def find_full_text(doi, jour, row):
         Returns:
           URL for full text
     '''
-    if jour and 'bioRxiv' in jour:
-        plink = f"{app.config['BIORXIV']}{doi}.full.pdf"
+    if jour:
+        if 'bioRxiv' in jour:
+          plink = f"{app.config['BIORXIV']}{doi}.full.pdf"
+        elif 'eLife' in jour:
+          try:
+              num = doi.split('/')[-1].replace('elife.', '').split('.')[0]
+              plink = f"{app.config['ELIFE']}{num}"
+          except Exception as _:
+              pass
+        else:
+          plink = f"{app.config['JOURNAL']}{doi}"
         return f" {tiny_badge('pdf', 'Full text', plink)}"
     if 'jrc_pmid' in row:
         plink = f"{app.config['PMC']}articles/pmid/{row['jrc_pmid']}"
