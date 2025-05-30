@@ -1539,9 +1539,9 @@ def find_full_text(doi, jour, row):
           try:
               num = doi.split('/')[-1].replace('elife.', '').split('.')[0]
               plink = f"{app.config['ELIFE']}{num}"
+              return f" {tiny_badge('pdf', 'Full text', plink)}"
           except Exception as _:
               pass
-        return f" {tiny_badge('pdf', 'Full text', plink)}"
     if 'jrc_pmid' in row:
         plink = f"{app.config['PMC']}articles/pmid/{row['jrc_pmid']}"
         #try:
