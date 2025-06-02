@@ -11,7 +11,7 @@
        updating first/last author (if necessary).
 """
 
-__version__ = '1.0.0'
+__version__ = '1.1.0'
 
 import argparse
 import collections
@@ -32,6 +32,7 @@ DB = {}
 ARG = DIS = LOGGER = None
 TO_ADD = {'affiliation': {}, 'orcid': {}, 'name': {}}
 OUTPUT = {'affiliation': [], 'orcid': [], 'name': []}
+IGNORE = {}
 TO_UPDATE = {}
 # Counters
 COUNT = collections.defaultdict(lambda: 0, {})
@@ -70,6 +71,15 @@ def initialize_program():
             DB[source] = JRC.connect_database(dbo)
         except Exception as err:
             terminate_program(err)
+    with open('ignore_uncredited.tsv', encoding='utf-8') as instream:
+        for line in instream:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split('\t')
+            if parts[0] not in IGNORE:
+                IGNORE[parts[0]] = []
+            IGNORE[parts[0]].append(parts[1])
 
 
 def janelia_affiliation(affiliations, mode='Crossref'):
@@ -183,6 +193,21 @@ def current_employee(auth):
     return 'alumni' not in auth and auth['workerType'] != 'Contingent Worker'
 
 
+def ignore_author(auth, row):
+    ''' Check if the author should be ignored for a specified DOI
+        Keyword arguments:
+          auth: record from orcid table
+          row: record from dois table
+    '''
+    full = f"{auth['given'][0]} {auth['family'][0]}"
+    if full not in IGNORE:
+        return False
+    if row['doi'] in IGNORE[full]:
+        LOGGER.warning(f"Ignoring {full} for {row['doi']}")
+        return True
+    return False
+
+
 def valid_author(auth, rows):
     ''' Check if the author is valid
         Keyword arguments:
@@ -193,6 +218,8 @@ def valid_author(auth, rows):
     '''
     bumped = False
     for row in rows:
+        if ignore_author(auth, row):
+            continue
         match_type = get_doi_author_matches(auth, row)
         if 'affiliation' in match_type:
             msg = f"{auth['given'][0]} {auth['family'][0]} is on {row['doi']} (affiliation)"
