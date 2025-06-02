@@ -3,7 +3,7 @@
     DOI needs to be in the PubMed Central archive.
 '''
 
-__version__ = '2.0.0'
+__version__ = '3.0.0'
 
 import argparse
 import collections
@@ -130,17 +130,26 @@ def update_dois():
     audit = []
     error = []
     for row in tqdm(rows, total=cnt, desc="Syncing PMIDs"):
+        pmid = ''
+        errmsg = {}
         COUNT['doi'] += 1
         try:
             pmid = JRC.get_pmid(row['doi'])
         except JRC.PMIDNotFound as err:
-            error.append({"doi": row['doi'], "error": err.details})
-            continue
+            errmsg = {"doi": row['doi'], "error": err.details}
         except Exception as err:
             terminate_program(err)
         if pmid:
-            LOGGER.info(f"Found PMID {pmid} for {row['doi']}")
             update_pmid(row, pmid, audit)
+            continue
+        try:
+            oresp = JRC.call_oa(row['doi'])
+        except Exception as err:
+            terminate_program(err)
+        if oresp and 'PMID' in oresp:
+            update_pmid(row, oresp['PMID'], audit)
+        if errmsg:
+            error.append(errmsg)
     postprocessing(audit, error)
 
 # -----------------------------------------------------------------------------
