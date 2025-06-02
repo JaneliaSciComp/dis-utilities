@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "45.0.0"
+__version__ = "45.1.0"
 # Database
 DB = {}
 # Custom queries
@@ -1523,18 +1523,21 @@ def get_tag_details(tag):
 # * General utility functions                                                  *
 # ******************************************************************************
 
-def find_full_text(doi, jour, row):
+def find_full_text(doi, jour, row, oresp):
     ''' Find full text for a DOI
         Keyword arguments:
           doi: DOI
           jour: journal
           row: row from the dois table
+          oresp: response from the OA API
         Returns:
           URL for full text
     '''
+    # bioRxiv and eLife
     if jour:
         if 'bioRxiv' in jour:
           plink = f"{app.config['BIORXIV']}{doi}.full.pdf"
+          return f" {tiny_badge('pdf', 'Full text', plink)}"
         elif 'eLife' in jour:
           try:
               num = doi.split('/')[-1].replace('elife.', '').split('.')[0]
@@ -1542,15 +1545,18 @@ def find_full_text(doi, jour, row):
               return f" {tiny_badge('pdf', 'Full text', plink)}"
           except Exception as _:
               pass
+    # PubMed Central
     if 'jrc_pmid' in row:
         plink = f"{app.config['PMC']}articles/pmid/{row['jrc_pmid']}"
-        #try:
-        #    pmcid = JRC.convert_pmid(row['jrc_pmid'])
-        #    if pmcid:
-        #        plink = f"{app.config['PMC']}articles/{pmcid}"
-        #except Exception as _:
-        #    pass
         return f" {tiny_badge('pdf', 'Full text', plink)}"
+    # OA
+    if oresp:
+        if 'publisher_url_for_pdf' in oresp:
+            plink = oresp['publisher_url_for_pdf']
+            return f" {tiny_badge('pdf', 'Full text', plink)}"
+        elif 'best_oa_location_url_for_pdf' in oresp:
+            plink = oresp['best_oa_location_url_for_pdf']
+            return f" {tiny_badge('pdf', 'Full text', plink)}"
     return ""
 
 
@@ -2751,7 +2757,7 @@ def show_doi_ui(doi):
         olink = f"{app.config['OA']}{doi}"
         doisec += f" {tiny_badge('source', 'OA data', olink)}"
     if local:
-        doisec += find_full_text(doi, jour, row)
+        doisec += find_full_text(doi, jour, row, oresp)
         #doisec += f" {tiny_badge('info', 'HQ migration', f'/doi/migration/{doi}')}"
     doisec += "</span><br>"
     if row:
