@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "45.2.0"
+__version__ = "46.0.0"
 # Database
 DB = {}
 # Custom queries
@@ -60,8 +60,9 @@ NAV = {"Home": "",
                          "Books": "subscriptions/Book",
                          "Book series": "subscriptions/Book series",
                          "Monographs": "subscriptions/Monograph"},
-       "ORCID": {"Labs": "labs",
-                 "Entries": "orcid_entry",
+       "ORCID": {"Entries": "orcid_entry",
+                 "Labs": "labs",
+                 "Latest hires": "orcid_datepicker",
                  "Authors with multiple ORCIDs": "orcid_duplicates",
                  "Duplicate authors": "duplicate_authors"},
        "Tag/affiliation": {"DOIs by tag": "dois_tag",
@@ -4578,6 +4579,68 @@ def show_names_ui(name):
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=f"Authors: {count:,}", html=html,
                                          navbar=generate_navbar('ORCID')))
+
+
+@app.route('/orcid_datepicker')
+def show_orcid_date_picker():
+    '''
+    Show a datepicker for selecting employees
+    '''
+    after = '<a class="btn btn-success" role="button" onclick="lookup(); return False;">' \
+            + 'Look up employees</a>'
+    return make_response(render_template('orcid_picker.html', urlroot=request.url_root,
+                                         title="Employee lookup by hire date",
+                                         startdef=weeks_ago(4), stopdef=str(date.today()),
+                                         after=after, navbar=generate_navbar('DOIs')))
+
+
+@app.route('/orcid/hiredate/<string:startdate>/<string:stopdate>')
+def show_hires(startdate, stopdate):
+    '''
+    Return employees that have been hired within the specified date range
+    '''
+    try:
+        cnt = DB['dis'].orcid.count_documents({"hireDate": {"$gte" : startdate, "$lte" : stopdate}})
+        rows = DB['dis'].orcid.find({"hireDate": {"$gte" : startdate, "$lte" : stopdate}},
+                                   {'_id': 0}).sort([("hireDate", -1), ("family", 1)])
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get employees"),
+                               message=error_message(err))
+    if not cnt:
+        return render_template('warning.html', urlroot=request.url_root,
+                               title=render_warning("Employees not found"),
+                               message=f"No employees were hired {startdate} - {stopdate}")
+    html = "<table id='hires' class='tablesorter standard'><thead><tr>" \
+           + "<th>Hire Date</th><th>Name</th><th>ORCID</th><th>Affiliations</th>" \
+           + "</tr></thead><tbody>"
+    for row in rows:
+        if 'orcid' not in row:
+            row['orcid'] = ""
+        who = f"{row['family'][0]}, {row['given'][0]}"
+        if 'userIdO365' in row and row['userIdO365']:
+            who = f"<a href='/userui/{row['userIdO365']}'>{who}</a>"
+        badges = []
+        if 'alumni' in row and row['alumni']:
+            badges.append(f"{tiny_badge('alumni', 'Former employee')}")
+        if 'workerType' in row and row['workerType'] and row['workerType'] != 'Employee':
+            badges.append(f"{tiny_badge('contingent', row['workerType'])}")
+        if 'group' in row:
+            badges.append(f"{tiny_badge('lab', row['group'])}")
+        if badges:
+            who += f" {' '.join(badges)}"
+        if 'affiliations' not in row:
+            row['affiliations'] = []
+        else:
+            row['affiliations'] = sorted(list(row['affiliations']))
+        html += f"<tr><td style='min-width:100px'>{row['hireDate']}</td><td>{who}</td>" \
+                + f"<td style='min-width:180px'>{row['orcid']}</td>" \
+                + f"<td>{', '.join(row['affiliations'])}</td></tr>"
+    html += '</tbody></table>'
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=f"Employees hired {startdate} - {stopdate} " \
+                                               + f"({cnt:,})",
+                                         html=html, navbar=generate_navbar('ORCID')))
 
 
 @app.route('/orcid_entry')
