@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "46.0.0"
+__version__ = "47.0.0"
 # Database
 DB = {}
 # Custom queries
@@ -474,18 +474,37 @@ def add_to_name(given, name, grow):
 
 
 def name_search_payload(given, family):
-    ''' Generate a payload for searching the orcid collection by name
+    ''' Generate a payload for searching the orcid collection by names
         Keyword arguments:
           given: list of given names
           family: list of family names
         Returns:
           Payload
     '''
-    return {"$and": [{"$or": [{"author.given": {"$in": given}},
-                              {"creators.givenName": {"$in": given}}]},
-                     {"$or": [{"author.family": {"$in": family}},
-                              {"creators.familyName": {"$in": family}}]}]
-           }
+    cross = {"author": {"$elemMatch": {"given": {'$in': given},
+                                       "family": {'$in': family}}}}
+    data = {"creators": {"$elemMatch": {"givenName": {'$in': given},
+                                        "familyName": {'$in': family}}}}
+    return {"$or": [cross, data]}
+
+
+def single_name_search_payload(given, family):
+    ''' Generate a payload for searching the orcid collection by a single name
+        Keyword arguments:
+          given: given name
+          family: family name
+        Returns:
+          Payload
+    '''
+    cross = {"author": {"$elemMatch": {"given": {"$regex": f"^{given}$", "$options" : "i"},
+                                       "family": {"$regex": f"^{family}$", "$options" : "i"}}}}
+    data = {"creators": {"$elemMatch": {"givenName": {"$regex": f"^{given}$", "$options" : "i"},
+                                        "familyName": {"$regex": f"^{family}$", "$options" : "i"}}}}
+    return {"$or": [cross, data,
+                    {"$or": [{"creators.name": {"$regex": f"^{given}$", "$options" : "i"}},
+                             {"creators.name": {"$regex": f"^{family}$", "$options" : "i"}}]},
+                   ]}
+
 
 
 def orcid_payload(oid, orc, eid=None):
@@ -498,13 +517,13 @@ def orcid_payload(oid, orc, eid=None):
           Payload
     '''
     # Name only search
-    payload = name_search_payload(orc['given'], orc['family'])
+    npayload = name_search_payload(orc['given'], orc['family'])
     if eid and not oid:
         # Employee ID only search
-        payload = {"$or": [{"jrc_author": eid}, {"$and": payload["$and"]}]}
+        payload = {"$or": [{"jrc_author": eid}, npayload]}
     elif oid and eid:
         # Search by either name or employee ID
-        payload = {"$or": [{"orcid": oid}, {"jrc_author": eid}, {"$and": payload["$and"]}]}
+        payload = {"$or": [{"orcid": oid}, {"jrc_author": eid}, npayload]}
     return payload
 
 
@@ -2787,14 +2806,14 @@ def show_pmid_ui(pmid):
 def show_doi_by_name_ui(family, given=None):
     ''' Show DOIs for a family name
     '''
-    payload = {'$or': [{"author.family": {"$regex": f"^{family}$", "$options" : "i"}},
-                       {"creators.familyName": {"$regex": f"^{family}$", "$options" : "i"}},
-                       {"creators.name": {"$regex": f"^{family}$", "$options" : "i"}},
-                      ]}
     if given:
-        payload['$or'][0]["author.given"] = {"$regex": f"^{given}$", "$options" : "i"}
-        payload['$or'][1]["creators.givenName"] = {"$regex": f"^{given}$", "$options" : "i"}
-        payload['$or'][2]["creators.name"] = {"$regex": f"^{given}$", "$options" : "i"}
+        payload = single_name_search_payload(given, family)
+        print(payload)
+    else:
+        payload = {'$or': [{"author.family": {"$regex": f"^{family}$", "$options" : "i"}},
+                           {"creators.familyName": {"$regex": f"^{family}$", "$options" : "i"}},
+                           {"creators.name": {"$regex": f"^{family}$", "$options" : "i"}},
+                          ]}
     try:
         rows = DB['dis'].dois.find(payload).collation({"locale": "en"}).sort("doi", 1)
     except Exception as err:
@@ -4637,6 +4656,7 @@ def show_hires(startdate, stopdate):
                 + f"<td style='min-width:180px'>{row['orcid']}</td>" \
                 + f"<td>{', '.join(row['affiliations'])}</td></tr>"
     html += '</tbody></table>'
+    endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=f"Employees hired {startdate} - {stopdate} " \
                                                + f"({cnt:,})",
