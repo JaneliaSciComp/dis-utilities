@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "47.0.0"
+__version__ = "47.1.0"
 # Database
 DB = {}
 # Custom queries
@@ -4646,6 +4646,9 @@ def show_hires(startdate, stopdate):
             badges.append(f"{tiny_badge('contingent', row['workerType'])}")
         if 'group' in row:
             badges.append(f"{tiny_badge('lab', row['group'])}")
+        if 'managed' in row and row['managed']:
+            for key in row['managed']:
+                badges.append(f"{tiny_badge('managed', key)}")
         if badges:
             who += f" {' '.join(badges)}"
         if 'affiliations' not in row:
