@@ -7,7 +7,7 @@
            to DIS MongoDB.
 """
 
-__version__ = '10.1.0'
+__version__ = '11.0.0'
 
 import argparse
 import configparser
@@ -26,8 +26,7 @@ from tqdm import tqdm
 import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
 
-# pylint: disable=broad-exception-caught,broad-exception-raised,logging-fstring-interpolation,
-# pylint: disable=too-many-lines
+# pylint: disable=broad-exception-caught,broad-exception-raised,logging-fstring-interpolation,logging-not-lazy,too-many-lines
 
 # Database
 DB = {}
@@ -284,9 +283,10 @@ def get_dois_for_dis(flycore):
     dlist.extend(get_dois_from_datacite("janelia"))
     dlist.extend(get_dois_from_datacite("affiliation"))
     # FlyCore
-    for doi in flycore['dois']:
-        if doi not in dlist and 'in prep' not in doi:
-            dlist.append(doi)
+    for doistring in flycore['dois']:
+        for doi in split_raw_doi(doistring):
+            if doi not in dlist and 'in prep' not in doi:
+                dlist.append(doi)
     # ALPS releases
     add_alps_releases(dlist)
     # EM datasets
@@ -336,7 +336,9 @@ def get_dois():
     if ARG.DOI:
         return {"dois": [ARG.DOI]}
     if ARG.FILE:
-        dois = ARG.FILE.read().splitlines()
+        dois = []
+        for doi in ARG.FILE.read().splitlines():
+            dois.extend(split_raw_doi(doi))
         LOGGER.info(f"Got {len(dois):,} DOIs from {ARG.FILE.name}")
         return {"dois": dois}
     if ARG.PIPE:
