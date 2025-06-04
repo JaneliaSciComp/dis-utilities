@@ -26,9 +26,10 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "47.1.0"
+__version__ = "47.2.0"
 # Database
 DB = {}
+CVTERM = {}
 # Custom queries
 CUSTOM_REGEX = {"publishing_year": {"field": "jrc_publishing_date",
                                     "value": "^!REPLACE!"}
@@ -169,6 +170,13 @@ def before_request():
         except Exception as err:
             return render_template('warning.html', urlroot=request.url_root,
                                    title=render_warning("Database connect error"), message=err)
+        try:
+            rows = DB['dis'].cvterm.find({})
+            for row in rows:
+                CVTERM[row['name']] = row
+        except Exception as err:
+            return render_template('warning.html', urlroot=request.url_root,
+                                   title=render_warning("Database error"), message=err)
     app.config["START_TIME"] = time()
     app.config["COUNTER"] += 1
     endpoint = request.endpoint if request.endpoint else "(Unknown)"
@@ -881,7 +889,7 @@ def add_jrc_fields(row):
             for aff in val.split(", "):
                 link.append(f"<a href='/tag/{escape(aff)}'>{aff}</a>")
             val = ", ".join(link)
-        html += f"<tr><td>{key}</td><td>{val}</td></tr>"
+        html += f"<tr><td>{CVTERM[key]['display'] if key in CVTERM else key}</td><td>{val}</td></tr>"
     html += "</table><br>"
     return html
 
@@ -5259,7 +5267,7 @@ def projects(option=None):
                                title=render_warning("Could not get projects from " \
                                                     + "orcid collection"),
                                message=error_message(err))
-    html = "<table id='projects' class='tablesorter numbers'><thead><tr><th>Author</th>" \
+    html = "<table id='projects' class='tablesorter numbers'><thead><tr><th>Name</th>" \
            + "<th>Count</th><th>Project tag</th><th>Tag status</th></tr></thead><tbody>"
     cnt = 0
     _, suporgs = get_suporgs()
