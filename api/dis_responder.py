@@ -68,7 +68,8 @@ NAV = {"Home": "",
                  "Duplicate authors": "duplicate_authors"},
        "Tag/affiliation": {"DOIs by tag": "dois_tag",
                            "Top DOI tags by year": "dois_top",
-                           "Author affiliations": "orcid_tag",
+                           "Author affiliations: P&C": "orcid_tag",
+                           "Author affiliations: DOI": "janelia_affiliations",
                            "Projects": "projects"},
        "Stats" : {"Database": "stats_database",
                   "Endpoints": "stats_endpoints"},
@@ -524,6 +525,7 @@ def orcid_payload(oid, orc, eid=None):
         Returns:
           Payload
     '''
+    payload = {}
     # Name only search
     npayload = name_search_payload(orc['given'], orc['family'])
     if eid and not oid:
@@ -889,7 +891,8 @@ def add_jrc_fields(row):
             for aff in val.split(", "):
                 link.append(f"<a href='/tag/{escape(aff)}'>{aff}</a>")
             val = ", ".join(link)
-        html += f"<tr><td>{CVTERM[key]['display'] if key in CVTERM else key}</td><td>{val}</td></tr>"
+        html += f"<tr><td>{CVTERM[key]['display'] if key in CVTERM else key}</td>" \
+                + f"<td>{val}</td></tr>"
     html += "</table><br>"
     return html
 
@@ -1408,7 +1411,7 @@ def get_subscriptions(stype='Journal'):
     return sub
 
 
-def get_top_journals(year, maxpub=False):
+def get_top_journals(year, maxpub=False, janelia=True):
     ''' Get top journals
         Keyword arguments:
           year: year to get data for
@@ -1416,14 +1419,17 @@ def get_top_journals(year, maxpub=False):
         Returns:
           Journal data
     '''
-    match = {"container-title": {"$exists": True, "$ne" : ""}}
+    if janelia:
+        match = {"jrc_journal": {"$exists": True}}
+    else:
+        match = {"$and": [{"jrc_journal": {"$exists": True}},
+                          {"jrc_journal": {"$ne": "Janelia Research Campus (non-publication)"}}]}
     if year != 'All':
         match["jrc_publishing_date"] = {"$regex": "^"+ year}
-    payload = [{"$unwind" : "$container-title"},
-               {"$match": match},
-               {"$group": {"_id": "$container-title", "count":{"$sum": 1},
-                           "maxpub": {"$max": "$jrc_publishing_date"}}},
-              ]
+    payload = [{"$match": match},
+               {"$group": {"_id": "$jrc_journal", "count":{"$sum": 1},
+                           "maxpub": {"$max": "$jrc_publishing_date"}}}
+               ]
     try:
         rows = DB['dis'].dois.aggregate(payload)
     except Exception as err:
@@ -1436,20 +1442,6 @@ def get_top_journals(year, maxpub=False):
             journal[row['_id']] = row['count']
     if not journal:
         return {}
-    payload = [{"$unwind" : "$institution"},
-               {"$match": match},
-               {"$group": {"_id": "$institution.name", "count":{"$sum": 1},
-                           "maxpub": {"$max": "$jrc_publishing_date"}}},
-              ]
-    try:
-        rows = DB['dis'].dois.aggregate(payload)
-    except Exception as err:
-        raise err
-    for row in rows:
-        if maxpub:
-            journal[row['_id']] = {"count": row['count'], "maxpub": row['maxpub']}
-        else:
-            journal[row['_id']] = row['count']
     return journal
 
 # ******************************************************************************
@@ -1527,7 +1519,7 @@ def get_tag_details(tag):
     parr = []
     pcnt = 0
     for key, val in pdict.items():
-        parr.append(f"{key}: {val}")
+        parr.append(f"{key}: {val:,}")
         pcnt += val
     if tag in orgs:
         tagtype = 'Supervisory org'
@@ -2703,10 +2695,10 @@ def show_doi_ui(doi):
                                 title=render_warning("Could not find DOI", 'warning'),
                                 message=f"Could not find DOI {doi}")
     authors = DL.get_author_list(data, orcid=True, project_map=DB['dis'].project_map)
-    if not authors:
-        return render_template('error.html', urlroot=request.url_root,
-                                title=render_warning("Could not generate author list"),
-                                message=f"Could not generate author list for {doi}")
+    #if not authors:
+    #    return render_template('error.html', urlroot=request.url_root,
+    #                            title=render_warning("Could not generate author list"),
+    #                            message=f"Could not generate author list for {doi}")
     title = DL.get_title(data)
     if not title:
         return render_template('error.html', urlroot=request.url_root,
@@ -4164,7 +4156,8 @@ def show_journals_dois(year='All'):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning(errmsg),
                                message='No journals were found')
-    html = '<table id="journals" class="tablesorter numbers"><thead><tr>' \
+    html = f"<h4>Journals found: {len(journal):,}</h4>" \
+           + '<table id="journals" class="tablesorter numbers"><thead><tr>' \
            + '<th>Journal</th><th>Publisher</th><th>Count</th><th>Last published to</th>' \
            + '<th>Subscription</th></tr></thead><tbody>'
     for key in sorted(journal, key=lambda x: journal[x]['count'], reverse=True):
@@ -4202,7 +4195,7 @@ def top_journals(year='All', top=10):
     '''
     top = min(top, 20)
     try:
-        journal = get_top_journals(year)
+        journal = get_top_journals(year, janelia=False)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get journal data from dois"),
@@ -4211,7 +4204,8 @@ def top_journals(year='All', top=10):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get journal data from dois"),
                                message='No journals were found')
-    html = '<table id="journals" class="tablesorter numberlast"><thead><tr>' \
+    html = "Note that this does not contain Janelia Research Campus (figshare)<br>" \
+           + '<table id="journals" class="tablesorter numberlast"><thead><tr>' \
            + '<th>Journal</th><th>Count</th></tr></thead><tbody>'
     data = {}
     for key in sorted(journal, key=journal.get, reverse=True):
@@ -4236,20 +4230,13 @@ def top_journals(year='All', top=10):
                                          navbar=generate_navbar('Journals')))
 
 
-@app.route('/dois_nojournal/<string:year>')
 @app.route('/dois_nojournal')
-def dois_nojournal(year='All'):
+def dois_nojournal():
     ''' Show DOIs missing journal data
     '''
     # The payload is somewhat coarse and won't get everything (thanks, eLife...)
-    payload = {"$and": [{"type": {"$in": app.config['ARTICLES']}},
-                        {"$or": [{"short-container-title": {"$exists": False}},
-                                 {"short-container-title": []}]},
-                        {"$or": [{"container-title": {"$exists": False}}, {"container-title": []}]},
-                        {"$or": [{"institution": {"$exists": False}}, {"institution": ""}]}
-                       ]}
-    if year != 'All':
-        payload["$and"].append({"jrc_publishing_date": {"$regex": "^"+ year}})
+    payload = {"jrc_journal": {"$exists": False},
+               "type": {"$nin": ["component", "grant"]}}
     try:
         rows = DB['dis'].dois.find(payload).sort([("doi", 1)])
     except Exception as err:
@@ -4260,19 +4247,13 @@ def dois_nojournal(year='All'):
            + '<th>DOI</th><th>Title</th></tr></thead><tbody>'
     cnt = 0
     for row in rows:
-        if DL.get_journal(row):
-            continue
         cnt += 1
         doi = row['doi']
         html += f"<tr><td><a href='/doiui/{doi}'>{doi}</a></td><td>{DL.get_title(row)}</td></tr>"
-    html += '</tbody></table><br>' + year_pulldown('dois_nojournal')
+    html += '</tbody></table>'
     if not cnt:
-        html = "<h5>No DOIs missing journal data</h5><br>" + year_pulldown('dois_nojournal')
-    title = "DOIs missing journals"
-    if year != 'All':
-        title += f" for {year}"
-    if cnt:
-        title += f" ({cnt})"
+        html = "<h5 style='color: lime'>No DOIs missing journal data</h5>"
+    title = f"DOIs missing journals ({cnt})"
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
@@ -4287,6 +4268,7 @@ def show_journal_ui(jname, year='All'):
     try:
         payload = {"$or": [{"container-title": jname},
                            {"institution.name": jname}]}
+        payload = {"jrc_journal": jname}
         if year != 'All':
             payload['jrc_publishing_date'] = {"$regex": "^"+ year}
         rows = DB['dis'].dois.find(payload).sort("jrc_publishing_date", -1)
@@ -5111,6 +5093,56 @@ def dois_tag():
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=f"DOI tags ({len(tags):,})", html=html,
                                          navbar=generate_navbar('Tag/affiliation')))
+
+
+@app.route('/janelia_affiliations')
+def janelia_affiliations():
+    ''' Show Janelia affiliations
+    '''
+    payload = [{"$project": {"author": 1, "_id": 0}},
+               {"$unwind": "$author"},
+               {"$unwind": "$author.affiliation"},
+               {"$match": {"author.affiliation.name": {"$regex": "Janelia"}}},
+               {"$group": {"_id": "$author.affiliation.name", "count": {"$sum": 1}}}
+              ]
+    try:
+        rows = DB['dis'].dois.aggregate(payload)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get affiliations " \
+                                                    + "from dois collection"),
+                               message=error_message(err))
+    affiliations = {}
+    for row in rows:
+        affiliations[row['_id']] = row['count']
+    payload = [{"$project": {"creators": 1, "_id": 0}},
+               {"$unwind": "$creators"},
+               {"$unwind": "$creators.affiliation"},
+               {"$match": {"creators.affiliation": {"$regex": "Janelia"}}},
+               {"$group": {"_id": "$creators.affiliation", "count": {"$sum": 1}}}
+              ]
+    try:
+        rows = DB['dis'].dois.aggregate(payload)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get affiliations " \
+                                                    + "from dois collection"),
+                               message=error_message(err))
+    for row in rows:
+        if row['_id'] not in affiliations:
+            affiliations[row['_id']] = row['count']
+        else:
+            affiliations[row['_id']] += row['count']
+    html = '<table id="affiliations" class="tablesorter numbers"><thead><tr>' \
+           + '<th>Affiliation</th><th>Count</th>' \
+           + '</tr></thead><tbody>'
+    for aff, count in sorted(affiliations.items(), key=lambda item: item[1], reverse=True):
+        html += f"<tr><td>{aff}</td><td>{count:,}</td></tr>"
+    html += '</tbody></table>'
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=f"DOI author affiliations ({len(affiliations):,})",
+                                         html=html, navbar=generate_navbar('Tag/affiliation')))
 
 
 @app.route('/orcid_tag')

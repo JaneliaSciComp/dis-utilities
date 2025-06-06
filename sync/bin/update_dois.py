@@ -7,7 +7,7 @@
            to DIS MongoDB.
 """
 
-__version__ = '11.0.0'
+__version__ = '12.0.0'
 
 import argparse
 import configparser
@@ -690,15 +690,15 @@ def update_config_database(persist):
                 COUNT['update'] += rest['rest']['updated']
 
 
-def get_tags_and_projects(authors):
-    ''' Find tags for a DOI using the authors
+def get_tags_and_projects(authors, rec):
+    ''' Find tags for a DOI using the authors from the orcid collection and the DOI record
         Keyword arguments:
           authors: list of detailed authors
+          rec: DOI record
         Returns:
           List of tags
     '''
     new_tags = []
-    projects = []
     for auth in authors:
         # Add Lab for the Group Leader
         if 'group' in auth and auth['group'] not in new_tags:
@@ -714,8 +714,22 @@ def get_tags_and_projects(authors):
                 LOGGER.warning(f"Project {auth['name']} is not defined")
             elif PROJECT[auth['name']] and auth['name'] not in new_tags:
                 new_tags.append(PROJECT[auth['name']])
-                projects.append(PROJECT[auth['name']])
-    return new_tags, projects
+    field, _ = get_field(rec)
+    if field in rec:
+        for auth in rec[field]:
+            if 'name' not in auth:
+                continue
+            if ',' in auth['name']:
+                fullname = ' '.join(re.split(r'\s*,\s*', auth['name'])[::-1])
+            else:
+                fullname = auth['name']
+            if fullname not in PROJECT:
+                continue
+            LOGGER.warning(f"Found {fullname} -> {PROJECT[fullname]} in author name " \
+                           + f"for {rec['doi']}")
+            if PROJECT[fullname] and fullname not in new_tags:
+                new_tags.append(PROJECT[fullname])
+    return new_tags
 
 
 def persist_author(key, authors, persist):
@@ -818,7 +832,7 @@ def add_tags(persist):
         if not authors:
             continue
         # Update jrc_tag using the authors
-        new_tags, projects = get_tags_and_projects(authors)
+        new_tags = get_tags_and_projects(authors, val)
         tags = get_tags(persist, rec)
         names = [etag['name'] for etag in tags]
         # Add new tags to the record
@@ -830,9 +844,6 @@ def add_tags(persist):
         if tags:
             LOGGER.debug(f"Added jrc_tag {list(t['name'] for t in tags)} to {key}")
             persist[key]['jrc_tag'] = tags
-        if projects:
-            LOGGER.debug(f"Added jrc_project {projects} to {key}")
-            persist[key]['jrc_project'] = projects
         if rec and 'jrc_newsletter' in rec:
             LOGGER.warning(f"Skipping jrc_author update for {key}")
         else:
@@ -843,6 +854,7 @@ def get_field(rec):
     ''' Get the field name for the authors
         Keyword arguments:
           rec: Crossref/DataCite record
+          datacite: True if DataCite, else False
         Returns:
           Field name and True if DataCite
     '''
@@ -919,8 +931,11 @@ def update_mongodb(persist):
     coll = DB['dis'].dois
     for key, val in tqdm(persist.items(), desc='Update DIS Mongo'):
         val['doi'] = key
-        # Publishing date
+        # Publishing date and journal
         val['jrc_publishing_date'] = DL.get_publishing_date(val)
+        tmp = DL.get_journal(val, name_only=True)
+        if tmp:
+            val['jrc_journal'] = tmp
         # First/last authors
         add_first_last_authors(val)
         for aname in ('jrc_first_author', 'jrc_first_id', 'jrc_last_author', 'jrc_last_id'):
