@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "47.2.0"
+__version__ = "48.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -69,10 +69,11 @@ NAV = {"Home": "",
        "Tag/affiliation": {"DOIs by tag": "dois_tag",
                            "Top DOI tags by year": "dois_top",
                            "Author affiliations: P&C": "orcid_tag",
-                           "Author affiliations: DOI": "janelia_affiliations",
+                           "Author affiliations: Janelia": "janelia_affiliations",
                            "Projects": "projects"},
-       "Stats" : {"Database": "stats_database",
-                  "Endpoints": "stats_endpoints"},
+       "System" : {"Database stats": "stats_database",
+                   "Controlled vocabularies": "cv",
+                   "Endpoints": "stats_endpoints"},
        "External systems": {"Search HHMI People system": "people",
                             "HHMI Supervisory Organizations": "orgs/full",
                             "ROR": "ror"}
@@ -174,7 +175,9 @@ def before_request():
         try:
             rows = DB['dis'].cvterm.find({})
             for row in rows:
-                CVTERM[row['name']] = row
+                if row['cv'] not in CVTERM:
+                    CVTERM[row['cv']] = {}
+                CVTERM[row['cv']][row['name']] = row
         except Exception as err:
             return render_template('warning.html', urlroot=request.url_root,
                                    title=render_warning("Database error"), message=err)
@@ -372,7 +375,9 @@ def get_custom_payload(ipd, display_value):
         rex = CUSTOM_REGEX[ipd['field']]['value']
         ipd['value'] = {"$regex": rex.replace("!REPLACE!", ipd['value'])}
         ipd['field'] = CUSTOM_REGEX[ipd['field']]['field']
-    ptitle = f"DOIs for {ipd['field']} {display_value}"
+    fdisplay = CVTERM['jrc'][ipd['field']]['display'] if ipd['field'] in CVTERM['jrc'] \
+               else ipd['field']
+    ptitle = f"DOIs for {fdisplay} {display_value}"
     payload = {ipd['field']: ipd['value']}
     if 'jrc_obtained_from' in ipd and ipd['jrc_obtained_from']:
         payload['jrc_obtained_from'] = ipd['jrc_obtained_from']
@@ -616,7 +621,8 @@ def generate_works_table(rows, name=None, show="full"):
         dois.append(row['doi'])
         payload = {"date":  DL.get_publishing_date(row),
                    "doi": doi,
-                   "title": get_work_title(row)
+                   "title": get_work_title(row),
+                   "raw": row
                   }
         works.append(payload)
         fileoutput += f"{payload['date']}\t{row['doi']}\t{payload['title']}\n"
@@ -636,15 +642,23 @@ def generate_works_table(rows, name=None, show="full"):
     html += "<table id='pubs' class='tablesorter standard'>" \
             + '<thead><tr><th>Published</th><th>DOI</th><th>Title</th></tr></thead><tbody>'
     for work in sorted(works, key=lambda row: row['date'], reverse=True):
-        html += f"<tr><td>{work['date']}</td><td>{work['doi'] if work['doi'] else '&nbsp;'}</td>" \
+        version = is_version(work['raw'])
+        cls = []
+        if version:
+            cls.append('ver')
+        html += f"<tr class=\'{' '.join(cls)}\'><td>{work['date']}</td>" \
+                + f"<td>{work['doi'] if work['doi'] else '&nbsp;'}</td>" \
                 + f"<td>{work['title']}</td></tr>"
     if dois:
         html += "</tbody></table>"
     if authors:
         html = f"<br>Authors found: {', '.join(sorted(authors.values()))}<br>" \
                + f"This may include non-Janelia authors<br>{html}"
-    html = create_downloadable('works', ['Published', 'DOI', 'Title'], fileoutput) + html
-    html = f"DOIs: {len(works):,}<br>" + html
+    cbutton = "<button class=\"btn btn-outline-warning\" " \
+              + "onclick=\"toggler('pubs', 'ver', 'totalrows');\">" \
+              + "Filter for versioned DOIs</button>"
+    html = cbutton + create_downloadable('works', ['Published', 'DOI', 'Title'], fileoutput) + html
+    html = f"Number of DOIs: <span id='totalrows'>{len(works)}</span><br>" + html
     return html, dois
 
 
@@ -784,7 +798,7 @@ def generate_user_table(rows):
     for row in rows:
         count += 1
         if 'orcid' in row:
-            link = f"<a href='/userui/{row['orcid']}'>{row['orcid']}</a>"
+            link = f"<a href='/orcidui/{row['orcid']}'>{row['orcid']}</a>"
         elif 'userIdO365' in row:
             link = f"<a href='/userui/{row['userIdO365']}'>No ORCID found</a>"
         else:
@@ -796,7 +810,8 @@ def generate_user_table(rows):
                 + f"<td>{', '.join(sorted(row['family']))}</td><td>{' '.join(badges)}</td></tr>"
     html += '</tbody></table>'
     cbutton = "<button class=\"btn btn-outline-warning\" " \
-              + "onclick=\"$('.other').toggle();\">Filter for current authors</button>"
+              + "onclick=\"toggler('ops', 'other', 'totalrowsa');\">" \
+              + "Filter for current authors</button>"
     html = cbutton + html
     return html, count
 
@@ -891,7 +906,7 @@ def add_jrc_fields(row):
             for aff in val.split(", "):
                 link.append(f"<a href='/tag/{escape(aff)}'>{aff}</a>")
             val = ", ".join(link)
-        html += f"<tr><td>{CVTERM[key]['display'] if key in CVTERM else key}</td>" \
+        html += f"<tr><td>{CVTERM['jrc'][key]['display'] if key in CVTERM['jrc'] else key}</td>" \
                 + f"<td>{val}</td></tr>"
     html += "</table><br>"
     return html
@@ -1244,6 +1259,31 @@ def s2_citation_count(doi, fmt='plain'):
     except Exception:
         return 0
 
+def is_version(row):
+    ''' Check if a DOI is a version
+        Keyword arguments:
+          row: DOI row
+        Returns:
+          True if DOI is a version, False otherwise
+    '''
+    # eLife DOIs ending in a dot number with relations (Crossref)
+    if re.search(r'/elife.+\.\d+$', row['doi']) and 'relation' in row \
+       and 'is-version-of' in row['relation']:
+        return True
+    # protocols.io with relations DOIs with relations (CrossRef)
+    if re.search(r'/protocols.io', row['doi']) and 'relation' in row \
+       and 'has-version' in row['relation']:
+        return True
+    # Non-eLife, non-Research Square, non-protocols.io DOIs with relations (Crossref)
+    if ('elife' not in row['doi'] and '/protocols.io' not in row['doi'] \
+        and '/rs.' not in row['doi']) \
+        and 'relation' in row and 'is-version-of' in row['relation']:
+        return True
+    # Janelia DOIs ending in a v number (DataCite)
+    if re.search(r'/janelia.+\.v\d+$', row['doi']):
+        return True
+    return False
+
 
 def standard_doi_table(rows, prefix=None):
     ''' Create a standard table of DOIs
@@ -1259,20 +1299,36 @@ def standard_doi_table(rows, prefix=None):
     fileoutput = ""
     cnt = 0
     for row in rows:
+        version = is_version(row)
         row['published'] = DL.get_publishing_date(row)
         row['link'] = doi_link(row['doi'])
         row['title'] = DL.get_title(row)
-        html += "<tr><td>" + dloop(row, ['published', 'link', 'title'], "</td><td>") + "</td></tr>"
+        cls = []
+        if version:
+            cls.append('ver')
+        # payload["$or"] = [{"type": "journal-article"}, {"types.resourceTypeGeneral": "Preprint"},
+        #                   {"subtype": "preprint"}]
+        if not (('type' in row and row['type'] == 'journal-article') \
+           or ('subtype' in row and row['subtype'] == 'preprint') \
+           or ('types' in row and 'resourceTypeGeneral' in row['types'] \
+           and row['types']['resourceTypeGeneral'] == 'Preprint')):
+            cls.append('notjournal')
+        html += f"<tr class=\'{' '.join(cls)}\'><td>" \
+            + dloop(row, ['published', 'link', 'title'], "</td><td>") + "</td></tr>"
         if row['title']:
             row['title'] = row['title'].replace("\n", " ")
         cnt += 1
         fileoutput += dloop(row, ['published', 'doi', 'title']) + "\n"
     html += '</tbody></table>'
+    counter = f"<p>Number of DOIs: <span id='totalrows'>{cnt}</span></p>"
+    cbutton = "<button id='verbtn' class=\"btn btn-outline-warning\" " \
+              + "onclick=\"toggler('dois', 'ver', 'totalrows');\">" \
+              + "Filter versioned DOIs</button>&nbsp;"
     if prefix:
-        html = year_pulldown(prefix) + "&nbsp;"*5 \
-               + create_downloadable('standard', header, fileoutput) + html
+        html = counter + year_pulldown(prefix) + "&nbsp;"*5 \
+               + cbutton + create_downloadable('standard', header, fileoutput) + html
     else:
-        html = create_downloadable('standard', header, fileoutput) + html
+        html = counter + cbutton + create_downloadable('standard', header, fileoutput) + html
     return html, cnt
 
 # ******************************************************************************
@@ -1654,7 +1710,7 @@ def journal_buttons(show, prefix):
     if show == 'journal':
         full = f"window.location.href='{prefix}/full'"
         html = '<div><button id="toggle-to-all" type="button" class="btn btn-success btn-tiny"' \
-               + f'onclick="{full}">Show all DOIs</button></div>'
+               + f'onclick="{full}">Show all resource types</button></div>'
     else:
         jour = f"window.location.href='{prefix}/journal'"
         html = '<div><button id="toggle-to-journal" type="button" ' \
@@ -2646,9 +2702,21 @@ def show_home(doi=None):
     orgs = '<option>'
     orgs += '</option><option>'.join(sorted(olist))
     orgs += '</option>'
+    try:
+        rows = DB['dis']['project_map'].distinct("project")
+    except Exception as err:
+        return render_template('warning.html', urlroot=request.url_root,
+                                title=render_warning("Could not find projects", 'error'),
+                                message=error_message(err))
+    plist = []
+    for row in rows:
+        plist.append(row)
+    projects = '<option>'
+    projects += '</option><option>'.join(sorted(plist))
+    projects += '</option>'
     endpoint_access()
     return make_response(render_template('home.html', urlroot=request.url_root,
-                                         journals=journals, orgs=orgs,
+                                         journals=journals, orgs=orgs, projects=projects,
                                          navbar=generate_navbar('Home')))
 
 # ******************************************************************************
@@ -2850,7 +2918,7 @@ def show_doi_by_type_ui(src, typ, sub, year):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get DOIs from dois collection"),
                                message=error_message(err))
-    html, _ = generate_works_table(rows)
+    html, _ = standard_doi_table(rows)
     desc = f"{src} {typ}"
     if sub != 'None':
         desc += f"/{sub}"
@@ -2883,6 +2951,8 @@ def show_doi_by_title_ui(title):
                                message=error_message(err))
     union = []
     for row in rows:
+        if isinstance(row['title'], str):
+            row['title'] = [row['title']]
         union.append(row)
     payload = {"titles.title": {"$regex": title, "$options" : "i"}}
     try:
@@ -2893,7 +2963,7 @@ def show_doi_by_title_ui(title):
                                message=error_message(err))
     for row in rows:
         union.append(row)
-    html, _ = generate_works_table(union, title)
+    html, _ = standard_doi_table(union)
     if not html:
         return render_template('warning.html', urlroot=request.url_root,
                                title=render_warning("Could not find DOIs", 'warning'),
@@ -4276,10 +4346,10 @@ def show_journal_ui(jname, year='All'):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get DOIs for journal"),
                                message=error_message(err))
-    html, cnt = standard_doi_table(rows)
-    title = f"DOIs for {jname} ({cnt})"
+    html, _ = standard_doi_table(rows)
+    title = f"DOIs for {jname}"
     if year != 'All':
-        title += f" (year={year})"
+        title += f" ({year})"
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                             title=title, html=html,
@@ -4583,10 +4653,11 @@ def show_names_ui(name):
                                title=render_warning("Could not count names in dois collection"),
                                message=error_message(err))
     html, count = generate_user_table(rows)
-    html = f"Search term: {name}<br>" + html
+    html = f"Search term: {name}<br><p>Number of authors: " \
+           + f"<span id='totalrowsa'>{count}</span></p>" + html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title=f"Authors: {count:,}", html=html,
+                                         title="Authors", html=html,
                                          navbar=generate_navbar('ORCID')))
 
 
@@ -4609,7 +4680,8 @@ def show_hires(startdate, stopdate):
     Return employees that have been hired within the specified date range
     '''
     try:
-        cnt = DB['dis'].orcid.count_documents({"hireDate": {"$gte" : startdate, "$lte" : stopdate}})
+        cnt = DB['dis'].orcid.count_documents({"hireDate": {"$gte" : startdate,
+                                                            "$lte" : stopdate}})
         rows = DB['dis'].orcid.find({"hireDate": {"$gte" : startdate, "$lte" : stopdate}},
                                    {'_id': 0}).sort([("hireDate", -1), ("family", 1)])
     except Exception as err:
@@ -5139,6 +5211,9 @@ def janelia_affiliations():
     for aff, count in sorted(affiliations.items(), key=lambda item: item[1], reverse=True):
         html += f"<tr><td>{aff}</td><td>{count:,}</td></tr>"
     html += '</tbody></table>'
+    html = "<p> When publishing a paper, please use the following affiliation for all Janelia " \
+           + "authors:<br><span style='color: lime;'>Janelia Research Campus, Howard Hughes " \
+           + "Medical Institute, Ashburn, VA</span></p>" + html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=f"DOI author affiliations ({len(affiliations):,})",
@@ -5276,11 +5351,12 @@ def dois_top(show="journal", num=10):
 
 @app.route('/projects')
 @app.route('/projects/<string:option>')
-def projects(option=None):
+def show_projects(option=None):
     ''' Show information on projects
     '''
+    payload = {"project": {"$nin": ["$name"]}}
     try:
-        rows = DB['dis'].project_map.find({})
+        rows = DB['dis'].project_map.find(payload)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get projects from " \
@@ -5290,43 +5366,34 @@ def projects(option=None):
     for row in rows:
         if 'doNotUse' in row and not option:
             continue
-        proj[row['name']] = row['project']
-    try:
-        dproj = DL.get_projects_from_dois(DB['dis'].dois,
-                                          DB['dis'].orcid if option != 'full' else None)
-    except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get projects from " \
-                                                    + "orcid collection"),
-                               message=error_message(err))
-    html = "<table id='projects' class='tablesorter numbers'><thead><tr><th>Name</th>" \
-           + "<th>Count</th><th>Project tag</th><th>Tag status</th></tr></thead><tbody>"
+        if row['project'] == row['name']:
+            continue
+        if row['project'] not in proj:
+            proj[row['project']] = []
+        proj[row['project']].append(row['name'])
+    html = "<table id='projects' class='tablesorter standard'><thead><tr><th>Project</th>" \
+           + "<th>Synonyms</th><th>Supervisory Organization</th></tr></thead><tbody>"
     cnt = 0
     _, suporgs = get_suporgs()
-    for key, val in sorted(dproj.items(), key=lambda x: (proj.get(x[0], '') or x[0], x[0])):
-        if key not in proj and option is None:
-            continue
-        if option == 'unknown' and key in proj:
-            continue
-        tag = proj[key] if key in proj else ""
-        tlink = f"<a href='/tag/{escape(tag)}'>{tag}</a>" if tag else ""
-        plink = f"<a href='/project/{escape(key)}'>{val}</a>"
-        if tag in suporgs:
-            status = 'Active' if suporgs[tag]['active'] else 'Inactive'
-            color = 'lime' if suporgs[tag]['active'] else 'yellow'
+    for key, val in sorted(proj.items()):
+        synonyms = []
+        for tag in sorted(val):
+            synonyms.append(f"<a href='/tag/{escape(tag)}'>{tag}</a>")
+        if key in suporgs:
+            status = 'Active' if suporgs[key]['active'] else 'Inactive'
+            color = 'lime' if suporgs[key]['active'] else 'yellow'
         else:
             status = 'UNKNOWN'
             color = 'red'
         status = f"<span style='color:{color}'>{status}</span>"
-        html += f"<tr><td>{key}</td><td>{plink}</td><td>{tlink}</td><td>{status}</td></tr>"
+        html += f"<tr><td><a href='/tag/{escape(key)}'>{key}</a></td>" \
+                + f"<td>{', '.join(synonyms)}</td><td>{status}</td></tr>"
         cnt += 1
     html += "</tbody></table>"
     if not cnt:
         html = "<p>No projects found</p>"
-    title = "Projects"
-    if option == 'unknown':
-        title += " (unknown)"
-    elif option == 'full':
+    title = "Project mapping"
+    if option == 'full':
         title += " (all)"
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
@@ -5376,7 +5443,7 @@ def orcid_affiliation(aff, year='All'):
                                message=error_message(err))
     htmlp = get_tag_details(aff) + "<br>"
     if cnt:
-        htmlp += f"<hr><p>Number of authors: {cnt:,}</p>"
+        htmlp += f"<hr><p>Number of authors: <span id='totalrowsa'>{cnt:,}</span></p>"
         additional, _ = generate_user_table(rows)
         htmlp += additional
     # DOIs
@@ -5401,7 +5468,7 @@ def orcid_affiliation(aff, year='All'):
     note = f" for {year}" if year != 'All' else ""
     html, cnt = standard_doi_table(rows)
     if cnt:
-        html = htmlp + f"<p>Number of tagged DOIs{note}: {cnt:,}</p>" + html
+        html = htmlp + html
     else:
         html = f"{htmlp}<br>No DOIs found for {aff}"
     endpoint_access()
@@ -5411,7 +5478,7 @@ def orcid_affiliation(aff, year='All'):
                                          navbar=generate_navbar('Tag/affiliation')))
 
 # ******************************************************************************
-# * UI endpoints (stats)                                                       *
+# * UI endpoints (system)                                                      *
 # ******************************************************************************
 @app.route('/stats_database')
 def stats_database():
@@ -5461,7 +5528,63 @@ def stats_database():
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="Database statistics", html=html,
-                                         navbar=generate_navbar('Stats')))
+                                         navbar=generate_navbar('System')))
+
+
+@app.route('/cv')
+@app.route('/cv/<string:cv>')
+def cvs(cv=None):
+    ''' Show CD information
+    '''
+    html = ""
+    try:
+        cnt = DB['dis'].cv.count_documents({})
+        rows = DB['dis'].cv.find({}).sort("display", 1)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get cvs"),
+                               message=error_message(err))
+    if cnt:
+        html = "<form>Select a CV to view: <select id='cv' onchange='find_cv()'>" \
+               + "<option value=''>Select a CV</option>"
+        display = ""
+        for row in rows:
+            if row['name'] == cv or cnt == 1:
+                cv = row['name']
+                sel = "selected"
+                display = row['display']
+            else:
+                sel = ""
+            html += f"<option value=\'{row['name']}\' {sel}>{row['display']}</option>"
+    else:
+        cv = rows[0]['name']
+        display = rows[0]['display']
+    html += "</select></form><br>"
+    if cv:
+        try:
+            rows = DB['dis'].cv.find_one({"cv": cv})
+        except Exception as err:
+            return render_template('error.html', urlroot=request.url_root,
+                                   title=render_warning("Could not get cv"),
+                                   message=error_message(err))
+        html += f"<h4>{display}</h4>"
+        try:
+            rows = DB['dis'].cvterm.find({"cv": cv}).sort("name", 1)
+        except Exception as err:
+            return render_template('error.html', urlroot=request.url_root,
+                                   title=render_warning("Could not get cvterms"),
+                                   message=error_message(err))
+        html += '<table id="cvterms" class="tablesorter standard"><thead><tr><th>Name</th>' \
+                + '<th>Display name</th><th>Definition</th><th>Format</th></tr></thead><tbody>'
+        for row in rows:
+            html += f"<tr><td>{row['name']}</td><td>{row['display']}</td>" \
+                    + f"<td>{row['definition']}</td><td>{row['format']}</td></tr>"
+        html += '</tbody></table>'
+    endpoint_access()
+    return make_response(render_template('cv.html', urlroot=request.url_root,
+                                         title="Controlled vocabularies", html=html,
+                                         navbar=generate_navbar('CV')))
+
 
 @app.route('/stats_endpoints')
 def stats_endpoints():
@@ -5481,7 +5604,7 @@ def stats_endpoints():
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="Endpoint access counts", html=html,
-                                         navbar=generate_navbar('Stats')))
+                                         navbar=generate_navbar('System')))
 
 # ******************************************************************************
 # * Multi-role endpoints (ORCID)                                               *

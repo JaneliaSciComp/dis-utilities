@@ -158,10 +158,12 @@ def process_projects():
                 row['jrc_tag'] = []
             if needs_tagging(PROJECT[full_name], row['jrc_tag']):
                 if PROJECT[full_name] not in SUPORG:
-                    LOGGER.error(f"Project {PROJECT[full_name]} not in supervisory orgs")
-                    continue
-                row['jrc_tag'].append({"name": PROJECT[full_name],
-                                       "code": SUPORG[PROJECT[full_name]], "type": "suporg"})
+                    LOGGER.warning(f"Project {PROJECT[full_name]} not in supervisory orgs")
+                    row['jrc_tag'].append({"name": PROJECT[full_name],
+                                           "code": None, "type": "affiliation"})
+                else:
+                    row['jrc_tag'].append({"name": PROJECT[full_name],
+                                           "code": SUPORG[PROJECT[full_name]], "type": "suporg"})
                 LOGGER.debug(json.dumps(row['jrc_tag'], indent=2))
                 log_message(f"Adding project {PROJECT[full_name]} to DOI", row)
                 if ARG.WRITE:
