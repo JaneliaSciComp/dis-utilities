@@ -26,7 +26,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "48.0.0"
+__version__ = "48.1.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -1406,7 +1406,13 @@ def show_tagged_authors(authors, confirmed):
             continue
         if auth['janelian'] or auth['asserted']:
             count += 1
-        who = f"{auth['given']} {auth['family']}"
+        if 'family' in auth:
+            who = f"{auth['given']} {auth['family']}"
+        # The next four lines are brought to you by authors that don't use their full names...
+        elif 'name' in auth:
+            who = auth['name']
+        else:
+            who = auth['given']
         if 'orcid' in auth and auth['orcid']:
             who = f"<a href='/userui/{auth['orcid']}'>{who}</a>"
         elif 'userIdO365' in auth and auth['userIdO365']:
