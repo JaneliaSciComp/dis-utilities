@@ -73,6 +73,7 @@ NAV = {"Home": "",
                            "Projects": "projects"},
        "System" : {"Database stats": "stats_database",
                    "Controlled vocabularies": "cv",
+                   "DOI relationships": "doi_relationships",
                    "Endpoints": "stats_endpoints"},
        "External systems": {"Search HHMI People system": "people",
                             "HHMI Supervisory Organizations": "orgs/full",
@@ -375,6 +376,8 @@ def get_custom_payload(ipd, display_value):
         rex = CUSTOM_REGEX[ipd['field']]['value']
         ipd['value'] = {"$regex": rex.replace("!REPLACE!", ipd['value'])}
         ipd['field'] = CUSTOM_REGEX[ipd['field']]['field']
+    elif ipd['value'] == "!EXISTS!":
+        ipd['value'] = {"$exists": 1}
     fdisplay = CVTERM['jrc'][ipd['field']]['display'] if ipd['field'] in CVTERM['jrc'] \
                else ipd['field']
     ptitle = f"DOIs for {fdisplay} {display_value}"
@@ -539,6 +542,10 @@ def orcid_payload(oid, orc, eid=None):
     elif oid and eid:
         # Search by either name or employee ID
         payload = {"$or": [{"orcid": oid}, {"jrc_author": eid}, npayload]}
+    elif oid and not eid:
+        # Search by either name or ORCID
+        payload = {"$or": [{"orcid": oid}, npayload]}
+    payload = payload or npayload
     return payload
 
 
@@ -1250,7 +1257,7 @@ def s2_citation_count(doi, fmt='plain'):
         if resp.status_code != 200:
             return 0
         data = resp.json()
-        if fmt == 'html':
+        if fmt == 'html' and data['citationCount']:
             cnt = f"<a href='{app.config['S2']}{data['paperId']}' target='_blank'>" \
                   + f"{data['citationCount']}</a>"
         else:
@@ -1258,6 +1265,7 @@ def s2_citation_count(doi, fmt='plain'):
         return cnt
     except Exception:
         return 0
+
 
 def is_version(row):
     ''' Check if a DOI is a version
@@ -2725,6 +2733,45 @@ def show_home(doi=None):
                                          journals=journals, orgs=orgs, projects=projects,
                                          navbar=generate_navbar('Home')))
 
+def get_display_badges(doi, row, data, local):
+    ''' Get badges for a DOI, formatted for display
+        Keyword arguments:
+          doi: DOI
+          row: row from dois collection
+          data: data from Crossref/DataCite API
+          local: True if the DOI is local, False otherwise
+        Returns:
+          Badges as a string
+    '''
+    badges = "<span class='paperdata'>"
+    if local:
+        if 'jrc_pmid' in row:
+            plink = f"{app.config['PMID']}{row['jrc_pmid']}/"
+            badges += f" {tiny_badge('primary', 'PMID', plink)}"
+    if '/protocols.io.' in doi:
+        badges += f" {tiny_badge('source', 'protocols.io', f'/raw/protocols.io/{doi}')}"
+    rlink = f"/doi/{doi}"
+    if local:
+        jour = DL.get_journal(data)
+        if jour:
+            if 'bioRxiv' in jour:
+                badges += f" {tiny_badge('source', 'bioRxiv', f'/raw/bioRxiv/{doi}')}"
+        if '/janelia.' in doi:
+            badges += f" {tiny_badge('source', 'figshare', f'/raw/figshare/{doi}')}"
+        badges += f" {tiny_badge('source', row['jrc_obtained_from'], rlink)}"
+    else:
+        badges += f" {tiny_badge('source', 'Raw data', rlink)}"
+    oresp = JRC.call_oa(doi)
+    if oresp:
+        olink = f"{app.config['OA']}{doi}"
+        badges += f" {tiny_badge('source', 'OA data', olink)}"
+    if local and 'jrc_fulltext_url' in row:
+        badges += f" {tiny_badge('pdf', 'Full text', row['jrc_fulltext_url'])}"
+    #badges += f" {tiny_badge('info', 'HQ migration', f'/doi/migration/{doi}')}"
+    badges += "</span>"
+    return badges
+
+
 # ******************************************************************************
 # * UI endpoints (DOI)                                                         *
 # ******************************************************************************
@@ -2750,7 +2797,7 @@ def show_doi_ui(doi):
     except Exception as err:
         return inspect_error(err, 'Could not get DOI')
     local = False
-    recsec = doisec = citsec = html = ""
+    recsec = citsec = html = ""
     if row:
         recsec += '<h5 style="color:lime">This DOI is saved locally in the Janelia database</h5>'
         recsec += add_jrc_fields(row)
@@ -2789,34 +2836,8 @@ def show_doi_ui(doi):
         citations = DL.short_citation(doi, True)
     except Exception as err:
         citations = f"Could not generate short citation for {doi} ({err})"
-    # DOI section
-    link = f"<a href='https://doi.org/{doi}' target='_blank'>{doi}</a>"
-    doisec += f"<span class='paperdata'>DOI: {link}"
-    if local:
-        if 'jrc_pmid' in row:
-            plink = f"{app.config['PMID']}{row['jrc_pmid']}/"
-            doisec += f" {tiny_badge('primary', 'PMID', plink)}"
-    if '/protocols.io.' in doi:
-        doisec += f" {tiny_badge('source', 'protocols.io', f'/raw/protocols.io/{doi}')}"
-    rlink = f"/doi/{doi}"
-    if local:
-        jour = DL.get_journal(data)
-        if jour:
-            if 'bioRxiv' in jour:
-                doisec += f" {tiny_badge('source', 'bioRxiv', f'/raw/bioRxiv/{doi}')}"
-        if '/janelia.' in doi:
-            doisec += f" {tiny_badge('source', 'figshare', f'/raw/figshare/{doi}')}"
-        doisec += f" {tiny_badge('source', row['jrc_obtained_from'], rlink)}"
-    else:
-        doisec += f" {tiny_badge('source', 'Raw data', rlink)}"
-    oresp = JRC.call_oa(doi)
-    if oresp:
-        olink = f"{app.config['OA']}{doi}"
-        doisec += f" {tiny_badge('source', 'OA data', olink)}"
-    if local and 'jrc_fulltext_url' in row:
-        doisec += f" {tiny_badge('pdf', 'Full text', row['jrc_fulltext_url'])}"
-    #doisec += f" {tiny_badge('info', 'HQ migration', f'/doi/migration/{doi}')}"
-    doisec += "</span><br>"
+    # Citations
+    doisec = ""
     if row:
         citcnt = s2_citation_count(doi, fmt='html')
         if citcnt:
@@ -2836,7 +2857,7 @@ def show_doi_ui(doi):
     # Abstract
     abstract = DL.get_abstract(data)
     if abstract:
-        html += f"<h4>Abstract</h4><div class='abstract'>{abstract}</div><br><br>"
+        html += f"<h4>Abstract</h4><div class='abstract'>{abstract}</div><br>"
     # Relations
     html += add_relations(data)
     # Author details
@@ -2851,7 +2872,11 @@ def show_doi_ui(doi):
             if alist:
                 html += f"<br><h4>Potential Janelia authors ({count})</h4>" \
                         + f"<div class='scroll'>{''.join(alist)}</div>"
-    doititle = f"{doi} (PMID: {row['jrc_pmid']})" if row and 'jrc_pmid' in row else doi
+    # Title
+    doilink = f"<a href='https://doi.org/{doi}' target='_blank'>{doi}</a>"
+    badges = get_display_badges(doi, row, data, local)
+    doititle = f"{doilink} (PMID: {row['jrc_pmid']})" if row and 'jrc_pmid' in row else doilink
+    doititle += badges
     endpoint_access()
     return make_response(render_template('doi.html', urlroot=request.url_root,
                                          title=doititle, recsec=recsec, doisec=doisec,
@@ -3612,14 +3637,15 @@ def show_doiui_custom():
                 return render_template('error.html', urlroot=request.url_root,
                                        title=render_warning(f"Missing {row}"),
                                        message=f"You must specify a {row}")
-        display_value = ipd['value']
+        display_value = '' if ipd['value'] == "!EXISTS!" else ipd['value']
         payload, ptitle = get_custom_payload(ipd, display_value)
     else:
         payload = ipd['query']
         ipd['field'] = "_".join(list(payload.keys()))
         ptitle = ''
-    print(f"Custom payload: {payload}")
     try:
+        cnt = DB['dis'].dois.count_documents(payload)
+        print(f"Custom payload: {payload}     Results: {cnt}")
         rows = DB['dis'].dois.find(payload)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
@@ -5590,6 +5616,51 @@ def cvs(cv=None):
     return make_response(render_template('cv.html', urlroot=request.url_root,
                                          title="Controlled vocabularies", html=html,
                                          navbar=generate_navbar('CV')))
+
+
+@app.route('/doi_relationships')
+def doi_relationships():
+    ''' Show DOI relationship information
+    '''
+    payload = [{"$match": {"relation": {"$exists": 1}}},
+               { "$addFields": {"relationship": { "$objectToArray": "$relation"}}},
+               {"$unwind": "$relationship"},
+               {"$group": {"_id": "$relationship.k", "count": {"$sum": 1}}},
+               {"$sort": {"count": -1}}]
+    try:
+        rows = DB['dis'].dois.aggregate(payload)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get DOI relationships for Crossref"),
+                               message=error_message(err))
+    html = "<div class='flexrow'><div class='flexcol'><h3>Crossref</h3>"
+    html += "<table id='crossref' class='tablesorter numbers'><thead><tr><th>Relationship</th>" \
+            + "<th>Count</th></tr></thead><tbody>"
+    for row in rows:
+        onclick = f"onclick='nav_post(\"relation.{row['_id']}\",\"!EXISTS!\")'"
+        html += f"<tr><td>{row['_id']}</td><td><a href='#' {onclick}>{row['count']}</a></td></tr>"
+    html += "</tbody></table></div>"
+    payload = [{"$match": {"relatedIdentifiers": {"$exists": 1}}},
+               {"$unwind": "$relatedIdentifiers"},
+               {"$group": {"_id": "$relatedIdentifiers.relationType", "count": {"$sum": 1}}},
+               {"$sort": {"count": -1}}]
+    try:
+        rows = DB['dis'].dois.aggregate(payload)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get DOI relationships for DataCite"),
+                               message=error_message(err))
+    html += "<div class='flexcol' style='margin-left: 15px'><h3>DataCite</h3>"
+    html += "<table id='datacite' class='tablesorter numbers'><thead><tr><th>Relationship</th>" \
+            + "<th>Count</th></tr></thead><tbody>"
+    for row in rows:
+        onclick = "onclick='nav_post(\"relatedIdentifiers.relationType\",\"" + row['_id'] + "\")'"
+        html += f"<tr><td>{row['_id']}</td><td><a href='#' {onclick}>{row['count']}</a></td></tr>"
+    html += "</tbody></table></div></div>"
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="DOI relationships", html=html,
+                                         navbar=generate_navbar('DOI')))
 
 
 @app.route('/stats_endpoints')

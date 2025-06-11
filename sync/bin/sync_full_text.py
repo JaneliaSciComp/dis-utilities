@@ -69,27 +69,37 @@ def find_full_text(doi, row):
     # bioRxiv (PDF)
     jour = DL.get_journal(row)
     if jour and 'bioRxiv' in jour:
+        COUNT['biorxiv'] += 1
         return f"{CONFIG['journals']['biorxiv']}{doi}.full.pdf"
+    # Links from DOI record
+    if 'link' in row and row['link']:
+        for link in row['link']:
+            if link['content-type'] == 'application/pdf':
+                COUNT['link'] += 1
+                return link['URL']
     # OA (PDF)
     oresp = {}
     try:
         oresp = JRC.call_oa(doi)
-    except Exception as err:
+    except Exception:
         pass
     if oresp:
         # 'best_oa_location_url'
         for field in ['publisher_url_for_pdf', 'best_oa_location_url_for_pdf']:
             if field in oresp and oresp[field]:
+                COUNT['oa'] += 1
                 return oresp[field]
     # eLife (no PDF)
     if jour and 'eLife' in jour:
         try:
             num = doi.split('/')[-1].replace('elife.', '').split('.')[0]
+            COUNT['elife'] += 1
             return f"{CONFIG['journals']['elife']}{num}"
         except Exception as _:
             pass
     # PubMed Central
     if 'jrc_pmid' in row and row['jrc_pmid']:
+        COUNT['pmc'] += 1
         return f"{CONFIG['ncbi']['pmc']}articles/pmid/{row['jrc_pmid']}"
     return ""
 
@@ -147,6 +157,12 @@ def processing():
             for line in notfound:
                 f.write(line + '\n')
     print(f"DOIs checked:   {cnt:,}")
+    print("Sources:")
+    print(f"  bioRxiv:      {COUNT['biorxiv']:,}")
+    print(f"  Crossref:     {COUNT['link']:,}")
+    print(f"  OA:           {COUNT['oa']:,}")
+    print(f"  eLife:        {COUNT['elife']:,}")
+    print(f"  PMC:          {COUNT['pmc']:,}")
     print(f"DOIs updated:   {COUNT['updated']:,}")
     print(f"DOIs not found: {COUNT['not_found']:,}")
 

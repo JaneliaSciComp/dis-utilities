@@ -1,6 +1,6 @@
 """ apply_version_tags.py
     Apply version tags to DOIs. Potential tags are found by recursively searching for all
-    versioned DOIs ("is" and "has").
+    versioned DOIs ("is", "has", and "identical to).
 """
 
 __version__ = '1.0.0'
@@ -22,6 +22,8 @@ DB = {}
 # Globals
 ARG = LOGGER = None
 TAG_RECORD = {}
+CROSSREF_RELATIONS = ('is-version-of', 'has-version', 'is-same-as')
+DATACITE_RELATIONS = ('HasVersion', 'IsVersionOf', 'IsIdenticalTo')
 # Counters
 COUNT = collections.defaultdict(lambda: 0, {})
 
@@ -60,6 +62,7 @@ def initialize_program():
         except Exception as err:
             terminate_program(err)
 
+
 def process_version_doi(vdoi, rec, dois):
     ''' Process a single version DOI by adding it to the dois list and returning the record
         Keyword arguments:
@@ -93,7 +96,7 @@ def get_versions(rec, dois):
     '''
     LOGGER.debug(f"Entered get_versions for {rec['doi']}")
     if 'relation' in rec:
-        for reltype in ('is-version-of', 'has-version'):
+        for reltype in CROSSREF_RELATIONS:
             if reltype not in rec['relation']:
                 continue
             for rel in rec['relation'][reltype]:
@@ -105,7 +108,7 @@ def get_versions(rec, dois):
     if 'relatedIdentifiers' in rec and rec['relatedIdentifiers']:
         for rel in rec['relatedIdentifiers']:
             if rel['relatedIdentifierType'] == 'DOI' \
-               and rel['relationType'] in ('HasVersion', 'IsVersionOf'):
+               and rel['relationType'] in DATACITE_RELATIONS:
                 vdoi = rel['relatedIdentifier'].lower()
                 vrec = process_version_doi(vdoi, rec, dois)
                 if vrec:

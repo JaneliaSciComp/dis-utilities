@@ -184,8 +184,8 @@ def update_managed_teams(idresp, row):
             if team['supOrgCode'] in DIS['sup_ignore']:
                 continue
             if lab:
-                terminate_program(f"Multiple labs found for {idresp['nameFirstPreferred']} " \
-                                  + idresp['nameLastPreferred'])
+                LOGGER.warning(f"Multiple labs found for {idresp['nameFirstPreferred']} " \
+                               + idresp['nameLastPreferred'])
             lab = team['supOrgName']
             if 'group' not in row:
                 dirty = True
