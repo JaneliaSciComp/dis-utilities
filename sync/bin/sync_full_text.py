@@ -74,7 +74,7 @@ def find_full_text(doi, row):
     # Links from DOI record
     if 'link' in row and row['link']:
         for link in row['link']:
-            if link['content-type'] == 'application/pdf':
+            if link['content-type'] == 'application/pdf' or 'pdf' in link['URL']:
                 COUNT['link'] += 1
                 return link['URL']
     # OA (PDF)
@@ -97,10 +97,12 @@ def find_full_text(doi, row):
             return f"{CONFIG['journals']['elife']}{num}"
         except Exception as _:
             pass
+    return "" #PLUG
     # PubMed Central
     if 'jrc_pmid' in row and row['jrc_pmid']:
         COUNT['pmc'] += 1
-        return f"{CONFIG['ncbi']['pmc']}articles/pmid/{row['jrc_pmid']}"
+        url = f"{CONFIG['ncbi']['pmc']}articles/pmid/{row['jrc_pmid']}"
+        return url
     return ""
 
 

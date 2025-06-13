@@ -725,8 +725,9 @@ def get_tags_and_projects(authors, rec):
                 fullname = auth['name']
             if fullname not in PROJECT:
                 continue
+            display = rec['doi'] if 'doi' in rec else rec
             LOGGER.warning(f"Found {fullname} -> {PROJECT[fullname]} in author name " \
-                           + f"for {rec['doi']}")
+                           + f"for {display}")
             if PROJECT[fullname] and fullname not in new_tags:
                 new_tags.append(PROJECT[fullname])
     return new_tags

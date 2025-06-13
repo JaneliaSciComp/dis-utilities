@@ -25,6 +25,7 @@ onload="tableInitialize();"
   <h2>{{title|safe}}</h2>
   {{ recsec|safe }}
   {{ doisec|safe }}
+  {% if cittype != "grant" %}
   <div class="flexcontainer"><div class="flexrow">
   <div class="flexitemauto">
   <span style="font-size: 1.5rem;font-weight: 500;">Citation for {{cittype}}<span>
@@ -37,6 +38,7 @@ onload="tableInitialize();"
   </div>
   </div>
   {{ citsec|safe }}
+  {% endif %}
 <script>
 const toggleToshort = document.getElementById("toggle-to-short");
 const toggleTofull = document.getElementById("toggle-to-full");
