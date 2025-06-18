@@ -1,4 +1,5 @@
 inquirer
+metapub
 openpyxl
 pandas
 rapidfuzz
