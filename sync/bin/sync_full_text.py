@@ -10,6 +10,7 @@ import configparser
 from operator import attrgetter
 import sys
 import urllib.request
+from metapub import FindIt
 from tqdm import tqdm
 import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
@@ -70,13 +71,13 @@ def find_full_text(doi, row):
     jour = DL.get_journal(row)
     if jour and 'bioRxiv' in jour:
         COUNT['biorxiv'] += 1
-        return f"{CONFIG['journals']['biorxiv']}{doi}.full.pdf"
+        return f"{CONFIG['journals']['biorxiv']}{doi}.full.pdf", None
     # Links from DOI record
     if 'link' in row and row['link']:
         for link in row['link']:
             if link['content-type'] == 'application/pdf' or 'pdf' in link['URL']:
                 COUNT['link'] += 1
-                return link['URL']
+                return link['URL'], None
     # OA (PDF)
     oresp = {}
     try:
@@ -88,22 +89,26 @@ def find_full_text(doi, row):
         for field in ['publisher_url_for_pdf', 'best_oa_location_url_for_pdf']:
             if field in oresp and oresp[field]:
                 COUNT['oa'] += 1
-                return oresp[field]
+                return oresp[field], None
     # eLife (no PDF)
     if jour and 'eLife' in jour:
         try:
             num = doi.split('/')[-1].replace('elife.', '').split('.')[0]
             COUNT['elife'] += 1
-            return f"{CONFIG['journals']['elife']}{num}"
+            return f"{CONFIG['journals']['elife']}{num}", None
         except Exception as _:
             pass
-    return "" #PLUG
     # PubMed Central
     if 'jrc_pmid' in row and row['jrc_pmid']:
         COUNT['pmc'] += 1
-        url = f"{CONFIG['ncbi']['pmc']}articles/pmid/{row['jrc_pmid']}"
-        return url
-    return ""
+        try:
+            src = FindIt(row['jrc_pmid'])
+            if src.url:
+                return src.url, None
+            return "", src.reason
+        except Exception as _:
+            pass
+    return "", None
 
 
 def download_file(url):
@@ -135,7 +140,7 @@ def processing():
     notfound = []
     for row in tqdm(rows, total=cnt, unit="DOI"):
         doi = row['doi']
-        fulltext = find_full_text(doi, row)
+        fulltext, reason = find_full_text(doi, row)
         if fulltext:
             if ARG.DOWNLOAD and '.pdf' in fulltext:
                 download_file(fulltext)
@@ -148,7 +153,7 @@ def processing():
             if result.modified_count:
                 COUNT['updated'] += result.modified_count
         else:
-            notfound.append(f"{doi} {row['type']}")
+            notfound.append(f"{doi}\t{row['type']}\t{reason if reason else ''}")
             COUNT['not_found'] += 1
     if audit:
         with open('dois_with_fulltext.txt', 'w', encoding='utf-8') as f:
