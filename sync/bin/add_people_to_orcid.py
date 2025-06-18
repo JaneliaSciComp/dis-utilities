@@ -2,7 +2,7 @@
     Add new employees to the orcid collection from the People system.
 '''
 
-__version__ = '2.0.0'
+__version__ = '2.1.0'
 
 import argparse
 import collections
@@ -23,6 +23,7 @@ DB = {}
 COUNT = collections.defaultdict(lambda: 0, {})
 # Global variables
 ARG = DIS = LOGGER = REST = None
+IGNORE = {}
 
 def terminate_program(msg=None):
     ''' Terminate the program gracefully
@@ -59,6 +60,12 @@ def initialize_program():
             DB[source] = JRC.connect_database(dbo)
         except Exception as err:
             terminate_program(err)
+    try:
+        rows = DB['dis']['to_ignore'].find({"type": "group"})
+        for row in rows:
+            IGNORE[row['key']] = True
+    except Exception as err:
+        terminate_program(err)
 
 
 def call_responder(server, endpoint):
@@ -121,7 +128,9 @@ def add_new_record(person, output):
           None
     '''
     rec = JRC.call_people_by_id(person['employeeId'])
-    if not rec['supOrgName'] or rec['supOrgName'] in DIS['group_ignore']:
+    if not rec['supOrgName'] or rec['supOrgName'] in IGNORE:
+        LOGGER.warning(f"Skipping {rec['nameFirstPreferred']} {rec['nameLastPreferred']} " \
+                       + f"({rec['supOrgName']})")
         COUNT['skipped'] += 1
         return
     COUNT['new'] += 1
