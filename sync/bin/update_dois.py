@@ -7,7 +7,7 @@
            to DIS MongoDB.
 """
 
-__version__ = '12.0.0'
+__version__ = '12.1.0'
 
 import argparse
 import configparser
@@ -823,9 +823,6 @@ def add_tags(persist):
             rec = DB['dis'].dois.find_one({"doi": key})
         except Exception as err:
             terminate_program(err)
-        # Try to add the PMID if we don't have it
-        if 'jrc_pmid' not in val:
-            add_pmid(key, persist)
         try:
             authors = DL.get_author_details(val, coll)
         except Exception as err:
