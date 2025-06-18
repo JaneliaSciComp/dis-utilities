@@ -15,6 +15,7 @@ import re
 import string
 import sys
 from time import time
+from urllib.parse import unquote
 from bokeh.palettes import all_palettes, plasma
 import bson
 from flask import (Flask, make_response, render_template, request, jsonify, redirect, send_file)
@@ -27,7 +28,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "49.0.0"
+__version__ = "50.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -44,7 +45,8 @@ NAV = {"Home": "",
                 "DOIs by publisher": "dois_publisher",
                 "DOIs by year": "dois_year",
                 "DOIs by month": "dois_month",
-                "Data DOIs": "dois_data",
+                "DataCite DOIs": "dois_data",
+                "DataCite DOI downloads": "dois_datacite",
                 "DOI yearly report": "dois_report"},
        "Authorship": {"DOIs by authorship": "dois_author",
                       "DOIs with lab head first/last authors": "doiui_group",
@@ -781,6 +783,16 @@ def endpoint_access():
     '''
     endpoint = str(request.url_rule).split('/')[1]
     coll = DB['dis'].api_endpoint
+    try:
+        row = coll.find_one({"endpoint": endpoint})
+        if row:
+            coll.update_one({"endpoint": endpoint}, {"$inc": {"count": 1}})
+        else:
+            coll.insert_one({"endpoint": endpoint, "count": 1})
+    except Exception:
+        pass
+    endpoint = unquote(request.url.replace(request.url_root, ""))
+    coll = DB['dis'].api_endpoint_details
     try:
         row = coll.find_one({"endpoint": endpoint})
         if row:
@@ -2836,12 +2848,15 @@ def show_doi_ui(doi):
         citations = DL.short_citation(doi, True)
     except Exception as err:
         citations = f"Could not generate short citation for {doi} ({err})"
-    # Citations (S2)
+    # Citations (S2 / DataCite)
     doisec = ""
     if row:
         citcnt = s2_citation_count(doi, fmt='html')
         if citcnt:
             doisec += f"<span class='paperdata'>Citations: {citcnt}</span><br>"
+        if row['jrc_obtained_from'] == 'DataCite':
+            if 'downloadCount' in row and row['downloadCount']:
+                doisec += f"<span class='paperdata'>Downloads: {row['downloadCount']:,}</span><br>"
     doisec += "<br>"
     # Citations
     citsec = cittype = ""
@@ -3161,7 +3176,6 @@ def dois_datad(dtype=None, pub=None, year='All'):
 def dois_data():
     ''' Show data DOIs
     '''
-    coll = DB['dis'].dois
     payload = [{"$match": {"jrc_obtained_from": "DataCite",
                            "types.resourceTypeGeneral": {"$nin": ["Preprint"]}}},
                {"$group": {"_id": {"type": "$types.resourceTypeGeneral",
@@ -3186,25 +3200,71 @@ def dois_data():
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get data DOIs"),
                                message=error_message(err))
+    types = {}
     dois = []
     for row in rows:
+        if row['_id']['type'] not in types:
+            types[row['_id']['type']] = 0
+        types[row['_id']['type']] += row['count']
         if 'detail' not in row['_id']:
             row['_id']['detail'] = ""
         dois.append(row)
-    html = '<table id="data" class="tablesorter numberlast"><thead><tr>' \
-           + '<th>Type</th><th>Subtype</th><th>Publisher</th><th>Count</th>' \
-           + '</tr></thead><tbody>'
+    # Summary
+    inner = '<table id="types" class="tablesorter numberlast"><thead><tr>' \
+            + '<th>Type</th><th>Count</th>' \
+            + '</tr></thead><tbody>'
+    for key, val in sorted(types.items(), key=itemgetter(1), reverse=True):
+        link = f"/doisui_type/DataCite/{key}/None"
+        inner += f"<td>{key}</td><td><a href='{link}'>{val}</a></td></tr>"
+    inner += "</tbody><tfoot></tfoot></table>"
+    html = f"<div class='flexrow'><div class='flexcol'>{inner}</div><div class='flexcol' style='margin-left: 50px'>"
+    # Details
+    inner = '<table id="details" class="tablesorter numberlast"><thead><tr>' \
+            + '<th>Type</th><th>Subtype</th><th>Publisher</th><th>Count</th>' \
+            + '</tr></thead><tbody>'
     total = 0
     for row in sorted(dois, key=lambda x: x['count'], reverse=True):
         total += row['count']
         link = f"/dois_data/{row['_id']['type']}/{row['_id']['pub']}"
-        html += f"<td>{row['_id']['type']}</td><td>{row['_id']['detail']}</td>" \
-                + f"<td>{row['_id']['pub']}</td><td><a href='{link}'>{row['count']}</a></td></tr>"
-    html += "</tbody><tfoot><tr><td colspan='3'>TOTAL</td>" \
+        inner += f"<td>{row['_id']['type']}</td><td>{row['_id']['detail']}</td>" \
+                 + f"<td>{row['_id']['pub']}</td>" \
+                 + f"<td><a href='{link}'>{row['count']}</a></td></tr>"
+    inner += "</tbody><tfoot><tr><td colspan='3'>TOTAL</td>" \
+             + f"<td>{total:,}</td></tr></tfoot></table>"
+    html += f"{inner}</div></div>"
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="DataCite DOIs", html=html,
+                                         navbar=generate_navbar('DOIs')))
+
+
+@app.route('/dois_datacite')
+def dois_datacite():
+    ''' Show datacite DOI download counts
+    '''
+    payload = {"jrc_obtained_from": "DataCite", "downloadCount": {"$ne": 0}}
+    coll = DB['dis'].dois
+    try:
+        rows = coll.find(payload).sort("downloadCount", -1)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get data DOIs"),
+                               message=error_message(err))
+    html = '<table id="data" class="tablesorter numberlast"><thead><tr>' \
+           + '<th>DOI</th><th>Title</th><th>Downloads</th>' \
+           + '</tr></thead><tbody>'
+    total = 0
+    for row in rows:
+        total += row['downloadCount']
+        link = doi_link(row['doi'])
+        print(row['doi'])
+        html += f"<td>{link}</td><td>{DL.get_title(row)}</td>" \
+                + f"<td>{row['downloadCount']}</td></tr>"
+    html += "</tbody><tfoot><tr><td colspan='2' style='text-align:right'>TOTAL</td>" \
             + f"<td>{total:,}</td></tr></tfoot></table><br>"
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title="Data DOIs", html=html,
+                                         title="DataCite DOI downloads", html=html,
                                          navbar=generate_navbar('DOIs')))
 
 
@@ -3539,7 +3599,7 @@ def show_insert(idate):
         version = []
         if 'relation' in row and 'is-version-of' in row['relation']:
             for ver in row['relation']['is-version-of']:
-                if ver['id-type'] == 'doi':
+                if ver['id-type'] == 'doi' and ver['id'] not in version:
                     version.append(ver['id'])
         version = doi_link(version) if version else ""
         news = row['jrc_newsletter'] if 'jrc_newsletter' in row else ""
