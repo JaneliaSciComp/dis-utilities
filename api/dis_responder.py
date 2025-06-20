@@ -28,7 +28,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "50.0.0"
+__version__ = "51.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -3217,7 +3217,8 @@ def dois_data():
         link = f"/doisui_type/DataCite/{key}/None"
         inner += f"<td>{key}</td><td><a href='{link}'>{val}</a></td></tr>"
     inner += "</tbody><tfoot></tfoot></table>"
-    html = f"<div class='flexrow'><div class='flexcol'>{inner}</div><div class='flexcol' style='margin-left: 50px'>"
+    html = f"<div class='flexrow'><div class='flexcol'>{inner}</div>" \
+           + "<div class='flexcol' style='margin-left: 50px'>"
     # Details
     inner = '<table id="details" class="tablesorter numberlast"><thead><tr>' \
             + '<th>Type</th><th>Subtype</th><th>Publisher</th><th>Count</th>' \
@@ -3653,22 +3654,38 @@ def show_organization(org_in, year=str(datetime.now().year), show="full"):
     else:
         orgs = [org_in]
     payload = {"jrc_tag.name": {"$in": orgs}}
+    jrc_payload = {}
+    jrc_journal_payload = {}
     if year != 'All':
         payload['jrc_publishing_date'] = {"$regex": "^"+ year}
+        jrc_payload['jrc_publishing_date'] = {"$regex": "^"+ year}
+        jrc_journal_payload['jrc_publishing_date'] = {"$regex": "^"+ year}
     if show == 'journal':
-        payload["$or"] = [{"type": "journal-article"}, {"types.resourceTypeGeneral": "Preprint"},
-                           {"subtype": "preprint"}]
+        payload["$or"] = [{"type": "journal-article"},
+                          {"types.resourceTypeGeneral": "Preprint"},
+                          {"types.resourceTypeGeneral": "DataPaper"}, {"subtype": "preprint"}]
+        jrc_payload["$or"] = [{"type": "journal-article"},
+                              {"types.resourceTypeGeneral": "Preprint"},
+                              {"types.resourceTypeGeneral": "DataPaper"}, {"subtype": "preprint"}]
+    jrc_journal_payload["$or"] = [{"type": 'journal-article', "subtype": {"$ne": ""}},
+                                  {"types.resourceTypeGeneral": "DataPaper"}]
     try:
         rows = DB['dis'].dois.find(payload).sort("jrc_publishing_date", -1)
+        jrc_items = DB['dis'].dois.count_documents(jrc_payload)
+        print(f"JRC items: {jrc_items} {jrc_payload}")
+        jrc_journal_items = DB['dis'].dois.count_documents(jrc_journal_payload)
+        print(f"JRC journal items: {jrc_journal_items}")
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get DOIs"),
                                message=error_message(err))
     html = '<table id="dois" class="tablesorter standard"><thead><tr>' \
            + '<th>Published</th><th>DOI</th><th>Tags</th><th>Title</th></tr></thead><tbody>'
-    dcnt = 0
+    dcnt = org_journal_cnt = 0
     content = ""
     for row in rows:
+        if DL.is_journal(row):
+            org_journal_cnt += 1
         dcnt += 1
         published = DL.get_publishing_date(row)
         title = DL.get_title(row)
@@ -3714,7 +3731,10 @@ def show_organization(org_in, year=str(datetime.now().year), show="full"):
                   + "</div></div>"
         html = year_pulldown(f"doiui_org/{org_in}") + subtitle \
                + f"{'Journal/preprint ' if show == 'journal' else ''}" \
-               + f"DOIs found for {org_in}: {dcnt:,}<br>" \
+               + f"DOIs found for {org_in}: {dcnt:,} ({org_journal_cnt:,} journals)<br>" \
+               + f"{'Journal/preprint ' if show == 'journal' else ''}" \
+               + f"DOIs found for Janelia Research Campus: {jrc_items:,} " \
+               + f"({jrc_journal_items:,} journals)<br>" \
                + buttons + html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
