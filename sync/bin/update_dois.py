@@ -7,7 +7,7 @@
            to DIS MongoDB.
 """
 
-__version__ = '12.1.0'
+__version__ = '12.2.0'
 
 import argparse
 import configparser
@@ -44,6 +44,7 @@ CROSSREF = {}
 DATACITE = {}
 CROSSREF_CALL = {}
 DATACITE_CALL = {}
+IGNORE = {}
 INSERTED = {}
 UPDATED = {}
 MISSING = {}
@@ -123,6 +124,12 @@ def initialize_program():
         terminate_program(err)
     for key, val in orgs.items():
         SUPORG[key] = val
+    try:
+        rows = DB['dis']['to_ignore'].find({"type": "em_dataset"})
+        for row in rows:
+            IGNORE[row['key']] = True
+    except Exception as err:
+        terminate_program(err)
 
 
 def get_dis_dois_from_mongo():
@@ -293,7 +300,8 @@ def get_dois_for_dis(flycore):
     emdois = JRC.simplenamespace_to_dict(JRC.get_config('em_dois'))
     cnt = 0
     for key, val in emdois.items():
-        if key in DISCONFIG['em_dataset_ignore']:
+        if key in IGNORE:
+            LOGGER.warning(f"Skipping {key} because it is in the ignore list")
             continue
         if val and isinstance(val, str):
             cnt += 1

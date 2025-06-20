@@ -3,7 +3,7 @@
     data (names, affiliation, employee types, teams) from the People system.
 '''
 
-__version__ = '3.6.0'
+__version__ = '3.7.0'
 
 import argparse
 import collections
@@ -23,6 +23,7 @@ DB = {}
 COUNT = collections.defaultdict(lambda: 0, {})
 # Global variables
 ARG = DIS = LOGGER = None
+IGNORE = {}
 TIMEOUT = (requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout,
            requests.exceptions.Timeout)
 
@@ -61,6 +62,12 @@ def initialize_program():
             DB[source] = JRC.connect_database(dbo)
         except Exception as err:
             terminate_program(err)
+    try:
+        rows = DB['dis']['to_ignore'].find({"type": "suporg"})
+        for row in rows:
+            IGNORE[row['key']] = True
+    except Exception as err:
+        terminate_program(err)
 
 
 def update_preferred_name(idresp, row):
@@ -181,7 +188,7 @@ def update_managed_teams(idresp, row):
     old_managed = row['managed'] if 'managed' in row else []
     for team in idresp['managedTeams']:
         if team['supOrgSubType'] == 'Lab' and team['supOrgName'].endswith(' Lab'):
-            if team['supOrgCode'] in DIS['sup_ignore']:
+            if team['supOrgCode'] in IGNORE:
                 continue
             if lab:
                 LOGGER.warning(f"Multiple labs found for {idresp['nameFirstPreferred']} " \

@@ -2,7 +2,7 @@
     Apply ORCIDs from the ORCID API to the orcid collection
 '''
 
-__version__ = '1.0.0'
+__version__ = '1.1.0'
 
 import argparse
 import collections
@@ -24,6 +24,7 @@ DB = {}
 COUNT = collections.defaultdict(lambda: 0, {})
 # Global variables
 ARG = CONFIG = DIS = LOGGER = None
+IGNORE = {}
 # Output files
 ADDED = []
 OUTPUT = {"name_error": [], "name_multi_records": [], "name_not_found": [], "orcid_exists": [],
@@ -64,6 +65,14 @@ def initialize_program():
             DB[source] = JRC.connect_database(dbo)
         except Exception as err:
             terminate_program(err)
+    try:
+        rows = DB['dis']['to_ignore'].find()
+        for row in rows:
+            if row['type'] not in IGNORE:
+                IGNORE[row['type']] = {}
+            IGNORE[row['type']][row['key']] = True
+    except Exception as err:
+        terminate_program(err)
 
 
 def check_orcid(oid, name, family, given):
@@ -161,11 +170,11 @@ def get_orcids_from_doi(oids, existing):
     except Exception as err:
         terminate_program(err)
     for rec in tqdm(recs, desc="Adding Crossref ORCIDs from doi collection"):
-        if 'author' not in rec or rec['doi'] in DIS['doi_ignore']:
+        if 'author' not in rec or rec['doi'] in IGNORE['doi']:
             continue
         for aut in rec['author']:
             oid = process_crossref_author(aut)
-            if not oid or oid in existing or oid in DIS['orcid_ignore']:
+            if not oid or oid in existing or oid in IGNORE['orcid']:
                 continue
             if oid not in oids:
                 COUNT['read'] += 1
@@ -179,11 +188,11 @@ def get_orcids_from_doi(oids, existing):
     except Exception as err:
         terminate_program(err)
     for rec in tqdm(recs, desc="Adding DataCite ORCIDs from doi collection"):
-        if rec['doi'] in DIS['doi_ignore']:
+        if rec['doi'] in IGNORE['doi']:
             continue
         for aut in rec['creators']:
             oid = process_datacite_author(aut)
-            if not oid or oid in existing or oid in DIS['orcid_ignore']:
+            if not oid or oid in existing or oid in IGNORE['orcid']:
                 continue
             if oid not in oids:
                 COUNT['read'] += 1
@@ -331,7 +340,7 @@ def apply_orcids():
                 oids.append(oid)
     for oid in tqdm(sorted(oids), desc="Processing ORCIDs"):
         COUNT['considered'] += 1
-        if oid in DIS['orcid_ignore']:
+        if oid in IGNORE['orcid']:
             COUNT['orcid_ignored'] += 1
             continue
         process_orcid(oid)
