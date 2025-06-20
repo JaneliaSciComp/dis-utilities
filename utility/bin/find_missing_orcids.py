@@ -16,6 +16,7 @@ import jrc_common.jrc_common as JRC
 DB = {}
 # General
 GROUPS = {}
+IGNORE = {}
 ORCIDS = {}
 MISSING = []
 # Counters
@@ -64,6 +65,13 @@ def initialize_program():
         GROUPS[row['group']] = True
     LOGGER.info(f"Found {len(GROUPS)} groups")
     try:
+        rows = DB['dis']['to_ignore'].find({"type": "suporg"})
+        for row in rows:
+            IGNORE[row['key']] = True
+    except Exception as err:
+        terminate_program(err)
+    LOGGER.info(f"Found {len(IGNORE)} suporgs to ignore")
+    try:
         rows = DB['dis'].orcid.find({"orcid": {"$exists": True}})
     except Exception as err:
         terminate_program(err)
@@ -91,7 +99,7 @@ def process_person(person):
         return False
     for team in rec['managedTeams']:
         if team['supOrgSubType'] == 'Lab' and team['supOrgName'].endswith(' Lab'):
-            if team['supOrgCode'] in DISCONFIG['sup_ignore']:
+            if team['supOrgCode'] in IGNORE:
                 continue
             lab = team['supOrgName']
             if lab not in GROUPS or rec['employeeId'] not in ORCIDS:
@@ -156,7 +164,6 @@ if __name__ == '__main__':
                         default=False, help='Flag, Very chatty')
     ARG = PARSER.parse_args()
     LOGGER = JRC.setup_logging(ARG)
-    DISCONFIG = JRC.simplenamespace_to_dict(JRC.get_config("dis"))
     initialize_program()
     perform_search()
     terminate_program()

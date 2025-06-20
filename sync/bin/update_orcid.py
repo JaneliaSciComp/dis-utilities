@@ -2,7 +2,7 @@
     Update the MongoDB orcid collection with ORCIDs and names for Janelia authors
 '''
 
-__version__ = '2.9.0'
+__version__ = '2.10.0'
 
 import argparse
 import collections
@@ -28,6 +28,7 @@ COUNT = collections.defaultdict(lambda: 0, {})
 PRESENT = {}
 NEW_ORCID = {}
 ALUMNI = []
+IGNORE = {}
 
 def terminate_program(msg=None):
     ''' Terminate the program gracefully
@@ -72,6 +73,14 @@ def initialize_program():
     for row in rows:
         PRESENT[row['orcid']] = row
     LOGGER.info(f"{len(PRESENT)} DOIs are already in the collection")
+    try:
+        rows = DB['dis']['to_ignore'].find()
+        for row in rows:
+            if row['type'] not in IGNORE:
+                IGNORE[row['type']] = {}
+            IGNORE[row['type']][row['key']] = True
+    except Exception as err:
+        terminate_program(err)
 
 
 def add_name(oid, oids, family, given):
@@ -98,7 +107,6 @@ def add_name(oid, oids, family, given):
         else:
             if not ARG.WRITE:
                 COUNT['insert'] += 1
-                print(oid, json.dumps(oids[oid], indent=2))
             NEW_ORCID[oid] = {"family": [family], "given": [given]}
 
 
@@ -114,7 +122,7 @@ def process_author(aut, oids, source="crossref"):
         if 'Janelia' in aff['name']:
             oid = re.sub(r'.*/', '', aut['ORCID'])
             if source == "crossref":
-                if oid in DISCONFIG['orcid_ignore']:
+                if oid in IGNORE['orcid']:
                     LOGGER.error(f"{oid} is in the ignore list")
                     break
                 add_name(oid, oids, aut['family'], aut['given'])
@@ -139,7 +147,7 @@ def get_name(oid):
         if 'family-name' not in name or not name['family-name']:
             LOGGER.warning(f"{oid} has no family name:\n{name}")
             return None, None
-        if oid in DISCONFIG['orcid_ignore']:
+        if oid in IGNORE['orcid']:
             LOGGER.error(f"{oid} is in the ignore list\n{name}")
             return None, None
         return name['family-name']['value'], name['given-names']['value']
@@ -214,7 +222,7 @@ def update_group_status(rec, idresp):
     lab = ''
     for team in idresp['managedTeams']:
         if team['supOrgSubType'] == 'Lab' and team['supOrgName'].endswith(' Lab'):
-            if team['supOrgCode'] in DISCONFIG['sup_ignore']:
+            if team['supOrgCode'] in IGNORE['suporg']:
                 continue
             if lab:
                 terminate_program(f"Multiple labs found for {idresp['nameFirstPreferred']} " \
@@ -386,7 +394,7 @@ def generate_email():
     try:
         LOGGER.info(f"Sending email to {DISCONFIG['receivers']}")
         JRC.send_email(msg, DISCONFIG['sender'], DISCONFIG['developer'] \
-                       if ARG.MANIFOLD == 'dev' else DISCONFIG['receivers'],
+                       if ARG.TEST else DISCONFIG['receivers'],
                        "ORCID updates")
     except Exception as err:
         LOGGER.error(err)
@@ -489,7 +497,7 @@ def update_orcid():
                    "author.ORCID": 1, "author.affiliation": 1, "doi": 1}
         recs = dcoll.find(payload, project)
         for rec in tqdm(recs, desc="Adding from doi collection"):
-            if rec['doi'] in DISCONFIG['doi_ignore']:
+            if rec['doi'] in IGNORE['doi']:
                 continue
             COUNT['records'] += 1
             for aut in rec['author']:
@@ -502,8 +510,8 @@ def update_orcid():
         perform_cleanup()
     if ARG.WRITE:
         write_records(oids)
-        if NEW_ORCID or ALUMNI:
-            generate_email()
+    if (NEW_ORCID or ALUMNI) and (ARG.TEST or ARG.WRITE):
+        generate_email()
     print(f"Records read from MongoDB:dois: {COUNT['records']}")
     print(f"Records read from ORCID:        {COUNT['orcid']}")
     print(f"ORCIDs inserted:                {COUNT['insert']}")
@@ -528,6 +536,8 @@ if __name__ == '__main__':
                         help='MongoDB manifold (dev, prod)')
     PARSER.add_argument('--force', dest='FORCE', action='store_true',
                         default=False, help='Update ORCID ID whether correlated or not')
+    PARSER.add_argument('--test', dest='TEST', action='store_true',
+                        default=False, help='Send email to developer')
     PARSER.add_argument('--write', dest='WRITE', action='store_true',
                         default=False, help='Write to database/config system')
     PARSER.add_argument('--verbose', dest='VERBOSE', action='store_true',
