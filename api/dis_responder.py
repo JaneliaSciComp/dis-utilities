@@ -28,7 +28,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "51.0.0"
+__version__ = "51.0.1"
 # Database
 DB = {}
 CVTERM = {}
@@ -3731,10 +3731,10 @@ def show_organization(org_in, year=str(datetime.now().year), show="full"):
                   + "</div></div>"
         html = year_pulldown(f"doiui_org/{org_in}") + subtitle \
                + f"{'Journal/preprint ' if show == 'journal' else ''}" \
-               + f"DOIs found for {org_in}: {dcnt:,} ({org_journal_cnt:,} journals)<br>" \
+               + f"DOIs found for {org_in}: {dcnt:,} ({org_journal_cnt:,} journal publications)<br>" \
                + f"{'Journal/preprint ' if show == 'journal' else ''}" \
                + f"DOIs found for Janelia Research Campus: {jrc_items:,} " \
-               + f"({jrc_journal_items:,} journals)<br>" \
+               + f"({jrc_journal_items:,} journal publications)<br>" \
                + buttons + html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
