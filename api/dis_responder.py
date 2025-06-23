@@ -28,7 +28,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "51.0.1"
+__version__ = "51.2.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -651,7 +651,7 @@ def generate_works_table(rows, name=None, show="full"):
     html += "<table id='pubs' class='tablesorter standard'>" \
             + '<thead><tr><th>Published</th><th>DOI</th><th>Title</th></tr></thead><tbody>'
     for work in sorted(works, key=lambda row: row['date'], reverse=True):
-        version = is_version(work['raw'])
+        version = DL.is_version(work['raw'])
         cls = []
         if version:
             cls.append('ver')
@@ -1279,32 +1279,6 @@ def s2_citation_count(doi, fmt='plain'):
         return 0
 
 
-def is_version(row):
-    ''' Check if a DOI is a version
-        Keyword arguments:
-          row: DOI row
-        Returns:
-          True if DOI is a version, False otherwise
-    '''
-    # eLife DOIs ending in a dot number with relations (Crossref)
-    if re.search(r'/elife.+\.\d+$', row['doi']) and 'relation' in row \
-       and 'is-version-of' in row['relation']:
-        return True
-    # protocols.io with relations DOIs with relations (CrossRef)
-    if re.search(r'/protocols.io', row['doi']) and 'relation' in row \
-       and 'has-version' in row['relation']:
-        return True
-    # Non-eLife, non-Research Square, non-protocols.io DOIs with relations (Crossref)
-    if ('elife' not in row['doi'] and '/protocols.io' not in row['doi'] \
-        and '/rs.' not in row['doi']) \
-        and 'relation' in row and 'is-version-of' in row['relation']:
-        return True
-    # Janelia DOIs ending in a v number (DataCite)
-    if re.search(r'/janelia.+\.v\d+$', row['doi']):
-        return True
-    return False
-
-
 def standard_doi_table(rows, prefix=None):
     ''' Create a standard table of DOIs
         Keyword arguments:
@@ -1319,7 +1293,7 @@ def standard_doi_table(rows, prefix=None):
     fileoutput = ""
     cnt = 0
     for row in rows:
-        version = is_version(row)
+        version = DL.is_version(row)
         row['published'] = DL.get_publishing_date(row)
         row['link'] = doi_link(row['doi'])
         row['title'] = DL.get_title(row)
@@ -3684,7 +3658,7 @@ def show_organization(org_in, year=str(datetime.now().year), show="full"):
     dcnt = org_journal_cnt = 0
     content = ""
     for row in rows:
-        if DL.is_journal(row):
+        if DL.is_journal(row) and not DL.is_version(row):
             org_journal_cnt += 1
         dcnt += 1
         published = DL.get_publishing_date(row)
