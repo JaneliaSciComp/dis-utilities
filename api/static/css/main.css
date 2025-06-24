@@ -293,6 +293,10 @@ hr {border-color: #666;
    color: white;
    background-color: green;
 }
+.badge-projecttag {
+   color: white;
+   background-color: darkgreen;
+}
 .badge-source {
    color: white;
    background-color: #0000b0;
