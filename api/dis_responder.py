@@ -28,10 +28,11 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "51.2.0"
+__version__ = "52.0.0"
 # Database
 DB = {}
 CVTERM = {}
+PROJECT = {}
 # Custom queries
 CUSTOM_REGEX = {"publishing_year": {"field": "jrc_publishing_date",
                                     "value": "^!REPLACE!"}
@@ -181,6 +182,10 @@ def before_request():
                 if row['cv'] not in CVTERM:
                     CVTERM[row['cv']] = {}
                 CVTERM[row['cv']][row['name']] = row
+            rows = DB['dis'].project_map.find({"doNotUse": {"$exists": False}})
+            for row in rows:
+                PROJECT[row['name']] = True
+                PROJECT[row['project']] = True
         except Exception as err:
             return render_template('warning.html', urlroot=request.url_root,
                                    title=render_warning("Database error"), message=err)
@@ -1344,7 +1349,7 @@ def tiny_badge(btype, msg, link=None):
     return html
 
 
-def get_badges(auth, ignore_match=False):
+def get_badges(auth, ignore_match=False, who=None):
     ''' Create a list of badges for an author
         Keyword arguments:
           auth: detailed author record
@@ -1377,7 +1382,10 @@ def get_badges(auth, ignore_match=False):
         if 'duplicate_name' in auth:
             badges.append(f"{tiny_badge('warning', 'Duplicate name')}")
     else:
-        badges.append(f"{tiny_badge('danger', 'Not in database')}")
+        if who in PROJECT.keys():
+            badges.append(f"{tiny_badge('projecttag', 'Project tag')}")
+        else:
+            badges.append(f"{tiny_badge('danger', 'Not in database')}")
         if 'asserted' in auth and auth['asserted']:
             badges.append(f"{tiny_badge('asserted', 'Janelia affiliation')}")
         if 'match' in auth and auth['match'] == 'ORCID':
@@ -1411,7 +1419,7 @@ def show_tagged_authors(authors, confirmed):
             who = f"<a href='/userui/{auth['orcid']}'>{who}</a>"
         elif 'userIdO365' in auth and auth['userIdO365']:
             who = f"<a href='/userui/{auth['userIdO365']}'>{who}</a>"
-        badges = get_badges(auth)
+        badges = get_badges(auth, who=who)
         if 'employeeId' in auth and auth['employeeId'] in confirmed:
             badges.insert(0, tiny_badge('author', 'Janelia author'))
         tags = []
@@ -2859,6 +2867,12 @@ def show_doi_ui(doi):
         abstract = DL.get_abstract(data)
         if abstract:
             html += f"<h4>Abstract</h4><div class='abstract'>{abstract}</div><br>"
+    # Subjects (DataCite categories)
+    try:
+        if row and row['jrc_obtained_from'] == 'DataCite' and 'subjects' in row and row['subjects']:
+            html += f"<h4>Subjects</h4>{', '.join(sub['subject'] for sub in row['subjects'])}<br><br>"
+    except Exception as err:
+        return inspect_error(err, f"Could not get subjects for DOI {row['doi']}")
     # Relations
     html += add_relations(data)
     # Author details
@@ -2915,7 +2929,7 @@ def show_doi_by_name_ui(family, given=None):
                            {"creators.name": {"$regex": f"^{family}$", "$options" : "i"}},
                           ]}
     try:
-        rows = DB['dis'].dois.find(payload).collation({"locale": "en"}).sort("doi", 1)
+        rows = DB['dis'].dois.find(payload).collation({"locale": "en"}).sort("jrc_publishing_date", -1)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get DOIs from dois collection"),
@@ -2945,7 +2959,7 @@ def show_doi_by_type_ui(src, typ, sub, year):
     if year != 'All':
         payload['jrc_publishing_date'] = {"$regex": "^" + year}
     try:
-        rows = DB['dis'].dois.find(payload).collation({"locale": "en"}).sort("doi", 1)
+        rows = DB['dis'].dois.find(payload).collation({"locale": "en"}).sort("jrc_publishing_date", -1)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get DOIs from dois collection"),
@@ -3140,6 +3154,49 @@ def dois_datad(dtype=None, pub=None, year='All'):
     title = f"DOIs for {pub} {dtype} ({cnt:,})"
     if year != 'All':
         title += f" (year={year})"
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=title, html=html,
+                                         navbar=generate_navbar('DOIs')))
+
+
+@app.route('/dois_subject/<string:subject>/<string:year>')
+@app.route('/dois_subject/<string:subject>')
+@app.route('/dois_subject')
+def dois_subject(subject=None, year='All'):
+    ''' Show DOI subjects
+    '''
+    if subject:
+        payload = {"subjects.subject": subject}
+    else:
+        payload = [{"$match": {"subjects": {"$exists": True}}},
+                   {"$unwind": "$subjects"},
+                   {"$group": {"_id": {"subject": "$subjects.subject", "scheme": "$subjects.subjectScheme"}, "count": {"$sum": 1}}},
+                   {"$sort": {"count": -1}}]
+    try:
+        if subject:
+            if year != 'All':
+                payload['jrc_publishing_date'] = {"$regex": "^"+ year}
+            rows = DB['dis'].dois.find(payload)
+        else:
+            rows = DB['dis'].dois.aggregate(payload)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get DOI subjects"),
+                               message=error_message(err))
+    if subject:
+        html, _ = standard_doi_table(rows, prefix=f"dois_subject/{subject}")
+        title = f"DOIs for {subject}"
+        if year != 'All':
+            title += f" (year={year})"
+    else:
+        html = "<table id='subjects' class='tablesorter numberlast'><thead><tr>" \
+               + "<th>Subject</th><th>Scheme</th><th>Count</th></tr></thead><tbody>"
+        for row in rows:
+            scheme = row['_id']['scheme'] if 'scheme' in row['_id'] else ''
+            html += f"<tr><td>{row['_id']['subject']}</td><td>{scheme}</td><td><a href='/dois_subject/{row['_id']['subject']}'>{row['count']}</a></td></tr>"
+        html += "</tbody></table>"
+        title = "Subjects"
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
