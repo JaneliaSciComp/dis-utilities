@@ -28,7 +28,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "52.0.0"
+__version__ = "53.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -1382,7 +1382,7 @@ def get_badges(auth, ignore_match=False, who=None):
         if 'duplicate_name' in auth:
             badges.append(f"{tiny_badge('warning', 'Duplicate name')}")
     else:
-        if who in PROJECT.keys():
+        if who in PROJECT:
             badges.append(f"{tiny_badge('projecttag', 'Project tag')}")
         else:
             badges.append(f"{tiny_badge('danger', 'Not in database')}")
@@ -1404,6 +1404,11 @@ def show_tagged_authors(authors, confirmed):
     alist = []
     count = 0
     for auth in authors:
+        is_project = False
+        if 'name' in auth and auth['name'] in PROJECT:
+            # Normally, a project would come back as not being a Janelian.
+            auth['janelian'] = True
+            is_project = True
         if (not auth['janelian']) and (not auth['asserted']) and (not auth['alumni']):
             continue
         if auth['janelian'] or auth['asserted']:
@@ -1422,6 +1427,8 @@ def show_tagged_authors(authors, confirmed):
         badges = get_badges(auth, who=who)
         if 'employeeId' in auth and auth['employeeId'] in confirmed:
             badges.insert(0, tiny_badge('author', 'Janelia author'))
+        if is_project:
+            who = f"<a href='/tag/{auth['name']}'>{who}</a>"
         tags = []
         if 'group' in auth:
             tags.append(auth['group'])
@@ -1606,6 +1613,32 @@ def get_tag_details(tag):
 # ******************************************************************************
 # * General utility functions                                                  *
 # ******************************************************************************
+
+def add_subjects(row, html):
+    ''' Add subjects to the HTML
+        Keyword arguments:
+          row: row from dois collection
+          html: HTML to add subjects to
+        Returns:
+          HTML with subjects added
+    '''
+    # Subjects (DataCite categories)
+    if row['jrc_obtained_from'] == 'DataCite':
+        try:
+            if row and row['jrc_obtained_from'] == 'DataCite' and 'subjects' in row and row['subjects']:
+                html += f"<h4>Subjects</h4>{', '.join(sub['subject'] for sub in row['subjects'])}" \
+                        + "<br><br>"
+        except Exception as err:
+            raise err
+    elif 'jrc_mesh' in row:
+        subjects = []
+        for mesh in row['jrc_mesh']:
+            if 'descriptor_name' in mesh and 'major_topic' in mesh and mesh['major_topic']:
+                subjects.append(mesh['descriptor_name'])
+        if subjects:
+            html += f"<h4>Subjects</h4>{', '.join(subjects)}<br><br>"
+    return html
+
 
 def random_string(strlen=8):
     ''' Generate a random string of letters and digits
@@ -2867,10 +2900,8 @@ def show_doi_ui(doi):
         abstract = DL.get_abstract(data)
         if abstract:
             html += f"<h4>Abstract</h4><div class='abstract'>{abstract}</div><br>"
-    # Subjects (DataCite categories)
     try:
-        if row and row['jrc_obtained_from'] == 'DataCite' and 'subjects' in row and row['subjects']:
-            html += f"<h4>Subjects</h4>{', '.join(sub['subject'] for sub in row['subjects'])}<br><br>"
+        html = add_subjects(row, html)
     except Exception as err:
         return inspect_error(err, f"Could not get subjects for DOI {row['doi']}")
     # Relations
@@ -2929,7 +2960,8 @@ def show_doi_by_name_ui(family, given=None):
                            {"creators.name": {"$regex": f"^{family}$", "$options" : "i"}},
                           ]}
     try:
-        rows = DB['dis'].dois.find(payload).collation({"locale": "en"}).sort("jrc_publishing_date", -1)
+        coll = DB['dis'].dois
+        rows = coll.find(payload).collation({"locale": "en"}).sort("jrc_publishing_date", -1)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get DOIs from dois collection"),
@@ -2959,7 +2991,8 @@ def show_doi_by_type_ui(src, typ, sub, year):
     if year != 'All':
         payload['jrc_publishing_date'] = {"$regex": "^" + year}
     try:
-        rows = DB['dis'].dois.find(payload).collation({"locale": "en"}).sort("jrc_publishing_date", -1)
+        coll = DB['dis'].dois
+        rows = coll.find(payload).collation({"locale": "en"}).sort("jrc_publishing_date", -1)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get DOIs from dois collection"),
@@ -3171,7 +3204,9 @@ def dois_subject(subject=None, year='All'):
     else:
         payload = [{"$match": {"subjects": {"$exists": True}}},
                    {"$unwind": "$subjects"},
-                   {"$group": {"_id": {"subject": "$subjects.subject", "scheme": "$subjects.subjectScheme"}, "count": {"$sum": 1}}},
+                   {"$group": {"_id": {"subject": "$subjects.subject",
+                                       "scheme": "$subjects.subjectScheme"},
+                               "count": {"$sum": 1}}},
                    {"$sort": {"count": -1}}]
     try:
         if subject:
@@ -3194,7 +3229,9 @@ def dois_subject(subject=None, year='All'):
                + "<th>Subject</th><th>Scheme</th><th>Count</th></tr></thead><tbody>"
         for row in rows:
             scheme = row['_id']['scheme'] if 'scheme' in row['_id'] else ''
-            html += f"<tr><td>{row['_id']['subject']}</td><td>{scheme}</td><td><a href='/dois_subject/{row['_id']['subject']}'>{row['count']}</a></td></tr>"
+            html += f"<tr><td>{row['_id']['subject']}</td><td>{scheme}</td><td>" \
+                    + f"<a href='/dois_subject/{row['_id']['subject']}'>{row['count']}</a>" \
+                    + "</td></tr>"
         html += "</tbody></table>"
         title = "Subjects"
     endpoint_access()
@@ -3762,7 +3799,8 @@ def show_organization(org_in, year=str(datetime.now().year), show="full"):
                   + "</div></div>"
         html = year_pulldown(f"doiui_org/{org_in}") + subtitle \
                + f"{'Journal/preprint ' if show == 'journal' else ''}" \
-               + f"DOIs found for {org_in}: {dcnt:,} ({org_journal_cnt:,} journal publications)<br>" \
+               + f"DOIs found for {org_in}: {dcnt:,} ({org_journal_cnt:,} " \
+               + "journal publications)<br>" \
                + f"{'Journal/preprint ' if show == 'journal' else ''}" \
                + f"DOIs found for Janelia Research Campus: {jrc_items:,} " \
                + f"({jrc_journal_items:,} journal publications)<br>" \
@@ -4111,11 +4149,13 @@ def dois_top_author(year='All'):
                                          navbar=generate_navbar('Authorship')))
 
 
+@app.route('/doiui_group/<string:year>/<string:which>')
 @app.route('/doiui_group/<string:year>')
 @app.route('/doiui_group')
-def doiui_group(year='All'):
+def doiui_group(year='All', which=None):
     ''' Show group leader first/last authorship
     '''
+    # Get lab head employee IDs
     payload = {"group_code": {"$exists": True}}
     try:
         rows = DB['dis'].orcid.find(payload, {"employeeId": 1})
@@ -4127,27 +4167,45 @@ def doiui_group(year='All'):
     leads = []
     for row in rows:
         leads.append(row['employeeId'])
+    # Get first authors
     payload = {"jrc_first_id": {"$in": leads}}
     if year != 'All':
         payload['jrc_publishing_date'] = {"$regex": "^"+ year}
     cnt = {}
     try:
-        cnt['first'] = DB['dis'].dois.count_documents(payload)
+        if which == 'first':
+            display_rows = DB['dis'].dois.find(payload)
+        else:
+            cnt['first'] = DB['dis'].dois.count_documents(payload)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get first authors " \
                                                     + "from dois collection"),
                                message=error_message(err))
+    # Get last authors
     payload = {"jrc_last_id": {"$in": leads}}
     if year != 'All':
         payload['jrc_publishing_date'] = {"$regex": "^"+ year}
+    display_rows = []
     try:
-        cnt['last'] = DB['dis'].dois.count_documents(payload)
+        if which == 'last':
+            display_rows = DB['dis'].dois.find(payload)
+        else:
+            cnt['last'] = DB['dis'].dois.count_documents(payload)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get last authors " \
                                                     + "from dois collection"),
                                message=error_message(err))
+    if which:
+        html, _ = standard_doi_table(display_rows)
+        title = f"DOIs with lab head {which} author"
+        if year != 'All':
+            title += f" ({year})"
+        endpoint_access()
+        return make_response(render_template('general.html', urlroot=request.url_root,
+                                             title=title, html=html,
+                                             navbar=generate_navbar('Authorship')))
     payload = {"jrc_author": {"$exists": True}}
     if year != 'All':
         payload['jrc_publishing_date'] = {"$regex": "^"+ year}
@@ -4159,8 +4217,10 @@ def doiui_group(year='All'):
                                                     + "from dois collection"),
                                message=error_message(err))
     html = "<table id='group' class='tablesorter numbers'><thead></thead><tbody>"
-    html += f"<tr><td>Lab head first author</td><td>{cnt['first']:,}</td></tr>"
-    html += f"<tr><td>Lab head last author</td><td>{cnt['last']:,}</td></tr>"
+    html += "<tr><td>Lab head first author</td><td>" \
+            + f"<a href='/doiui_group/{year}/first'>{cnt['first']:,}</a></td></tr>"
+    html += "<tr><td>Lab head last author</td><td>" \
+            + f"<a href='/doiui_group/{year}/last'>{cnt['last']:,}</a></td></tr>"
     html += "</tbody></table><br>" + year_pulldown('doiui_group')
     data = {'Lab head first author': cnt['first'],
             'Non-lab head first author': cnt['total'] - cnt['first']}
@@ -4187,6 +4247,115 @@ def doiui_group(year='All'):
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title=title, html=html,
                                          chartscript=chartscript, chartdiv=chartdiv,
+                                         navbar=generate_navbar('Authorship')))
+
+
+@app.route('/doiui_orgcont/<string:year>/<string:org>/<string:which>/')
+@app.route('/doiui_orgcont/<string:year>/<string:org>')
+@app.route('/doiui_orgcont/<string:year>')
+@app.route('/doiui_orgcont')
+def doiui_orgcont(year='All', org='Shared Resources', which=None):
+    ''' Show Shared resources authorship
+    '''
+    # Get lab head employee IDs
+    payload = {"group_code": {"$exists": True}}
+    try:
+        rows = DB['dis'].orcid.find(payload, {"employeeId": 1})
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get group leads " \
+                                                    + "from dois collection"),
+                               message=error_message(err))
+    leads = []
+    for row in rows:
+        leads.append(row['employeeId'])
+    # Get Shared Resources employee IDs
+    payload = {"group": org}
+    try:
+        row = DB['dis'].org_group.find_one(payload)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning(f"Could not get {org} " \
+                                                    + "from dois collection"),
+                               message=error_message(err))
+    shared = []
+    if row:
+        for member in row['members']:
+            shared.append(member)
+    # Get first authors
+    payload = {"jrc_first_id": {"$in": leads}}
+    if year != 'All':
+        payload['jrc_publishing_date'] = {"$regex": "^"+ year}
+    finds = {"first": [], "firstsr": [], "last": [], "lastsr": []}
+    try:
+        rows = DB['dis'].dois.find(payload)
+        for row in rows:
+            if DL.is_journal(row) and not DL.is_version(row):
+                finds['first'].append(row)
+        payload['jrc_tag.name'] = {"$in": shared}
+        rows = DB['dis'].dois.find(payload)
+        for row in rows:
+            if DL.is_journal(row) and not DL.is_version(row):
+                finds['firstsr'].append(row)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get first authors " \
+                                                    + "from dois collection"),
+                               message=error_message(err))
+    # Get last authors
+    payload = {"jrc_last_id": {"$in": leads}}
+    if year != 'All':
+        payload['jrc_publishing_date'] = {"$regex": "^"+ year}
+    try:
+        rows = DB['dis'].dois.find(payload)
+        for row in rows:
+            if DL.is_journal(row) and not DL.is_version(row):
+                finds['last'].append(row)
+        payload['jrc_tag.name'] = {"$in": shared}
+        rows = DB['dis'].dois.find(payload)
+        for row in rows:
+            if DL.is_journal(row) and not DL.is_version(row):
+                finds['lastsr'].append(row)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get last authors " \
+                                                    + "from dois collection"),
+                               message=error_message(err))
+    if which:
+        if org == 'all':
+            display_rows = finds['first'] if which == 'first' else finds['last']
+        else:
+            display_rows = finds['firstsr'] if which == 'first' else finds['lastsr']
+        html, _ = standard_doi_table(display_rows)
+        if org == 'all':
+            title = f"Journal publications with lab head {which} author"
+        else:
+            title = f"Journal publications for {org} with lab head {which} author"
+        if year != 'All':
+            title += f" ({year})"
+        endpoint_access()
+        return make_response(render_template('general.html', urlroot=request.url_root,
+                                             title=title, html=html,
+                                             navbar=generate_navbar('Authorship')))
+    title = f"Journal publications for {org}"
+    if year != 'All':
+        title += f" ({year})"
+    html = "<table id='org' class='tablesorter numbers'><thead><tr><th></th><th>All</th>" \
+           + "<th>Shared Resources</th></tr></thead><tbody>"
+    c1 = f"<a href='/doiui_orgcont/{year}/all/first'>{len(finds['first']):,}</a>" \
+        if finds['first'] else ""
+    c2 = f"<a href='/doiui_orgcont/{year}/{org}/first'>{len(finds['firstsr']):,}</a>" \
+         if finds['firstsr'] else ""
+    html += f"<tr><td>Lab head first author</td><td>{c1}</td><td>{c2}</td></tr>"
+    c1 = f"<a href='/doiui_orgcont/{year}/all/last'>{len(finds['last']):,}</a>" \
+         if finds['last'] else ""
+    c2 = f"<a href='/doiui_orgcont/{year}/{org}/last'>{len(finds['lastsr']):,}</a>" \
+         if finds['lastsr'] else ""
+    html += f"<tr><td>Lab head last author</td><td>{c1}</td><td>{c2}</td></tr>"
+    html += "</tbody></table><br>" + year_pulldown('doiui_orgcont')
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=title, html=html,
                                          navbar=generate_navbar('Authorship')))
 
 

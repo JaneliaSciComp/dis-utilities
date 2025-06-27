@@ -7,7 +7,7 @@
            to DIS MongoDB.
 """
 
-__version__ = '12.2.0'
+__version__ = '13.0.0'
 
 import argparse
 import configparser
@@ -155,16 +155,16 @@ def get_dis_dois_from_mongo():
     return result
 
 
-def get_dois_from_crossref():
+def get_dois_from_crossref(filter="janelia"):
     ''' Get DOIs from Crossref
         Keyword arguments:
-          None
+          filter: filter type
         Returns:
           List of unique DOIs
     '''
     dlist = []
     LOGGER.info("Getting DOIs from Crossref")
-    suffix = CONFIG['crossref']['janelia']
+    suffix = CONFIG['crossref'][filter]
     complete = False
     parts = 0
     while not complete:
@@ -286,6 +286,7 @@ def get_dois_for_dis(flycore):
     '''
     # Crossref
     dlist = get_dois_from_crossref()
+    dlist.extend(get_dois_from_crossref("ror"))
     # DataCite
     dlist.extend(get_dois_from_datacite("janelia"))
     dlist.extend(get_dois_from_datacite("affiliation"))
@@ -495,12 +496,14 @@ def get_doi_record(doi):
         else:
             try:
                 msg = call_crossref_with_retry(doi)
-                if 'author' not in msg['message'] and 'editor' not in msg['message']:
+                if 'author' not in msg['message'] and 'editor' not in msg['message'] \
+                   and ('project' not in msg['message'] or 'investigator' not in msg['message']['project'][0]):
                     MISSING[f"No author for {doi}"] = True
                     LOGGER.warning(f"No author for {doi}")
                     COUNT['noauthor'] += 1
                     return None
-                if 'title' not in msg['message']:
+                print(msg['message']['type'])
+                if ('title' not in msg['message']) and ('type' not in msg['message'] or msg['message']['type'] != 'grant'):
                     LOGGER.warning(f"No title for {doi}")
                     MISSING[f"No title for {doi}"] = True
                     return None

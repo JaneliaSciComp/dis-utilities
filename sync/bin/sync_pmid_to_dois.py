@@ -3,7 +3,7 @@
     DOI needs to be in the PubMed Central archive.
 '''
 
-__version__ = '4.0.0'
+__version__ = '5.0.0'
 
 import argparse
 import collections
@@ -12,6 +12,7 @@ from operator import attrgetter
 import os
 import sys
 from metapub import PubMedFetcher
+import metapub.exceptions
 from tqdm import tqdm
 import jrc_common.jrc_common as JRC
 
@@ -94,24 +95,42 @@ def postprocessing(audit, error):
           + f"  OA:                {COUNT['OA']:,}\n" \
           + f"DOIs written:        {COUNT['written']:,}"
     print(msg)
-    if audit:
-        filename = 'pmid_dois_updates.json'
-        with open(filename, 'w', encoding='utf-8') as outfile:
-            outfile.write(f"{json.dumps(audit, indent=4, default=str)}\n")
-        LOGGER.info(f"Wrote {len(audit):,} update{'' if len(audit) == 1 else 's'} to {filename}")
     if error:
         filename = 'pmid_dois_errors.json'
         with open(filename, 'w', encoding='utf-8') as outfile:
             outfile.write(f"{json.dumps(error, indent=4, default=str)}\n")
         LOGGER.info(f"Wrote {len(error):,} errors to {filename}")
+    if audit:
+        filename = 'pmid_dois_updates.json'
+        with open(filename, 'w', encoding='utf-8') as outfile:
+            outfile.write(f"{json.dumps(audit, indent=4, default=str)}\n")
+        LOGGER.info(f"Wrote {len(audit):,} update{'' if len(audit) == 1 else 's'} to {filename}")
     if (not COUNT['updated']) or (not (ARG.TEST or ARG.WRITE)):
         return
     text = f"<pre>PMIDs have been added to DOIs.\n\n{msg}</pre>"
-    text += "<br><br>Please see the attached file for the new records."
+    if audit:
+        text += "<br><br>Please see the attached file for the new records."
     subject = "PMIDs added to DOIs"
     email = DIS['developer'] if ARG.TEST else DIS['receivers']
-    JRC.send_email(text, DIS['sender'], email, subject,
-                   attachment=filename, mime='html')
+    if audit:
+        JRC.send_email(text, DIS['sender'], email, subject,
+                       attachment=filename, mime='html')
+    else:
+        JRC.send_email(text, DIS['sender'], email, subject, mime='html')
+
+
+def get_mesh_array(mesh):
+    ''' Get the mesh array
+        Keyword arguments:
+          mesh: mesh object
+    '''
+    mesh_array = []
+    for key, val in mesh.items():
+        single = val
+        single['key'] = key
+        mesh_array.append(single)
+    return mesh_array
+
 
 def update_pmid_by_article(row, article, audit):
     ''' Update PMID using an article object
@@ -128,6 +147,8 @@ def update_pmid_by_article(row, article, audit):
         payload['jrc_pmid'] = article.pmid
     if hasattr(article, 'pmc') and article.pmc:
         payload['jrc_pmc'] = article.pmc
+    if hasattr(article, 'mesh') and article.mesh:
+        payload['jrc_mesh'] = get_mesh_array(article.mesh)
     if not payload:
         #LOGGER.warning(f"No PMID for {row['doi']}")
         return
@@ -138,15 +159,29 @@ def update_pmid_by_article(row, article, audit):
     audit.append(payload)
 
 
-def update_pmid(row, pmid, audit):
+def update_pmid(row, pmid, fetch, audit):
     ''' Update PMID using
         Keyword arguments:
           row: record to update
           pmid: PMID to update
+          fetch: PubMedFetcher object
           audit: list of updates
     '''
-    LOGGER.info(f"Updating PMID for {row['doi']}: {pmid}")
+    LOGGER.debug(f"Updating PMID for {row['doi']}: {pmid}")
     payload = {'jrc_pmid': pmid}
+    article = None
+    try:
+        article = fetch.article_by_pmid(pmid)
+    except metapub.exceptions.InvalidPMID:
+        LOGGER.warning(f"Invalid PMID for {row['doi']}: {pmid}")
+        return
+    except metapub.exceptions.MetaPubError:
+        LOGGER.warning(f"MetaPubError for {row['doi']}: {pmid}")
+        return
+    if article and hasattr(article, 'mesh') and article.mesh:
+        payload['jrc_mesh'] = get_mesh_array(article.mesh)
+    if not payload:
+        return
     COUNT['updated'] += 1
     write_record(row, payload)
     payload["doi"] = row['doi']
@@ -180,7 +215,7 @@ def fetch_pmid(fetch, row, audit, error):
         terminate_program(err)
     if pmid:
         COUNT['PubMed'] += 1
-        update_pmid(row, pmid, audit)
+        update_pmid(row, pmid, fetch, audit)
         return
     # OA
     try:
@@ -189,7 +224,7 @@ def fetch_pmid(fetch, row, audit, error):
         terminate_program(err)
     if oresp and 'PMID' in oresp:
         COUNT['OA'] += 1
-        update_pmid(row, oresp['PMID'], audit)
+        update_pmid(row, oresp['PMID'], fetch, audit)
         return
     if errmsg:
         error.append(errmsg)
@@ -217,8 +252,27 @@ def update_dois():
     fetch = PubMedFetcher()
     for row in tqdm(rows, total=cnt, desc="Syncing PMIDs"):
         fetch_pmid(fetch, row, audit, error)
-
     postprocessing(audit, error)
+
+
+def refresh_pmids():
+    ''' Refresh existing PMIDs
+        Keyword arguments:
+          None
+        Returns:
+          None
+    '''
+    payload = {"jrc_pmid": {"$exists": True}}
+    try:
+        cnt = DB['dis']['dois'].count_documents(payload)
+        rows = DB['dis']['dois'].find(payload)
+    except Exception as err:
+        terminate_program(err)
+    audit = []
+    fetch = PubMedFetcher()
+    for row in tqdm(rows, total=cnt, desc="Syncing PMIDs"):
+        update_pmid(row, row['jrc_pmid'], fetch, audit)
+    postprocessing(audit, [])
 
 # -----------------------------------------------------------------------------
 
@@ -230,6 +284,8 @@ if __name__ == '__main__':
                         help='MongoDB manifold (dev, prod)')
     PARSER.add_argument('--doi', dest='DOI', action='store',
                         help='DOI')
+    PARSER.add_argument('--update', dest='UPDATE', action='store_true',
+                        default=False, help='Update existing PMIDs')
     PARSER.add_argument('--test', dest='TEST', action='store_true',
                         default=False, help='Send email to developer')
     PARSER.add_argument('--write', dest='WRITE', action='store_true',
@@ -245,5 +301,8 @@ if __name__ == '__main__':
         DIS = JRC.simplenamespace_to_dict(JRC.get_config("dis"))
     except Exception as err:
         terminate_program(err)
-    update_dois()
+    if ARG.UPDATE:
+        refresh_pmids()
+    else:
+        update_dois()
     terminate_program()
