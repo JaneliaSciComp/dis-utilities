@@ -256,7 +256,7 @@ hr {border-color: #666;
 }
 .badge-author {
    color: white;
-   background-color: #00a450;
+   background-color: #00a550;
    border: 1px solid gold;
 }
 .badge-contingent {
@@ -295,7 +295,7 @@ hr {border-color: #666;
 }
 .badge-projecttag {
    color: white;
-   background-color: darkgreen;
+   background-color: #098e96;
 }
 .badge-source {
    color: white;
