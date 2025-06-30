@@ -73,7 +73,7 @@ $(document).on('keypress', 'input', function(e) {
       alert("You must enter an organization");
       return;
     }
-    url = "/doiui_org/" + $("#input-orglist").val();
+    url = "/org_detail/" + $("#input-orglist").val();
     window.location = url;
   }
   function find_orgs_summary() {
@@ -82,7 +82,7 @@ $(document).on('keypress', 'input', function(e) {
       return;
     }
     const currentYear = new Date().getFullYear();
-    url = "/doiui_orgcont/" + currentYear  + "/" + $("#input-orglist").val();
+    url = "/org_summary/" + $("#input-orglist").val() + "/" + currentYear;
     window.location = url;
   }
   function find_projects() {
