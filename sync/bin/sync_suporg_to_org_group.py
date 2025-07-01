@@ -16,8 +16,8 @@ import jrc_common.jrc_common as JRC
 # Database
 DB = {}
 # Global variables
-LOGGER = None
-ARG = None
+ARG = LOGGER = None
+IGNORE = {}
 
 def terminate_program(msg=None):
     ''' Terminate the program gracefully
@@ -54,6 +54,13 @@ def initialize_program():
             DB[source] = JRC.connect_database(dbo)
         except Exception as err:
             terminate_program(err)
+    try:
+        rows = DB['dis']['to_ignore'].find({"type": "group"})
+        for row in rows:
+            IGNORE[row['key']] = True
+    except Exception as err:
+        terminate_program(err)
+
 
 def on_steering_committee(code, rec):
     ''' Check if the person is on the steering committee
@@ -153,15 +160,22 @@ def process_single_org(code, name, total_orgs=None, processed_orgs=None):
             process_single_org(subcode, subname, total_orgs, processed_orgs)
     return total_orgs
 
-def process_list(organizations, rec):
+
+def process_list(raw, rec):
     ''' Process the list of organizations
         Keyword arguments:
-          organizations: list of organizations
+          raw: raw list of organizations
           rec: record from the org_group collection
         Returns:
           None
     '''
+    if 'members' not in rec:
+        rec['members'] = []
     original_members = set(rec['members'])
+    organizations = set()
+    for org in raw:
+        if org not in IGNORE:
+            organizations.add(org)
     for org in rec['members']:
         if org not in organizations:
             organizations.add(org)
@@ -217,7 +231,7 @@ def process_single_group():
         res = process_single_org(code, name)
         for val in res.values():
             organizations.add(val)
-        if name not in organizations:
+        if name not in organizations and name not in IGNORE:
             organizations.add(name)
     process_list(organizations, rec)
 

@@ -28,7 +28,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "54.0.0"
+__version__ = "55.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -46,9 +46,10 @@ NAV = {"Home": "",
                 "DOIs by publisher": "dois_publisher",
                 "DOIs by year": "dois_year",
                 "DOIs by month": "dois_month",
-                "DataCite DOIs": "dois_data",
-                "DataCite DOI downloads": "dois_datacite",
                 "DOI yearly report": "dois_report"},
+       "DataCite": {"DataCite DOI stats": "datacite_dois",
+                    "DataCite DOI downloads": "datacite_downloads",
+                    "DataCite subjects": "datacite_subject"},
        "Authorship": {"DOIs by authorship": "dois_author",
                       "DOIs with lab head first/last authors": "doiui_group",
                       "Top first and last authors": "dois_top_author",
@@ -310,7 +311,6 @@ def generate_navbar(active):
             nav += f"<a class='nav-link' href='{link}'>{heading}</a></li>"
     nav += '</ul></div></nav>'
     return nav
-
 
 # ******************************************************************************
 # * Payload utility functions                                                  *
@@ -2822,6 +2822,7 @@ def show_home(doi=None):
                                          journals=journals, orgs=orgs, projects=projects,
                                          navbar=generate_navbar('Home')))
 
+
 def get_display_badges(doi, row, data, local):
     ''' Get badges for a DOI, formatted for display
         Keyword arguments:
@@ -2860,10 +2861,10 @@ def get_display_badges(doi, row, data, local):
     badges += "</span>"
     return badges
 
-
 # ******************************************************************************
 # * UI endpoints (DOI)                                                         *
 # ******************************************************************************
+
 @app.route('/doiui/<path:doi>')
 def show_doi_ui(doi):
     ''' Show DOI
@@ -3222,180 +3223,6 @@ def dois_source(year='All'):
                                          title=title, html=html,
                                          chartscript=chartscript, chartdiv=chartdiv,
                                          chartscript2=chartscript2, chartdiv2=chartdiv2,
-                                         navbar=generate_navbar('DOIs')))
-
-
-@app.route('/dois_data/<string:dtype>/<string:pub>/<string:year>')
-@app.route('/dois_data/<string:dtype>/<string:pub>')
-def dois_datad(dtype=None, pub=None, year='All'):
-    ''' Show data DOIs
-    '''
-    if pub == 'protocols.io':
-        payload = {"jrc_obtained_from": "Crossref",
-                   "doi": {"$regex": "/protocols.io"}}
-    else:
-        payload = {"jrc_obtained_from": "DataCite",
-                   "types.resourceTypeGeneral": dtype, "publisher": pub}
-    if year != 'All':
-        payload['jrc_publishing_date'] = {"$regex": "^"+ year}
-    coll = DB['dis'].dois
-    try:
-        rows = coll.find(payload).sort("jrc_publishing_date", -1)
-    except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get data DOIs"),
-                               message=error_message(err))
-    html, cnt = standard_doi_table(rows, prefix=f"dois_data/{dtype}/{pub}")
-    title = f"DOIs for {pub} {dtype} ({cnt:,})"
-    if year != 'All':
-        title += f" (year={year})"
-    endpoint_access()
-    return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title=title, html=html,
-                                         navbar=generate_navbar('DOIs')))
-
-
-@app.route('/dois_subject/<string:subject>/<string:year>')
-@app.route('/dois_subject/<string:subject>')
-@app.route('/dois_subject')
-def dois_subject(subject=None, year='All'):
-    ''' Show DOI subjects
-    '''
-    if subject:
-        payload = {"subjects.subject": subject}
-    else:
-        payload = [{"$match": {"subjects": {"$exists": True}}},
-                   {"$unwind": "$subjects"},
-                   {"$group": {"_id": {"subject": "$subjects.subject",
-                                       "scheme": "$subjects.subjectScheme"},
-                               "count": {"$sum": 1}}},
-                   {"$sort": {"count": -1}}]
-    try:
-        if subject:
-            if year != 'All':
-                payload['jrc_publishing_date'] = {"$regex": "^"+ year}
-            rows = DB['dis'].dois.find(payload)
-        else:
-            rows = DB['dis'].dois.aggregate(payload)
-    except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get DOI subjects"),
-                               message=error_message(err))
-    if subject:
-        html, _ = standard_doi_table(rows, prefix=f"dois_subject/{subject}")
-        title = f"DOIs for {subject}"
-        if year != 'All':
-            title += f" (year={year})"
-    else:
-        html = "<table id='subjects' class='tablesorter numberlast'><thead><tr>" \
-               + "<th>Subject</th><th>Scheme</th><th>Count</th></tr></thead><tbody>"
-        for row in rows:
-            scheme = row['_id']['scheme'] if 'scheme' in row['_id'] else ''
-            html += f"<tr><td>{row['_id']['subject']}</td><td>{scheme}</td><td>" \
-                    + f"<a href='/dois_subject/{row['_id']['subject']}'>{row['count']}</a>" \
-                    + "</td></tr>"
-        html += "</tbody></table>"
-        title = "Subjects"
-    endpoint_access()
-    return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title=title, html=html,
-                                         navbar=generate_navbar('DOIs')))
-
-
-@app.route('/dois_data')
-def dois_data():
-    ''' Show data DOIs
-    '''
-    payload = [{"$match": {"jrc_obtained_from": "DataCite",
-                           "types.resourceTypeGeneral": {"$nin": ["Preprint"]}}},
-               {"$group": {"_id": {"type": "$types.resourceTypeGeneral",
-                                   "detail": "$types.resourceType",
-                                   "pub": "$publisher"}, "count": {"$sum": 1}}},
-               {"$sort": {"count": -1}},
-               {"$unionWith": {
-                   "coll": "dois",
-                   "pipeline": [
-                       {"$match": {"jrc_obtained_from": "Crossref",
-                                   "doi": {"$regex": "/protocols.io"}}},
-                       {"$group": {"_id": {"type": "$subtype", "pub": "protocols.io"},
-                                   "count": {"$sum": 1}}},
-                       {"$sort": {"count": -1}}
-                   ]
-               }}
-              ]
-    coll = DB['dis'].dois
-    try:
-        rows = coll.aggregate(payload)
-    except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get data DOIs"),
-                               message=error_message(err))
-    types = {}
-    dois = []
-    for row in rows:
-        if row['_id']['type'] not in types:
-            types[row['_id']['type']] = 0
-        types[row['_id']['type']] += row['count']
-        if 'detail' not in row['_id']:
-            row['_id']['detail'] = ""
-        dois.append(row)
-    # Summary
-    inner = '<table id="types" class="tablesorter numberlast"><thead><tr>' \
-            + '<th>Type</th><th>Count</th>' \
-            + '</tr></thead><tbody>'
-    for key, val in sorted(types.items(), key=itemgetter(1), reverse=True):
-        link = f"/doisui_type/DataCite/{key}/None"
-        inner += f"<td>{key}</td><td><a href='{link}'>{val}</a></td></tr>"
-    inner += "</tbody><tfoot></tfoot></table>"
-    html = f"<div class='flexrow'><div class='flexcol'>{inner}</div>" \
-           + "<div class='flexcol' style='margin-left: 50px'>"
-    # Details
-    inner = '<table id="details" class="tablesorter numberlast"><thead><tr>' \
-            + '<th>Type</th><th>Subtype</th><th>Publisher</th><th>Count</th>' \
-            + '</tr></thead><tbody>'
-    total = 0
-    for row in sorted(dois, key=lambda x: x['count'], reverse=True):
-        total += row['count']
-        link = f"/dois_data/{row['_id']['type']}/{row['_id']['pub']}"
-        inner += f"<td>{row['_id']['type']}</td><td>{row['_id']['detail']}</td>" \
-                 + f"<td>{row['_id']['pub']}</td>" \
-                 + f"<td><a href='{link}'>{row['count']}</a></td></tr>"
-    inner += "</tbody><tfoot><tr><td colspan='3'>TOTAL</td>" \
-             + f"<td>{total:,}</td></tr></tfoot></table>"
-    html += f"{inner}</div></div>"
-    endpoint_access()
-    return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title="DataCite DOIs", html=html,
-                                         navbar=generate_navbar('DOIs')))
-
-
-@app.route('/dois_datacite')
-def dois_datacite():
-    ''' Show datacite DOI download counts
-    '''
-    payload = {"jrc_obtained_from": "DataCite", "downloadCount": {"$ne": 0}}
-    coll = DB['dis'].dois
-    try:
-        rows = coll.find(payload).sort("downloadCount", -1)
-    except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get data DOIs"),
-                               message=error_message(err))
-    html = '<table id="data" class="tablesorter numberlast"><thead><tr>' \
-           + '<th>DOI</th><th>Title</th><th>Downloads</th>' \
-           + '</tr></thead><tbody>'
-    total = 0
-    for row in rows:
-        total += row['downloadCount']
-        link = doi_link(row['doi'])
-        print(row['doi'])
-        html += f"<td>{link}</td><td>{DL.get_title(row)}</td>" \
-                + f"<td>{row['downloadCount']}</td></tr>"
-    html += "</tbody><tfoot><tr><td colspan='2' style='text-align:right'>TOTAL</td>" \
-            + f"<td>{total:,}</td></tr></tfoot></table><br>"
-    endpoint_access()
-    return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title="DataCite DOI downloads", html=html,
                                          navbar=generate_navbar('DOIs')))
 
 
@@ -3988,6 +3815,186 @@ def dois_publisher(year='All'):
                                          title=title, html=html,
                                          navbar=generate_navbar('DOIs')))
 
+# ******************************************************************************
+# * UI endpoints (DataCite)                                                    *
+# ******************************************************************************
+
+@app.route('/datacite_subject/<string:subject>/<string:year>')
+@app.route('/datacite_subject/<string:subject>')
+@app.route('/datacite_subject')
+def datacite_subject(subject=None, year='All'):
+    ''' Show DOI subjects
+    '''
+    if subject:
+        payload = {"subjects.subject": subject}
+    else:
+        payload = [{"$match": {"subjects": {"$exists": True}}},
+                   {"$unwind": "$subjects"},
+                   {"$group": {"_id": {"subject": "$subjects.subject",
+                                       "scheme": "$subjects.subjectScheme"},
+                               "count": {"$sum": 1}}},
+                   {"$sort": {"count": -1}}]
+    try:
+        if subject:
+            if year != 'All':
+                payload['jrc_publishing_date'] = {"$regex": "^"+ year}
+            rows = DB['dis'].dois.find(payload)
+        else:
+            rows = DB['dis'].dois.aggregate(payload)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get DOI subjects"),
+                               message=error_message(err))
+    if subject:
+        html, _ = standard_doi_table(rows, prefix=f"datacite_subject/{subject}")
+        title = f"DOIs for {subject}"
+        if year != 'All':
+            title += f" (year={year})"
+    else:
+        html = "<table id='subjects' class='tablesorter numberlast'><thead><tr>" \
+               + "<th>Subject</th><th>Scheme</th><th>Count</th></tr></thead><tbody>"
+        for row in rows:
+            scheme = row['_id']['scheme'] if 'scheme' in row['_id'] else ''
+            html += f"<tr><td>{row['_id']['subject']}</td><td>{scheme}</td><td>" \
+                    + f"<a href='/datacite_subject/{row['_id']['subject']}'>{row['count']}</a>" \
+                    + "</td></tr>"
+        html += "</tbody></table>"
+        title = "Subjects"
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=title, html=html,
+                                         navbar=generate_navbar('DOIs')))
+
+
+@app.route('/datacite_dois')
+def datacite_dois():
+    ''' Show DataCite DOIs
+    '''
+    payload = [{"$match": {"jrc_obtained_from": "DataCite",
+                           "types.resourceTypeGeneral": {"$nin": ["Preprint"]}}},
+               {"$group": {"_id": {"type": "$types.resourceTypeGeneral",
+                                   "detail": "$types.resourceType",
+                                   "pub": "$publisher"}, "count": {"$sum": 1}}},
+               {"$sort": {"count": -1}},
+               {"$unionWith": {
+                   "coll": "dois",
+                   "pipeline": [
+                       {"$match": {"jrc_obtained_from": "Crossref",
+                                   "doi": {"$regex": "/protocols.io"}}},
+                       {"$group": {"_id": {"type": "$subtype", "pub": "protocols.io"},
+                                   "count": {"$sum": 1}}},
+                       {"$sort": {"count": -1}}
+                   ]
+               }}
+              ]
+    coll = DB['dis'].dois
+    try:
+        rows = coll.aggregate(payload)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get data DOIs"),
+                               message=error_message(err))
+    types = {}
+    dois = []
+    for row in rows:
+        if row['_id']['type'] not in types:
+            types[row['_id']['type']] = 0
+        types[row['_id']['type']] += row['count']
+        if 'detail' not in row['_id']:
+            row['_id']['detail'] = ""
+        dois.append(row)
+    # Summary
+    inner = '<table id="types" class="tablesorter numberlast"><thead><tr>' \
+            + '<th>Type</th><th>Count</th>' \
+            + '</tr></thead><tbody>'
+    for key, val in sorted(types.items(), key=itemgetter(1), reverse=True):
+        link = f"/doisui_type/DataCite/{key}/None"
+        inner += f"<td>{key}</td><td><a href='{link}'>{val}</a></td></tr>"
+    inner += "</tbody><tfoot></tfoot></table>"
+    html = f"<div class='flexrow'><div class='flexcol'>{inner}</div>" \
+           + "<div class='flexcol' style='margin-left: 50px'>"
+    # Details
+    inner = '<table id="details" class="tablesorter numberlast"><thead><tr>' \
+            + '<th>Type</th><th>Subtype</th><th>Publisher</th><th>Count</th>' \
+            + '</tr></thead><tbody>'
+    total = 0
+    for row in sorted(dois, key=lambda x: x['count'], reverse=True):
+        total += row['count']
+        link = f"/datacite_dois/{row['_id']['type']}/{row['_id']['pub']}"
+        inner += f"<td>{row['_id']['type']}</td><td>{row['_id']['detail']}</td>" \
+                 + f"<td>{row['_id']['pub']}</td>" \
+                 + f"<td><a href='{link}'>{row['count']}</a></td></tr>"
+    inner += "</tbody><tfoot><tr><td colspan='3'>TOTAL</td>" \
+             + f"<td>{total:,}</td></tr></tfoot></table>"
+    html += f"{inner}</div></div>"
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="DataCite DOI stats", html=html,
+                                         navbar=generate_navbar('DOIs')))
+
+
+@app.route('/datacite_dois/<string:dtype>/<string:pub>/<string:year>')
+@app.route('/datacite_dois/<string:dtype>/<string:pub>')
+def datacite_doisd(dtype=None, pub=None, year='All'):
+    ''' Show data DOIs
+    '''
+    if pub == 'protocols.io':
+        payload = {"jrc_obtained_from": "Crossref",
+                   "doi": {"$regex": "/protocols.io"}}
+    else:
+        payload = {"jrc_obtained_from": "DataCite",
+                   "types.resourceTypeGeneral": dtype, "publisher": pub}
+    if year != 'All':
+        payload['jrc_publishing_date'] = {"$regex": "^"+ year}
+    coll = DB['dis'].dois
+    try:
+        rows = coll.find(payload).sort("jrc_publishing_date", -1)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get data DOIs"),
+                               message=error_message(err))
+    html, cnt = standard_doi_table(rows, prefix=f"datacite_dois/{dtype}/{pub}")
+    title = f"DOIs for {pub} {dtype} ({cnt:,})"
+    if year != 'All':
+        title += f" (year={year})"
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=title, html=html,
+                                         navbar=generate_navbar('DOIs')))
+
+
+@app.route('/datacite_downloads')
+def datacite_downloads():
+    ''' Show DataCite DOI download counts
+    '''
+    payload = {"jrc_obtained_from": "DataCite", "downloadCount": {"$ne": 0}}
+    coll = DB['dis'].dois
+    try:
+        rows = coll.find(payload).sort("downloadCount", -1)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get data DOIs"),
+                               message=error_message(err))
+    html = '<table id="data" class="tablesorter numberlast"><thead><tr>' \
+           + '<th>DOI</th><th>Title</th><th>Downloads</th>' \
+           + '</tr></thead><tbody>'
+    total = 0
+    for row in rows:
+        total += row['downloadCount']
+        link = doi_link(row['doi'])
+        print(row['doi'])
+        html += f"<td>{link}</td><td>{DL.get_title(row)}</td>" \
+                + f"<td>{row['downloadCount']}</td></tr>"
+    html += "</tbody><tfoot><tr><td colspan='2' style='text-align:right'>TOTAL</td>" \
+            + f"<td>{total:,}</td></tr></tfoot></table><br>"
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="DataCite DOI downloads", html=html,
+                                         navbar=generate_navbar('DOIs')))
+
+# ******************************************************************************
+# * UI endpoints (Authorship)                                                  *
+# ******************************************************************************
 
 @app.route('/dois_author/<string:year>')
 @app.route('/dois_author')
@@ -4331,6 +4338,7 @@ def show_organization(org_in, year=str(datetime.now().year), show="full"):
     dcnt = org_journal_cnt = 0
     content = ""
     for row in rows:
+        print(row['doi'], DL.is_journal(row))
         if DL.is_journal(row) and not DL.is_version(row):
             org_journal_cnt += 1
         dcnt += 1
@@ -4514,8 +4522,8 @@ def org_year(org="Shared Resources"):
         html += f"<tr><td>{yr}</td><td>{c1}</td><td>{c2}</td></tr>"
     c1 = f"<a href='/org_summary/all/All/last'>{total['Janelia']}</a>"
     c2 = f"<a href='/org_summary/{org}/All/last'>{total[org]}</a>"
-    html += f"<tr><td>TOTAL</td><td>{c1}</td><td>{c2}</td></tr>"
-    html += '</tbody></table><br>'
+    html += f"</tbody><tfoot><tr><td>TOTAL</td><td>{c1}</td><td>{c2}</td></tr>"
+    html += '</tfoot></table><br>'
     chartscript, chartdiv = DP.stacked_bar_chart(data, title,
                                                  xaxis="years",
                                                  yaxis=('Janelia', org),

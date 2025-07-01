@@ -3,7 +3,7 @@
     DOI needs to be in the PubMed Central archive.
 '''
 
-__version__ = '5.0.0'
+__version__ = '5.1.0'
 
 import argparse
 import collections
@@ -93,6 +93,7 @@ def postprocessing(audit, error):
           + f"  PubMed (eutils):   {COUNT['PubMed (eutils)']:,}\n" \
           + f"  PubMed:            {COUNT['PubMed']:,}\n" \
           + f"  OA:                {COUNT['OA']:,}\n" \
+          + f"  MeSH updates:      {COUNT['mesh']:,}\n" \
           + f"DOIs written:        {COUNT['written']:,}"
     print(msg)
     if error:
@@ -129,6 +130,8 @@ def get_mesh_array(mesh):
         single = val
         single['key'] = key
         mesh_array.append(single)
+    if mesh_array:
+        COUNT['mesh'] += 1
     return mesh_array
 
 
