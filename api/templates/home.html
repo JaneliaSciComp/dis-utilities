@@ -85,6 +85,15 @@ $(document).on('keypress', 'input', function(e) {
     url = "/org_summary/" + $("#input-orglist").val() + "/" + currentYear;
     window.location = url;
   }
+  function find_orgs_year() {
+    if (!$('#input-orglist').val()) {
+      alert("You must enter an organization");
+      return;
+    }
+    const currentYear = new Date().getFullYear();
+    url = "/org_year/" + $("#input-orglist").val()
+    window.location = url;
+  }
   function find_projects() {
     if (!$('#input-projlist').val()) {
       alert("You must enter a project");
@@ -197,6 +206,7 @@ onload="tableInitialize();"
   <div class="flexitem">
     <button type="submit" id="doio2" class="btn btn-primary btn-md" onclick="find_orgs_summary(); return false;" href="#">Summary</button>
     <button type="submit" id="doio" class="btn btn-primary btn-md" onclick="find_orgs(); return false;" href="#">Details</button>
+    <button type="submit" id="doiy" class="btn btn-primary btn-md" onclick="find_orgs_year(); return false;" href="#">Yearly</button>
   </div>
 </div>
 <br>
