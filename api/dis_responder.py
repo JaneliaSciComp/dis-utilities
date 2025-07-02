@@ -28,7 +28,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "56.0.0"
+__version__ = "56.1.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -2967,14 +2967,15 @@ def show_doi_ui(doi):
         abstract = DL.get_abstract(data)
         if abstract:
             html += f"<h4>Abstract</h4><div class='abstract'>{abstract}</div><br>"
-    try:
-        html = add_subjects(row, html)
-        if 'span' in html:
-            html += "<br><i class='fa-solid fa-circle-info'></i> Subjects in " \
-                    + "<span style='color: #777'>dark gray</span> are considered minor in MeSH"
-        html += "<br><br>"
-    except Exception as err:
-        return inspect_error(err, f"Could not get subjects for DOI {row['doi']}")
+    if row:
+        try:
+            html = add_subjects(row, html)
+            if 'span' in html:
+                html += "<br><i class='fa-solid fa-circle-info'></i> Subjects in " \
+                        + "<span style='color: #777'>dark gray</span> are considered minor in MeSH"
+            html += "<br><br>"
+        except Exception as err:
+            return inspect_error(err, f"Could not get subjects for DOI {row['doi']}")
     # Relations
     html += add_relations(data)
     # Author details
