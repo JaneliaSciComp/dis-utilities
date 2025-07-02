@@ -28,7 +28,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "55.0.0"
+__version__ = "56.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -44,6 +44,7 @@ NAV = {"Home": "",
                 "DOI stats": "dois_source",
                 "DOIs awaiting processing": "dois_pending",
                 "DOIs by publisher": "dois_publisher",
+                "DOIs by subject": "dois_subjectpicker",
                 "DOIs by year": "dois_year",
                 "DOIs by month": "dois_month",
                 "DOI yearly report": "dois_report"},
@@ -1688,17 +1689,20 @@ def add_subjects(row, html):
         try:
             if row and row['jrc_obtained_from'] == 'DataCite' and 'subjects' in row \
                and row['subjects']:
-                html += f"<h4>Subjects</h4>{', '.join(sub['subject'] for sub in row['subjects'])}" \
-                        + "<br><br>"
+                html += "<h4>DataCite subjects</h4>" \
+                        + f"{', '.join(sub['subject'] for sub in row['subjects'])}" + "<br><br>"
         except Exception as err:
             raise err
     elif 'jrc_mesh' in row:
         subjects = []
         for mesh in row['jrc_mesh']:
-            if 'descriptor_name' in mesh and 'major_topic' in mesh and mesh['major_topic']:
-                subjects.append(mesh['descriptor_name'])
+            if 'descriptor_name' in mesh:
+                if 'major_topic' in mesh and mesh['major_topic']:
+                    subjects.append(mesh['descriptor_name'])
+                else:
+                    subjects.append(f"<span style='color: #777'>{mesh['descriptor_name']}</span>")
         if subjects:
-            html += f"<h4>Subjects</h4>{', '.join(subjects)}<br><br>"
+            html += f"<h4>MeSH subjects</h4>{', '.join(subjects)}"
     return html
 
 
@@ -2965,6 +2969,10 @@ def show_doi_ui(doi):
             html += f"<h4>Abstract</h4><div class='abstract'>{abstract}</div><br>"
     try:
         html = add_subjects(row, html)
+        if 'span' in html:
+            html += "<br><i class='fa-solid fa-circle-info'></i> Subjects in " \
+                    + "<span style='color: #777'>dark gray</span> are considered minor in MeSH"
+        html += "<br><br>"
     except Exception as err:
         return inspect_error(err, f"Could not get subjects for DOI {row['doi']}")
     # Relations
@@ -3810,6 +3818,106 @@ def dois_publisher(year='All'):
     if year != 'All':
         title += f" for {year}"
     title += f" ({len(pubs):,})"
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=title, html=html,
+                                         navbar=generate_navbar('DOIs')))
+
+
+@app.route('/dois_subjectpicker')
+def show_doi_subjectpicker():
+    ''' Show DOI subjects
+    '''
+    try:
+        payload = [{"$match": {"subjects": {"$exists": True}}},
+                   {"$unwind": "$subjects"},
+                   {"$group": {"_id": {"subject": "$subjects.subject",
+                                       "scheme": "$subjects.subjectScheme"},
+                               "count": {"$sum": 1}}},
+                   {"$sort": {"count": -1}}]
+        rows = DB['dis'].dois.aggregate(payload)
+    except Exception as err:
+        return inspect_error(err, 'Could not get Crossref DOI subjects')
+    if not rows:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not find subjects", 'warning'),
+                               message="Could not find Crossref DOI subjects")
+    subdict = {}
+    for row in rows:
+        if 'scheme' not in row['_id']:
+            row['_id']['scheme'] = "DataCite unspecified"
+        if row['_id']['subject'] not in subdict:
+            subdict[row['_id']['subject']] = [{"count": row['count'],
+                                               "schema": row['_id']['scheme']}]
+        else:
+            subdict[row['_id']['subject']].append({"count": row['count'],
+                                                   "schema": row['_id']['scheme']})
+    try:
+        payload = [{"$match": {"jrc_mesh": {"$exists": 1}}},
+                   {"$unwind": "$jrc_mesh"},
+                   {"$group": {"_id": "$jrc_mesh.descriptor_name", "count": {"$sum": 1}}}]
+        rows = DB['dis'].dois.aggregate(payload)
+    except Exception as err:
+        return inspect_error(err, 'Could not get DataCite DOI subjects')
+    if not rows:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not find subjects", 'warning'),
+                               message="Could not find DataCite DOI subjects")
+    for row in rows:
+        if row['_id'] not in subdict:
+            subdict[row['_id']] = [{"count": row['count'], "schema": "MeSH"}]
+        else:
+            subdict[row['_id']].append({"count": row['count'], "schema": "MeSH"})
+    sublist = '<option>'
+    outlist = ""
+    for subj, val in sorted(subdict.items()):
+        outlist += f"{subj}\t"
+        schlist = []
+        for sch in val:
+            schlist.append(f"{sch['schema']}: {sch['count']}")
+        outlist += ", ".join(schlist) + "\n"
+        sublist += f"<option value='{subj}'>{subj}</option>"
+    sublist += '</option>'
+    html = f"Found {len(subdict):,} unique subjects<br>" \
+           + create_downloadable("subjects", ["Subject", "Schemas"], outlist) + "<br><br>"
+    endpoint_access()
+    return make_response(render_template('subject.html', urlroot=request.url_root,
+                                         title="DOI subjects", html=html, subjects=sublist,
+                                         navbar=generate_navbar('DOIs')))
+
+
+@app.route('/dois_subject/<string:subject>')
+def show_doi_subject(subject):
+    ''' Show DOIs for a subject
+    '''
+    payload = {"$or": [{"subjects.subject": subject},
+                       {"jrc_mesh.descriptor_name": subject}]}
+    try:
+        rows = DB['dis'].dois.find(payload)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get DOI subjects"),
+                               message=error_message(err))
+    header = ['Published', 'DOI', 'Source', 'Title']
+    html = "<table id='dois' class='tablesorter standard'><thead><tr>" \
+           + ''.join([f"<th>{itm}</th>" for itm in header]) + "</tr></thead><tbody>"
+    fileoutput = ""
+    cnt = 0
+    for row in rows:
+        row['published'] = DL.get_publishing_date(row)
+        row['link'] = doi_link(row['doi'])
+        row['title'] = DL.get_title(row)
+        row['source'] = row['jrc_obtained_from'] if 'jrc_obtained_from' in row else 'DataCite'
+        html += "<tr><td>" \
+            + dloop(row, ['published', 'link', 'source', 'title'], "</td><td>") + "</td></tr>"
+        if row['title']:
+            row['title'] = row['title'].replace("\n", " ")
+        cnt += 1
+        fileoutput += dloop(row, ['published', 'doi', 'source', 'title']) + "\n"
+    html += '</tbody></table>'
+    counter = f"<p>Number of DOIs: <span id='totalrows'>{cnt}</span></p>"
+    html = counter + html
+    title = f"DOIs for subject {subject}"
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
@@ -5837,9 +5945,8 @@ def dois_top(show="journal", num=10):
 def show_projects(option=None):
     ''' Show information on projects
     '''
-    payload = {"project": {"$nin": ["$name"]}}
     try:
-        rows = DB['dis'].project_map.find(payload)
+        rows = DB['dis'].project_map.find({"project": {"$nin": ["$name"]}})
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get projects from " \

@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block script %}
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jquery-cookie/1.4.1/jquery.cookie.min.js"></script>
+<script src="/static/bootstrap-autocomplete/autocomplete.js"></script>
+<script>
+$(document).on('keypress', 'input', function(e) {
+  if (e.which === 13) {
+    var focusedElement = $(':focus');
+    var eid = focusedElement.attr('id');
+    e.preventDefault();
+    if (eid == 'input-subjlist') {
+        find_subject();
+    }
+  }
+  return;
+});
+  function find_subject() {
+    var focusedElement = $(':focus');
+    if (!$('#input-subjlist').val()) {
+      alert("You must enter a subject");
+      return;
+    }
+    url = "/dois_subject/" + $("#input-subjlist").val();
+    window.location = url;
+  }
+</script>
+{% endblock %}
+{% block onload %}
+onload="tableInitialize();"
+{% endblock %}
+
+{% block content %}
+<h2>{{ title }}</h2>
+{{ html | safe }}
+<form>
+<div class="flexcontainer">
+  <div class="flexitem">
+  <span class="form-control-lg">Find DOIs by subject:</span>
+  </div>
+  <div class="flexitem">
+    <div class="form-group">
+      <input type="text" class="form-control" placeholder="Select a subject" list="list-subj" id="input-subjlist">
+      <datalist id="list-subj">
+        {{ subjects | safe }}
+      </datalist>
+  </div>
+  <script>
+      document.addEventListener('DOMContentLoaded', e => {
+          $('#input-subjectlist').autocomplete()
+      }, false);
+  </script>
+  </div>
+  <div class="flexitem">
+    <button type="submit" id="dois" class="btn btn-primary btn-md" onclick="find_subject(); return false;" href="#">Look up</button>
+  </div>
+</div>
+</form>
+{% endblock %}
