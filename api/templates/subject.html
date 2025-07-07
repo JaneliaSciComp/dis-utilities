@@ -11,6 +11,9 @@ $(document).on('keypress', 'input', function(e) {
     if (eid == 'input-subjlist') {
         find_subject();
     }
+    if (eid == 'psub') {
+        find_subject_partial();
+    }
   }
   return;
 });
@@ -21,6 +24,15 @@ $(document).on('keypress', 'input', function(e) {
       return;
     }
     url = "/dois_subject/" + $("#input-subjlist").val();
+    window.location = url;
+  }
+  function find_subject_partial() {
+    var focusedElement = $(':focus');
+    if (!$('#psub').val()) {
+      alert("You must enter a subject");
+      return;
+    }
+    url = "/dois_subject/" + $("#psub").val() + "/partial";
     window.location = url;
   }
 </script>
@@ -52,6 +64,18 @@ onload="tableInitialize();"
   </div>
   <div class="flexitem">
     <button type="submit" id="dois" class="btn btn-primary btn-md" onclick="find_subject(); return false;" href="#">Look up</button>
+  </div>
+</div>
+  <br><br>
+<div class="flexcontainer">
+  <div class="flexitem">
+  <span class="form-control-lg">Find DOIs by partial subject:</span>
+  </div>
+  <div class="flexitem">
+    <input type="text" class="form-control form-control-lg" id="psub" size=28>
+  </div>
+  <div class="flexitem">
+    <button type="submit" id="doisp" class="btn btn-primary btn-md" onclick="find_subject_partial(); return false;" href="#">Look up</button>
   </div>
 </div>
 </form>

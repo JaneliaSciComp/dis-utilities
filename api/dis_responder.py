@@ -28,7 +28,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "56.1.0"
+__version__ = "57.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -1676,7 +1676,7 @@ def get_tag_details(tag):
 # * General utility functions                                                  *
 # ******************************************************************************
 
-def add_subjects(row, html):
+def add_subjects(row, html=None):
     ''' Add subjects to the HTML
         Keyword arguments:
           row: row from dois collection
@@ -1689,8 +1689,11 @@ def add_subjects(row, html):
         try:
             if row and row['jrc_obtained_from'] == 'DataCite' and 'subjects' in row \
                and row['subjects']:
-                html += "<h4>DataCite subjects</h4>" \
-                        + f"{', '.join(sub['subject'] for sub in row['subjects'])}" + "<br><br>"
+                if html:
+                    html += "<h4>DataCite subjects</h4>" \
+                            + f"{', '.join(sub['subject'] for sub in row['subjects'])}" + "<br><br>"
+                else:
+                    return f"{', '.join(sub['subject'] for sub in row['subjects'])}"
         except Exception as err:
             raise err
     elif 'jrc_mesh' in row:
@@ -1702,7 +1705,10 @@ def add_subjects(row, html):
                 else:
                     subjects.append(f"<span style='color: #777'>{mesh['descriptor_name']}</span>")
         if subjects:
-            html += f"<h4>MeSH subjects</h4>{', '.join(subjects)}"
+            if html:
+                html += f"<h4>MeSH subjects</h4>{', '.join(subjects)}"
+            else:
+                return f"{', '.join(subjects)}"
     return html
 
 
@@ -3887,12 +3893,17 @@ def show_doi_subjectpicker():
                                          navbar=generate_navbar('DOIs')))
 
 
+@app.route('/dois_subject/<string:subject>/<string:partial>')
 @app.route('/dois_subject/<string:subject>')
-def show_doi_subject(subject):
+def show_doi_subject(subject, partial=None):
     ''' Show DOIs for a subject
     '''
-    payload = {"$or": [{"subjects.subject": subject},
-                       {"jrc_mesh.descriptor_name": subject}]}
+    if partial:
+        payload = {"$or": [{"subjects.subject": {"$regex": subject, "$options": "i"}},
+                           {"jrc_mesh.descriptor_name": {"$regex": subject, "$options": "i"}}]}
+    else:
+        payload = {"$or": [{"subjects.subject": subject},
+                           {"jrc_mesh.descriptor_name": subject}]}
     try:
         rows = DB['dis'].dois.find(payload)
     except Exception as err:
@@ -3900,25 +3911,37 @@ def show_doi_subject(subject):
                                title=render_warning("Could not get DOI subjects"),
                                message=error_message(err))
     header = ['Published', 'DOI', 'Source', 'Title']
+    if partial:
+        header.insert(-1, "Subjects")
     html = "<table id='dois' class='tablesorter standard'><thead><tr>" \
            + ''.join([f"<th>{itm}</th>" for itm in header]) + "</tr></thead><tbody>"
     fileoutput = ""
     cnt = 0
+    crossref = False
     for row in rows:
         row['published'] = DL.get_publishing_date(row)
         row['link'] = doi_link(row['doi'])
         row['title'] = DL.get_title(row)
         row['source'] = row['jrc_obtained_from'] if 'jrc_obtained_from' in row else 'DataCite'
+        if row['source'] == 'Crossref':
+            crossref = True
         html += "<tr><td>" \
-            + dloop(row, ['published', 'link', 'source', 'title'], "</td><td>") + "</td></tr>"
+            + dloop(row, ['published', 'link', 'source'], "</td><td>") + "</td>"
+        if partial:
+            subj = add_subjects(row)
+            html += f"<td>{subj}</td>"
+        html += f"<td>{row['title']}</td></tr>"
         if row['title']:
             row['title'] = row['title'].replace("\n", " ")
         cnt += 1
         fileoutput += dloop(row, ['published', 'doi', 'source', 'title']) + "\n"
     html += '</tbody></table>'
-    counter = f"<p>Number of DOIs: <span id='totalrows'>{cnt}</span></p>"
+    counter = f"<p>Number of DOIs: <span id='totalrows'>{cnt:,}</span></p>"
+    if partial and crossref:
+        counter += "<p><i class='fa-solid fa-circle-info'></i> Subjects in " \
+                   + "<span style='color: #777'>dark gray</span> are considered minor in MeSH</p>"
     html = counter + html
-    title = f"DOIs for subject {subject}"
+    title = f"DOIs with partial subject {subject}" if partial else f"DOIs for subject {subject}"
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
