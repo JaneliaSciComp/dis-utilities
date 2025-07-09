@@ -267,6 +267,10 @@ hr {border-color: #666;
    color: black;
    background-color: #89c242;
 }
+.badge-delta {
+   color: black;
+   background-color: deepskyblue;
+}
 .badge-lab {
    color: white;
    background-color: #8b008b;
