@@ -28,7 +28,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "58.0.0"
+__version__ = "58.1.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -4702,7 +4702,6 @@ def org_year(org="Shared Resources"):
             years[org][pdate[:4]] = 0
         years[org][pdate[:4]] += 1
     data = {'years': sorted(years['years'].keys()), 'Janelia': [], org: []}
-    print(data)
     for yr in data['years']:
         if yr in years[org]:
             data['Janelia'].append(years['Janelia'][yr] - years[org][yr])
@@ -4712,7 +4711,7 @@ def org_year(org="Shared Resources"):
             data[org].append(0)
     title = f"Journal publications by year for {org} with lab head last author"
     html = '<table id="years" class="tablesorter numbers"><thead><tr>' \
-           + f"<th>Year</th><th>Janelia</th><th>{org}</th>" \
+           + f"<th>Year</th><th>All</th><th>{org}</th>" \
            + '</tr></thead><tbody>'
     total = {'Janelia': 0, org: 0}
     for yr in data['years']:
@@ -4720,18 +4719,22 @@ def org_year(org="Shared Resources"):
             jtot = years['Janelia'][yr] - years[org][yr]
         else:
             jtot = years['Janelia'][yr]
-        total['Janelia'] += jtot
+        total['Janelia'] += years['Janelia'][yr]
         total[org] += years[org][yr]
-        c1 = f"<a href='/org_summary/all/{yr}/last'>{jtot}</a>"
+        c1 = f"<a href='/org_summary/all/{yr}/last'>{years['Janelia'][yr]}</a>"
         c2 = f"<a href='/org_summary/{org}/{yr}/last'>{years[org][yr]}</a>"
         html += f"<tr><td>{yr}</td><td>{c1}</td><td>{c2}</td></tr>"
     c1 = f"<a href='/org_summary/all/All/last'>{total['Janelia']}</a>"
     c2 = f"<a href='/org_summary/{org}/All/last'>{total[org]}</a>"
     html += f"</tbody><tfoot><tr><td>TOTAL</td><td>{c1}</td><td>{c2}</td></tr>"
     html += '</tfoot></table><br>'
+    print(json.dumps(data, indent=2))
+    data[f"With {org} authors"] = data.pop(org)
+    data[f"No {org} authors"] = data.pop("Janelia")
+    print(json.dumps(data, indent=2))
     chartscript, chartdiv = DP.stacked_bar_chart(data, title,
                                                  xaxis="years",
-                                                 yaxis=('Janelia', org),
+                                                 yaxis=(f"No {org} authors", f"With {org} authors"),
                                                  colors=DP.SOURCE_PALETTE)
     endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
