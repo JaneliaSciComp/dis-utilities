@@ -1,6 +1,6 @@
 ''' sync_pmid_to_dois.py
     Update the MongoDB dois collection with PMIDs from NCBI. This ain't gonna find everything - the
-    DOI needs to be in the PubMed Central archive.
+    DOI needs to be in the PubMed or PubMed Central archive.
 '''
 
 __version__ = '5.1.0'
@@ -75,7 +75,10 @@ def write_record(row, payload):
           None
     '''
     if ARG.WRITE:
-        result = DB['dis']['dois'].update_one({'_id': row['_id']}, {"$set": payload})
+        if "$unset" in payload:
+            result = DB['dis']['dois'].update_one({'_id': row['_id']}, payload)
+        else:
+            result = DB['dis']['dois'].update_one({'_id': row['_id']}, {"$set": payload})
         if hasattr(result, 'matched_count') and result.matched_count:
             COUNT['written'] += result.matched_count
 
@@ -94,6 +97,7 @@ def postprocessing(audit, error):
           + f"  PubMed:            {COUNT['PubMed']:,}\n" \
           + f"  OA:                {COUNT['OA']:,}\n" \
           + f"  MeSH updates:      {COUNT['mesh']:,}\n" \
+          + f"  PMIDs removed:     {COUNT['removed']:,}\n" \
           + f"DOIs written:        {COUNT['written']:,}"
     print(msg)
     if error:
@@ -177,6 +181,13 @@ def update_pmid(row, pmid, fetch, audit):
         article = fetch.article_by_pmid(pmid)
     except metapub.exceptions.InvalidPMID:
         LOGGER.warning(f"Invalid PMID for {row['doi']}: {pmid}")
+        if ARG.UPDATE:
+            # There used to be a PMID, and now there isn't. Yes, this is a thing: PubMed can remove PMIDs.
+            LOGGER.warning(f"Removing PMID for {row['doi']}: {pmid}")
+            payload = {"$unset": {"jrc_mesh": "", "jrc_pmc": "", "jrc_pmid": ""}}
+            write_record(row, payload)
+            COUNT['removed'] += 1
+            COUNT['PubMed'] -= 1
         return
     except metapub.exceptions.MetaPubError:
         LOGGER.warning(f"MetaPubError for {row['doi']}: {pmid}")
@@ -274,6 +285,7 @@ def refresh_pmids():
     audit = []
     fetch = PubMedFetcher()
     for row in tqdm(rows, total=cnt, desc="Syncing PMIDs"):
+        COUNT['PubMed'] += 1
         update_pmid(row, row['jrc_pmid'], fetch, audit)
     postprocessing(audit, [])
 

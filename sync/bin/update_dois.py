@@ -954,7 +954,8 @@ def update_mongodb(persist):
         if key not in EXISTING:
             val['jrc_inserted'] = datetime.today().replace(microsecond=0)
         val['jrc_updated'] = datetime.today().replace(microsecond=0)
-        # LOGGER.debug(val)
+        #if ARG.DEBUG:
+        #    print(json.dumps(val, indent=2, default=str))
         if ARG.WRITE:
             if ARG.DOI or ARG.FILE:
                 val['jrc_load_source'] = "Manual"
@@ -964,6 +965,10 @@ def update_mongodb(persist):
             else:
                 val['jrc_load_source'] = "Sync"
             coll.update_one({"doi": key}, {"$set": val}, upsert=True)
+            # Thanks, eLife. You're NOT SUPPOSED TO REUSE DOIs!
+            if 'elife' in key and 'subtype' not in val:
+                LOGGER.warning(f"Removing subtype from {key}")
+                coll.update_one({"doi": key}, {"$unset": {"subtype": ""}})
             if key in TO_BE_PROCESSED:
                 try:
                     DB['dis'].dois_to_process.delete_one({"doi": key})
