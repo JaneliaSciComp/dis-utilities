@@ -28,7 +28,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "58.1.0"
+__version__ = "58.1.1"
 # Database
 DB = {}
 CVTERM = {}
@@ -4880,7 +4880,7 @@ def preprint_with_pub():
     day_count = []
     day_pub = {}
     html = "<table id='preprint_with_pub' class='tablesorter numbers'><thead><tr>" \
-           + "<th>Published</th><th>DOI</th><th>Title</th><th>Publisher</th></tr></thead><tbody>"
+           + "<th>Published</th><th>DOI</th><th>Title</th><th>Journal</th></tr></thead><tbody>"
     for row in rows:
         if len(row['jrc_preprint']) == 1:
             prep = row['jrc_preprint'][0]
@@ -4936,7 +4936,7 @@ def preprint_no_pub():
                                title=render_warning("Could not get preprint data from dois"),
                                message=error_message(err))
     html = '<table id="preprint_no_pub" class="tablesorter numbers"><thead><tr>' \
-           + '<th>Published</th><th>DOI</th><th>Title</th><th>Publisher</th></tr></thead><tbody>'
+           + '<th>Published</th><th>DOI</th><th>Title</th><th>Journal</th></tr></thead><tbody>'
     cnt = 0
     for row in rows:
         cnt += 1
