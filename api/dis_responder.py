@@ -28,7 +28,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "57.0.0"
+__version__ = "58.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -56,7 +56,9 @@ NAV = {"Home": "",
                       "Top first and last authors": "dois_top_author",
                       "DOIs without Janelia authors": "dois_no_janelia"},
        "Preprints": {"DOIs by preprint status": "dois_preprint",
-                     "DOIs by preprint status by year": "dois_preprint_year"},
+                     "DOIs by preprint status by year": "dois_preprint_year",
+                     "Preprints with journal publications": "preprint_with_pub",
+                     "Preprints without journal publications": "preprint_no_pub"},
        "Journals": {"DOIs by journal": "journals_dois",
                     "Top journals": "top_journals",
                     "DOIs missing journals": "dois_nojournal",
@@ -947,6 +949,65 @@ def get_doi(doi):
     return source, data
 
 
+def get_separator(last, this):
+    ''' Get a separator between dates, with a badge if the delta a day or more
+        Keyword arguments:
+          last: last date
+          this: this date
+        Returns:
+          HTML
+    '''
+    delta = (datetime.strptime(this, '%Y-%m-%d') - datetime.strptime(last, '%Y-%m-%d')).days
+    if delta and delta >= 0:
+        delta = str(delta) + f" day{'s' if delta > 1 else ''}"
+        return f" &rarr; {tiny_badge('delta', delta, size=10)} &rarr; "
+    return "&nbsp;&nbsp;&rarr;&nbsp;&nbsp;"
+
+
+def add_update_times(row):
+    ''' Produce a horizontal list of important record times
+        Keyword arguments:
+          row: DOI record
+        Returns:
+          HTML
+    '''
+    date_list = []
+    last = None
+    if 'jrc_updated' in row:
+        updated = str(row['jrc_updated']).split(' ', maxsplit=1)[0]
+    else:
+        updated = None
+    if 'jrc_publishing_date' in row:
+        last = str(row['jrc_publishing_date']).split(' ', maxsplit=1)[0]
+        date_list.append(f"Published {last}")
+    if 'jrc_inserted' in row:
+        this = str(row['jrc_inserted']).split(' ', maxsplit=1)[0]
+        if last:
+            date_list.append(get_separator(last, this))
+        last = this
+        date_list.append(f"Inserted {this}")
+    if 'jrc_newsletter' in row:
+        this = str(row['jrc_newsletter']).split(' ', maxsplit=1)[0]
+        if last:
+            if updated and updated < this:
+                date_list.append(get_separator(last, updated))
+                date_list.append(f"Updated {updated}")
+                last = updated
+                updated = None
+            date_list.append(get_separator(last, this))
+        last = this
+        date_list.append(f"Added to newsletter {this}")
+    if updated:
+        this = updated
+        if last:
+            date_list.append(get_separator(last, this))
+        last = this
+        date_list.append(f"Updated {this}")
+    if date_list:
+        return f"<span class='paperdata'>{''.join(date_list)}</span>"
+    return ""
+
+
 def add_jrc_fields(row):
     ''' Add a table of custom JRC fields
         Keyword arguments:
@@ -1396,16 +1457,17 @@ def standard_doi_table(rows, prefix=None):
 # * Badge utility functions                                                    *
 # ******************************************************************************
 
-def tiny_badge(btype, msg, link=None):
+def tiny_badge(btype, msg, link=None, size=8):
     ''' Create HTML for a [very] small badge
         Keyword arguments:
           btype: badge type (success, danger, etc.)
           msg: message to show on badge
           link: link to other web page
+          size: size of badge (default 8)
         Returns:
           HTML
     '''
-    html = f"<span class='badge badge-{btype}' style='font-size: 8pt'>{msg}</span>"
+    html = f"<span class='badge badge-{btype}' style='font-size: {size}pt'>{msg}</span>"
     if link:
         html = f"<a href='{link}' target='_blank'>{html}</a>"
     return html
@@ -1684,26 +1746,31 @@ def add_subjects(row, html=None):
         Returns:
           HTML with subjects added
     '''
-    # Subjects (DataCite categories)
     if row['jrc_obtained_from'] == 'DataCite':
+    # Subjects (DataCite categories)
         try:
             if row and row['jrc_obtained_from'] == 'DataCite' and 'subjects' in row \
                and row['subjects']:
                 if html:
                     html += "<h4>DataCite subjects</h4>" \
-                            + f"{', '.join(sub['subject'] for sub in row['subjects'])}" + "<br><br>"
+                            + f"{', '.join(sub['subject'] for sub in row['subjects'])}"
                 else:
                     return f"{', '.join(sub['subject'] for sub in row['subjects'])}"
         except Exception as err:
             raise err
     elif 'jrc_mesh' in row:
+        # MeSH subjects (Crossref)
         subjects = []
         for mesh in row['jrc_mesh']:
             if 'descriptor_name' in mesh:
                 if 'major_topic' in mesh and mesh['major_topic']:
-                    subjects.append(mesh['descriptor_name'])
+                    subj = mesh['descriptor_name']
                 else:
-                    subjects.append(f"<span style='color: #777'>{mesh['descriptor_name']}</span>")
+                    subj = f"<span style='color: #88a'>{mesh['descriptor_name']}</span>"
+                if 'key' in mesh and mesh['key']:
+                    subj = f"<a href='https://www.ncbi.nlm.nih.gov/mesh/{mesh['key']}' " \
+                           + f"target='_blank'>{subj}</a>"
+                subjects.append(subj)
         if subjects:
             if html:
                 html += f"<h4>MeSH subjects</h4>{', '.join(subjects)}"
@@ -2900,6 +2967,7 @@ def show_doi_ui(doi):
     recsec = html = ""
     if row:
         recsec += '<h5 style="color:lime">This DOI is saved locally in the Janelia database</h5>'
+        recsec += add_update_times(row)
         recsec += add_jrc_fields(row)
         local = True
     else:
@@ -2978,7 +3046,7 @@ def show_doi_ui(doi):
             html = add_subjects(row, html)
             if 'span' in html:
                 html += "<br><i class='fa-solid fa-circle-info'></i> Subjects in " \
-                        + "<span style='color: #777'>dark gray</span> are considered minor in MeSH"
+                        + "<span style='color: #88a'>gray-blue</span> are considered minor in MeSH"
             html += "<br><br>"
         except Exception as err:
             return inspect_error(err, f"Could not get subjects for DOI {row['doi']}")
@@ -4636,10 +4704,11 @@ def org_year(org="Shared Resources"):
     data = {'years': sorted(years['years'].keys()), 'Janelia': [], org: []}
     print(data)
     for yr in data['years']:
-        data['Janelia'].append(years['Janelia'][yr])
         if yr in years[org]:
+            data['Janelia'].append(years['Janelia'][yr] - years[org][yr])
             data[org].append(years[org][yr])
         else:
+            data['Janelia'].append(years['Janelia'][yr])
             data[org].append(0)
     title = f"Journal publications by year for {org} with lab head last author"
     html = '<table id="years" class="tablesorter numbers"><thead><tr>' \
@@ -4647,9 +4716,13 @@ def org_year(org="Shared Resources"):
            + '</tr></thead><tbody>'
     total = {'Janelia': 0, org: 0}
     for yr in data['years']:
-        total['Janelia'] += years['Janelia'][yr]
+        if yr in years[org]:
+            jtot = years['Janelia'][yr] - years[org][yr]
+        else:
+            jtot = years['Janelia'][yr]
+        total['Janelia'] += jtot
         total[org] += years[org][yr]
-        c1 = f"<a href='/org_summary/all/{yr}/last'>{years['Janelia'][yr]}</a>"
+        c1 = f"<a href='/org_summary/all/{yr}/last'>{jtot}</a>"
         c2 = f"<a href='/org_summary/{org}/{yr}/last'>{years[org][yr]}</a>"
         html += f"<tr><td>{yr}</td><td>{c1}</td><td>{c2}</td></tr>"
     c1 = f"<a href='/org_summary/all/All/last'>{total['Janelia']}</a>"
@@ -4786,6 +4859,93 @@ def dois_preprint_year():
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title="DOIs preprint status by year", html=html,
                                          chartscript=chartscript, chartdiv=chartdiv,
+                                         navbar=generate_navbar('Preprints')))
+
+
+@app.route('/preprint_with_pub')
+def preprint_with_pub():
+    ''' Show preprints with publications
+    '''
+    payload = {"subtype": "preprint", "jrc_preprint": {"$exists": 1}}
+    coll = DB['dis'].dois
+    try:
+        rows = coll.find(payload).sort([("jrc_publishing_date", -1)])
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get preprint data from dois"),
+                               message=error_message(err))
+    day_count = []
+    day_pub = {}
+    html = "<table id='preprint_with_pub' class='tablesorter numbers'><thead><tr>" \
+           + "<th>Published</th><th>DOI</th><th>Title</th><th>Publisher</th></tr></thead><tbody>"
+    for row in rows:
+        if len(row['jrc_preprint']) == 1:
+            prep = row['jrc_preprint'][0]
+        else:
+            prep = None
+            for pdoi in row['jrc_preprint']:
+                prow = DL.get_doi_record(pdoi, coll=coll)
+                if not DL.is_version(prow):
+                    prep = pdoi
+                    break
+            if not prep:
+                prep = row['jrc_preprint'][0]
+        jour = DL.get_doi_record(prep, coll=coll)
+        if not jour or 'jrc_publishing_date' not in jour:
+            continue
+        # Get dates
+        preprint_date = datetime.strptime(row['jrc_publishing_date'], '%Y-%m-%d')
+        journal_date = datetime.strptime(jour['jrc_publishing_date'], '%Y-%m-%d')
+        # Calculate days between preprint and journal publication
+        days = (journal_date - preprint_date).days
+        day_count.append(days)
+        if row['jrc_journal'] not in day_pub:
+            day_pub[row['jrc_journal']] = []
+        day_pub[row['jrc_journal']].append(days)
+        html += f"<tr><td>{row['jrc_publishing_date']}</td><td>{doi_link(row['doi'])}</td>" \
+                + f"<td>{DL.get_title(row)}</td><td>{row['jrc_journal']}</td></tr>"
+    html += '</tbody></table>'
+    avg_days = sum(day_count) / len(day_count) if day_count else 0
+    pre = f"Preprints with journal publications: {len(day_count):,}<br>" \
+           + f"Average days to publication: {avg_days:,.1f}<br>"
+    pre += "<table id='preprint_with_pub' class='tablesorter numbers'><thead><tr>" \
+           + "<th>Journal</th><th>Average days to publication</th></tr></thead><tbody>"
+    for jour, days in day_pub.items():
+        avg_days = sum(days) / len(days) if days else 0
+        pre += f"<tr><td>{jour}</td><td>{avg_days:,.1f}</td></tr>"
+    pre += '</tbody></table>'
+    html = pre + html
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="Preprints with journal publications", html=html,
+                                         navbar=generate_navbar('Preprints')))
+
+
+@app.route('/preprint_no_pub')
+def preprint_no_pub():
+    ''' Show preprints with publications
+    '''
+    payload = {"subtype": "preprint", "jrc_preprint": {"$exists": 0}}
+    try:
+        rows = DB['dis'].dois.find(payload).sort([("jrc_publishing_date", -1)])
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get preprint data from dois"),
+                               message=error_message(err))
+    html = '<table id="preprint_no_pub" class="tablesorter numbers"><thead><tr>' \
+           + '<th>Published</th><th>DOI</th><th>Title</th><th>Publisher</th></tr></thead><tbody>'
+    cnt = 0
+    for row in rows:
+        cnt += 1
+        ptitle = DL.get_title(row)
+        html += f"<tr><td>{row['jrc_publishing_date']}</td>" \
+                + f"<td>{doi_link(row['doi'])}</td><td>{ptitle}</td>" \
+                + f"<td>{row['jrc_journal']}</td></tr>"
+    html += '</tbody></table>'
+    html = f"Preprints without journal publications: {cnt:,}<br><br>" + html
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="Preprints without journal publications", html=html,
                                          navbar=generate_navbar('Preprints')))
 
 # ******************************************************************************
