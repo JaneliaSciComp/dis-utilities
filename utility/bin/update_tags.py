@@ -2,7 +2,7 @@
     Update tags for selected DOIs
 """
 
-__version__ = '3.2.0'
+__version__ = '4.0.0'
 
 import argparse
 import collections
@@ -18,6 +18,8 @@ import doi_common.doi_common as DL
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation
 
+# Parameters
+ARG = LOGGER = None
 # Database
 DB = {}
 PROJECT = {}
@@ -246,6 +248,32 @@ def process_tags(ans, tagd):
     return payload
 
 
+def tag_single_doi(rec):
+    """ Tag a single DOI
+        Keyword arguments:
+          rec: DOI record
+        Returns:
+          None
+    """
+    new_tag = []
+    if 'jrc_tag' in rec:
+        for tag in rec['jrc_tag']:
+            if ARG.TAG == tag['name']:
+                return
+            new_tag.append(tag)
+    code = get_suporg_code(ARG.TAG)
+    tagtype = 'suporg' if code else 'affiliation'
+    new_tag.append({"name": ARG.TAG, "code": code, "type": tagtype})
+    if ARG.WRITE:
+        coll = DB['dis'].dois
+        result = coll.update_one({"doi": rec['doi']}, {"$set": {"jrc_tag": new_tag}})
+        if hasattr(result, 'matched_count') and result.matched_count:
+            COUNT['updated'] += 1
+    else:
+        print(f"{rec['doi']}\n{json.dumps(new_tag, indent=2)}")
+        COUNT['updated'] += 1
+
+
 def update_single_doi(rec):
     """ Update tags for a single DOI
         Keyword arguments:
@@ -323,7 +351,10 @@ def update_tags():
             LOGGER.warning(f"DOI {doi} not found")
             COUNT['notfound'] += 1
             continue
-        update_single_doi(rec)
+        if ARG.TAG:
+            tag_single_doi(rec)
+        else:
+            update_single_doi(rec)
     print(f"DOIs specified:           {COUNT['specified']}")
     print(f"DOIs not found:           {COUNT['notfound']}")
     print(f"DOIs selected for update: {COUNT['selected']}")
@@ -341,6 +372,8 @@ if __name__ == '__main__':
     PARSER.add_argument('--file', dest='FILE', action='store',
                         type=argparse.FileType("r", encoding="ascii"),
                         help='File of DOIs to process')
+    PARSER.add_argument('--tag', dest='TAG', action='store',
+                        help='Tag to apply to all specified DOIs')
     PARSER.add_argument('--days', dest='DAYS', action='store', type=int,
                         default=7, help='Number of days to go back for DOIs')
     PARSER.add_argument('--manifold', dest='MANIFOLD', action='store',
@@ -354,6 +387,8 @@ if __name__ == '__main__':
                         default=False, help='Flag, Very chatty')
     ARG = PARSER.parse_args()
     LOGGER = JRC.setup_logging(ARG)
+    if ARG.TAG and not ARG.FILE:
+        terminate_program("The --tag parm only works with --file")
     initialize_program()
     update_tags()
     terminate_program()
