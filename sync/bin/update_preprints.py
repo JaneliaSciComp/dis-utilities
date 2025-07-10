@@ -14,6 +14,7 @@ __version__ = '1.0.0'
 import argparse
 import collections
 from datetime import datetime
+import json
 from operator import attrgetter
 import sys
 import pandas as pd
@@ -75,7 +76,7 @@ def initialize_program():
             terminate_program(err)
     LOGGER.info("Getting DOIs")
     projection = {"_id": 0, "DOI": 1, "doi": 1, "title": 1, "titles": 1,
-                  "author": 1, "creators": 1, "relation": 1,
+                  "author": 1, "creators": 1, "relation": 1, "type": 1,
                   "published": 1, "published-print": 1, "published-online": 1,
                   "posted": 1, "created": 1, "registered": 1}
     try:
@@ -160,7 +161,12 @@ def process_pair(prerec, primrec):
     score = fuzz.token_sort_ratio(pretitle, primtitle, processor=utils.default_process)
     if score < ARG.THRESHOLD:
         return
-    authors = DL.get_author_list(prerec, returntype="list")
+    try:
+        authors = DL.get_author_list(prerec, returntype="list")
+    except Exception as err:
+        print(json.dumps(prerec, indent=2, default=str))
+        LOGGER.error(f"Could not find authors for {predoi}")
+        terminate_program(err)
     prefirst = authors[0]
     prelast = authors[-1]
     authors = DL.get_author_list(primrec, returntype="list")
