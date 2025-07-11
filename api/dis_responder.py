@@ -28,7 +28,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "59.0.0"
+__version__ = "60.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -58,7 +58,8 @@ NAV = {"Home": "",
        "Preprints": {"DOIs by preprint status": "dois_preprint",
                      "DOIs by preprint status by year": "dois_preprint_year",
                      "Preprints with journal publications": "preprint_with_pub",
-                     "Preprints without journal publications": "preprint_no_pub"},
+                     "Preprints without journal publications": "preprint_no_pub",
+                     "Journal publications without preprints": "pub_no_preprint"},
        "Journals": {"DOIs by journal": "journals_dois",
                     "Top journals": "top_journals",
                     "DOIs missing journals": "dois_nojournal",
@@ -4875,8 +4876,10 @@ def preprint_with_pub():
                                message=error_message(err))
     day_count = []
     day_pub = {}
-    html = "<table id='preprint_with_pub' class='tablesorter numbers'><thead><tr>" \
-           + "<th>Published</th><th>DOI</th><th>Title</th><th>Journal</th></tr></thead><tbody>"
+    fileoutput = ""
+    header = ['Published', 'DOI', 'Title', 'Journal']
+    html = "<table id='preprint_with_pub' class='tablesorter numbers'><thead><tr><th>" \
+           + "</th><th>".join(header) + "</th></tr></thead><tbody>"
     for row in rows:
         if len(row['jrc_preprint']) == 1:
             prep = row['jrc_preprint'][0]
@@ -4901,6 +4904,8 @@ def preprint_with_pub():
         if row['jrc_journal'] not in day_pub:
             day_pub[row['jrc_journal']] = []
         day_pub[row['jrc_journal']].append(days)
+        fileoutput+= "\t".join([row['jrc_publishing_date'], row['doi'], DL.get_title(row),
+                                row['jrc_journal']]) + "\n"
         html += f"<tr><td>{row['jrc_publishing_date']}</td><td>{doi_link(row['doi'])}</td>" \
                 + f"<td>{DL.get_title(row)}</td><td>{row['jrc_journal']}</td></tr>"
     html += '</tbody></table>'
@@ -4912,7 +4917,7 @@ def preprint_with_pub():
     for jour, days in day_pub.items():
         avg_days = sum(days) / len(days) if days else 0
         pre += f"<tr><td>{jour}</td><td>{avg_days:,.1f}</td></tr>"
-    pre += '</tbody></table>'
+    pre += '</tbody></table>' + create_downloadable('preprint_with_pub', header, fileoutput)
     html = pre + html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
@@ -4931,20 +4936,58 @@ def preprint_no_pub():
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get preprint data from dois"),
                                message=error_message(err))
-    html = '<table id="preprint_no_pub" class="tablesorter numbers"><thead><tr>' \
-           + '<th>Published</th><th>DOI</th><th>Title</th><th>Journal</th></tr></thead><tbody>'
+    fileoutput = ""
+    header = ['Published', 'DOI', 'Title', 'Journal']
+    html = "<table id='preprint_no_pub' class='tablesorter numbers'><thead><tr><th>" \
+           + "</th><th>".join(header) + "</th></tr></thead><tbody>"
     cnt = 0
     for row in rows:
         cnt += 1
         ptitle = DL.get_title(row)
+        fileoutput+= "\t".join([row['jrc_publishing_date'], row['doi'], DL.get_title(row),
+                                row['jrc_journal']]) + "\n"
         html += f"<tr><td>{row['jrc_publishing_date']}</td>" \
                 + f"<td>{doi_link(row['doi'])}</td><td>{ptitle}</td>" \
                 + f"<td>{row['jrc_journal']}</td></tr>"
     html += '</tbody></table>'
-    html = f"Preprints without journal publications: {cnt:,}<br><br>" + html
+    html = f"Preprints without journal publications: {cnt:,}<br><br>"  \
+           + create_downloadable('preprint_no_pub', header, fileoutput) + html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="Preprints without journal publications", html=html,
+                                         navbar=generate_navbar('Preprints')))
+
+
+@app.route('/pub_no_preprint')
+def pub_no_preprint():
+    ''' Show publications without preprints
+    '''
+    payload = {"type": "journal-article", "jrc_preprint": {"$exists": 0}}
+    try:
+        rows = DB['dis'].dois.find(payload).sort([("jrc_publishing_date", -1)])
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get preprint data from dois"),
+                               message=error_message(err))
+    fileoutput = ""
+    header = ['Published', 'DOI', 'Title', 'Journal']
+    html = "<table id='pub_nopreprint' class='tablesorter numbers'><thead><tr><th>" \
+           + "</th><th>".join(header) + "</th></tr></thead><tbody>"
+    cnt = 0
+    for row in rows:
+        cnt += 1
+        ptitle = DL.get_title(row)
+        fileoutput+= "\t".join([row['jrc_publishing_date'], row['doi'], DL.get_title(row),
+                                row['jrc_journal']]) + "\n"
+        html += f"<tr><td>{row['jrc_publishing_date']}</td>" \
+                + f"<td>{doi_link(row['doi'])}</td><td>{ptitle}</td>" \
+                + f"<td>{row['jrc_journal']}</td></tr>"
+    html += '</tbody></table>'
+    html = f"Journal publications without preprints: {cnt:,}<br><br>"  \
+           + create_downloadable('pub_no_preprint', header, fileoutput) + html
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="Journal publications without preprints", html=html,
                                          navbar=generate_navbar('Preprints')))
 
 # ******************************************************************************
