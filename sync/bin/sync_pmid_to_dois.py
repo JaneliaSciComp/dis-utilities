@@ -3,7 +3,7 @@
     DOI needs to be in the PubMed or PubMed Central archive.
 '''
 
-__version__ = '5.1.0'
+__version__ = '6.0.0'
 
 import argparse
 import collections
@@ -11,6 +11,7 @@ import json
 from operator import attrgetter
 import os
 import sys
+from time import sleep
 from metapub import PubMedFetcher
 import metapub.exceptions
 from tqdm import tqdm
@@ -266,6 +267,8 @@ def update_dois():
     fetch = PubMedFetcher()
     for row in tqdm(rows, total=cnt, desc="Syncing PMIDs"):
         fetch_pmid(fetch, row, audit, error)
+        # We're rate limited to 10 transaction/sec
+        sleep(.101)
     postprocessing(audit, error)
 
 
