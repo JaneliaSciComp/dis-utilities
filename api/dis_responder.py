@@ -28,7 +28,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "58.1.1"
+__version__ = "59.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -959,7 +959,7 @@ def get_separator(last, this):
     '''
     delta = (datetime.strptime(this, '%Y-%m-%d') - datetime.strptime(last, '%Y-%m-%d')).days
     if delta and delta >= 0:
-        delta = str(delta) + f" day{'s' if delta > 1 else ''}"
+        delta =  f"{delta:,} day{'s' if delta > 1 else ''}"
         return f" &rarr; {tiny_badge('delta', delta, size=10)} &rarr; "
     return "&nbsp;&nbsp;&rarr;&nbsp;&nbsp;"
 
@@ -3070,7 +3070,7 @@ def show_doi_ui(doi):
     doititle = f"{doilink} (PMID: {row['jrc_pmid']})" if row and 'jrc_pmid' in row else doilink
     doititle += badges
     endpoint_access()
-    return make_response(render_template('doi.html', urlroot=request.url_root,
+    return make_response(render_template('doi.html', urlroot=request.url_root, pagetitle=doi,
                                          title=doititle, recsec=recsec, doisec=doisec,
                                          cittype=cittype, citsec=citsec, html=html,
                                          navbar=generate_navbar('DOIs')))
@@ -4715,10 +4715,6 @@ def org_year(org="Shared Resources"):
            + '</tr></thead><tbody>'
     total = {'Janelia': 0, org: 0}
     for yr in data['years']:
-        if yr in years[org]:
-            jtot = years['Janelia'][yr] - years[org][yr]
-        else:
-            jtot = years['Janelia'][yr]
         total['Janelia'] += years['Janelia'][yr]
         total[org] += years[org][yr]
         c1 = f"<a href='/org_summary/all/{yr}/last'>{years['Janelia'][yr]}</a>"
@@ -5357,7 +5353,7 @@ def show_oid_ui(oid):
     if 'works' in data['activities-summary'] and data['activities-summary']['works']['group']:
         html += add_orcid_works(data, dois)
     endpoint_access()
-    return make_response(render_template('general.html', urlroot=request.url_root,
+    return make_response(render_template('general.html', urlroot=request.url_root, pagetitle=oid,
                                          title=f"<a href='https://orcid.org/{oid}' " \
                                                + f"target='_blank'>{oid}</a>", html=html,
                                          navbar=generate_navbar('ORCID')))
