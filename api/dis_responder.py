@@ -28,7 +28,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
 
-__version__ = "60.0.0"
+__version__ = "60.1.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -6030,7 +6030,7 @@ def dois_ack():
         html += f"<tr class={rclass}><td>{link}</td><td>{org}</td>"
         for source in app.config['SOURCES']:
             if source in val:
-                onclick = "onclick='nav_post(\"jrc_tag.name\",\"" + tag \
+                onclick = "onclick='nav_post(\"jrc_acknowledge.name\",\"" + tag \
                           + "\",\"" + source + "\")'"
                 link = f"<a href='#' {onclick}>{val[source]:,}</a>"
             else:
