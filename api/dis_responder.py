@@ -75,6 +75,7 @@ NAV = {"Home": "",
                  "Authors with multiple ORCIDs": "orcid_duplicates",
                  "Duplicate authors": "duplicate_authors"},
        "Tag/affiliation": {"DOIs by tag": "dois_tag",
+                           "DOIs by acknowledgement": "dois_ack",
                            "Top DOI tags by year": "dois_top",
                            "Author affiliations: P&C": "orcid_tag",
                            "Author affiliations: Janelia": "janelia_affiliations",
@@ -1049,7 +1050,7 @@ def add_jrc_fields(row):
             val = ", ".join(link)
         if key == 'jrc_preprint':
             val = doi_link(val)
-        elif 'jrc_tag' in key:
+        elif key in ['jrc_tag', 'jrc_acknowledge']:
             link = []
             for aff in val.split(", "):
                 link.append(f"<a href='/tag/{escape(aff)}'>{aff}</a>")
@@ -5984,6 +5985,68 @@ def dois_tag():
                                          navbar=generate_navbar('Tag/affiliation')))
 
 
+@app.route('/dois_ack')
+def dois_ack():
+    ''' Show acknowledgements with counts
+    '''
+    payload = [{"$unwind" : "$jrc_acknowledge"},
+               {"$project": {"_id": 0, "jrc_acknowledge.name": 1, "jrc_obtained_from": 1}},
+               {"$group": {"_id": {"tag": "$jrc_acknowledge.name", "source": "$jrc_obtained_from"},
+                           "count":{"$sum": 1}}},
+               {"$sort": {"_id.tag": 1}}
+              ]
+    try:
+        orgs = DL.get_supervisory_orgs(DB['dis'].suporg)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get supervisory orgs"),
+                               message=error_message(err))
+    try:
+        rows = DB['dis'].dois.aggregate(payload)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get acknowledgements from dois collection"),
+                               message=error_message(err))
+    html = '<table id="types" class="tablesorter numbers"><thead><tr>' \
+           + '<th>Acknowledgement</th><th>SupOrg</th><th>Crossref</th><th>DataCite</th>' \
+           + '</tr></thead><tbody>'
+    tags = {}
+    for row in rows:
+        if row['_id']['tag'] not in tags:
+            tags[row['_id']['tag']] = {}
+        if row['_id']['source'] not in tags[row['_id']['tag']]:
+            tags[row['_id']['tag']][row['_id']['source']] = row['count']
+    for tag, val in tags.items():
+        link = f"<a href='/tag/{escape(tag)}'>{tag}</a>"
+        rclass = 'other'
+        if tag in orgs:
+            if 'active' in orgs[tag]:
+                org = "<span style='color: lime;'>Yes</span>"
+                rclass = 'active'
+            else:
+                org = "<span style='color: yellow;'>Inactive</span>"
+        else:
+            org = "<span style='color: red;'>No</span>"
+        html += f"<tr class={rclass}><td>{link}</td><td>{org}</td>"
+        for source in app.config['SOURCES']:
+            if source in val:
+                onclick = "onclick='nav_post(\"jrc_tag.name\",\"" + tag \
+                          + "\",\"" + source + "\")'"
+                link = f"<a href='#' {onclick}>{val[source]:,}</a>"
+            else:
+                link = ""
+            html += f"<td>{link}</td>"
+        html += "</tr>"
+    html += '</tbody></table>'
+    cbutton = "<button class=\"btn btn-outline-warning\" " \
+              + "onclick=\"$('.other').toggle();\">Filter for active SupOrgs</button>"
+    html = cbutton + html
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=f"DOI acknowledgements ({len(tags):,})", html=html,
+                                         navbar=generate_navbar('Tag/affiliation')))
+
+
 @app.route('/janelia_affiliations')
 def janelia_affiliations():
     ''' Show Janelia affiliations
@@ -6265,6 +6328,7 @@ def orcid_affiliation(aff, year='All'):
     # DOIs
     if year == 'All':
         payload = {"$or": [{"jrc_tag.name": aff},
+                           {"jrc_acknowledge.name": aff},
                            {"author.name": aff},
                            {"creators.name": aff}]}
     else:

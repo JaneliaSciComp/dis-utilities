@@ -2,7 +2,7 @@
     Update tags for selected DOIs
 """
 
-__version__ = '4.0.0'
+__version__ = '5.0.0'
 
 import argparse
 import collections
@@ -85,10 +85,8 @@ def get_dois():
           List of DOIs
     '''
     if ARG.DOI:
-        COUNT['specified'] = 1
         return [ARG.DOI]
     if ARG.FILE:
-        COUNT['specified'] = 1
         return ARG.FILE.read().splitlines()
     LOGGER.info(f"Finding DOIs from the last {ARG.DAYS} day{'' if ARG.DAYS == 1 else 's'}")
     week_ago = (datetime.today() - timedelta(days=ARG.DAYS))
@@ -248,25 +246,32 @@ def process_tags(ans, tagd):
     return payload
 
 
-def tag_single_doi(rec):
+def tag_single_doi(rec, jrc_term):
     """ Tag a single DOI
         Keyword arguments:
           rec: DOI record
+          jrc_term: field to update ("jrc_tag" or "jrc_acknowledge")
         Returns:
           None
     """
     new_tag = []
-    if 'jrc_tag' in rec:
-        for tag in rec['jrc_tag']:
+    if jrc_term in rec:
+        for tag in rec[jrc_term]:
             if ARG.TAG == tag['name']:
+                LOGGER.warning(f"Tag {ARG.TAG} already exists for DOI {rec['doi']}")
                 return
             new_tag.append(tag)
-    code = get_suporg_code(ARG.TAG)
-    tagtype = 'suporg' if code else 'affiliation'
-    new_tag.append({"name": ARG.TAG, "code": code, "type": tagtype})
+    if ARG.ACKNOWLEDGE:
+        code = get_suporg_code(ARG.ACKNOWLEDGE)
+        tagtype = 'suporg' if code else 'acknowledgement'
+        new_tag.append({"name": ARG.ACKNOWLEDGE, "code": code, "type": tagtype})
+    else:
+        code = get_suporg_code(ARG.TAG)
+        tagtype = 'suporg' if code else 'affiliation'
+        new_tag.append({"name": ARG.TAG, "code": code, "type": tagtype})
     if ARG.WRITE:
         coll = DB['dis'].dois
-        result = coll.update_one({"doi": rec['doi']}, {"$set": {"jrc_tag": new_tag}})
+        result = coll.update_one({"doi": rec['doi']}, {"$set": {jrc_term: new_tag}})
         if hasattr(result, 'matched_count') and result.matched_count:
             COUNT['updated'] += 1
     else:
@@ -342,6 +347,7 @@ def update_tags():
         terminate_program("No DOIs were found")
     coll = DB['dis'].dois
     for odoi in dois:
+        COUNT['specified'] += 1
         doi = odoi.lower().strip()
         try:
             rec = coll.find_one({"doi": doi})
@@ -351,8 +357,8 @@ def update_tags():
             LOGGER.warning(f"DOI {doi} not found")
             COUNT['notfound'] += 1
             continue
-        if ARG.TAG:
-            tag_single_doi(rec)
+        if ARG.TAG or ARG.ACKNOWLEDGE:
+            tag_single_doi(rec, 'jrc_acknowledge' if ARG.ACKNOWLEDGE else 'jrc_tag')
         else:
             update_single_doi(rec)
     print(f"DOIs specified:           {COUNT['specified']}")
@@ -372,8 +378,11 @@ if __name__ == '__main__':
     PARSER.add_argument('--file', dest='FILE', action='store',
                         type=argparse.FileType("r", encoding="ascii"),
                         help='File of DOIs to process')
-    PARSER.add_argument('--tag', dest='TAG', action='store',
-                        help='Tag to apply to all specified DOIs')
+    MEG = PARSER.add_mutually_exclusive_group()
+    MEG.add_argument('--tag', dest='TAG', action='store',
+                     help='Tag to apply to all specified DOIs')
+    MEG.add_argument('--acknowledge', dest='ACKNOWLEDGE', action='store',
+                     help='Acknowledgement to apply to all specified DOIs')
     PARSER.add_argument('--days', dest='DAYS', action='store', type=int,
                         default=7, help='Number of days to go back for DOIs')
     PARSER.add_argument('--manifold', dest='MANIFOLD', action='store',
@@ -389,6 +398,8 @@ if __name__ == '__main__':
     LOGGER = JRC.setup_logging(ARG)
     if ARG.TAG and not ARG.FILE:
         terminate_program("The --tag parm only works with --file")
+    if ARG.ACKNOWLEDGE and not ARG.FILE:
+        terminate_program("The --acknowledge parm only works with --file")
     initialize_program()
     update_tags()
     terminate_program()
