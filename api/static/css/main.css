@@ -130,6 +130,25 @@ table.numbercenter {
   border: 1px solid #058d95;
 }
 
+table.citations {
+  text-align: center;
+  font-size: 14pt;
+  line-height: 14px;
+  color: #f5fffa;
+}
+
+.citations th {
+  background: dodgerblue;
+  line-height: 24px;
+  border: 1px solid dodgerblue;
+}
+
+.citations td {
+  padding: 8px;
+  background: #334 !important;
+  border: 1px solid dodgerblue;
+}
+
 table.borderless {
   font-size: 12pt;
   line-height: 16px;
