@@ -26,9 +26,9 @@ import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
 import dis_plots as DP
 
-# pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines
+# pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals
 
-__version__ = "60.1.0"
+__version__ = "61.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -1405,6 +1405,34 @@ def s2_citation_count(doi, fmt='plain'):
         else:
             cnt = data['citationCount']
         return cnt
+    except Exception:
+        return 0
+
+
+def wos_citation_count(doi):
+    ''' Get citation count from Web of Science
+        Keyword arguments:
+          doi: DOI
+        Returns:
+          Citation count
+    '''
+    url = f"{app.config['WOS_DOI']}{doi}"
+    headers = {'X-ApiKey': app.config['WOS_API_KEY']}
+    print(url)
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        if resp.status_code == 429:
+            raise Exception("Rate limit exceeded")
+        if resp.status_code != 200:
+            return 0
+        data = resp.json()
+        print(data['hits'][0]['citations'])
+        if 'hits' in data and len(data['hits']) > 0 and 'citations' in data['hits'][0]:
+            for citation in data['hits'][0]['citations']:
+                if citation['db'] == 'WOS':
+                    return citation['count']
+        else:
+            return 0
     except Exception:
         return 0
 
@@ -3006,12 +3034,23 @@ def show_doi_ui(doi):
         citations = DL.short_citation(doi, True)
     except Exception as err:
         citations = f"Could not generate short citation for {doi} ({err})"
-    # Citations (S2 / DataCite)
     doisec = ""
+    # Citations (OpenAlex / S2 / DataCite)
     if row:
+        tblrow = []
+        citcnt = DL.get_citation_count(doi)
+        if citcnt:
+            tblrow.append(f"<td>OpenAlex: {citcnt:,}</td>")
         citcnt = s2_citation_count(doi, fmt='html')
         if citcnt:
-            doisec += f"<span class='paperdata'>Citations: {citcnt}</span><br>"
+            tblrow.append(f"<td>Semantic Scholar: {citcnt}</td>")
+        citcnt = wos_citation_count(doi)
+        if citcnt:
+            tblrow.append(f"<td>Web of Science: {citcnt:,}</td>")
+        if tblrow:
+            doisec += "<table id='citations' class='citations'><thead>" \
+                      + f"<tr><th colspan={len(tblrow)}>Citation counts</th></tr>" \
+                      + "</thead><tbody>" + ''.join(tblrow) + "</tbody></table>"
         if row['jrc_obtained_from'] == 'DataCite':
             if 'downloadCount' in row and row['downloadCount']:
                 doisec += f"<span class='paperdata'>Downloads: {row['downloadCount']:,}</span><br>"
@@ -4540,7 +4579,7 @@ def show_organization(org_in, year=str(datetime.now().year), show="full"):
     dcnt = org_journal_cnt = 0
     content = ""
     for row in rows:
-        print(row['doi'], DL.is_journal(row))
+        #print(row['doi'], DL.is_journal(row))
         if DL.is_journal(row) and not DL.is_version(row):
             org_journal_cnt += 1
         dcnt += 1
@@ -6005,7 +6044,8 @@ def dois_ack():
         rows = DB['dis'].dois.aggregate(payload)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get acknowledgements from dois collection"),
+                               title=render_warning("Could not get acknowledgements from " \
+                                                    + "dois collection"),
                                message=error_message(err))
     html = '<table id="types" class="tablesorter numbers"><thead><tr>' \
            + '<th>Acknowledgement</th><th>SupOrg</th><th>Crossref</th><th>DataCite</th>' \
