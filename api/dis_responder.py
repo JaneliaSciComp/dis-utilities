@@ -28,7 +28,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals
 
-__version__ = "61.1.0"
+__version__ = "62.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -1418,7 +1418,6 @@ def wos_citation_count(doi):
     '''
     url = f"{app.config['WOS_DOI']}{doi}"
     headers = {'X-ApiKey': app.config['WOS_API_KEY']}
-    print(url)
     try:
         resp = requests.get(url, headers=headers, timeout=10)
         if resp.status_code == 429:
@@ -1426,7 +1425,6 @@ def wos_citation_count(doi):
         if resp.status_code != 200:
             return 0
         data = resp.json()
-        print(data['hits'][0]['citations'])
         if 'hits' in data and len(data['hits']) > 0 and 'citations' in data['hits'][0]:
             for citation in data['hits'][0]['citations']:
                 if citation['db'] == 'WOS':
@@ -3035,15 +3033,32 @@ def show_doi_ui(doi):
     except Exception as err:
         citations = f"Could not generate short citation for {doi} ({err})"
     doisec = ""
-    # Citations (OpenAlex / S2 / DataCite)
+    # Citations (DataCite, Dimensions, OpenAlex, S2, Web of Science)
     if row:
         tblrow = []
-        citcnt = DL.get_citation_count(doi)
+        # DataCite
+        if row['jrc_obtained_from'] == 'DataCite' and 'citationCount' in row \
+            and row['citationCount']:
+            tblrow.append(f"<td>Dimensions: {row['citationCount']:,}</td>")
+        # Dimensions
+        try:
+            citcnt = DL.get_citation_count(doi)
+        except Exception as err:
+            citcnt = 0
+        if citcnt:
+            tblrow.append(f"<td>Dimensions: {citcnt:,}</td>")
+        # OpenAlex
+        try:
+            citcnt = DL.get_citation_count(doi, 'openalex')
+        except Exception as err:
+            citcnt = 0
         if citcnt:
             tblrow.append(f"<td>OpenAlex: {citcnt:,}</td>")
+        # Semantic Scholar
         citcnt = s2_citation_count(doi, fmt='html')
         if citcnt:
             tblrow.append(f"<td>Semantic Scholar: {citcnt}</td>")
+        # Web of Science
         citcnt = wos_citation_count(doi)
         if citcnt:
             tblrow.append(f"<td>Web of Science: {citcnt:,}</td>")
@@ -3051,6 +3066,7 @@ def show_doi_ui(doi):
             doisec += "<table id='citations' class='citations'><thead>" \
                       + f"<tr><th colspan={len(tblrow)}>Citation counts</th></tr>" \
                       + "</thead><tbody>" + ''.join(tblrow) + "</tbody></table>"
+        # DataCite downloads
         if row['jrc_obtained_from'] == 'DataCite':
             if 'downloadCount' in row and row['downloadCount']:
                 doisec += f"<span class='paperdata'>Downloads: {row['downloadCount']:,}</span><br>"
