@@ -28,7 +28,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals
 
-__version__ = "61.0.0"
+__version__ = "61.1.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -4707,7 +4707,7 @@ def org_summary(org='Shared Resources',year='All', which=None):
     if year != 'All':
         title += f" ({year})"
     html = "<table id='org' class='tablesorter numbers'><thead><tr><th></th><th>All</th>" \
-           + "<th>Shared Resources</th></tr></thead><tbody>"
+           + f"<th>{org}</th></tr></thead><tbody>"
     c1 = f"<a href='/org_summary/all/{year}/first'>{len(finds['first']):,}</a>" \
         if finds['first'] else ""
     c2 = f"<a href='/org_summary/{org}/{year}/first'>{len(finds['firstsr']):,}</a>" \
