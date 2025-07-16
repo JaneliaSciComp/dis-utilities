@@ -28,7 +28,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals
 
-__version__ = "62.0.0"
+__version__ = "63.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -1405,32 +1405,6 @@ def s2_citation_count(doi, fmt='plain'):
         else:
             cnt = data['citationCount']
         return cnt
-    except Exception:
-        return 0
-
-
-def wos_citation_count(doi):
-    ''' Get citation count from Web of Science
-        Keyword arguments:
-          doi: DOI
-        Returns:
-          Citation count
-    '''
-    url = f"{app.config['WOS_DOI']}{doi}"
-    headers = {'X-ApiKey': app.config['WOS_API_KEY']}
-    try:
-        resp = requests.get(url, headers=headers, timeout=10)
-        if resp.status_code == 429:
-            raise Exception("Rate limit exceeded")
-        if resp.status_code != 200:
-            return 0
-        data = resp.json()
-        if 'hits' in data and len(data['hits']) > 0 and 'citations' in data['hits'][0]:
-            for citation in data['hits'][0]['citations']:
-                if citation['db'] == 'WOS':
-                    return citation['count']
-        else:
-            return 0
     except Exception:
         return 0
 
@@ -3042,26 +3016,28 @@ def show_doi_ui(doi):
             tblrow.append(f"<td>Dimensions: {row['citationCount']:,}</td>")
         # Dimensions
         try:
-            citcnt = DL.get_citation_count(doi)
+            citcnt, url = DL.get_citation_count(doi)
         except Exception as err:
             citcnt = 0
         if citcnt:
-            tblrow.append(f"<td>Dimensions: {citcnt:,}</td>")
+            tblrow.append(f"<td>Dimensions: {citcnt:,}{url}</td>")
         # OpenAlex
         try:
-            citcnt = DL.get_citation_count(doi, 'openalex')
+            citcnt, url = DL.get_citation_count(doi, 'openalex')
         except Exception as err:
             citcnt = 0
         if citcnt:
-            tblrow.append(f"<td>OpenAlex: {citcnt:,}</td>")
+            tblrow.append(f"<td>OpenAlex: <a href='{url}' target='_blank'>{citcnt:,}</a></td>")
         # Semantic Scholar
         citcnt = s2_citation_count(doi, fmt='html')
         if citcnt:
             tblrow.append(f"<td>Semantic Scholar: {citcnt}</td>")
         # Web of Science
-        citcnt = wos_citation_count(doi)
+        #citcnt = wos_citation_count(doi)
+        citcnt, url = DL.get_citation_count(doi, 'wos')
         if citcnt:
-            tblrow.append(f"<td>Web of Science: {citcnt:,}</td>")
+            tblrow.append(f"<td>Web of Science: <a href='{url}' target='_blank'>" \
+                          + f"{citcnt:,}</a></td>")
         if tblrow:
             doisec += "<table id='citations' class='citations'><thead>" \
                       + f"<tr><th colspan={len(tblrow)}>Citation counts</th></tr>" \
@@ -4599,7 +4575,6 @@ def show_organization(org_in, year=str(datetime.now().year), show="full"):
         if DL.is_journal(row) and not DL.is_version(row):
             org_journal_cnt += 1
         dcnt += 1
-        published = DL.get_publishing_date(row)
         title = DL.get_title(row)
         if not title:
             title = ""
@@ -4607,10 +4582,11 @@ def show_organization(org_in, year=str(datetime.now().year), show="full"):
         for tag in row['jrc_tag']:
             if tag['name'] in orgs:
                 tags.append(tag['name'])
-        html += f"<tr><td>{published}</td><td>{doi_link(row['doi'])}</td>" \
+        html += f"<tr><td>{row['jrc_publishing_date']}</td><td>{doi_link(row['doi'])}</td>" \
                 + f"<td>{', '.join(sorted(tags))}</td><td>{title}</td></tr>"
         authors = DL.get_author_list(row)
-        content += f"{published}\t{row['doi']}\t{', '.join(sorted(tags))}\t{title}\t{authors}\n"
+        content += f"{row['jrc_publishing_date']}\t{row['doi']}\t" \
+                   + f"{', '.join(sorted(tags))}\t{title}\t{authors}\n"
         for org in [tag['name'] for tag in row['jrc_tag']]:
             if org in orgs and len(orgs) > 1:
                 orgcount[org] += 1
