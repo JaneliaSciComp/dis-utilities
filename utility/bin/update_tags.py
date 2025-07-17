@@ -2,7 +2,7 @@
     Update tags for selected DOIs
 """
 
-__version__ = '5.0.0'
+__version__ = '6.0.0'
 
 import argparse
 import collections
@@ -87,7 +87,18 @@ def get_dois():
     if ARG.DOI:
         return [ARG.DOI]
     if ARG.FILE:
-        return ARG.FILE.read().splitlines()
+        try:
+            dois = []
+            linenum = 0
+            with open(ARG.FILE.name, 'r', encoding='utf-8') as file:
+                for line in file:
+                    linenum += 1
+                    dois.append(line.strip())
+            return dois
+        except UnicodeDecodeError as err:
+            terminate_program(f"Error reading file {ARG.FILE.name} line ({linenum}): {err}")
+        except Exception as err:
+            terminate_program(err)
     LOGGER.info(f"Finding DOIs from the last {ARG.DAYS} day{'' if ARG.DAYS == 1 else 's'}")
     week_ago = (datetime.today() - timedelta(days=ARG.DAYS))
     try:
@@ -257,7 +268,10 @@ def tag_single_doi(rec, jrc_term):
     new_tag = []
     if jrc_term in rec:
         for tag in rec[jrc_term]:
-            if ARG.TAG == tag['name']:
+            if ARG.ACKNOWLEDGE and ARG.ACKNOWLEDGE == tag['name']:
+                LOGGER.warning(f"Acknowledgement {ARG.ACKNOWLEDGE} already exists for DOI {rec['doi']}")
+                return
+            if ARG.TAG and ARG.TAG == tag['name']:
                 LOGGER.warning(f"Tag {ARG.TAG} already exists for DOI {rec['doi']}")
                 return
             new_tag.append(tag)

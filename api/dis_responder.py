@@ -3033,7 +3033,6 @@ def show_doi_ui(doi):
         if citcnt:
             tblrow.append(f"<td>Semantic Scholar: {citcnt}</td>")
         # Web of Science
-        #citcnt = wos_citation_count(doi)
         citcnt, url = DL.get_citation_count(doi, 'wos')
         if citcnt:
             tblrow.append(f"<td>Web of Science: <a href='{url}' target='_blank'>" \
