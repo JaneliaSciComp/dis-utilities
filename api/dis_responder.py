@@ -28,7 +28,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals
 
-__version__ = "63.0.0"
+__version__ = "63.1.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -1754,7 +1754,7 @@ def add_subjects(row, html=None):
             if row and row['jrc_obtained_from'] == 'DataCite' and 'subjects' in row \
                and row['subjects']:
                 if html:
-                    html += "<h4>DataCite subjects</h4>" \
+                    html += "<br><h4>DataCite subjects</h4>" \
                             + f"{', '.join(sub['subject'] for sub in row['subjects'])}"
                 else:
                     return f"{', '.join(sub['subject'] for sub in row['subjects'])}"
@@ -1775,7 +1775,7 @@ def add_subjects(row, html=None):
                 subjects.append(subj)
         if subjects:
             if html:
-                html += f"<h4>MeSH subjects</h4>{', '.join(subjects)}"
+                html += f"<br><h4>MeSH subjects</h4>{', '.join(subjects)}"
             else:
                 return f"{', '.join(subjects)}"
     return html
@@ -3013,7 +3013,7 @@ def show_doi_ui(doi):
         # DataCite
         if row['jrc_obtained_from'] == 'DataCite' and 'citationCount' in row \
             and row['citationCount']:
-            tblrow.append(f"<td>Dimensions: {row['citationCount']:,}</td>")
+            tblrow.append(f"<td>DataCite: {row['citationCount']:,}</td>")
         # Dimensions
         try:
             citcnt, url = DL.get_citation_count(doi)
@@ -3033,7 +3033,8 @@ def show_doi_ui(doi):
         if citcnt:
             tblrow.append(f"<td>Semantic Scholar: {citcnt}</td>")
         # Web of Science
-        citcnt, url = DL.get_citation_count(doi, 'wos')
+        citcnt, url = DL.get_citation_count(doi, 'wos',
+                                            bool(row['jrc_obtained_from'] == 'DataCite'))
         if citcnt:
             tblrow.append(f"<td>Web of Science: <a href='{url}' target='_blank'>" \
                           + f"{citcnt:,}</a></td>")
@@ -3072,7 +3073,7 @@ def show_doi_ui(doi):
     else:
         abstract = DL.get_abstract(data)
         if abstract:
-            html += f"<h4>Abstract</h4><div class='abstract'>{abstract}</div><br>"
+            html += f"<h4>Abstract</h4><div class='abstract'>{abstract}</div>"
     if row:
         try:
             html = add_subjects(row, html)
