@@ -8,7 +8,7 @@
 | add_preprint.py            | Add a preprint relationship for a particular preprint-article pair                  |
 | assign_authors.py          | Add/remove JRC authors for a given DOI                                              |
 | create_api_key.pl          | Create a JWT token for a user                                                       |
-| delete_dois.py             | Delete DOIs from the dois collection                                                |
+| delete_doi.py              | Delete one or more DOIs from the dois collection                                    |
 | edit_orcid.py              | Edit a record in the orcid collection                                               |
 | find_missing_orcids.py     | Find entries in the People system with groups (lab heads) but no ORCID              |
 | get_citation.py            | Print citations to the terminal in Janelia newsletter format                        |

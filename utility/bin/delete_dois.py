@@ -4,6 +4,7 @@
 
 import argparse
 import collections
+from datetime import datetime
 from operator import attrgetter
 import sys
 from tqdm import tqdm
@@ -11,9 +12,10 @@ import jrc_common.jrc_common as JRC
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation
 
+# General variables
+ARG = LOGGER = None
 # Database
 DB = {}
-
 # Counters
 COUNT = collections.defaultdict(lambda: 0, {})
 
@@ -61,13 +63,16 @@ def delete_dois():
           None
     '''
     dois = []
-    try:
-        with open(ARG.FILE, "r", encoding="ascii") as instream:
-            for doi in instream.read().splitlines():
-                dois.append(doi.lower().strip())
-    except Exception as err:
-        LOGGER.error(f"Could not process {ARG.FILE}")
-        terminate_program(err)
+    if ARG.DOI:
+        dois.append(ARG.DOI)
+    elif ARG.FILE:
+        try:
+            with open(ARG.FILE, "r", encoding="ascii") as instream:
+                for doi in instream.read().splitlines():
+                    dois.append(doi.lower().strip())
+        except Exception as err:
+            LOGGER.error(f"Could not process {ARG.FILE}")
+            terminate_program(err)
     for doi in tqdm(dois):
         COUNT["read"] += 1
         try:
@@ -78,18 +83,26 @@ def delete_dois():
             COUNT["missing"] += 1
             LOGGER.warning(f"DOI {doi} not found")
             continue
-        if 'jrc_authors' in row or 'jrc_first_auohor' in row or 'jrc_last_auohor' in row:
-            LOGGER.error(f"DOI {doi} has Janelia authors")
-            continue
         if ARG.WRITE:
             try:
                 resp = DB['dis'].dois.delete_one({"doi": doi})
                 COUNT['deleted'] += resp.deleted_count
+                LOGGER.warning(f"Deleted {doi}")
             except Exception as err:
-                terminate_program(err)
-    print(f"DOIs read:    {COUNT['read']}")
-    print(f"DOIs missing: {COUNT['missing']}")
-    print(f"DOIs deleted: {COUNT['deleted']}")
+                terminate_program(f"Could not delete {doi} from dois collection: {err}")
+            payload = {"type": "doi", "key": doi,
+                       "inserted": datetime.today().replace(microsecond=0)}
+            try:
+                resp = DB['dis'].to_ignore.find_one({"type": "doi", "key": doi})
+                if not resp:
+                    resp = DB['dis'].to_ignore.insert_one(payload)
+                    COUNT['inserted'] += 1
+            except Exception as err:
+                terminate_program(f"Could not insert {doi} into to_ignore collection: {err}")
+    print(f"DOIs read:                 {COUNT['read']}")
+    print(f"DOIs not found:            {COUNT['missing']}")
+    print(f"DOIs deleted:              {COUNT['deleted']}")
+    print(f"DOIs added to ignore list: {COUNT['inserted']}")
 
 
 # -----------------------------------------------------------------------------
@@ -97,8 +110,11 @@ def delete_dois():
 if __name__ == '__main__':
     PARSER = argparse.ArgumentParser(
         description="Delete DOIs from the dois collection")
-    PARSER.add_argument('--file', dest='FILE', action='store',
-                        help='File of DOIs to process')
+    group = PARSER.add_mutually_exclusive_group(required=True)
+    group.add_argument('--doi', dest='DOI', action='store',
+                        help='DOI to delete')
+    group.add_argument('--file', dest='FILE', action='store',
+                        help='File of DOIs to delete')
     PARSER.add_argument('--manifold', dest='MANIFOLD', action='store',
                         default='prod', choices=['dev', 'prod'],
                         help='MongoDB manifold (dev, prod)')
