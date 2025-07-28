@@ -3,7 +3,7 @@
     DOI needs to be in the PubMed or PubMed Central archive.
 '''
 
-__version__ = '6.0.0'
+__version__ = '6.1.0'
 
 import argparse
 import collections
@@ -227,6 +227,9 @@ def fetch_pmid(fetch, row, audit, error):
     except JRC.PMIDNotFound as err:
         errmsg = {"doi": row['doi'], "error": err.details}
     except Exception as err:
+        if err.status_code in [429]:
+            LOGGER.warning(f"Error {err.status_code} for {row['doi']}: skipping")
+            pass
         terminate_program(err)
     if pmid:
         COUNT['PubMed'] += 1

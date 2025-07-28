@@ -4092,7 +4092,7 @@ def datacite_subject(subject=None, year='All'):
                     + f"<a href='/datacite_subject/{row['_id']['subject']}'>{row['count']}</a>" \
                     + "</td></tr>"
         html += "</tbody></table>"
-        title = "Subjects"
+        title = "DataCite subjects"
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
