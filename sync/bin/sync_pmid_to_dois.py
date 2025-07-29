@@ -3,11 +3,12 @@
     DOI needs to be in the PubMed or PubMed Central archive.
 '''
 
-__version__ = '6.2.0'
+__version__ = '6.3.0'
 
 import argparse
 import collections
 import json
+import random
 from operator import attrgetter
 import os
 import sys
@@ -263,9 +264,13 @@ def update_dois():
     except Exception as err:
         terminate_program(err)
     audit = []
+    doi_rows = []
     error = []
     fetch = PubMedFetcher()
-    for row in tqdm(rows, total=cnt, desc="Syncing PMIDs"):
+    for row in rows:
+        doi_rows.append(row)
+    random.shuffle(doi_rows)
+    for row in tqdm(doi_rows, total=cnt, desc="Syncing PMIDs"):
         fetch_pmid(fetch, row, audit, error)
         # We're rate limited to 10 transaction/sec
         sleep(.104)
