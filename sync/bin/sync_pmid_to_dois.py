@@ -3,7 +3,7 @@
     DOI needs to be in the PubMed or PubMed Central archive.
 '''
 
-__version__ = '6.1.0'
+__version__ = '6.2.0'
 
 import argparse
 import collections
@@ -227,10 +227,7 @@ def fetch_pmid(fetch, row, audit, error):
     except JRC.PMIDNotFound as err:
         errmsg = {"doi": row['doi'], "error": err.details}
     except Exception as err:
-        if err.status_code in [429]:
-            LOGGER.warning(f"Error {err.status_code} for {row['doi']}: skipping")
-            pass
-        terminate_program(err)
+        LOGGER.warning(f"{type(err).__name__} error for {row['doi']}: skipping")
     if pmid:
         COUNT['PubMed'] += 1
         update_pmid(row, pmid, fetch, audit)
@@ -271,7 +268,7 @@ def update_dois():
     for row in tqdm(rows, total=cnt, desc="Syncing PMIDs"):
         fetch_pmid(fetch, row, audit, error)
         # We're rate limited to 10 transaction/sec
-        sleep(.101)
+        sleep(.104)
     postprocessing(audit, error)
 
 
