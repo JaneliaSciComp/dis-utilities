@@ -28,7 +28,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals
 
-__version__ = "63.1.0"
+__version__ = "64.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -76,6 +76,7 @@ NAV = {"Home": "",
                  "Duplicate authors": "duplicate_authors"},
        "Tag/affiliation": {"DOIs by tag": "dois_tag",
                            "DOIs by acknowledgement": "dois_ack",
+                           "DOIs by lab": "dois_lab",
                            "Top DOI tags by year": "dois_top",
                            "Author affiliations: P&C": "orcid_tag",
                            "Author affiliations: Janelia": "janelia_affiliations",
@@ -909,10 +910,11 @@ def generate_user_table(rows):
 # * DOI utility functions                                                      *
 # ******************************************************************************
 
-def doi_link(doi):
+def doi_link(doi, color=None):
     ''' Return a link to a DOI or DOIs
         Keyword arguments:
           doi: DOI
+          color: color of the link
         Returns:
           newdoi: HTML link(s) to DOI(s) as a string
     '''
@@ -921,7 +923,10 @@ def doi_link(doi):
     doilist = [doi] if isinstance(doi, str) else doi
     newdoi = []
     for item in doilist:
-        newdoi.append(f"<a href='/doiui/{item}'>{item}</a>")
+        if color:
+            newdoi.append(f"<a href='/doiui/{item}' style='color: {color};'>{item}</a>")
+        else:
+            newdoi.append(f"<a href='/doiui/{item}'>{item}</a>")
     if isinstance(doi, str):
         newdoi = newdoi[0]
     else:
@@ -1363,8 +1368,10 @@ def get_source_data(year):
             if field not in row['_id']:
                 row['_id'][field] = ''
         data['Crossref'] += row['count']
-        hdict["_".join([row['_id']['source'], row['_id']['type'],
-                        row['_id']['subtype']])] = row['count']
+        key = "_".join([row['_id']['source'], row['_id']['type'], row['_id']['subtype']])
+        if key not in hdict:
+            hdict[key] = 0
+        hdict[key] += row['count']
     # DataCite
     match['jrc_obtained_from'] = "DataCite"
     payload = [{"$match": match},
@@ -6013,6 +6020,66 @@ def dois_tag():
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=f"DOI tags ({len(tags):,})", html=html,
+                                         navbar=generate_navbar('Tag/affiliation')))
+
+
+@app.route('/dois_lab')
+def dois_lab():
+    ''' Show labs with counts
+    '''
+    try:
+        orgs = DL.get_supervisory_orgs(DB['dis'].suporg)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get supervisory orgs"),
+                               message=error_message(err))
+    payload = {"jrc_tag.name": {"$regex": " Lab"},
+               "$or": [{"type": "journal-article"}, {"subtype": "preprint"},
+                       {"types.resourceTypeGeneral": "Preprint"}]}
+    try:
+        rows = DB['dis'].dois.find(payload)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get lab DOIs from dois collection"),
+                               message=error_message(err))
+    pre = "Reported below are journal articles/preprints for all current labs. " \
+          + "DOIs in <span style='color: lime;'>green</span> are for multiple labs.<br>"
+    header = ['Lab', 'Published', 'Type', 'DOI','Title']
+    html = '<table id="types" class="tablesorter numbers"><thead><tr><th>' \
+            + '</th><th>'.join(header) + '</th></tr></thead><tbody>'
+    dois = []
+    ddois = {}
+    multi = []
+    for row in rows:
+        cnt = 0
+        for tag in row['jrc_tag']:
+            if ' Lab' not in tag['name'] or tag['name'] not in orgs \
+                or 'active' not in orgs[tag['name']] or not orgs[tag['name']]['active']:
+                continue
+            typ = 'Journal article' if 'type' in row  \
+                                    and row['type'] == 'journal-article' else 'Preprint'
+            dois.append([tag['name'], row['jrc_publishing_date'], typ,
+                         row['doi'], DL.get_title(row)])
+            ddois[row['doi']] = True
+            cnt += 1
+        if cnt > 1:
+            multi.append(row['doi'])
+    dois.sort(key=lambda x: (x[0], x[1]))
+    fileoutput = ""
+    for doi in dois:
+        fileoutput += "\t".join(doi) + "\n"
+        # DOI
+        if doi[3] in multi:
+            doi[3] = doi_link(doi[3], 'lime')
+            #doi[3] = f"<span style='color: lime;'>{doi[3]}</span>"
+        else:
+            doi[3] = doi_link(doi[3])
+        html += "<tr><td>" + "</td><td>".join(doi) + "</td></tr>"
+    html += '</tbody></table>'
+    html = pre + create_downloadable('dois', header, fileoutput) + html
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=f"DOIs by lab ({len(ddois):,})", html=html,
                                          navbar=generate_navbar('Tag/affiliation')))
 
 
