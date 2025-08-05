@@ -28,7 +28,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals
 
-__version__ = "64.0.0"
+__version__ = "64.1.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -5413,7 +5413,9 @@ def show_oid_ui(oid):
                                title=render_warning(f"Could not find ORCID ID {oid}", 'warning'),
                                message=data['user-message'])
     name = data['person']['name']
-    if name['credit-name']:
+    if not name:
+        who = ''
+    elif name['credit-name']:
         who = f"{name['credit-name']['value']}"
     elif 'family-name' not in name or not name['family-name']:
         who = f"{name['given-names']['value']} <span style='color: red'>" \
