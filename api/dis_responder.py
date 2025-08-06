@@ -28,7 +28,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals
 
-__version__ = "64.1.0"
+__version__ = "64.2.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -2259,6 +2259,41 @@ def show_doi(doi):
     return generate_response(result)
 
 
+@app.route('/doi/openalex/<path:doi>')
+def show_openalex_doi(doi):
+    '''
+    Return a DOI from OpenAlex
+    Return OpenAlex information for a given DOI.
+    ---
+    tags:
+      - DOI
+    parameters:
+      - in: path
+        name: doi
+        schema:
+          type: path
+        required: true
+        description: DOI
+    responses:
+      200:
+        description: DOI data
+      other:
+        description: OpenAlex error
+    '''
+    doi = doi.lstrip('/').rstrip('/').lower()
+    result = initialize_result()
+    try:
+        row = DL.get_doi_record(doi, source='openalex')
+    except Exception as err:
+        raise InvalidUsage(str(err), 500) from err
+    if row:
+        result['rest']['row_count'] = len(row)
+        result['rest']['source'] = 'openalex'
+        result['data'] = row
+        return generate_response(result)
+    return generate_response(result)
+
+
 @app.route('/doi/inserted/<string:idate>')
 def show_inserted(idate):
     '''
@@ -2940,7 +2975,11 @@ def get_display_badges(doi, row, data, local):
     oresp = JRC.call_oa(doi)
     if oresp:
         olink = f"{app.config['OA']}{doi}"
-        badges += f" {tiny_badge('source', 'OA data', olink)}"
+        badges += f" {tiny_badge('source', 'OA.Report', olink)}"
+    oresp = DL.get_doi_record(doi, source='openalex')
+    if oresp:
+        olink = f"https://openalex.org/works?page=1&filter=ids.openalex:{oresp[0]['id']}"
+        badges += f" {tiny_badge('source', 'OpenAlex', olink)}"
     if local and 'jrc_fulltext_url' in row:
         badges += f" {tiny_badge('pdf', 'Full text', row['jrc_fulltext_url'])}"
     #badges += f" {tiny_badge('info', 'HQ migration', f'/doi/migration/{doi}')}"
