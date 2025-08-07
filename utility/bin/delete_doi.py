@@ -48,11 +48,32 @@ def initialize_program():
     dbs = ['dis']
     for source in dbs:
         dbo = attrgetter(f"{source}.{ARG.MANIFOLD}.write")(dbconfig)
-        LOGGER.info("Connecting to %s %s on %s as %s", dbo.name, ARG.MANIFOLD, dbo.host, dbo.user)
+        LOGGER.info(f"Connecting to {dbo.name} {ARG.MANIFOLD} on {dbo.host} as {dbo.user}")
         try:
             DB[source] = JRC.connect_database(dbo)
         except Exception as err:
             terminate_program(err)
+
+
+def process_ignore(doi):
+    ''' Remove a DOI from the ignore list
+        Keyword arguments:
+          doi: DOI to process
+        Returns:
+          None
+    '''
+    try:
+        resp = DB['dis'].to_ignore.find_one({"type": "doi", "key": doi})
+    except Exception as err:
+        terminate_program(err)
+    if not resp:
+        COUNT["missing"] += 1
+        return
+    try:
+        resp = DB['dis'].to_ignore.delete_one({"type": "doi", "key": doi})
+    except Exception as err:
+        terminate_program(err)
+    COUNT["deleted"] += 1
 
 
 def delete_dois():
@@ -75,6 +96,9 @@ def delete_dois():
             terminate_program(err)
     for doi in tqdm(dois):
         COUNT["read"] += 1
+        if ARG.IGNORE:
+            process_ignore(doi)
+            continue
         try:
             row = DB['dis'].dois.find_one({"doi": doi})
         except Exception as err:
@@ -118,6 +142,8 @@ if __name__ == '__main__':
     PARSER.add_argument('--manifold', dest='MANIFOLD', action='store',
                         default='prod', choices=['dev', 'prod'],
                         help='MongoDB manifold (dev, prod)')
+    PARSER.add_argument('--ignore', dest='IGNORE', action='store_true',
+                        default=False, help='Remove from ignore list only')
     PARSER.add_argument('--write', dest='WRITE', action='store_true',
                         default=False, help='Actually delete DOIs')
     PARSER.add_argument('--verbose', dest='VERBOSE', action='store_true',
