@@ -96,9 +96,9 @@ def find_full_text(doi, row):
     if oresp:
         # 'best_oa_location_url'
         for field in ['publisher_url_for_pdf', 'best_oa_location_url_for_pdf']:
-            if field in oresp[0] and oresp[0][field]:
+            if field in oresp and oresp[field]:
                 COUNT['openalex'] += 1
-                return oresp[0][field], None
+                return oresp[field], None
         return "", None
     # OA.Report (PDF)
     oresp = {}
