@@ -28,7 +28,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals
 
-__version__ = "66.0.0"
+__version__ = "67.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -2257,41 +2257,6 @@ def show_doi(doi):
         raise InvalidUsage(str(err), 500) from err
     if result['data']:
         result['rest']['row_count'] = 1
-    return generate_response(result)
-
-
-@app.route('/doi/openalex/<path:doi>')
-def show_openalex_doi(doi):
-    '''
-    Return a DOI from OpenAlex
-    Return OpenAlex information for a given DOI.
-    ---
-    tags:
-      - DOI
-    parameters:
-      - in: path
-        name: doi
-        schema:
-          type: path
-        required: true
-        description: DOI
-    responses:
-      200:
-        description: DOI data
-      other:
-        description: OpenAlex error
-    '''
-    doi = doi.lstrip('/').rstrip('/').lower()
-    result = initialize_result()
-    try:
-        row = DL.get_doi_record(doi, source='openalex')
-    except Exception as err:
-        raise InvalidUsage(str(err), 500) from err
-    if row:
-        result['rest']['row_count'] = len(row)
-        result['rest']['source'] = 'openalex'
-        result['data'] = row
-        return generate_response(result)
     return generate_response(result)
 
 
@@ -4570,11 +4535,17 @@ def dois_no_janelia(year='All'):
 def show_raw(resource=None, doi=None):
     ''' Raw resource metadata for a DOI
     '''
+    doi = doi.lstrip('/').rstrip('/').lower()
     result = initialize_result()
     response = None
     if resource == 'bioRxiv':
         try:
             response = JRC.call_biorxiv(doi)
+        except Exception as err:
+            raise InvalidUsage(str(err), 500) from err
+    elif resource == 'elife':
+        try:
+            response = DL.get_doi_record(doi, source='elife')
         except Exception as err:
             raise InvalidUsage(str(err), 500) from err
     elif resource == 'figshare':
@@ -4587,6 +4558,11 @@ def show_raw(resource=None, doi=None):
                         response = response2.json()
                 except Exception:
                     pass
+        except Exception as err:
+            raise InvalidUsage(str(err), 500) from err
+    elif resource == 'openalex':
+        try:
+            response = DL.get_doi_record(doi, source='openalex')
         except Exception as err:
             raise InvalidUsage(str(err), 500) from err
     elif resource == 'protocols.io':
