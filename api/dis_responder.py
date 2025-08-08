@@ -6711,14 +6711,14 @@ def stats_endpoints():
                                          navbar=generate_navbar('System')))
 
 @app.route('/ignore')
-@app.route('/ignore/<string:type>')
+@app.route('/ignore/<string:typ>')
 def ignore(typ=None):
     ''' Show ignore information
     '''
     html = ""
     title = "Ignore list"
     try:
-        rows = DB['dis'].to_ignore.distinct("typ")
+        rows = DB['dis'].to_ignore.distinct("type")
         cnt = len(rows)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
