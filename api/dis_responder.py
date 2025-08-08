@@ -28,7 +28,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals
 
-__version__ = "67.0.0"
+__version__ = "68.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -2928,8 +2928,7 @@ def get_display_badges(doi, row, data, local):
     if '/protocols.io.' in doi:
         badges += f" {tiny_badge('source', 'protocols.io', f'/raw/protocols.io/{doi}')}"
     elif 'elife' in doi.lower():
-        frag = doi.split('ife.')[-1].split('.')[0]
-        badges += " " + tiny_badge('source', 'eLife', f"{app.config['ELIFE']}{frag}")
+        badges += " " + tiny_badge('source', 'eLife', f'/raw/eLife/{doi}')
     rlink = f"/doi/{doi}"
     if local:
         jour = DL.get_journal(data)
@@ -2990,6 +2989,65 @@ def cited_list_button(doi):
     outstring = "\n".join(dois)
     button = create_downloadable("cited_list", ["DOI"], outstring, size='btn-tiny')
     return f"<span style='line-height: 1.3'><br></span>{button}"
+
+
+def get_citation_counts(doi, row):
+    ''' Get citation counts
+        Keyword arguments:
+          doi: DOI
+          row: row from dois collection
+        Returns:
+          Citation counts as HTML
+    '''
+    # Citations (DataCite, Dimensions, eLife, OpenAlex, S2, Web of Science)
+    doisec = ""
+    tblrow = []
+    # DataCite
+    if row['jrc_obtained_from'] == 'DataCite' and 'citationCount' in row \
+        and row['citationCount']:
+        tblrow.append(f"<td>DataCite: {row['citationCount']:,}</td>")
+    # Dimensions
+    try:
+        citcnt, url = DL.get_citation_count(doi)
+    except Exception as err:
+        citcnt = 0
+    if citcnt:
+        tblrow.append(f"<td>Dimensions: {citcnt:,}{url}</td>")
+    # eLife
+    if 'elife' in doi.lower():
+        try:
+            citcnt, url = DL.get_citation_count(doi, 'elife')
+        except Exception as err:
+            citcnt = 0
+        if citcnt:
+            tblrow.append(f"<td>eLife: <a href='{url}' target='_blank'>{citcnt:,}</a>")
+    try:
+        citcnt, url = DL.get_citation_count(doi, 'openalex')
+    except Exception as err:
+        citcnt = 0
+    if citcnt:
+        cbutton = cited_list_button(doi)
+        tblrow.append(f"<td>OpenAlex: <a href='{url}' target='_blank'>{citcnt:,}</a>" \
+                      + f"{cbutton}</td>")
+    # Semantic Scholar
+    citcnt = s2_citation_count(doi, fmt='html')
+    if citcnt:
+        tblrow.append(f"<td>Semantic Scholar: {citcnt}</td>")
+    # Web of Science
+    citcnt, url = DL.get_citation_count(doi, 'wos',
+                                        bool(row['jrc_obtained_from'] == 'DataCite'))
+    if citcnt:
+        tblrow.append(f"<td>Web of Science: <a href='{url}' target='_blank'>" \
+                      + f"{citcnt:,}</a></td>")
+    if tblrow:
+        doisec += "<table id='citations' class='citations'><thead>" \
+                  + f"<tr><th colspan={len(tblrow)}>Citation counts</th></tr>" \
+                  + "</thead><tbody>" + ''.join(tblrow) + "</tbody></table>"
+    # DataCite downloads
+    if row['jrc_obtained_from'] == 'DataCite':
+        if 'downloadCount' in row and row['downloadCount']:
+            doisec += f"<span class='paperdata'>Downloads: {row['downloadCount']:,}</span><br>"
+    return doisec
 
 
 @app.route('/doiui/<path:doi>')
@@ -3055,47 +3113,8 @@ def show_doi_ui(doi):
     except Exception as err:
         citations = f"Could not generate short citation for {doi} ({err})"
     doisec = ""
-    # Citations (DataCite, Dimensions, OpenAlex, S2, Web of Science)
     if row:
-        tblrow = []
-        # DataCite
-        if row['jrc_obtained_from'] == 'DataCite' and 'citationCount' in row \
-            and row['citationCount']:
-            tblrow.append(f"<td>DataCite: {row['citationCount']:,}</td>")
-        # Dimensions
-        try:
-            citcnt, url = DL.get_citation_count(doi)
-        except Exception as err:
-            citcnt = 0
-        if citcnt:
-            tblrow.append(f"<td>Dimensions: {citcnt:,}{url}</td>")
-        # OpenAlex
-        try:
-            citcnt, url = DL.get_citation_count(doi, 'openalex')
-        except Exception as err:
-            citcnt = 0
-        if citcnt:
-            cbutton = cited_list_button(doi)
-            tblrow.append(f"<td>OpenAlex: <a href='{url}' target='_blank'>{citcnt:,}</a>" \
-                          + f"{cbutton}</td>")
-        # Semantic Scholar
-        citcnt = s2_citation_count(doi, fmt='html')
-        if citcnt:
-            tblrow.append(f"<td>Semantic Scholar: {citcnt}</td>")
-        # Web of Science
-        citcnt, url = DL.get_citation_count(doi, 'wos',
-                                            bool(row['jrc_obtained_from'] == 'DataCite'))
-        if citcnt:
-            tblrow.append(f"<td>Web of Science: <a href='{url}' target='_blank'>" \
-                          + f"{citcnt:,}</a></td>")
-        if tblrow:
-            doisec += "<table id='citations' class='citations'><thead>" \
-                      + f"<tr><th colspan={len(tblrow)}>Citation counts</th></tr>" \
-                      + "</thead><tbody>" + ''.join(tblrow) + "</tbody></table>"
-        # DataCite downloads
-        if row['jrc_obtained_from'] == 'DataCite':
-            if 'downloadCount' in row and row['downloadCount']:
-                doisec += f"<span class='paperdata'>Downloads: {row['downloadCount']:,}</span><br>"
+        doisec = get_citation_counts(doi, row)
     doisec += "<br>"
     # Citations
     citsec = cittype = ""
@@ -4538,7 +4557,9 @@ def show_raw(resource=None, doi=None):
     doi = doi.lstrip('/').rstrip('/').lower()
     result = initialize_result()
     response = None
-    if resource == 'bioRxiv':
+    if resource:
+        resource = resource.lower()
+    if resource == 'biorxiv':
         try:
             response = JRC.call_biorxiv(doi)
         except Exception as err:
