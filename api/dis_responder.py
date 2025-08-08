@@ -28,7 +28,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals
 
-__version__ = "64.2.0"
+__version__ = "66.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -84,7 +84,8 @@ NAV = {"Home": "",
        "System" : {"Database stats": "stats_database",
                    "Controlled vocabularies": "cv",
                    "DOI relationships": "doi_relationships",
-                   "Endpoints": "stats_endpoints"},
+                   "Endpoints": "stats_endpoints",
+                   "Ignore lists": "ignore"},
        "External systems": {"Search HHMI People system": "people",
                             "HHMI Supervisory Organizations": "orgs/full",
                             "ROR": "ror"}
@@ -1797,7 +1798,7 @@ def random_string(strlen=8):
     return ''.join(random.choice(cmps) for i in range(strlen))
 
 
-def create_downloadable(name, header, content):
+def create_downloadable(name, header, content, size='btn-med'):
     ''' Generate a downloadable content file
         Keyword arguments:
           name: base file name
@@ -1811,7 +1812,7 @@ def create_downloadable(name, header, content):
         if header:
             content = "\t".join(header) + "\n" + content
         text_file.write(content)
-    return f'<a class="btn btn-outline-success" href="/download/{fname}" ' \
+    return f'<a class="btn btn-outline-success {size}" href="/download/{fname}" ' \
                 + 'role="button">Download tab-delimited file</a>'
 
 
@@ -2961,6 +2962,9 @@ def get_display_badges(doi, row, data, local):
             badges += f" {tiny_badge('primary', 'PMID', plink)}"
     if '/protocols.io.' in doi:
         badges += f" {tiny_badge('source', 'protocols.io', f'/raw/protocols.io/{doi}')}"
+    elif 'elife' in doi.lower():
+        frag = doi.split('ife.')[-1].split('.')[0]
+        badges += " " + tiny_badge('source', 'eLife', f"{app.config['ELIFE']}{frag}")
     rlink = f"/doi/{doi}"
     if local:
         jour = DL.get_journal(data)
@@ -2974,11 +2978,11 @@ def get_display_badges(doi, row, data, local):
         badges += f" {tiny_badge('source', 'Raw data', rlink)}"
     oresp = JRC.call_oa(doi)
     if oresp:
-        olink = f"{app.config['OA']}{doi}"
+        olink = f"{app.config['OAREPORT']}{doi}"
         badges += f" {tiny_badge('source', 'OA.Report', olink)}"
     oresp = DL.get_doi_record(doi, source='openalex')
     if oresp:
-        olink = f"https://openalex.org/works?page=1&filter=ids.openalex:{oresp[0]['id']}"
+        olink = f"{app.config['OPENALEX']}{oresp['id'].split('/')[-1]}"
         badges += f" {tiny_badge('source', 'OpenAlex', olink)}"
     if local and 'jrc_fulltext_url' in row:
         badges += f" {tiny_badge('pdf', 'Full text', row['jrc_fulltext_url'])}"
@@ -2989,6 +2993,39 @@ def get_display_badges(doi, row, data, local):
 # ******************************************************************************
 # * UI endpoints (DOI)                                                         *
 # ******************************************************************************
+
+def cited_list_button(doi):
+    ''' Generate a button to view the cited list
+        Keyword arguments:
+          doi: DOI
+        Returns:
+          Button as a string
+    '''
+    try:
+        rec = DL.get_doi_record(doi, coll=None, source='openalex')
+    except Exception:
+        return ""
+    if not rec or 'cited_by_api_url' not in rec or not rec['cited_by_api_url']:
+        return ""
+    try:
+        resp = requests.get(rec['cited_by_api_url'], timeout=10)
+    except Exception:
+        return ""
+    if resp.status_code != 200:
+        return ""
+    data = resp.json()
+    if 'results' not in data or not data['results']:
+        return ""
+    dois = []
+    for itm in data['results']:
+        if 'doi' in itm and itm['doi']:
+            dois.append(itm['doi'])
+    if not dois:
+        return ""
+    outstring = "\n".join(dois)
+    button = create_downloadable("cited_list", ["DOI"], outstring, size='btn-tiny')
+    return f"<span style='line-height: 1.3'><br></span>{button}"
+
 
 @app.route('/doiui/<path:doi>')
 def show_doi_ui(doi):
@@ -3073,7 +3110,9 @@ def show_doi_ui(doi):
         except Exception as err:
             citcnt = 0
         if citcnt:
-            tblrow.append(f"<td>OpenAlex: <a href='{url}' target='_blank'>{citcnt:,}</a></td>")
+            cbutton = cited_list_button(doi)
+            tblrow.append(f"<td>OpenAlex: <a href='{url}' target='_blank'>{citcnt:,}</a>" \
+                          + f"{cbutton}</td>")
         # Semantic Scholar
         citcnt = s2_citation_count(doi, fmt='html')
         if citcnt:
@@ -6554,7 +6593,7 @@ def stats_database():
 @app.route('/cv')
 @app.route('/cv/<string:cv>')
 def cvs(cv=None):
-    ''' Show CD information
+    ''' Show CV information
     '''
     html = ""
     try:
@@ -6603,7 +6642,7 @@ def cvs(cv=None):
     endpoint_access()
     return make_response(render_template('cv.html', urlroot=request.url_root,
                                          title="Controlled vocabularies", html=html,
-                                         navbar=generate_navbar('CV')))
+                                         navbar=generate_navbar('System')))
 
 
 @app.route('/doi_relationships')
@@ -6648,7 +6687,7 @@ def doi_relationships():
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="DOI relationships", html=html,
-                                         navbar=generate_navbar('DOI')))
+                                         navbar=generate_navbar('System')))
 
 
 @app.route('/stats_endpoints')
@@ -6669,6 +6708,49 @@ def stats_endpoints():
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="Endpoint access counts", html=html,
+                                         navbar=generate_navbar('System')))
+
+@app.route('/ignore')
+@app.route('/ignore/<string:type>')
+def ignore(typ=None):
+    ''' Show ignore information
+    '''
+    html = ""
+    title = "Ignore list"
+    try:
+        rows = DB['dis'].to_ignore.distinct("typ")
+        cnt = len(rows)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get cvs"),
+                               message=error_message(err))
+    if cnt:
+        html = "<form>Select an ignore list to view: <select id='type' onchange='find_ignore()'>" \
+               + "<option value=''>Select a list</option>"
+        for row in rows:
+            if row == typ or cnt == 1:
+                typ = row
+                sel = "selected"
+            else:
+                sel = ""
+            html += f"<option value=\'{row}\' {sel}>{row}</option>"
+    html += "</select></form><br>"
+    if typ:
+        title = f"{typ} ignore list"
+        try:
+            rows = DB['dis'].to_ignore.find({"type": typ}).sort("key", 1)
+        except Exception as err:
+            return render_template('error.html', urlroot=request.url_root,
+                                   title=render_warning("Could not get ignore list"),
+                                   message=error_message(err))
+        html += '<table id="ignores" class="tablesorter standard"><thead><tr><th>Key</th>' \
+                + '</tr></thead><tbody>'
+        for row in rows:
+            html += f"<tr><td>{row['key']}</td></tr>"
+        html += '</tbody></table>'
+    endpoint_access()
+    return make_response(render_template('ignore.html', urlroot=request.url_root,
+                                         title=title, html=html,
                                          navbar=generate_navbar('System')))
 
 # ******************************************************************************
