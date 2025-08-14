@@ -28,7 +28,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches
 
-__version__ = "69.0.0"
+__version__ = "69.1.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -3041,13 +3041,14 @@ def get_citation_counts(doi, row):
             citcnt = 0
         if citcnt:
             tblrow.append(f"<td>eLife: <a href='{url}' target='_blank'>{citcnt:,}</a>")
+    # OpenAlex
     try:
         citcnt, url = DL.get_citation_count(doi, 'openalex')
     except Exception:
         citcnt = 0
     if citcnt:
         cbutton, ccnt = cited_list_button(doi)
-        if ccnt:
+        if ccnt and ccnt > citcnt:
             citcnt = ccnt
         tblrow.append(f"<td>OpenAlex: <a href='{url}' target='_blank'>{citcnt:,}</a>" \
                       + f"{cbutton}</td>")
