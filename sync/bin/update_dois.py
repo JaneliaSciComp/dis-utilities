@@ -7,7 +7,7 @@
            to DIS MongoDB.
 """
 
-__version__ = '13.0.0'
+__version__ = '13.0.1'
 
 import argparse
 import configparser
@@ -502,7 +502,6 @@ def get_doi_record(doi):
                     LOGGER.warning(f"No author for {doi}")
                     COUNT['noauthor'] += 1
                     return None
-                print(msg['message']['type'])
                 if ('title' not in msg['message']) and ('type' not in msg['message'] or msg['message']['type'] != 'grant'):
                     LOGGER.warning(f"No title for {doi}")
                     MISSING[f"No title for {doi}"] = True
