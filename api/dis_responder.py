@@ -26,9 +26,9 @@ import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
 import dis_plots as DP
 
-# pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals
+# pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches
 
-__version__ = "68.0.0"
+__version__ = "69.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -493,7 +493,6 @@ def get_dup_color(occur):
         return "gold"
     if len(orcid) == len(occur):
         return "lightsalmon"
-    print(email)
     if len(email) == 1:
         return "orange"
     return "red"
@@ -743,6 +742,32 @@ def generate_works_table(rows, name=None, show="full"):
     html = f"Number of DOIs: <span id='totalrows'>{len(works)}</span><br>" + html
     return html, dois
 
+def add_orcid_controls(orc, html):
+    ''' Add ORCID and People controls to HTML
+        Keyword arguments:
+          orc: orcid record
+          html: HTML
+        Returns:
+          HTML
+    '''
+    if 'orcid' in orc:
+        olink = f"/orcidapi/{orc['orcid']}"
+        html += f" {tiny_badge('info', 'Show ORCID data', olink)}"
+        try:
+            olink = f"{app.config['OPENALEX']}authors?filter=orcid:{orc['orcid']}" \
+                    + f"&mailto={app.config['EMAIL']}"
+            print(olink)
+            resp = requests.get(olink, timeout=10)
+            print(resp)
+            if resp.status_code == 200:
+                html += f" {tiny_badge('info', 'Show OpenAlex data', olink)}"
+        except Exception:
+            pass
+    if 'userIdO365' in orc:
+        olink = f"/peoplerec/{orc['userIdO365']}"
+        html += f" {tiny_badge('info', 'Show People data', olink)}"
+    return html
+
 
 def get_orcid_from_db(oid, use_eid=False, bare=False, show="full"):
     ''' Generate HTML for an ORCID or employeeId that is in the orcid collection
@@ -780,12 +805,7 @@ def get_orcid_from_db(oid, use_eid=False, bare=False, show="full"):
     if 'affiliations' in orc:
         html += f"<tr><td>Affiliations:</td><td>{', '.join(orc['affiliations'])}</td></tr>"
     html += "</table><br>"
-    if 'orcid' in orc:
-        olink = f"/orcidapi/{orc['orcid']}"
-        html += f" {tiny_badge('info', 'Show ORCID data', olink)}"
-    if 'userIdO365' in orc:
-        olink = f"/peoplerec/{orc['userIdO365']}"
-        html += f" {tiny_badge('info', 'Show People data', olink)}"
+    html = add_orcid_controls(orc, html)
     html += "<br>"
     try:
         if use_eid:
@@ -1276,7 +1296,6 @@ def get_first_last_authors(year):
                 if 'preprints' not in stat[which]:
                     stat[which]['preprints'] = 0
                 stat[which]['preprints'] += row['count']
-    print(json.dumps(stat, indent=2))
     return stat['first'], stat['last'], stat['any']
 
 
@@ -2946,7 +2965,8 @@ def get_display_badges(doi, row, data, local):
         badges += f" {tiny_badge('source', 'OA.Report', olink)}"
     oresp = DL.get_doi_record(doi, source='openalex')
     if oresp:
-        olink = f"{app.config['OPENALEX']}{oresp['id'].split('/')[-1]}"
+        olink = f"{app.config['OPENALEX']}works{oresp['id'].split('/')[-1]}" \
+                + f"&mailto={app.config['EMAIL']}"
         badges += f" {tiny_badge('source', 'OpenAlex', olink)}"
     if local and 'jrc_fulltext_url' in row:
         badges += f" {tiny_badge('pdf', 'Full text', row['jrc_fulltext_url'])}"
@@ -2988,7 +3008,7 @@ def cited_list_button(doi):
         return ""
     outstring = "\n".join(dois)
     button = create_downloadable("cited_list", ["DOI"], outstring, size='btn-tiny')
-    return f"<span style='line-height: 1.3'><br></span>{button}"
+    return f"<span style='line-height: 1.3'><br></span>{button}", len(dois)
 
 
 def get_citation_counts(doi, row):
@@ -3009,7 +3029,7 @@ def get_citation_counts(doi, row):
     # Dimensions
     try:
         citcnt, url = DL.get_citation_count(doi)
-    except Exception as err:
+    except Exception:
         citcnt = 0
     if citcnt:
         tblrow.append(f"<td>Dimensions: {citcnt:,}{url}</td>")
@@ -3017,16 +3037,18 @@ def get_citation_counts(doi, row):
     if 'elife' in doi.lower():
         try:
             citcnt, url = DL.get_citation_count(doi, 'elife')
-        except Exception as err:
+        except Exception:
             citcnt = 0
         if citcnt:
             tblrow.append(f"<td>eLife: <a href='{url}' target='_blank'>{citcnt:,}</a>")
     try:
         citcnt, url = DL.get_citation_count(doi, 'openalex')
-    except Exception as err:
+    except Exception:
         citcnt = 0
     if citcnt:
-        cbutton = cited_list_button(doi)
+        cbutton, ccnt = cited_list_button(doi)
+        if ccnt:
+            citcnt = ccnt
         tblrow.append(f"<td>OpenAlex: <a href='{url}' target='_blank'>{citcnt:,}</a>" \
                       + f"{cbutton}</td>")
     # Semantic Scholar
@@ -3201,7 +3223,6 @@ def show_doi_by_name_ui(family, given=None):
     '''
     if given:
         payload = single_name_search_payload(given, family)
-        print(payload)
     else:
         payload = {'$or': [{"author.family": {"$regex": f"^{family}$", "$options" : "i"}},
                            {"creators.familyName": {"$regex": f"^{family}$", "$options" : "i"}},
@@ -4284,7 +4305,6 @@ def datacite_downloads():
     for row in rows:
         total += row['downloadCount']
         link = doi_link(row['doi'])
-        print(row['doi'])
         html += f"<td>{link}</td><td>{DL.get_title(row)}</td>" \
                 + f"<td>{row['downloadCount']}</td></tr>"
     html += "</tbody><tfoot><tr><td colspan='2' style='text-align:right'>TOTAL</td>" \
@@ -4653,7 +4673,6 @@ def show_organization(org_in, year=str(datetime.now().year), show="full"):
     dcnt = org_journal_cnt = 0
     content = ""
     for row in rows:
-        #print(row['doi'], DL.is_journal(row))
         if DL.is_journal(row) and not DL.is_version(row):
             org_journal_cnt += 1
         dcnt += 1
@@ -4839,10 +4858,8 @@ def org_year(org="Shared Resources"):
     c2 = f"<a href='/org_summary/{org}/All/last'>{total[org]}</a>"
     html += f"</tbody><tfoot><tr><td>TOTAL</td><td>{c1}</td><td>{c2}</td></tr>"
     html += '</tfoot></table><br>'
-    print(json.dumps(data, indent=2))
     data[f"With {org} authors"] = data.pop(org)
     data[f"No {org} authors"] = data.pop("Janelia")
-    print(json.dumps(data, indent=2))
     chartscript, chartdiv = DP.stacked_bar_chart(data, title,
                                                  xaxis="years",
                                                  yaxis=(f"No {org} authors", f"With {org} authors"),
