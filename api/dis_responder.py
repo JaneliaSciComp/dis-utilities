@@ -28,7 +28,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches
 
-__version__ = "69.2.0"
+__version__ = "69.3.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -2961,7 +2961,7 @@ def get_display_badges(doi, row, data, local):
         badges += f" {tiny_badge('source', 'OA.Report', olink)}"
     oresp = DL.get_doi_record(doi, source='openalex')
     if oresp:
-        olink = f"{app.config['OPENALEX']}works{oresp['id'].split('/')[-1]}" \
+        olink = f"{app.config['OPENALEX']}works/{oresp['id'].split('/')[-1]}" \
                 + f"&mailto={app.config['EMAIL']}"
         badges += f" {tiny_badge('source', 'OpenAlex', olink)}"
     if local and 'jrc_fulltext_url' in row:
