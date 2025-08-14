@@ -28,7 +28,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches
 
-__version__ = "69.1.0"
+__version__ = "69.2.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -90,10 +90,6 @@ NAV = {"Home": "",
                             "HHMI Supervisory Organizations": "orgs/full",
                             "ROR": "ror"}
       }
-# Sources
-
-# Dates
-OPSTART = datetime.strptime('2024-05-16','%Y-%m-%d')
 
 # ******************************************************************************
 # * Classes                                                                    *
@@ -3113,7 +3109,8 @@ def show_doi_ui(doi):
     if not data:
         return render_template('warning.html', urlroot=request.url_root,
                                 title=render_warning("Could not find DOI", 'warning'),
-                                message=f"Could not find DOI {doi}")
+                                message=f"Could not find DOI {doi} in " \
+                                        +f"{'DataCite' if DL.is_datacite(doi) else 'Crossref'}")
     authors = DL.get_author_list(data, orcid=True, project_map=DB['dis'].project_map)
     #if not authors:
     #    return render_template('error.html', urlroot=request.url_root,
