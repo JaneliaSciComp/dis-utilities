@@ -28,7 +28,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches
 
-__version__ = "69.3.0"
+__version__ = "70.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -738,6 +738,7 @@ def generate_works_table(rows, name=None, show="full"):
     html = f"Number of DOIs: <span id='totalrows'>{len(works)}</span><br>" + html
     return html, dois
 
+
 def add_orcid_controls(orc, html):
     ''' Add ORCID and People controls to HTML
         Keyword arguments:
@@ -752,9 +753,7 @@ def add_orcid_controls(orc, html):
         try:
             olink = f"{app.config['OPENALEX']}authors?filter=orcid:{orc['orcid']}" \
                     + f"&mailto={app.config['EMAIL']}"
-            print(olink)
             resp = requests.get(olink, timeout=10)
-            print(resp)
             if resp.status_code == 200:
                 html += f" {tiny_badge('info', 'Show OpenAlex data', olink)}"
         except Exception:
@@ -1020,7 +1019,7 @@ def add_update_times(row):
                 updated = None
             date_list.append(get_separator(last, this))
         last = this
-        date_list.append(f"Added to newsletter {this}")
+        date_list.append(f"<span style='color: limegreen;'>Added to newsletter {this}</span>")
     if updated:
         this = updated
         if last:
@@ -1414,7 +1413,7 @@ def s2_citation_count(doi, fmt='plain'):
           Citation count
     '''
     url = f"{app.config['S2_GRAPH']}paper/DOI:{doi}?fields=citationCount"
-    headers = {'x-api-key': app.config['S2_API_KEY']}
+    headers = {'x-api-key': os.environ.get('S2_API_KEY')}
     try:
         resp = requests.get(url, headers=headers, timeout=10)
         if resp.status_code == 429:
@@ -1983,6 +1982,36 @@ def stats():
 # ******************************************************************************
 # * API endpoints (DOI)                                                        *
 # ******************************************************************************
+@app.route('/citations/incoming/<path:doi>')
+def show_incoming_citations(doi):
+    '''
+    Return a DOI's incoming citations
+    Return a DOI's incoming citations.
+    # Do not display
+    tags:
+      - DOI
+    parameters:
+      - in: path
+        name: doi
+        schema:
+          type: path
+        required: true
+        description: DOI
+    responses:
+      200:
+        description: DOI data
+      500:
+        description: MongoDB error
+    '''
+    doi = doi.lstrip('/').rstrip('/').lower()
+    dois = DL.get_incoming_citations(doi)
+    fname = f"{doi.replace('/', '_')}.csv"
+    with open(f"/tmp/{fname}", 'w', encoding='ascii') as fileout:
+        for itm in dois:
+            fileout.write(itm + '\n')
+    return download(fname)
+
+
 @app.route('/doi/authors/<path:doi>')
 def show_doi_authors(doi):
     '''
@@ -2877,7 +2906,7 @@ def download(fname):
     ''' Downloadable content
     '''
     try:
-        return send_file('/tmp/' + fname, download_name=fname)  # pylint: disable=E1123
+        return send_file('/tmp/' + fname, download_name=fname, as_attachment=True)  # pylint: disable=E1123
     except Exception as err:
         return render_template("error.html", urlroot=request.url_root,
                                title='Download error', message=err)
@@ -2937,9 +2966,12 @@ def get_display_badges(doi, row, data, local):
     '''
     badges = "<span class='paperdata'>"
     if local:
+        if 'jrc_pmc' in row:
+            plink = f"{app.config['PMCID']}PMC{row['jrc_pmc']}/"
+            badges += f" {tiny_badge('primary', 'PMC', plink)}"
         if 'jrc_pmid' in row:
             plink = f"{app.config['PMID']}{row['jrc_pmid']}/"
-            badges += f" {tiny_badge('primary', 'PMID', plink)}"
+            badges += f" {tiny_badge('primary', 'PubMed', plink)}"
     if '/protocols.io.' in doi:
         badges += f" {tiny_badge('source', 'protocols.io', f'/raw/protocols.io/{doi}')}"
     elif 'elife' in doi.lower():
@@ -2974,39 +3006,6 @@ def get_display_badges(doi, row, data, local):
 # * UI endpoints (DOI)                                                         *
 # ******************************************************************************
 
-def cited_list_button(doi):
-    ''' Generate a button to view the cited list
-        Keyword arguments:
-          doi: DOI
-        Returns:
-          Button as a string
-    '''
-    try:
-        rec = DL.get_doi_record(doi, coll=None, source='openalex')
-    except Exception:
-        return ""
-    if not rec or 'cited_by_api_url' not in rec or not rec['cited_by_api_url']:
-        return ""
-    try:
-        resp = requests.get(rec['cited_by_api_url'], timeout=10)
-    except Exception:
-        return ""
-    if resp.status_code != 200:
-        return ""
-    data = resp.json()
-    if 'results' not in data or not data['results']:
-        return ""
-    dois = []
-    for itm in data['results']:
-        if 'doi' in itm and itm['doi']:
-            dois.append(itm['doi'])
-    if not dois:
-        return ""
-    outstring = "\n".join(dois)
-    button = create_downloadable("cited_list", ["DOI"], outstring, size='btn-tiny')
-    return f"<span style='line-height: 1.3'><br></span>{button}", len(dois)
-
-
 def get_citation_counts(doi, row):
     ''' Get citation counts
         Keyword arguments:
@@ -3039,15 +3038,15 @@ def get_citation_counts(doi, row):
             tblrow.append(f"<td>eLife: <a href='{url}' target='_blank'>{citcnt:,}</a>")
     # OpenAlex
     try:
-        citcnt, url = DL.get_citation_count(doi, 'openalex')
+        citcnt, _ = DL.get_citation_count(doi, 'openalex')
     except Exception:
         citcnt = 0
     if citcnt:
-        cbutton, ccnt = cited_list_button(doi)
-        if ccnt and ccnt > citcnt:
-            citcnt = ccnt
-        tblrow.append(f"<td>OpenAlex: <a href='{url}' target='_blank'>{citcnt:,}</a>" \
-                      + f"{cbutton}</td>")
+        cbutton = f'<a class="btn btn-outline-success btn-tiny" ' \
+                  + f'href="/citations/incoming/{doi}" ' \
+                  + 'role="button">Download tab-delimited file</a>'
+        cbutton = f"<span style='line-height: 1.3'><br></span>{cbutton}"
+        tblrow.append(f"<td>OpenAlex: {citcnt:,}{cbutton}</td>")
     # Semantic Scholar
     citcnt = s2_citation_count(doi, fmt='html')
     if citcnt:
@@ -3347,7 +3346,7 @@ def dois_source(year='All'):
             val = f"<a href='/doisui_type/{src}/{typ}/{sub}/{year}'>{val}</a>"
         html += f"<tr><td>{src}</td><td>{typ}</td><td>{sub if sub != 'None' else ''}</td>" \
                 + f"<td>{val}</td></tr>"
-    html += f"</tbody><tfoot><tr><td colspan='3'>TOTAL</td><td>{total:,}</td>" \
+    html += f"</tbody><tfoot><tr><th colspan='3'>TOTAL</th><th>{total:,}</th>" \
             + "</tr></tfoot></table><br>"
     html += year_pulldown('dois_source')
     title = "DOIs by source"
@@ -3679,6 +3678,7 @@ def dois_year():
         if row['_id']['source'] not in years[row['_id']['year']]:
             years[row['_id']['year']][row['_id']['source']] = row['count']
     data = {"years": [], "Crossref": [], "DataCite": []}
+    counter = collections.defaultdict(lambda: 0, {})
     for year in sorted(years, reverse=True):
         if year < '2006':
             continue
@@ -3692,12 +3692,17 @@ def dois_year():
                 onclick = "onclick='nav_post(\"publishing_year\",\"" + year \
                           + "\",\"" + source + "\")'"
                 link = f"<a href='#' {onclick}>{years[year][source]:,}</a>"
+                counter[source] += years[year][source]
             else:
                 data[source].insert(0, 0)
                 link = ""
             html += f"<td>{link}</td>"
         html += "</tr>"
-    html += '</tbody></table>'
+    html += f"</tbody><tfoot><tr><th>Total</th>"
+    for source in app.config['SOURCES']:
+        html += f"<th style='text-align: center;'>{counter[source]:,}</th>"
+    html += "</tr></tfoot>"
+    html += '</table>'
     chartscript, chartdiv = DP.stacked_bar_chart(data, "DOIs published by year/source",
                                                  xaxis="years", yaxis=app.config['SOURCES'],
                                                  colors=DP.SOURCE_PALETTE)
@@ -3902,6 +3907,7 @@ def dois_month(year=str(datetime.now().year)):
     html = '<table id="years" class="tablesorter numbers"><thead><tr>' \
            + '<th>Month</th><th>Crossref</th><th>DataCite</th>' \
            + '</tr></thead><tbody>'
+    counter = collections.defaultdict(lambda: 0, {})
     for mon in data['months']:
         mname = date(1900, int(mon), 1).strftime('%B')
         html += f"<tr><td>{mname}</td>"
@@ -3911,10 +3917,15 @@ def dois_month(year=str(datetime.now().year)):
                           + f"{year}-{mon}" + "\",\"" + source + "\")'"
                 link = f"<a href='#' {onclick}>{data[source][int(mon)-1]:,}</a>"
                 html += f"<td>{link}</td>"
+                counter[source] += data[source][int(mon)-1]
             else:
                 html += "<td></td>"
         html += "</tr>"
-    html += '</tbody></table><br>' + year_pulldown('dois_month', all_years=False)
+    html += f"</tbody><tfoot><tr><th>Total</th>"
+    for source in app.config['SOURCES']:
+        html += f"<th style='text-align: center;'>{counter[source]:,}</th>"
+    html += "</tr></tfoot>"
+    html += '</table><br>' + year_pulldown('dois_month', all_years=False)
     chartscript, chartdiv = DP.stacked_bar_chart(data, title,
                                                  xaxis="months",
                                                  yaxis=('Crossref', 'DataCite'),
@@ -4245,8 +4256,8 @@ def datacite_dois():
         inner += f"<td>{row['_id']['type']}</td><td>{row['_id']['detail']}</td>" \
                  + f"<td>{row['_id']['pub']}</td>" \
                  + f"<td><a href='{link}'>{row['count']}</a></td></tr>"
-    inner += "</tbody><tfoot><tr><td colspan='3'>TOTAL</td>" \
-             + f"<td>{total:,}</td></tr></tfoot></table>"
+    inner += f"</tbody><tfoot><tr><th colspan='3'>TOTAL</th>" \
+             + f"<th style='text-align: center;'>{total:,}</th></tr></tfoot></table>"
     html += f"{inner}</div></div>"
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
@@ -4305,8 +4316,8 @@ def datacite_downloads():
         link = doi_link(row['doi'])
         html += f"<td>{link}</td><td>{DL.get_title(row)}</td>" \
                 + f"<td>{row['downloadCount']}</td></tr>"
-    html += "</tbody><tfoot><tr><td colspan='2' style='text-align:right'>TOTAL</td>" \
-            + f"<td>{total:,}</td></tr></tfoot></table><br>"
+    html += "</tbody><tfoot><tr><th colspan='2'>TOTAL</th>" \
+            + f"<th style='text-align: center;'>{total:,}</th></tr></tfoot></table><br>"
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="DataCite DOI downloads", html=html,
@@ -4585,6 +4596,7 @@ def show_raw(resource=None, doi=None):
     elif resource == 'elife':
         try:
             response = DL.get_doi_record(doi, source='elife')
+            print(response)
         except Exception as err:
             raise InvalidUsage(str(err), 500) from err
     elif resource == 'figshare':
@@ -4976,10 +4988,14 @@ def dois_preprint_year():
         data['Preprint'][data['years'].index(year)] += 1
     html = '<table id="years" class="tablesorter numbers"><thead><tr>' \
            + '<th>Year</th><th>Journal articles</th><th>Preprints</th></thead><tbody>'
+    jrn = pre = 0
     for idx in range(len(data['years'])):
         html += f"<tr><td>{data['years'][idx]}</td><td>{data['Journal article'][idx]:,}</td>" \
                 + f"<td>{data['Preprint'][idx]:,}</td></tr>"
-    html += '</tbody></table>'
+        jrn += data['Journal article'][idx]
+        pre += data['Preprint'][idx]
+    html += f"</tbody><tfoot><tr><th>Total</th><th style='text-align: center;'>{jrn:,}</th>" \
+            + f"<th style='text-align: center;'>{pre:,}</th></tr></tfoot></table>"
     chartscript, chartdiv = DP.stacked_bar_chart(data, "DOIs published by year/preprint status",
                                                  xaxis="years",
                                                  yaxis=('Journal article', 'Preprint'),
@@ -6207,6 +6223,7 @@ def dois_ack():
             tags[row['_id']['tag']] = {}
         if row['_id']['source'] not in tags[row['_id']['tag']]:
             tags[row['_id']['tag']][row['_id']['source']] = row['count']
+    counter = collections.defaultdict(lambda: 0, {})
     for tag, val in tags.items():
         link = f"<a href='/tag/{escape(tag)}'>{tag}</a>"
         rclass = 'other'
@@ -6224,11 +6241,16 @@ def dois_ack():
                 onclick = "onclick='nav_post(\"jrc_acknowledge.name\",\"" + tag \
                           + "\",\"" + source + "\")'"
                 link = f"<a href='#' {onclick}>{val[source]:,}</a>"
+                counter[source] += val[source]
             else:
                 link = ""
             html += f"<td>{link}</td>"
         html += "</tr>"
-    html += '</tbody></table>'
+    html += f"</tbody><tfoot><tr><th>Total</th><th></th>"
+    for source in app.config['SOURCES']:
+        html += f"<th style='text-align: center;'>{counter[source]:,}</th>"
+    html += "</tr></tfoot>"
+    html += '</table>'
     cbutton = "<button class=\"btn btn-outline-warning\" " \
               + "onclick=\"$('.other').toggle();\">Filter for active SupOrgs</button>"
     html = cbutton + html

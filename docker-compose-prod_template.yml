@@ -22,7 +22,11 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - CONFIG_SERVER_URL=https://config.int.janelia.org/
+      - NCBI_API_KEY=<<INSERT API KEY>>
       - PEOPLE_API_KEY=<<INSERT API KEY>>
+      - PROTOCOLS_API_TOKEN=<<INSERT API KEY>>
+      - S2_API_KEY=<<INSERT API KEY>>
+      - WOS_API_KEY=<<INSERT API KEY>>
     networks:
         - dis-net
 
