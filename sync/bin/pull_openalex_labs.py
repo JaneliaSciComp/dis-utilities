@@ -23,7 +23,9 @@ DB = {}
 COUNT = collections.defaultdict(lambda: 0, {})
 # Global variables
 ARG = DISCONFIG = LOGGER = REST = None
+ROR = {}
 MESSAGE = {"sent": [], "no_institutions": [], "institution_mismatch": []}
+OUTPUT = {"sent": [], "no_institutions": [], "institution_mismatch": []}
 
 def terminate_program(msg=None):
     ''' Terminate the program gracefully
@@ -78,6 +80,30 @@ def initialize_program():
             DB[source] = JRC.connect_database(dbo)
         except Exception as err:
             terminate_program(err)
+    try:
+        rows = DB['dis']['cvterm'].find({'cv': 'ror'})
+    except Exception as err:
+        terminate_program(err)
+    for row in rows:
+        ROR[row['display']] = row['name']
+
+
+def get_author_works(orcid):
+    ''' Get author works
+        Keyword arguments:
+          orcid: ORCID
+        Returns:
+          List of works
+    '''
+    base = f"/works?filter=author.orcid:{orcid}&mailto={DISCONFIG['developer']}&per-page=100&cursor="
+    cursor = "*"
+    rows = []
+    while cursor:
+        resp = call_responder('openalex', base + cursor)
+        rows.extend(resp['results'])
+        cursor = resp['meta']['next_cursor'] if resp['meta']['next_cursor'] else None
+    LOGGER.debug(f"Found {len(rows)} works for {orcid}")
+    return rows
 
 
 def janelia_author(row, orcid):
@@ -95,15 +121,19 @@ def janelia_author(row, orcid):
             continue
         if not auth['institutions']:
             MESSAGE['no_institutions'].append(f"{doi} {auth['author']['display_name']}")
+            OUTPUT['no_institutions'].append(f"{doi}\t{auth['author']['display_name']}\t{row['publication_date']}")
             return False
         for inst in auth['institutions']:
-            if ('ror' in inst and inst['ror'] == 'https://ror.org/013sk6x84') \
+            if ('ror' in inst and inst['ror'] == f"https://ror.org/{ROR['Janelia Research Campus']}") \
                or ('display_name' in inst and 'Janelia' in inst['display_name']):
                 MESSAGE['sent'].append(f"{doi} {auth['author']['display_name']}")
+                OUTPUT['sent'].append(f"{doi}\t{auth['author']['display_name']}\t{row['publication_date']}")
                 return True
         MESSAGE['institution_mismatch'].append(f"{doi} {auth['author']['display_name']}")
+        OUTPUT['institution_mismatch'].append(f"{doi}\t{auth['author']['display_name']}\t{row['publication_date']}")
         return False
     return False
+
 
 def process_author(rec):
     ''' Process author
@@ -112,14 +142,13 @@ def process_author(rec):
         Returns:
           None
     '''
-    resp = call_responder('openalex', f"/works?filter=author.orcid:{rec['orcid']}" \
-                          + f"&mailto={DISCONFIG['developer']}")
     idresp = JRC.call_people_by_id(rec['employeeId'])
     if idresp['departmentAddress1'] != '19700 Helix Drive':
         return
     dto = datetime.strptime(idresp['hireDate'].split(' ')[0], "%m/%d/%Y")
     hired = dto.strftime("%Y-%m-%d")
-    for row in resp['results']:
+    rows = get_author_works(rec['orcid'])
+    for row in rows:
         COUNT['dois'] += 1
         if hired > row['publication_date'] or row['publication_date'] < '2006-04-01':
             COUNT['skipped'] += 1
@@ -194,6 +223,12 @@ def processing():
         with open('openalex_ready.txt', 'w', encoding='ascii') as fileout:
             for itm in MESSAGE['sent']:
                 fileout.write(itm.split(' ')[0] + '\n')
+    for key in OUTPUT:
+        if OUTPUT[key]:
+            LOGGER.info(f"Writing openalex_{key}.tsv")
+            with open(f"openalex_{key}.tsv", 'w', encoding='utf-8') as fileout:
+                for itm in OUTPUT[key]:
+                    fileout.write(itm + '\n')
     if ARG.TEST or ARG.WRITE:
         generate_emails()
     print(f"Labs found:                     {cnt}")
