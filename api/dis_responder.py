@@ -28,7 +28,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches
 
-__version__ = "70.0.0"
+__version__ = "70.1.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -4035,6 +4035,7 @@ def dois_publisher(year='All'):
 def show_doi_subjectpicker():
     ''' Show DOI subjects
     '''
+    cnt = {'datacite': 0, 'crossref_mesh': 0}
     try:
         payload = [{"$match": {"subjects": {"$exists": True}}},
                    {"$unwind": "$subjects"},
@@ -4059,6 +4060,7 @@ def show_doi_subjectpicker():
         else:
             subdict[row['_id']['subject']].append({"count": row['count'],
                                                    "schema": row['_id']['scheme']})
+    cnt['datacite'] = len(subdict)
     try:
         payload = [{"$match": {"jrc_mesh": {"$exists": 1}}},
                    {"$unwind": "$jrc_mesh"},
@@ -4071,6 +4073,7 @@ def show_doi_subjectpicker():
                                title=render_warning("Could not find subjects", 'warning'),
                                message="Could not find DataCite DOI subjects")
     for row in rows:
+        cnt['crossref_mesh'] += 1
         if row['_id'] not in subdict:
             subdict[row['_id']] = [{"count": row['count'], "schema": "MeSH"}]
         else:
@@ -4085,7 +4088,9 @@ def show_doi_subjectpicker():
         outlist += ", ".join(schlist) + "\n"
         sublist += f"<option value='{subj}'>{subj}</option>"
     sublist += '</option>'
-    html = f"Found {len(subdict):,} unique subjects<br>" \
+    html = f"Found {len(subdict):,} unique subjects<ul class='unstyled'>" \
+           + f"<li>DataCite: {cnt['datacite']:,}</li>" \
+           + f"<li>MeSH (Crossref): {cnt['crossref_mesh']:,}</li></ul>" \
            + create_downloadable("subjects", ["Subject", "Schemas"], outlist) + "<br><br>"
     endpoint_access()
     return make_response(render_template('subject.html', urlroot=request.url_root,

@@ -201,7 +201,7 @@ table.property {
 .flexitem {
   flex: 1;
   min-width: 150px;
-  max-width: 280px;
+  max-width: 290px;
 }
 
 .flexitemauto {
