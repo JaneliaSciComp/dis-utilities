@@ -67,7 +67,7 @@ def initialize_program():
 
 
 def get_dois(works):
-    ''' Get citingDOIs from the works
+    ''' Get citing DOIs from the works
         Keyword arguments:
           works: list of works
         Returns:
@@ -80,10 +80,6 @@ def get_dois(works):
         COUNT['not_cited'] += 1
     for itm in works:
         dois = []
-        if works:
-            COUNT['cited'] += 1
-        else:
-            COUNT['not_cited'] += 1
         for itm in works:
             if 'doi' in itm and itm['doi']:
                 dois.append(itm['doi'])
@@ -102,8 +98,8 @@ def process_dois():
     if ARG.DOI:
         dois = [ARG.DOI]
     else:
-        with open(ARG.FILE, 'r', encoding='ascii') as file:
-            dois = [line.strip() for line in file if line.strip()]
+        with open(ARG.FILE, 'r', encoding='utf-8') as file:
+            dois = [line.strip().lower() for line in file if line.strip()]
     for doi in tqdm.tqdm(dois, desc="Processing DOIs"):
         if len(dois) > 1:
             time.sleep(.11)
@@ -127,7 +123,10 @@ def process_dois():
             COUNT['error'] += 1
             continue
         dois = get_dois(works)
-        cdict[doi] = dois
+        if ARG.COUNT:
+            cdict[doi] = len(dois)
+        else:
+            cdict[doi] = dois
     # Write results to JSON file
     output_file = 'citing_works.json'
     LOGGER.info("Writing results to %s", output_file)
@@ -154,6 +153,8 @@ if __name__ == "__main__":
                         help='DOI')
     group.add_argument('--file', dest='FILE', action='store',
                         help='File containing DOIs')
+    PARSER.add_argument('--count', dest='COUNT', action='store_true',
+                        default=False, help='Provide citing DOI counts only') 
     PARSER.add_argument('--verbose', dest='VERBOSE', action='store_true',
                         default=False, help='Flag, Chatty')
     PARSER.add_argument('--debug', dest='DEBUG', action='store_true',
