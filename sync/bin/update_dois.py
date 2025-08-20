@@ -7,9 +7,10 @@
            to DIS MongoDB.
 """
 
-__version__ = '13.0.1'
+__version__ = '14.0.0'
 
 import argparse
+import collections
 import configparser
 from datetime import datetime
 import json
@@ -56,9 +57,7 @@ ARG = CONFIG = DISCONFIG = EXISTING = LOGGER = REST = START_TIME = None
 PROJECT = {}
 SUPORG = {}
 DEFAULT_TAGS = ['Janelia Experimental Technology (jET)', 'Scientific Computing Software']
-COUNT = {'crossref': 0, 'datacite': 0, 'found': 0, 'foundc': 0, 'foundd': 0,
-         'notfound': 0, 'noupdate': 0, 'noauthor': 0,
-         'insert': 0, 'update': 0, 'delete': 0, 'foundfb': 0, 'flyboy': 0}
+COUNT = collections.defaultdict(lambda: 0, {})
 
 def terminate_program(msg=None):
     ''' Terminate the program gracefully
@@ -125,9 +124,11 @@ def initialize_program():
     for key, val in orgs.items():
         SUPORG[key] = val
     try:
-        rows = DB['dis']['to_ignore'].find({"type": "em_dataset"})
+        rows = DB['dis']['to_ignore'].find({"type": {"$in": ["doi", "em_dataset"]}})
         for row in rows:
-            IGNORE[row['key']] = True
+            if row['type'] not in IGNORE:
+                IGNORE[row['type']] = {}
+            IGNORE[row['type']][row['key']] = True
     except Exception as err:
         terminate_program(err)
 
@@ -155,16 +156,16 @@ def get_dis_dois_from_mongo():
     return result
 
 
-def get_dois_from_crossref(filter="janelia"):
+def get_dois_from_crossref(flt="janelia"):
     ''' Get DOIs from Crossref
         Keyword arguments:
-          filter: filter type
+          flt: filter type
         Returns:
           List of unique DOIs
     '''
     dlist = []
     LOGGER.info("Getting DOIs from Crossref")
-    suffix = CONFIG['crossref'][filter]
+    suffix = CONFIG['crossref'][flt]
     complete = False
     parts = 0
     while not complete:
@@ -301,7 +302,7 @@ def get_dois_for_dis(flycore):
     emdois = JRC.simplenamespace_to_dict(JRC.get_config('em_dois'))
     cnt = 0
     for key, val in emdois.items():
-        if key in IGNORE:
+        if key in IGNORE['em_dataset']:
             LOGGER.warning(f"Skipping {key} because it is in the ignore list")
             continue
         if val and isinstance(val, str):
@@ -420,7 +421,7 @@ def call_crossref_with_retry(doi):
             if type(err).__name__ in ['ConnectTimeout', 'ReadTimeout']:
                 attempt -= 1
                 if not attempt:
-                    raise Exception(f"Could not find {doi} in Crossref: multiple timeouts")
+                    raise Exception(f"Could not find {doi} in Crossref: multiple timeouts") from err
                 LOGGER.warning(f"crossref.org timeout for {doi}: retrying ({attempt})")
                 sleep(1)
                 continue
@@ -464,7 +465,7 @@ def call_datacite_with_retry(doi):
             if type(err).__name__ in ['ConnectTimeout', 'ReadTimeout']:
                 attempt -= 1
                 if not attempt:
-                    raise Exception(f"Could not find {doi} in DataCite: multiple timeouts")
+                    raise Exception(f"Could not find {doi} in DataCite: multiple timeouts") from err
                 LOGGER.warning(f"datacite.org timeout for {doi}: retrying ({attempt})")
                 sleep(1)
                 continue
@@ -497,12 +498,14 @@ def get_doi_record(doi):
             try:
                 msg = call_crossref_with_retry(doi)
                 if 'author' not in msg['message'] and 'editor' not in msg['message'] \
-                   and ('project' not in msg['message'] or 'investigator' not in msg['message']['project'][0]):
+                   and ('project' not in msg['message'] \
+                        or 'investigator' not in msg['message']['project'][0]):
                     MISSING[f"No author for {doi}"] = True
                     LOGGER.warning(f"No author for {doi}")
                     COUNT['noauthor'] += 1
                     return None
-                if ('title' not in msg['message']) and ('type' not in msg['message'] or msg['message']['type'] != 'grant'):
+                if ('title' not in msg['message']) and ('type' not in msg['message'] \
+                                                        or msg['message']['type'] != 'grant'):
                     LOGGER.warning(f"No title for {doi}")
                     MISSING[f"No title for {doi}"] = True
                     return None
@@ -1041,6 +1044,10 @@ def process_dois():
             terminate_program(f"Invalid DOI: {odoi}")
         doi = odoi if ARG.TARGET == 'flyboy' else odoi.lower().strip()
         COUNT['found'] += 1
+        if doi in IGNORE['doi']:
+            LOGGER.warning(f"Skipping {doi} because it is in the ignore list")
+            COUNT['skipped'] += 1
+            continue
         if doi in specified:
             continue
         specified[doi] = True
@@ -1134,6 +1141,7 @@ def post_activities():
         print(f"DOIs fetched from Crossref:      {COUNT['crossref']:,}")
         print(f"DOIs fetched from DataCite:      {COUNT['datacite']:,}")
     print(f"DOIs specified:                  {COUNT['found']:,}")
+    print(f"DOIs skipped:                    {COUNT['skipped']:,}")
     print(f"DOIs found in Crossref:          {COUNT['foundc']:,}")
     print(f"DOIs found in DataCite:          {COUNT['foundd']:,}")
     print(f"DOIs with no author:             {COUNT['noauthor']:,}")
