@@ -28,7 +28,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches
 
-__version__ = "70.1.0"
+__version__ = "71.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -3014,7 +3014,7 @@ def get_citation_counts(doi, row):
         Returns:
           Citation counts as HTML
     '''
-    # Citations (DataCite, Dimensions, eLife, OpenAlex, S2, Web of Science)
+    # Citations (DataCite, Dimensions, eLife, OpenAlex, PubMed, S2, Web of Science)
     doisec = ""
     tblrow = []
     # DataCite
@@ -3047,6 +3047,14 @@ def get_citation_counts(doi, row):
                   + 'role="button">Download tab-delimited file</a>'
         cbutton = f"<span style='line-height: 1.3'><br></span>{cbutton}"
         tblrow.append(f"<td>OpenAlex: {citcnt:,}{cbutton}</td>")
+    # PubMed
+    if 'jrc_pmid' in row:
+        try:
+            citcnt, url = DL.get_citation_count(row['jrc_pmid'], 'pubmed')
+        except Exception:
+            citcnt = 0
+        if citcnt:
+            tblrow.append(f"<td>PubMed: <a href='{url}' target='_blank'>{citcnt:,}</a>")
     # Semantic Scholar
     citcnt = s2_citation_count(doi, fmt='html')
     if citcnt:
