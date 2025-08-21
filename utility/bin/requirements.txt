@@ -8,6 +8,7 @@ openpyxl
 pandas
 requests
 tqdm
+xmltodict
 mysqlclient==2.1.1
 pymongo==4.4.0
 git+https://github.com/JaneliaSciComp/jrc_common.git
