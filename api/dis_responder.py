@@ -28,7 +28,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "72.0.0"
+__version__ = "72.1.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -2016,7 +2016,10 @@ def show_incoming_citations(source, doi):
         rec = DL.get_doi_record(doi, coll=DB['dis'].dois)
         if rec and 'jrc_pmid' in rec:
             cinput = rec['jrc_pmid']
-    dois = DL.get_incoming_citations(cinput, source=source)
+    try:
+        dois = DL.get_incoming_citations(cinput, source=source)
+    except Exception as err:
+        raise InvalidUsage(str(err), 500) from err
     fname = f"{doi.replace('/', '_')}_{source}.csv"
     with open(f"/tmp/{fname}", 'w', encoding='ascii') as fileout:
         for itm in dois:
