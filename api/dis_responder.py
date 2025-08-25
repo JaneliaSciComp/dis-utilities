@@ -26,9 +26,9 @@ import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
 import dis_plots as DP
 
-# pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches
+# pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "71.0.0"
+__version__ = "72.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -49,6 +49,7 @@ NAV = {"Home": "",
                 "DOIs by month": "dois_month",
                 "DOI yearly report": "dois_report"},
        "DataCite": {"DataCite DOI stats": "datacite_dois",
+                    "DataCite DOI citations": "datacite_citations",
                     "DataCite DOI downloads": "datacite_downloads",
                     "DataCite subjects": "datacite_subject"},
        "Authorship": {"DOIs by authorship": "dois_author",
@@ -786,12 +787,12 @@ def get_orcid_from_db(oid, use_eid=False, bare=False, show="full"):
     full_name = " ".join([orc['given'][0], orc['family'][0]])
     html = "<br><table class='borderless'>"
     if use_eid and 'orcid' in orc:
-        html += f"<tr><td>ORCID:</td><td><a href='https://orcid.org/{orc['orcid']}'>" \
+        html += f"<tr><td>ORCID:</td><td><a href='{app.config['ORCID']}{orc['orcid']}'>" \
                 + f"{orc['orcid']}</a></td></tr>"
     html += f"<tr><td>Given name:</td><td>{', '.join(sorted(orc['given']))}</td></tr>"
     html += f"<tr><td>Family name:</td><td>{', '.join(sorted(orc['family']))}</td></tr>"
     if 'orcid' in orc:
-        html += f"<tr><td>ORCID:</td><td><a href='https://orcid.org/{orc['orcid']}'>" \
+        html += f"<tr><td>ORCID:</td><td><a href='{app.config['ORCID']}{orc['orcid']}'>" \
                 + f"{orc['orcid']}</a></td></tr>"
     if 'userIdO365' in orc:
         link = "<a href='" + f"{app.config['WORKDAY']}{orc['userIdO365']}" \
@@ -1792,7 +1793,7 @@ def add_subjects(row, html=None):
                 else:
                     subj = f"<span style='color: #88a'>{mesh['descriptor_name']}</span>"
                 if 'key' in mesh and mesh['key']:
-                    subj = f"<a href='https://www.ncbi.nlm.nih.gov/mesh/{mesh['key']}' " \
+                    subj = f"<a href='{app.config['NCBI_MESH']}{mesh['key']}' " \
                            + f"target='_blank'>{subj}</a>"
                 subjects.append(subj)
         if subjects:
@@ -1982,8 +1983,8 @@ def stats():
 # ******************************************************************************
 # * API endpoints (DOI)                                                        *
 # ******************************************************************************
-@app.route('/citations/incoming/<path:doi>')
-def show_incoming_citations(doi):
+@app.route('/citations/incoming/<string:source>/<path:doi>')
+def show_incoming_citations(source, doi):
     '''
     Return a DOI's incoming citations
     Return a DOI's incoming citations.
@@ -1991,6 +1992,12 @@ def show_incoming_citations(doi):
     tags:
       - DOI
     parameters:
+      - in: path
+        name: source
+        schema:
+          type: string
+        required: true
+        description: Source
       - in: path
         name: doi
         schema:
@@ -2004,8 +2011,13 @@ def show_incoming_citations(doi):
         description: MongoDB error
     '''
     doi = doi.lstrip('/').rstrip('/').lower()
-    dois = DL.get_incoming_citations(doi)
-    fname = f"{doi.replace('/', '_')}.csv"
+    cinput = doi
+    if source == 'pubmed' and not doi.isdigit():
+        rec = DL.get_doi_record(doi, coll=DB['dis'].dois)
+        if rec and 'jrc_pmid' in rec:
+            cinput = rec['jrc_pmid']
+    dois = DL.get_incoming_citations(cinput, source=source)
+    fname = f"{doi.replace('/', '_')}_{source}.csv"
     with open(f"/tmp/{fname}", 'w', encoding='ascii') as fileout:
         for itm in dois:
             fileout.write(itm + '\n')
@@ -2381,7 +2393,7 @@ def show_citation(doi):
     result['rest']['source'] = 'mongo'
     authors = DL.get_author_list(row)
     title = DL.get_title(row)
-    result['data'] = f"{authors} {title}. https://doi.org/{doi}."
+    result['data'] = f"{authors} {title}. {app.config['DOI']}{doi}."
     if 'jrc_preprint' in row:
         result['jrc_preprint'] = row['jrc_preprint']
     return generate_response(result)
@@ -2435,7 +2447,7 @@ def show_multiple_citations(ctype='dis'):
         journal = DL.get_journal(row)
         result['data'][doi] = f"{authors} {title}."
         if ctype == 'dis':
-            result['data'][doi] = f"{result['data'][doi]}. https://doi.org/{doi}."
+            result['data'][doi] = f"{result['data'][doi]}. {app.config['DOI']}{doi}."
         else:
             result['data'][doi] = f"{result['data'][doi]}. {journal}."
     return generate_response(result)
@@ -3014,13 +3026,15 @@ def get_citation_counts(doi, row):
         Returns:
           Citation counts as HTML
     '''
-    # Citations (DataCite, Dimensions, eLife, OpenAlex, PubMed, S2, Web of Science)
+    # Citations (DataCite, Dimensions, eLife, OA.Report, OpenAlex, PubMed, S2, Web of Science)
     doisec = ""
     tblrow = []
     # DataCite
     if row['jrc_obtained_from'] == 'DataCite' and 'citationCount' in row \
         and row['citationCount']:
-        tblrow.append(f"<td>DataCite: {row['citationCount']:,}</td>")
+        url = f"{app.config['DATACITE']}{doi}"
+        tblrow.append(f"<td>DataCite: <a href='{url}' target='_blank'>" \
+                      + f"{row['citationCount']:,}</a></td>")
     # Dimensions
     try:
         citcnt, url = DL.get_citation_count(doi)
@@ -3036,17 +3050,28 @@ def get_citation_counts(doi, row):
             citcnt = 0
         if citcnt:
             tblrow.append(f"<td>eLife: <a href='{url}' target='_blank'>{citcnt:,}</a>")
-    # OpenAlex
+    # OA.Report
     try:
-        citcnt, _ = DL.get_citation_count(doi, 'openalex')
+        citcnt, url = DL.get_citation_count(doi, 'oa')
     except Exception:
         citcnt = 0
     if citcnt:
-        cbutton = f'<a class="btn btn-outline-success btn-tiny" ' \
-                  + f'href="/citations/incoming/{doi}" ' \
+        tblrow.append(f"<td>OA.Report: {citcnt:,}</td>")
+    # OpenAlex
+    try:
+        citcnt, url = DL.get_citation_count(doi, 'openalex')
+    except Exception:
+        citcnt = 0
+    if citcnt:
+        cbutton = '<a class="btn btn-outline-success btn-tiny" ' \
+                  + f'href="/citations/incoming/openalex/{doi}" ' \
                   + 'role="button">Download tab-delimited file</a>'
         cbutton = f"<span style='line-height: 1.3'><br></span>{cbutton}"
-        tblrow.append(f"<td>OpenAlex: {citcnt:,}{cbutton}</td>")
+        if url:
+            tblrow.append(f"<td>OpenAlex: <a href='{url}' target='_blank'>{citcnt:,}</a>" \
+                          + f"{cbutton}</td>")
+        else:
+            tblrow.append(f"<td>OpenAlex: {citcnt:,}{cbutton}</td>")
     # PubMed
     if 'jrc_pmid' in row:
         try:
@@ -3054,7 +3079,12 @@ def get_citation_counts(doi, row):
         except Exception:
             citcnt = 0
         if citcnt:
-            tblrow.append(f"<td>PubMed: <a href='{url}' target='_blank'>{citcnt:,}</a>")
+            cbutton = '<a class="btn btn-outline-success btn-tiny" ' \
+                      + f'href="/citations/incoming/pubmed/{doi}"' \
+                      + 'role="button">Download tab-delimited file</a>'
+            cbutton = f"<span style='line-height: 1.3'><br></span>{cbutton}"
+            tblrow.append(f"<td>PubMed: <a href='{url}' target='_blank'>{citcnt:,}</a>" \
+                          + f"{cbutton}</td>")
     # Semantic Scholar
     citcnt = s2_citation_count(doi, fmt='html')
     if citcnt:
@@ -3194,7 +3224,7 @@ def show_doi_ui(doi):
                 html += f"<br><h4>Potential Janelia authors ({count})</h4>" \
                         + f"<div class='scroll'>{''.join(alist)}</div>"
     # Title
-    doilink = f"<a href='https://doi.org/{doi}' target='_blank'>{doi}</a>"
+    doilink = f"<a href='{app.config['DOI']}{doi}' target='_blank'>{doi}</a>"
     badges = get_display_badges(doi, row, data, local)
     doititle = f"{doilink} (PMID: {row['jrc_pmid']})" if row and 'jrc_pmid' in row else doilink
     doititle += badges
@@ -3706,7 +3736,7 @@ def dois_year():
                 link = ""
             html += f"<td>{link}</td>"
         html += "</tr>"
-    html += f"</tbody><tfoot><tr><th>Total</th>"
+    html += "</tbody><tfoot><tr><th>Total</th>"
     for source in app.config['SOURCES']:
         html += f"<th style='text-align: center;'>{counter[source]:,}</th>"
     html += "</tr></tfoot>"
@@ -3929,7 +3959,7 @@ def dois_month(year=str(datetime.now().year)):
             else:
                 html += "<td></td>"
         html += "</tr>"
-    html += f"</tbody><tfoot><tr><th>Total</th>"
+    html += "</tbody><tfoot><tr><th>Total</th>"
     for source in app.config['SOURCES']:
         html += f"<th style='text-align: center;'>{counter[source]:,}</th>"
     html += "</tr></tfoot>"
@@ -4269,7 +4299,7 @@ def datacite_dois():
         inner += f"<td>{row['_id']['type']}</td><td>{row['_id']['detail']}</td>" \
                  + f"<td>{row['_id']['pub']}</td>" \
                  + f"<td><a href='{link}'>{row['count']}</a></td></tr>"
-    inner += f"</tbody><tfoot><tr><th colspan='3'>TOTAL</th>" \
+    inner += "</tbody><tfoot><tr><th colspan='3'>TOTAL</th>" \
              + f"<th style='text-align: center;'>{total:,}</th></tr></tfoot></table>"
     html += f"{inner}</div></div>"
     endpoint_access()
@@ -4305,6 +4335,35 @@ def datacite_doisd(dtype=None, pub=None, year='All'):
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
+                                         navbar=generate_navbar('DOIs')))
+
+
+@app.route('/datacite_citations')
+def datacite_citations():
+    ''' Show DataCite DOI citation counts
+    '''
+    payload = {"jrc_obtained_from": "DataCite", "citationCount": {"$ne": 0}}
+    coll = DB['dis'].dois
+    try:
+        rows = coll.find(payload).sort("citationCount", -1)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get data DOIs"),
+                               message=error_message(err))
+    html = '<table id="data" class="tablesorter numberlast"><thead><tr>' \
+           + '<th>DOI</th><th>Title</th><th>Citations</th>' \
+           + '</tr></thead><tbody>'
+    total = 0
+    for row in rows:
+        total += row['citationCount']
+        link = doi_link(row['doi'])
+        html += f"<td>{link}</td><td>{DL.get_title(row)}</td>" \
+                + f"<td>{row['citationCount']}</td></tr>"
+    html += "</tbody><tfoot><tr><th colspan='2'>TOTAL</th>" \
+            + f"<th style='text-align: center;'>{total:,}</th></tr></tfoot></table><br>"
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="DataCite DOI citations", html=html,
                                          navbar=generate_navbar('DOIs')))
 
 
@@ -5557,7 +5616,7 @@ def show_oid_ui(oid):
         html += add_orcid_works(data, dois)
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root, pagetitle=oid,
-                                         title=f"<a href='https://orcid.org/{oid}' " \
+                                         title=f"<a href='{app.config['ORCID']}{oid}' " \
                                                + f"target='_blank'>{oid}</a>", html=html,
                                          navbar=generate_navbar('ORCID')))
 
@@ -5840,7 +5899,8 @@ def orcid_duplicates():
                 other = []
                 for rec in recs:
                     names.append(f"{rec['given'][0]} {rec['family'][0]}")
-                    other.append(f"<a href=\"https://orcid.org/{rec['orcid']}\">{rec['orcid']}</a>")
+                    other.append(f"<a href=\"{app.config['ORCID']}{rec['orcid']}\">" \
+                                 + f"{rec['orcid']}</a>")
                 html += f"<tr><td>{', '.join(names)}</td><td>{', '.join(other)}</td></tr>"
             html += '</tbody></table>'
         if not html:
@@ -6045,7 +6105,7 @@ def ror(rorid=None):
                                              title="Search ROR", content="",
                                              navbar=generate_navbar('External systems')))
     try:
-        resp = requests.get(f"https://api.ror.org/v2/organizations/{rorid}", timeout=10).json()
+        resp = requests.get(f"{app.config['ROR']}{rorid}", timeout=10).json()
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning(f"Could not get ROR data for {rorid}"),
@@ -6259,7 +6319,7 @@ def dois_ack():
                 link = ""
             html += f"<td>{link}</td>"
         html += "</tr>"
-    html += f"</tbody><tfoot><tr><th>Total</th><th></th>"
+    html += "</tbody><tfoot><tr><th>Total</th><th></th>"
     for source in app.config['SOURCES']:
         html += f"<th style='text-align: center;'>{counter[source]:,}</th>"
     html += "</tr></tfoot>"
