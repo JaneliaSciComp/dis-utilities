@@ -1,8 +1,12 @@
 ''' pull_openalex_labs.py
     Sync works from OpenAlex for current lab heads.
+    DOIs are added to the database if the following conditions are met:
+    - The work has an author who is a current lab head
+    - The work has a publication date after the lab head's hire date
+    - The lab head (or any other author) has a Janelia affiliation
 '''
 
-__version__ = '0.0.1'
+__version__ = '1.0.0'
 
 import argparse
 import collections
@@ -25,7 +29,8 @@ COUNT = collections.defaultdict(lambda: 0, {})
 ARG = DISCONFIG = LOGGER = REST = None
 ROR = {}
 MESSAGE = {"sent": [], "no_institutions": [], "institution_mismatch": []}
-OUTPUT = {"sent": [], "no_institutions": [], "institution_mismatch": []}
+OUTPUT = {"sent": {}, "no_institutions": {}, "institution_mismatch": {}}
+OAID = {}
 
 def terminate_program(msg=None):
     ''' Terminate the program gracefully
@@ -95,7 +100,8 @@ def get_author_works(orcid):
         Returns:
           List of works
     '''
-    base = f"/works?filter=author.orcid:{orcid}&mailto={DISCONFIG['developer']}&per-page=100&cursor="
+    base = f"/works?filter=author.orcid:{orcid}&mailto={DISCONFIG['developer']}" \
+           + "&per-page=100&cursor="
     cursor = "*"
     rows = []
     while cursor:
@@ -104,6 +110,18 @@ def get_author_works(orcid):
         cursor = resp['meta']['next_cursor'] if resp['meta']['next_cursor'] else None
     LOGGER.debug(f"Found {len(rows)} works for {orcid}")
     return rows
+
+def janelia_affiliation(inst):
+    ''' Check if institution is a Janelia affiliation
+        Keyword arguments:
+          inst: institution
+        Returns:
+          True if institution is a Janelia affiliation
+          False otherwise
+    '''
+    return ('ror' in inst \
+        and inst['ror'] == f"https://ror.org/{ROR['Janelia Research Campus']}") \
+       or ('display_name' in inst and 'Janelia' in inst['display_name'])
 
 
 def janelia_author(row, orcid):
@@ -116,21 +134,38 @@ def janelia_author(row, orcid):
           False otherwise
     '''
     doi = row['doi'].replace('https://doi.org/', '')
+    OAID[doi] = row['id'].split('/')[-1]
+    # Find lab head Janelia affiliation
     for auth in row['authorships']:
         if not auth['author']['orcid'] or orcid not in auth['author']['orcid']:
             continue
+        if auth['institutions']:
+            for inst in auth['institutions']:
+                if janelia_affiliation(inst):
+                    if doi not in OUTPUT['sent']:
+                        OUTPUT['sent'][doi] = [auth['author']['display_name'],
+                                               row['publication_date']]
+                    return True
+    for auth in row['authorships']:
+        # Check if *any* author is from Janelia
+        if auth['institutions']:
+            for inst in auth['institutions']:
+                if janelia_affiliation(inst):
+                    if doi not in OUTPUT['sent']:
+                        OUTPUT['sent'][doi] = [auth['author']['display_name'],
+                                               row['publication_date']]
+                    return True
+        # The next check is for the lab head ORCID only
+        if not auth['author']['orcid'] or orcid not in auth['author']['orcid']:
+            continue
         if not auth['institutions']:
-            MESSAGE['no_institutions'].append(f"{doi} {auth['author']['display_name']}")
-            OUTPUT['no_institutions'].append(f"{doi}\t{auth['author']['display_name']}\t{row['publication_date']}")
+            if doi not in OUTPUT['no_institutions']:
+                OUTPUT['no_institutions'][doi] = [auth['author']['display_name'],
+                                                  row['publication_date']]
             return False
-        for inst in auth['institutions']:
-            if ('ror' in inst and inst['ror'] == f"https://ror.org/{ROR['Janelia Research Campus']}") \
-               or ('display_name' in inst and 'Janelia' in inst['display_name']):
-                MESSAGE['sent'].append(f"{doi} {auth['author']['display_name']}")
-                OUTPUT['sent'].append(f"{doi}\t{auth['author']['display_name']}\t{row['publication_date']}")
-                return True
-        MESSAGE['institution_mismatch'].append(f"{doi} {auth['author']['display_name']}")
-        OUTPUT['institution_mismatch'].append(f"{doi}\t{auth['author']['display_name']}\t{row['publication_date']}")
+        if doi not in OUTPUT['institution_mismatch']:
+            OUTPUT['institution_mismatch'][doi] = [auth['author']['display_name'],
+                                                   row['publication_date']]
         return False
     return False
 
@@ -176,29 +211,39 @@ def generate_emails():
     '''
     msg = ""
     if MESSAGE['sent']:
-        msg += "\nThe following DOIs will be added to the database:"
+        msg += "<br>The following DOIs will be added to the database:<br>"
         for itm in MESSAGE['sent']:
-            msg += f"\n  {itm}"
+            msg += f"  {itm}<br>"
         msg += "\n"
     if MESSAGE['no_institutions']:
-        msg += "\nThe following DOIs have no institutions:"
+        msg += "<br>The following DOIs have no institutions:<br>"
         for itm in MESSAGE['no_institutions']:
-            msg += f"\n  {itm}"
+            msg += f"  {itm}<br>"
         msg += "\n"
     if MESSAGE['institution_mismatch']:
-        msg += "\nThe following DOIs have an institution mismatch:"
+        msg += "<br>The following DOIs have an institution mismatch:<br>"
         for itm in MESSAGE['institution_mismatch']:
-            msg += f"\n  {itm}"
+            msg += f"  {itm}<br>"
     if msg:
-        msg = JRC.get_run_data(__file__, __version__) + msg
+        msg = JRC.get_run_data(__file__, __version__) + "<br>" + msg
     else:
         return
     try:
         email = DISCONFIG['developer'] if ARG.TEST else DISCONFIG['receivers']
         LOGGER.info(f"Sending email to {email}")
-        JRC.send_email(msg, DISCONFIG['sender'], email, "Lab head DOI sync")
+        JRC.send_email(msg, DISCONFIG['sender'], email, "Lab head DOI sync", mime='html')
     except Exception as err:
         terminate_program(err)
+
+
+def oalink(doi):
+    ''' Generate an OpenAlex link
+        Keyword arguments:
+          doi: DOI
+        Returns:
+          OpenAlex link
+    '''
+    return f"<a href='https://openalex.org/{OAID[doi]}'>{doi}</a>"
 
 
 def processing():
@@ -218,17 +263,18 @@ def processing():
         terminate_program(err)
     for row in tqdm(rows, desc="Processing labs", total=cnt):
         process_author(row)
-    if MESSAGE['sent']:
+    for okey, ovalue in OUTPUT.items():
+        if ovalue:
+            LOGGER.info(f"Writing openalex_{okey}.tsv")
+            with open(f"openalex_{okey}.tsv", 'w', encoding='utf-8') as fileout:
+                for key, val in sorted(ovalue.items()):
+                    fileout.write(f"{key}\t" + '\t'.join(val) + '\n')
+                    MESSAGE[okey].append('\t'.join([oalink(key), val[0]]) + "\n")
+    if OUTPUT['sent']:
         LOGGER.info("Writing openalex_ready.txt")
         with open('openalex_ready.txt', 'w', encoding='ascii') as fileout:
-            for itm in MESSAGE['sent']:
-                fileout.write(itm.split(' ')[0] + '\n')
-    for key in OUTPUT:
-        if OUTPUT[key]:
-            LOGGER.info(f"Writing openalex_{key}.tsv")
-            with open(f"openalex_{key}.tsv", 'w', encoding='utf-8') as fileout:
-                for itm in OUTPUT[key]:
-                    fileout.write(itm + '\n')
+            for key in sorted(OUTPUT['sent'].keys()):
+                fileout.write(key + '\n')
     if ARG.TEST or ARG.WRITE:
         generate_emails()
     print(f"Labs found:                     {cnt}")
