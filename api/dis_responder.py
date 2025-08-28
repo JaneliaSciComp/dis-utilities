@@ -28,7 +28,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "72.1.0"
+__version__ = "73.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -1072,11 +1072,6 @@ def add_jrc_fields(row):
             val = ", ".join(link)
         if key == 'jrc_preprint':
             val = doi_link(val)
-        elif key in ['jrc_tag', 'jrc_acknowledge']:
-            link = []
-            for aff in val.split(", "):
-                link.append(f"<a href='/tag/{escape(aff)}'>{aff}</a>")
-            val = ", ".join(link)
         html += f"<tr><td>{CVTERM['jrc'][key]['display'] if key in CVTERM['jrc'] else key}</td>" \
                 + f"<td>{val}</td></tr>"
     html += "</table><br>"
@@ -1777,7 +1772,7 @@ def add_subjects(row, html=None):
             if row and row['jrc_obtained_from'] == 'DataCite' and 'subjects' in row \
                and row['subjects']:
                 if html:
-                    html += "<br><h4>DataCite subjects</h4>" \
+                    html += "<h4>DataCite subjects</h4>" \
                             + f"{', '.join(sub['subject'] for sub in row['subjects'])}"
                 else:
                     return f"{', '.join(sub['subject'] for sub in row['subjects'])}"
@@ -1798,7 +1793,7 @@ def add_subjects(row, html=None):
                 subjects.append(subj)
         if subjects:
             if html:
-                html += f"<br><h4>MeSH subjects</h4>{', '.join(subjects)}"
+                html += f"<h4>MeSH subjects</h4>{', '.join(subjects)}"
             else:
                 return f"{', '.join(subjects)}"
     return html
@@ -1986,9 +1981,9 @@ def stats():
 @app.route('/citations/incoming/<string:source>/<path:doi>')
 def show_incoming_citations(source, doi):
     '''
-    Return a DOI's incoming citations
-    Return a DOI's incoming citations.
-    # Do not display
+    Download a DOI's incoming citations
+    Download a file containing a DOI's incoming citations.
+    ---
     tags:
       - DOI
     parameters:
@@ -2032,7 +2027,9 @@ def show_doi_authors(doi):
     '''
     Return a DOI's authors
     Return information on authors for a given DOI.
-    # Do not display
+    ---
+    tags:
+      - DOI
     tags:
       - DOI
     parameters:
@@ -2067,8 +2064,10 @@ def show_doi_authors(doi):
         orgs = DL.get_supervisory_orgs(DB['dis'].suporg)
     except Exception as err:
         raise InvalidUsage("Could not get supervisory orgs: " + str(err), 500) from err
-    if not result['rest']['authorized'] and 'jrc_author' in row:
-        del row['jrc_author']
+    if not result['rest']['authorized']:
+        for auth in authors:
+            if 'employeeId' in auth:
+                del auth['employeeId']
     if 'jrc_tag' in row:
         for atag in row['jrc_tag']:
             if atag['name'] not in tagname:
@@ -3008,8 +3007,7 @@ def get_display_badges(doi, row, data, local):
         badges += f" {tiny_badge('source', 'OA.Report', olink)}"
     oresp = DL.get_doi_record(doi, source='openalex')
     if oresp:
-        olink = f"{app.config['OPENALEX']}works/{oresp['id'].split('/')[-1]}" \
-                + f"&mailto={app.config['EMAIL']}"
+        olink = f"/raw/openalex/{doi}"
         badges += f" {tiny_badge('source', 'OpenAlex', olink)}"
     if local and 'jrc_fulltext_url' in row:
         badges += f" {tiny_badge('pdf', 'Full text', row['jrc_fulltext_url'])}"
@@ -3109,6 +3107,113 @@ def get_citation_counts(doi, row):
     return doisec
 
 
+def doi_tabs(doi, row, data, authors):
+    ''' Generate DOI tabs
+        Keyword arguments:
+          doi: DOI
+          row: row from dois collection
+          data: data from Crossref/DataCite API
+          authors: authors from Crossref/DataCite API
+        Returns:
+          DOI tabs as HTML
+    '''
+    content = {}
+    display_key = {'author': 'Author tags', 'citations': 'Citations', 'abstract': 'Abstract',
+                   'ack': 'Acknowledgements', 'subjects': 'Subjects', 'related': 'Related DOIs'}
+    # Author tags
+    if 'jrc_tag' in row:
+        tags = []
+        for tag in row['jrc_tag']:
+            tags.append(f"<a href='/tag/{escape(tag['name'])}'>{tag['name']}</a>")
+        content['author'] = "<br>".join(tags)
+    # Citation counts
+    if row:
+        ahtml = get_citation_counts(doi, row)
+        if ahtml:
+            content['citations'] = ahtml
+    # Abstract
+    abstract = ahtml = ""
+    if 'type' in data and data['type'] == 'grant':
+        if 'project' in data and data['project']:
+            if all(['project-description' in data['project'][0],
+                    data['project'][0]['project-description'],
+                    'description' in data['project'][0]['project-description'][0]]):
+                abstract = data['project'][0]['project-description'][0]['description']
+                ptitle = ""
+                if 'project-title' in data['project'][0] and data['project'][0]['project-title']:
+                    ptitle = f" ({data['project'][0]['project-title'][0]['title']})"
+                ahtml += f"<h4>Grant{ptitle}</h4><div class='abstract'>{abstract}</div><br>"
+    else:
+        abstract = DL.get_abstract(data)
+        if abstract:
+            ahtml += f"<h4>Abstract</h4><div class='abstract'>{abstract}</div>"
+    if ahtml:
+        content['abstract'] = ahtml
+    # Acknowledgements
+    ahtml = ""
+    tags = []
+    if 'jrc_acknowledge' in row:
+        for tag in row['jrc_acknowledge']:
+            tags.append(f"<a href='/tag/{escape(tag['name'])}'>{tag['name']}</a>")
+        if tags:
+            ahtml += "<h4>Acknowledgement tags</h4>" + "<br>".join(tags)
+    if 'elife' in doi.lower():
+        edata = DL.get_doi_record(doi, source='elife')
+        if edata and 'acknowledgements' in edata and edata['acknowledgements']:
+            acktext = []
+            for ack in edata['acknowledgements']:
+                acktext.append(ack['text'])
+            if ahtml:
+                ahtml += "<br>"
+            ahtml += f"<h4>Acknowledgements</h4><div class='abstract'>{'<br>'.join(acktext)}</div>"
+    if ahtml:
+        content['ack'] = ahtml
+    # Subjects
+    ahtml = "&nbsp;"
+    if row:
+        try:
+            ahtml = add_subjects(row, ahtml)
+            if 'span' in ahtml:
+                ahtml += "<br><i class='fa-solid fa-circle-info'></i> Subjects in " \
+                         + "<span style='color: #88a'>gray-blue</span> are considered minor in MeSH"
+        except Exception:
+            pass
+        if ahtml != "&nbsp;":
+            content['subjects'] = ahtml
+    # Relations
+    rels = add_relations(data)
+    if rels:
+        content['related'] = rels
+    # Authors
+    ahtml = ""
+    if authors:
+        alist, count = show_tagged_authors(authors, row['jrc_author'] \
+                       if 'jrc_author' in row else [])
+        if alist:
+            ahtml = f"<h4>Potential Janelia authors ({count})</h4>" \
+                    + f"<div class='scroll'>{''.join(alist)}</div>"
+    # Tabs
+    html = '<ul class="nav nav-tabs" id="myTab" role="tablist">'
+    html += '<li class="nav-item" role="presentation">' \
+           + '<button class="nav-link active" id="home-tab" data-toggle="tab" ' \
+           + 'data-target="#home" type="button" role="tab" aria-controls="home" ' \
+           + 'aria-selected="true">Authors</button></li>'
+    for key in content:
+        html += '<li class="nav-item" role="presentation">' \
+                + f'<button class="nav-link" id="{key}-tab" data-toggle="tab" ' \
+                + f'data-target="#{key}" type="button" role="tab" aria-controls="{key}" ' \
+                + f'aria-selected="false">{display_key[key]}</button></li>'
+    html += '</ul>'
+    html += '<div class="tab-content" id="myTabContent">'
+    html += '<div class="tab-pane fade show active" id="home" role="tabpanel" ' \
+            + f'aria-labelledby="home-tab"><br>{ahtml}</div>'
+    for key, val in content.items():
+        html += f'<div class="tab-pane fade" id="{key}" role="tabpanel" ' \
+                + f'aria-labelledby="{key}-tab"><br>{val}</div>'
+    html += '</div>'
+    return html
+
+
 @app.route('/doiui/<path:doi>')
 def show_doi_ui(doi):
     ''' Show DOI
@@ -3172,11 +3277,7 @@ def show_doi_ui(doi):
         citations = DL.short_citation(doi, True)
     except Exception as err:
         citations = f"Could not generate short citation for {doi} ({err})"
-    doisec = ""
-    if row:
-        doisec = get_citation_counts(doi, row)
-    doisec += "<br>"
-    # Citations
+    # Citation
     citsec = cittype = ""
     if 'type' in data:
         cittype += data['type'].replace('-', ' ')
@@ -3187,45 +3288,14 @@ def show_doi_ui(doi):
     citsec += f"<div id='div-full' class='citation'>{citationf} {journal}.</div>"
     citsec += f"<div id='div-short' class='citation'>{citations}</div>"
     citsec += "<br>"
-    # Abstract
-    abstract = ""
-    if 'type' in data and data['type'] == 'grant':
-        if 'project' in data and data['project']:
-            if all(['project-description' in data['project'][0],
-                    data['project'][0]['project-description'],
-                    'description' in data['project'][0]['project-description'][0]]):
-                abstract = data['project'][0]['project-description'][0]['description']
-                ptitle = ""
-                if 'project-title' in data['project'][0] and data['project'][0]['project-title']:
-                    ptitle = f" ({data['project'][0]['project-title'][0]['title']})"
-                html += f"<h4>Grant{ptitle}</h4><div class='abstract'>{abstract}</div><br>"
-    else:
-        abstract = DL.get_abstract(data)
-        if abstract:
-            html += f"<h4>Abstract</h4><div class='abstract'>{abstract}</div>"
-    if row:
-        try:
-            html = add_subjects(row, html)
-            if 'span' in html:
-                html += "<br><i class='fa-solid fa-circle-info'></i> Subjects in " \
-                        + "<span style='color: #88a'>gray-blue</span> are considered minor in MeSH"
-            html += "<br><br>"
-        except Exception as err:
-            return inspect_error(err, f"Could not get subjects for DOI {row['doi']}")
-    # Relations
-    html += add_relations(data)
     # Author details
+    authors = None
     if row:
         try:
             authors = DL.get_author_details(row, DB['dis'].orcid)
         except Exception as err:
             return inspect_error(err, 'Could not get author list details')
-        if authors:
-            alist, count = show_tagged_authors(authors, row['jrc_author'] \
-                if 'jrc_author' in row else [])
-            if alist:
-                html += f"<br><h4>Potential Janelia authors ({count})</h4>" \
-                        + f"<div class='scroll'>{''.join(alist)}</div>"
+    html += doi_tabs(doi, row, data, authors)
     # Title
     doilink = f"<a href='{app.config['DOI']}{doi}' target='_blank'>{doi}</a>"
     badges = get_display_badges(doi, row, data, local)
@@ -3233,8 +3303,9 @@ def show_doi_ui(doi):
     doititle += badges
     endpoint_access()
     return make_response(render_template('doi.html', urlroot=request.url_root, pagetitle=doi,
-                                         title=doititle, recsec=recsec, doisec=doisec,
-                                         cittype=cittype, citsec=citsec, html=html,
+                                         title=doititle, recsec=recsec, #doisec=doisec,
+                                         cittype=cittype, citsec=citsec,
+                                         html=html,
                                          navbar=generate_navbar('DOIs')))
 
 
@@ -4194,6 +4265,79 @@ def show_doi_subject(subject, partial=None):
                                          navbar=generate_navbar('DOIs')))
 
 # ******************************************************************************
+# * UI endpoints (PubMed)                                                      *
+# ******************************************************************************
+
+@app.route('/pubmed/pmc/<string:pmcid>')
+def show_doi_pmc(pmcid):
+    '''
+    Return a PubMed Central record
+    Return PubMed Central record information for a given PubMed Central ID.
+    ---
+    tags:
+      - PubMed
+    parameters:
+      - in: path
+        name: pmcid
+        schema:
+          type: path
+        required: true
+        description: PMCID
+    responses:
+      200:
+        description: PMC data
+      500:
+        description: PMC error
+    '''
+    result = initialize_result()
+    try:
+        pmidjson = DL.get_doi_record(pmcid, source='pmc')
+    except Exception as err:
+        raise InvalidUsage(str(err), 500) from err
+    if pmidjson:
+        result['rest']['row_count'] = 1
+        result['rest']['source'] = 'pmc'
+        if 'OAI-PMH' in pmidjson and 'GetRecord' in pmidjson['OAI-PMH']:
+            result['data'] = pmidjson['OAI-PMH']
+        else:
+            result['data'] = {}
+    return generate_response(result)
+
+
+@app.route('/pubmed/pubmed/<string:pmid>')
+def show_doi_pubmed(pmid):
+    '''
+    Return a PubMed record
+    Return PubMed record information for a given PubMed ID.
+    ---
+    tags:
+      - PubMed
+    parameters:
+      - in: path
+        name: pmid
+        schema:
+          type: path
+        required: true
+        description: PMID
+    responses:
+      200:
+        description: PubMed data
+      500:
+        description: PubMed error
+    '''
+    result = initialize_result()
+    try:
+        pmidjson = DL.get_doi_record(pmid, source='pubmed')
+    except Exception as err:
+        raise InvalidUsage(str(err), 500) from err
+    if pmidjson:
+        result['rest']['row_count'] = 1
+        result['rest']['source'] = 'pubmed'
+        result['data'] = pmidjson['PubmedArticleSet']
+    return generate_response(result)
+
+
+# ******************************************************************************
 # * UI endpoints (DataCite)                                                    *
 # ******************************************************************************
 
@@ -4656,7 +4800,8 @@ def dois_no_janelia(year='All'):
 
 @app.route('/raw/<string:resource>/<path:doi>')
 def show_raw(resource=None, doi=None):
-    ''' Raw resource metadata for a DOI
+    ''' JSON metadata for a DOI
+    resource: biorxiv, elife, figshare, openalex, protocols.io
     '''
     doi = doi.lstrip('/').rstrip('/').lower()
     result = initialize_result()
@@ -4665,13 +4810,12 @@ def show_raw(resource=None, doi=None):
         resource = resource.lower()
     if resource == 'biorxiv':
         try:
-            response = JRC.call_biorxiv(doi)
+            response = DL.get_doi_record(doi, source='biorxiv')
         except Exception as err:
             raise InvalidUsage(str(err), 500) from err
     elif resource == 'elife':
         try:
             response = DL.get_doi_record(doi, source='elife')
-            print(response)
         except Exception as err:
             raise InvalidUsage(str(err), 500) from err
     elif resource == 'figshare':
