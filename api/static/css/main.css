@@ -1,4 +1,4 @@
-div.abstract {height: 100px;
+div.abstract {height: 200px;
               width: 90%;
               overflow-y: scroll;
               font: 13pt Times;
@@ -331,8 +331,8 @@ body {
   font-size: 12pt;
   background-color: #222;
   color: #bbc;
-  margin-left: 5px;
-  margin-right: 5px;
+  margin-left: 10px;
+  margin-right: 10px;
 }
 
 input, select {
