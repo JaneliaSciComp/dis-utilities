@@ -2,7 +2,7 @@
     Add new employees to the orcid collection from the People system.
 '''
 
-__version__ = '2.1.0'
+__version__ = '3.0.0'
 
 import argparse
 import collections
@@ -128,6 +128,11 @@ def add_new_record(person, output):
           None
     '''
     rec = JRC.call_people_by_id(person['employeeId'])
+    if not rec:
+        LOGGER.warning(f"No record found for {person['nameFirstPreferred']} " \
+                       + f"{person['nameLastPreferred']}")
+        COUNT['skipped'] += 1
+        return
     if not rec['supOrgName'] or rec['supOrgName'] in IGNORE:
         LOGGER.warning(f"Skipping {rec['nameFirstPreferred']} {rec['nameLastPreferred']} " \
                        + f"({rec['supOrgName']})")
@@ -248,7 +253,11 @@ def update_orcid():
             orcid[row['employeeId']] = False
         else:
             orcid[row['employeeId']] = True
-    resp = call_responder("people", "People/Search/ByOther/Janelia Research Campus")
+    if ARG.NAME:
+        resp = call_responder("people", f"People/Search/ByName/{ARG.NAME}")
+    else:
+        #resp = call_responder("people", "People/Search/ByOther/Janelia Research Campus")
+        resp = call_responder("people", "People/GetForExternal/JANELIA_SITE/7")
     COUNT['people'] = len(resp)
     output = {'boomerang': [], 'new': []}
     for person in tqdm(resp):
@@ -296,6 +305,8 @@ def update_orcid():
 if __name__ == '__main__':
     PARSER = argparse.ArgumentParser(
         description="Sync People to MongoDB:orcid")
+    PARSER.add_argument('--name', dest='NAME', action='store',
+                        default=None, help='Name to search for')
     PARSER.add_argument('--manifold', dest='MANIFOLD', action='store',
                         default='prod', choices=['dev', 'prod'],
                         help='MongoDB manifold (dev, prod)')
