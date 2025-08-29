@@ -28,7 +28,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "73.0.0"
+__version__ = "74.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -3121,7 +3121,7 @@ def doi_tabs(doi, row, data, authors):
     display_key = {'author': 'Author tags', 'citations': 'Citations', 'abstract': 'Abstract',
                    'ack': 'Acknowledgements', 'subjects': 'Subjects', 'related': 'Related DOIs'}
     # Author tags
-    if 'jrc_tag' in row:
+    if row and 'jrc_tag' in row:
         tags = []
         for tag in row['jrc_tag']:
             tags.append(f"<a href='/tag/{escape(tag['name'])}'>{tag['name']}</a>")
@@ -3152,7 +3152,7 @@ def doi_tabs(doi, row, data, authors):
     # Acknowledgements
     ahtml = ""
     tags = []
-    if 'jrc_acknowledge' in row:
+    if row and 'jrc_acknowledge' in row:
         for tag in row['jrc_acknowledge']:
             tags.append(f"<a href='/tag/{escape(tag['name'])}'>{tag['name']}</a>")
         if tags:
@@ -3192,6 +3192,8 @@ def doi_tabs(doi, row, data, authors):
         if alist:
             ahtml = f"<h4>Potential Janelia authors ({count})</h4>" \
                     + f"<div class='scroll'>{''.join(alist)}</div>"
+    if not authors and not content:
+        return ""
     # Tabs
     html = '<ul class="nav nav-tabs" id="myTab" role="tablist">'
     html += '<li class="nav-item" role="presentation">' \
