@@ -28,7 +28,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "75.0.0"
+__version__ = "75.1.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -2990,7 +2990,7 @@ def get_display_badges(doi, row, data, local):
         badges += f" {tiny_badge('source', 'protocols.io', f'/raw/protocols.io/{doi}')}"
     elif 'elife' in doi.lower():
         badges += " " + tiny_badge('source', 'eLife', f'/raw/eLife/{doi}')
-    elif 'publisher' in row and data['publisher'] == 'Elsevier BV':
+    elif 'publisher' in row and row['publisher'] == 'Elsevier BV':
         badges += " " + tiny_badge('source', 'Elsevier', f'/raw/elsevier/{doi}')
     rlink = f"/doi/{doi}"
     if local:
