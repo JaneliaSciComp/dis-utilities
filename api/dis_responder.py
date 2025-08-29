@@ -28,7 +28,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "74.0.0"
+__version__ = "75.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -2990,6 +2990,8 @@ def get_display_badges(doi, row, data, local):
         badges += f" {tiny_badge('source', 'protocols.io', f'/raw/protocols.io/{doi}')}"
     elif 'elife' in doi.lower():
         badges += " " + tiny_badge('source', 'eLife', f'/raw/eLife/{doi}')
+    elif 'publisher' in row and data['publisher'] == 'Elsevier BV':
+        badges += " " + tiny_badge('source', 'Elsevier', f'/raw/elsevier/{doi}')
     rlink = f"/doi/{doi}"
     if local:
         jour = DL.get_journal(data)
@@ -4803,21 +4805,16 @@ def dois_no_janelia(year='All'):
 @app.route('/raw/<string:resource>/<path:doi>')
 def show_raw(resource=None, doi=None):
     ''' JSON metadata for a DOI
-    resource: biorxiv, elife, figshare, openalex, protocols.io
+    resource: biorxiv, elife, elsevier, figshare, openalex, protocols.io
     '''
     doi = doi.lstrip('/').rstrip('/').lower()
     result = initialize_result()
     response = None
     if resource:
         resource = resource.lower()
-    if resource == 'biorxiv':
+    if resource in ('biorxiv', 'elife', 'elsevier', 'openalex'):
         try:
-            response = DL.get_doi_record(doi, source='biorxiv')
-        except Exception as err:
-            raise InvalidUsage(str(err), 500) from err
-    elif resource == 'elife':
-        try:
-            response = DL.get_doi_record(doi, source='elife')
+            response = DL.get_doi_record(doi, source=resource)
         except Exception as err:
             raise InvalidUsage(str(err), 500) from err
     elif resource == 'figshare':
@@ -4830,11 +4827,6 @@ def show_raw(resource=None, doi=None):
                         response = response2.json()
                 except Exception:
                     pass
-        except Exception as err:
-            raise InvalidUsage(str(err), 500) from err
-    elif resource == 'openalex':
-        try:
-            response = DL.get_doi_record(doi, source='openalex')
         except Exception as err:
             raise InvalidUsage(str(err), 500) from err
     elif resource == 'protocols.io':
