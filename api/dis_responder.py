@@ -28,7 +28,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "75.2.0"
+__version__ = "76.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -2990,7 +2990,7 @@ def get_display_badges(doi, row, data, local):
         badges += f" {tiny_badge('source', 'protocols.io', f'/raw/protocols.io/{doi}')}"
     elif 'elife' in doi.lower():
         badges += " " + tiny_badge('source', 'eLife', f'/raw/eLife/{doi}')
-    elif 'publisher' in data and data['publisher'] == 'Elsevier BV':
+    elif 'publisher' in data and data['publisher'].startswith('Elsevier'):
         badges += " " + tiny_badge('source', 'Elsevier', f'/raw/elsevier/{doi}')
     rlink = f"/doi/{doi}"
     if local:
@@ -3021,11 +3021,12 @@ def get_display_badges(doi, row, data, local):
 # * UI endpoints (DOI)                                                         *
 # ******************************************************************************
 
-def get_citation_counts(doi, row):
+def get_citation_counts(doi, row, partial=True):
     ''' Get citation counts
         Keyword arguments:
           doi: DOI
           row: row from dois collection
+          partial: True to only show some counts, False to show all counts
         Returns:
           Citation counts as HTML
     '''
@@ -3054,12 +3055,13 @@ def get_citation_counts(doi, row):
         if citcnt:
             tblrow.append(f"<td>eLife: <a href='{url}' target='_blank'>{citcnt:,}</a>")
     # OA.Report
-    try:
-        citcnt, url = DL.get_citation_count(doi, 'oa')
-    except Exception:
-        citcnt = 0
-    if citcnt:
-        tblrow.append(f"<td>OA.Report: {citcnt:,}</td>")
+    if not partial:
+        try:
+            citcnt, url = DL.get_citation_count(doi, 'oa')
+        except Exception:
+            citcnt = 0
+        if citcnt:
+            tblrow.append(f"<td>OA.Report: {citcnt:,}</td>")
     # OpenAlex
     try:
         citcnt, url = DL.get_citation_count(doi, 'openalex')
@@ -3100,12 +3102,18 @@ def get_citation_counts(doi, row):
                       + f"{citcnt:,}</a></td>")
     if tblrow:
         doisec += "<table id='citations' class='citations'><thead>" \
-                  + f"<tr><th colspan={len(tblrow)}>Citation counts</th></tr>" \
+                  + f"<tr><th colspan={len(tblrow)}>Citation counts&nbsp;" \
+                  + "<a href=\"#\" onclick=\"$('#verbiage').toggle();\">" \
+                  + "<i class='fa-solid fa-circle-info' style='color: lime'></i></a></th></tr>" \
                   + "</thead><tbody>" + ''.join(tblrow) + "</tbody></table>"
     # DataCite downloads
     if row['jrc_obtained_from'] == 'DataCite':
         if 'downloadCount' in row and row['downloadCount']:
             doisec += f"<span class='paperdata'>Downloads: {row['downloadCount']:,}</span><br>"
+    if tblrow:
+        with open(f"{app.root_path}/static/html/citation_counts.html", 'r',
+                  encoding='utf-8') as htmlin:
+            doisec += '<div id="verbiage" style="display: none;">' + htmlin.read() + '</div>'
     return doisec
 
 
