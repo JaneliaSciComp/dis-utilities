@@ -28,7 +28,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "76.0.0"
+__version__ = "77.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -6994,15 +6994,25 @@ def ignore(typ=None):
     if typ:
         title = f"{typ} ignore list"
         try:
-            rows = DB['dis'].to_ignore.find({"type": typ}).sort("key", 1)
+            irows = DB['dis'].to_ignore.find({"type": typ}).sort("key", 1)
         except Exception as err:
             return render_template('error.html', urlroot=request.url_root,
                                    title=render_warning("Could not get ignore list"),
                                    message=error_message(err))
+        reason_present = False
+        rows = []
+        for row in irows:
+            if 'reason' in row:
+                reason_present = True
+            rows.append(row)
         html += '<table id="ignores" class="tablesorter standard"><thead><tr><th>Key</th>' \
-                + '</tr></thead><tbody>'
+                + f"{'<th>Reason</th>' if reason_present else ''}</tr></thead><tbody>"
         for row in rows:
-            html += f"<tr><td>{row['key']}</td></tr>"
+            if reason_present:
+                reason = f"<td>{row['reason']}</td>" if 'reason' in row else '<td></td>'
+            else:
+                reason = ''
+            html += f"<tr><td>{row['key']}</td>{reason}</tr>"
         html += '</tbody></table>'
     endpoint_access()
     return make_response(render_template('ignore.html', urlroot=request.url_root,
