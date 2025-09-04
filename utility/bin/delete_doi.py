@@ -103,19 +103,23 @@ def delete_dois():
             row = DB['dis'].dois.find_one({"doi": doi})
         except Exception as err:
             terminate_program(err)
+        missing = False
         if not row:
+            missing = True
             COUNT["missing"] += 1
-            LOGGER.warning(f"DOI {doi} not found")
-            continue
+            LOGGER.warning(f"DOI {doi} not found in local database")
         if ARG.WRITE:
-            try:
-                resp = DB['dis'].dois.delete_one({"doi": doi})
-                COUNT['deleted'] += resp.deleted_count
-                LOGGER.warning(f"Deleted {doi}")
-            except Exception as err:
-                terminate_program(f"Could not delete {doi} from dois collection: {err}")
+            if not missing:
+                try:
+                    resp = DB['dis'].dois.delete_one({"doi": doi})
+                    COUNT['deleted'] += resp.deleted_count
+                    LOGGER.warning(f"Deleted {doi}")
+                except Exception as err:
+                    terminate_program(f"Could not delete {doi} from dois collection: {err}")
             payload = {"type": "doi", "key": doi,
                        "inserted": datetime.today().replace(microsecond=0)}
+            if ARG.REASON:
+                payload["reason"] = ARG.REASON
             try:
                 resp = DB['dis'].to_ignore.find_one({"type": "doi", "key": doi})
                 if not resp:
@@ -142,6 +146,8 @@ if __name__ == '__main__':
     PARSER.add_argument('--manifold', dest='MANIFOLD', action='store',
                         default='prod', choices=['dev', 'prod'],
                         help='MongoDB manifold (dev, prod)')
+    PARSER.add_argument('--reason', dest='REASON', action='store',
+                        help='Reason to delete DOI (optional)')
     PARSER.add_argument('--ignore', dest='IGNORE', action='store_true',
                         default=False, help='Remove from ignore list only')
     PARSER.add_argument('--write', dest='WRITE', action='store_true',
