@@ -7,7 +7,7 @@
            to DIS MongoDB.
 """
 
-__version__ = '14.0.0'
+__version__ = '15.0.0'
 
 import argparse
 import collections
@@ -104,9 +104,7 @@ def initialize_program():
         dbconfig = JRC.get_config("databases")
     except Exception as err:
         terminate_program(err)
-    dbs = ['flyboy']
-    if ARG.TARGET == 'dis':
-        dbs.append('dis')
+    dbs = ['dis', 'flyboy']
     for source in dbs:
         manifold = ARG.MANIFOLD if source == 'dis' else 'prod'
         dbo = attrgetter(f"{source}.{manifold}.write")(dbconfig)
@@ -115,14 +113,6 @@ def initialize_program():
             DB[source] = JRC.connect_database(dbo)
         except Exception as err:
             terminate_program(err)
-    if ARG.TARGET == 'flyboy':
-        return
-    try:
-        orgs = DL.get_supervisory_orgs()
-    except Exception as err:
-        terminate_program(err)
-    for key, val in orgs.items():
-        SUPORG[key] = val
     try:
         rows = DB['dis']['to_ignore'].find({"type": {"$in": ["doi", "em_dataset"]}})
         for row in rows:
@@ -131,6 +121,15 @@ def initialize_program():
             IGNORE[row['type']][row['key']] = True
     except Exception as err:
         terminate_program(err)
+
+    if ARG.TARGET == 'flyboy':
+        return
+    try:
+        orgs = DL.get_supervisory_orgs()
+    except Exception as err:
+        terminate_program(err)
+    for key, val in orgs.items():
+        SUPORG[key] = val
 
 
 def get_dis_dois_from_mongo():
