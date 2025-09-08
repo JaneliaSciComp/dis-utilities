@@ -27,6 +27,7 @@ DB = {}
 COUNT = collections.defaultdict(lambda: 0, {})
 # Global variables
 ARG = DISCONFIG = LOGGER = REST = None
+IGNORE = []
 ROR = {}
 MESSAGE = {"sent": [], "no_institutions": [], "institution_mismatch": []}
 OUTPUT = {"sent": {}, "no_institutions": {}, "institution_mismatch": {}}
@@ -91,6 +92,13 @@ def initialize_program():
         terminate_program(err)
     for row in rows:
         ROR[row['display']] = row['name']
+    try:
+        rows = DB['dis']['to_ignore'].find({})
+    except Exception as err:
+        terminate_program(err)
+    for row in rows:
+        IGNORE.append(row['key'])
+    LOGGER.info(f"Found {len(IGNORE):,} DOIs to ignore")
 
 
 def get_author_works(orcid):
@@ -124,7 +132,7 @@ def janelia_affiliation(inst):
        or ('display_name' in inst and 'Janelia' in inst['display_name'])
 
 
-def janelia_author(row, orcid):
+def janelia_author(row, orcid, doi):
     ''' Check if author is a Janelia author
         Keyword arguments:
           row: row from OpenAlex
@@ -133,7 +141,6 @@ def janelia_author(row, orcid):
           True if author is a Janelia author
           False otherwise
     '''
-    doi = row['doi'].replace('https://doi.org/', '')
     OAID[doi] = row['id'].split('/')[-1]
     # Find lab head Janelia affiliation
     for auth in row['authorships']:
@@ -184,19 +191,30 @@ def process_author(rec):
     hired = dto.strftime("%Y-%m-%d")
     rows = get_author_works(rec['orcid'])
     for row in rows:
+        if hired > row['publication_date'] or row['publication_date'] < DISCONFIG['min_publishing_date']:
+            COUNT['skipped'] += 1
+            continue
+        if 'doi' in row and row['doi']:
+            doi = row['doi'].replace('https://doi.org/', '')
+        else:
+            if 'best_oa_location' in row and row['best_oa_location'] \
+               and 'landing_page_url' in row['best_oa_location'] \
+               and row['best_oa_location']['landing_page_url'] \
+               and row['best_oa_location']['landing_page_url'].startswith('https://doi.org/'):
+                doi = row['best_oa_location']['landing_page_url'].replace('https://doi.org/', '')
+                LOGGER.warning(f"Using best_oa_location DOI: {doi}")
+            else:
+                COUNT['skipped'] += 1
+                continue
+        if doi in IGNORE:
+            COUNT['ignored'] += 1
+            continue
         COUNT['dois'] += 1
-        if hired > row['publication_date'] or row['publication_date'] < '2006-04-01':
-            COUNT['skipped'] += 1
-            continue
-        if not row['doi']:
-            COUNT['skipped'] += 1
-            continue
-        doi = row['doi'].replace('https://doi.org/', '')
         drec = DL.get_doi_record(doi, DB['dis']['dois'])
         if drec:
             COUNT['in_database'] += 1
             continue
-        if not janelia_author(row, rec['orcid']):
+        if not janelia_author(row, rec['orcid'], doi):
             COUNT['no_author'] += 1
             continue
         # Additional DOI processing goes here
@@ -279,6 +297,7 @@ def processing():
         generate_emails()
     print(f"Labs found:                     {cnt}")
     print(f"DOIs found:                     {COUNT['dois']:,}")
+    print(f"DOIs ignored:                   {COUNT['ignored']:,}")
     print(f"DOIs skipped:                   {COUNT['skipped']:,}")
     print(f"DOIs with no author:            {COUNT['no_author']:,}")
     print(f"DOIs already in database:       {COUNT['in_database']:,}")

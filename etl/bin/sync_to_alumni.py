@@ -185,7 +185,8 @@ def process_alumni():
             # If they're in orcid with a name, check alumni status
             COUNT['name_in_orcid'] += 1
             if 'alumni' not in row or not row['alumni']:
-                terminate_program(f"{name} {eid} is not alumni {row}")
+                LOGGER.warning(f"{name} {eid} is not alumni {row}")
+                continue
             if 'employeeId' in row:
                 # If they have an employee ID in orcid, skip them
                 LOGGER.warning(f"{name} {eid} {row}")
