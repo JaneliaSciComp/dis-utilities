@@ -28,7 +28,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "77.0.0"
+__version__ = "78.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -1508,6 +1508,8 @@ def get_badges(auth, ignore_match=False, who=None):
             badges.append(f"{tiny_badge('alumni', 'Former employee')}")
         elif 'validated' not in auth or not auth['validated']:
             badges.append(f"{tiny_badge('warning', 'Not validated')}")
+        if 'employeeId' not in auth or not auth['employeeId']:
+            badges.append(f"{tiny_badge('alumni', 'No employee ID')}")
         if 'orcid' not in auth or not auth['orcid']:
             badges.append(f"{tiny_badge('noorcid', 'No ORCID')}")
         if auth['asserted']:
@@ -1584,6 +1586,51 @@ def show_tagged_authors(authors, confirmed):
         row = f"<td>{who}</td><td>{' '.join(badges)}</td><td>{', '.join(tags)}</td>"
         alist.append(row)
     return f"<table class='borderless'><tr>{'</tr><tr>'.join(alist)}</tr></table>", count
+
+
+def show_openalex_authors(doi, confirmed):
+    ''' Show OpenAlex authors
+        Keyword arguments:
+          doi: DOI
+          confirmed: list of confirmed authors
+        Returns:
+          List of HTML authors
+    '''
+    data = DL.get_doi_record(doi, source='openalex')
+    if not data:
+        return "", 0
+    alist = []
+    for auth in data['authorships']:
+        if 'author' in auth and 'display_name' in auth['author']:
+            badges = []
+            who = auth['author']['display_name']
+            rec = None
+            if 'orcid' in auth['author'] and auth['author']['orcid']:
+                orc = auth['author']['orcid'].replace('https://orcid.org/', '')
+                try:
+                    rec = DB['dis'].orcid.find_one({"orcid": orc})
+                except Exception:
+                    pass
+            if not rec:
+                try:
+                    fam = auth['author']['display_name'].split(" ")[-1]
+                    giv = auth['author']['display_name'].replace(fam, "").strip()
+                    rec = DB['dis'].orcid.find_one({"given": giv, "family": fam})
+                except Exception:
+                    pass
+            if rec:
+                if 'orcid' in rec and rec['orcid']:
+                    who = f"<a href='/userui/{rec['orcid']}'>{who}</a>"
+                elif 'userIdO365' in rec and rec['userIdO365']:
+                    who = f"<a href='/userui/{rec['userIdO365']}'>{who}</a>"
+                odata = DL.get_single_author_details(rec, DB['dis'].orcid)
+                badges = get_badges(odata, who=who)
+                if 'employeeId' in odata and odata['employeeId'] in confirmed:
+                    badges.insert(0, tiny_badge('author', 'Janelia author'))
+            row = f"<td>{who}</td><td>{' '.join(badges)}</td>"
+            alist.append(row)
+    return f"<table class='borderless'><tr>{'</tr><tr>'.join(alist)}</tr></table>", \
+           len(data['authorships'])
 
 
 def add_orcid_badges(orc):
@@ -3202,6 +3249,14 @@ def doi_tabs(doi, row, data, authors):
         if alist:
             ahtml = f"<h4>Potential Janelia authors ({count})</h4>" \
                     + f"<div class='scroll'>{''.join(alist)}</div>"
+        if not alist or not count:
+            alist, count = show_openalex_authors(row['doi'], row['jrc_author'] \
+                                                             if 'jrc_author' in row else [])
+            if alist:
+                ahtml = f"<h4>OpenAlex authors ({count}) " \
+                        + "<span style='font-size:12pt;color:red'>(could not match Janelia " \
+                        + f"authors in {row['jrc_obtained_from']})</span></h4>" \
+                        + f"<div class='scroll'>{''.join(alist)}</div>"
     if not authors and not content:
         return ""
     # Tabs
