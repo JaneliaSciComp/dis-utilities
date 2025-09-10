@@ -7,7 +7,7 @@
            to DIS MongoDB.
 """
 
-__version__ = '15.0.0'
+__version__ = '15.1.0'
 
 import argparse
 import collections
@@ -931,6 +931,27 @@ def add_first_last_authors(rec):
         rec["jrc_first_id"] = first
 
 
+def add_openalex(rec):
+    ''' Add data from OpenAlex
+        Keyword arguments:
+          rec: Crossref/DataCite record
+        Returns:
+          None
+    '''
+    if 'jrc_is_oa' not in rec:
+        # For now, we're only adding Open Access data, which won't change
+        return
+    try:
+        data = DL.get_doi_record(rec['doi'], source='openalex')
+    except Exception:
+        return
+    if not data:
+        return
+    if 'open_access' in data and data['open_access']:
+        rec["jrc_is_oa"] = bool(data['open_access']['is_oa'])
+        rec["jrc_oa_status"] = data['open_access']['oa_status']
+
+
 def update_mongodb(persist):
     ''' Persist DOI records in MongoDB
         Keyword arguments:
@@ -951,6 +972,9 @@ def update_mongodb(persist):
         for aname in ('jrc_first_author', 'jrc_first_id', 'jrc_last_author', 'jrc_last_id'):
             if aname in val:
                 LOGGER.debug(f"Added {aname} {val[aname]} to {key}")
+        # Data from OpenAlex
+        if 'janelia' not in key: # Janelia DataCite DOIs are [almost] never in OpenAlex
+            add_openalex(val)
         # Insert/update timestamps
         if key not in EXISTING:
             val['jrc_inserted'] = datetime.today().replace(microsecond=0)
