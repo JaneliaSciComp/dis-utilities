@@ -21,7 +21,20 @@ function nav_post(field, value, source="") {
     payload = payload +
               '<input type="text" name="jrc_obtained_from" value="' + source + '" />'
   }
-  var form = $('<form action="' + url + '" method="post">' +
+  var form = $('<form style="visibility:hidden" action="' + url + '" method="post">' +
+             payload + '</form>');
+  $('body').append(form);
+  form.submit();
+}
+
+function nav_post_year(field, value, year="All") {
+  url = "/doiui/custom";
+  payload = '<input type="text" name="field" value="' + field + '" />' +
+            '<input type="text" name="value" value="' + value + '" />'
+  if (year != 'All') {
+    url = url + "/" + year;
+  }
+  var form = $('<form style="visibility:hidden" action="' + url + '" method="post">' +
              payload + '</form>');
   $('body').append(form);
   form.submit();

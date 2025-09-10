@@ -28,7 +28,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "78.0.0"
+__version__ = "79.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -61,7 +61,8 @@ NAV = {"Home": "",
                      "Preprints with journal publications": "preprint_with_pub",
                      "Preprints without journal publications": "preprint_no_pub",
                      "Journal publications without preprints": "pub_no_preprint"},
-       "Journals": {"DOIs by journal": "journals_dois",
+       "Journals": {"Open Access report": "dois_oa",
+                    "DOIs by journal": "journals_dois",
                     "Top journals": "top_journals",
                     "DOIs missing journals": "dois_nojournal",
                     "Journals referenced": "journals_referenced"},
@@ -3974,8 +3975,9 @@ def show_insert(idate):
                                          navbar=generate_navbar('DOIs')))
 
 
+@app.route('/doiui/custom/<string:year>', methods=['OPTIONS', 'POST'])
 @app.route('/doiui/custom', methods=['OPTIONS', 'POST'])
-def show_doiui_custom():
+def show_doiui_custom(year='All'):
     '''
     Return DOIs for a given find query
     Return a list of DOI records for a given query.
@@ -4014,6 +4016,8 @@ def show_doiui_custom():
         payload = ipd['query']
         ipd['field'] = "_".join(list(payload.keys()))
         ptitle = ''
+    if year != 'All':
+        payload['jrc_publishing_date'] = {"$regex": "^"+ year}
     try:
         cnt = DB['dis'].dois.count_documents(payload)
         print(f"Custom payload: {payload}     Results: {cnt}")
@@ -5414,6 +5418,51 @@ def pub_no_preprint():
 # ******************************************************************************
 # * UI endpoints (Journals)                                                    *
 # ******************************************************************************
+
+@app.route('/dois_oa/<string:year>')
+@app.route('/dois_oa')
+def show_open_access(year='All'):
+    ''' Show open access DOIs
+    '''
+    match = {'jrc_is_oa': {"$exists": True}}
+    if year != 'All':
+        match["jrc_publishing_date"] = {"$regex": "^"+ year}
+    payload = [{'$match': match},
+               {'$group': {'_id': '$jrc_oa_status', 'count': {"$sum": 1}}},
+               {'$sort': {'count': -1}}
+              ]
+    try:
+        rows = DB['dis'].dois.aggregate(payload)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning('Could not get Open Access data'),
+                               message=error_message(err))
+    total = total_oa = 0
+    html = '<table id="dois" class="tablesorter numberlast"><thead><tr>' \
+           + '<th>Status</th><th>Description</th><th>Count</th></tr></thead><tbody>'
+    for row in rows:
+        total += row['count']
+        if row['_id'] != 'closed':
+            total_oa += row['count']
+        onclick = "onclick='nav_post(\"jrc_oa_status\",\"" + str(row['_id']) + "\")'"
+        onclick = "onclick='nav_post_year(\"jrc_oa_status\",\"" + row['_id'] \
+                          + "\",\"" + year + "\")'"
+        link = f"<a href='#' {onclick}>{row['count']}</a>"
+        html += f"<tr><td>{row['_id']}</td><td>{CVTERM['oa_status'][row['_id']]['display']}</td>" \
+                + f"<td>{link}</td></tr>"
+    html += '</tbody></table>'
+    ymsg = f" for {year}" if year != 'All' else ''
+    pre = f"<span style='font-size: 18pt; color: lime'>{total_oa/total*100:.1f}%</span>" \
+          + f"<span style='font-size: 14pt'> of Crossref DOIs{ymsg} are open access</span>"
+    html = pre + '<br>' + year_pulldown('dois_oa') + html
+    title = 'Open Access DOIs'
+    if year != 'All':
+        title += f" ({year})"
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=title, html=html,
+                                         navbar=generate_navbar('Journals')))
+
 
 @app.route('/journals_dois/<string:year>')
 @app.route('/journals_dois')
