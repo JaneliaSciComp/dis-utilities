@@ -28,7 +28,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "79.0.0"
+__version__ = "79.1.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -3051,14 +3051,15 @@ def get_display_badges(doi, row, data, local):
         badges += f" {tiny_badge('source', row['jrc_obtained_from'], rlink)}"
     else:
         badges += f" {tiny_badge('source', 'Raw data', rlink)}"
-    oresp = JRC.call_oa(doi)
-    if oresp:
-        olink = f"{app.config['OAREPORT']}{doi}"
-        badges += f" {tiny_badge('source', 'OA.Report', olink)}"
-    oresp = DL.get_doi_record(doi, source='openalex')
-    if oresp:
-        olink = f"/raw/openalex/{doi}"
-        badges += f" {tiny_badge('source', 'OpenAlex', olink)}"
+    if 'janelia' not in doi:
+        oresp = JRC.call_oa(doi)
+        if oresp:
+            olink = f"{app.config['OAREPORT']}{doi}"
+            badges += f" {tiny_badge('source', 'OA.Report', olink)}"
+        oresp = DL.get_doi_record(doi, source='openalex')
+        if oresp:
+            olink = f"/raw/openalex/{doi}"
+            badges += f" {tiny_badge('source', 'OpenAlex', olink)}"
     if local and 'jrc_fulltext_url' in row:
         badges += f" {tiny_badge('pdf', 'Full text', row['jrc_fulltext_url'])}"
     #badges += f" {tiny_badge('info', 'HQ migration', f'/doi/migration/{doi}')}"
