@@ -3535,35 +3535,38 @@ def dois_source(year='All'):
         title += f" ({year})"
     chartscript, chartdiv = DP.pie_chart(data, title, "source", width=500,
                                          colors=DP.SOURCE_PALETTE)
-    if year == 'All' or year >= '2024':
-        payload = [{"$group": {"_id": "$jrc_load_source", "count": {"$sum": 1}}},
-                   {"$sort" : {"count": -1}}
-                  ]
-        try:
-            rows = DB['dis'].dois.aggregate(payload)
-        except Exception as err:
-            return render_template('error.html', urlroot=request.url_root,
-                                   title=render_warning("Could not get load methods " \
-                                                        + "from dois collection"),
-                                   message=error_message(err))
-        data = {}
-        for row in rows:
-            data[row['_id']] = row['count']
-        title = "DOIs by load method"
-        if year != 'All':
-            title += f" ({year})"
-        script2, div2 = DP.pie_chart(data, title, "source", width=500,
-                                     colors=DP.SOURCE_PALETTE)
-        chartscript += script2
-        chartdiv += div2
+    payload = [{"$group": {"_id": "$jrc_load_source", "count": {"$sum": 1}}},
+               {"$sort" : {"count": -1}}
+              ]
+    if year != 'All':
+        payload.insert(0, {"$match": {"jrc_publishing_date": {"$regex": "^"+ year}}})
+    try:
+        rows = DB['dis'].dois.aggregate(payload)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get load methods " \
+                                                    + "from dois collection"),
+                               message=error_message(err))
+    data = {}
+    for row in rows:
+        data[row['_id']] = row['count']
+    title = "DOIs by load method"
+    if year != 'All':
+        title += f" ({year})"
+    script2, div2 = DP.pie_chart(data, title, "source", width=500,
+                                 colors=DP.SOURCE_PALETTE)
+    chartscript += script2
+    chartdiv += div2
     # DOIs with PMIDs
     data = {}
     payload = {"jrc_obtained_from": "Crossref",
                "jrc_pmid": {"$exists": True}}
+    tpayload = {"jrc_obtained_from": "Crossref"}
     if year != 'All':
         payload["jrc_publishing_date"] = {"$regex": "^"+ year}
+        tpayload["jrc_publishing_date"] = {"$regex": "^"+ year}
     try:
-        total = DB['dis'].dois.count_documents({"jrc_obtained_from": "Crossref"})
+        total = DB['dis'].dois.count_documents(tpayload)
         cnt = DB['dis'].dois.count_documents(payload)
         data['PMIDs'] = cnt
         data['No PMIDs'] = total - cnt
@@ -5439,29 +5442,35 @@ def show_open_access(year='All'):
                                title=render_warning('Could not get Open Access data'),
                                message=error_message(err))
     total = total_oa = 0
-    html = '<table id="dois" class="tablesorter numberlast"><thead><tr>' \
+    html = '<table id="dois" class="tablesorter numberlast" width=500><thead><tr>' \
            + '<th>Status</th><th>Description</th><th>Count</th></tr></thead><tbody>'
+    data = {}
+    palette = []
     for row in rows:
         total += row['count']
         if row['_id'] != 'closed':
             total_oa += row['count']
-        onclick = "onclick='nav_post(\"jrc_oa_status\",\"" + str(row['_id']) + "\")'"
-        onclick = "onclick='nav_post_year(\"jrc_oa_status\",\"" + row['_id'] \
+        onclick = "onclick='nav_post_year(\"jrc_oa_status\",\"" + row['_id'].capitalize() \
                           + "\",\"" + year + "\")'"
         link = f"<a href='#' {onclick}>{row['count']}</a>"
-        html += f"<tr><td>{row['_id']}</td><td>{CVTERM['oa_status'][row['_id']]['display']}</td>" \
+        html += f"<tr><td>{row['_id'].capitalize()}</td><td>{CVTERM['oa_status'][row['_id']]['display']}</td>" \
                 + f"<td>{link}</td></tr>"
+        data[row['_id'].capitalize()] = row['count']
+        palette.append(DP.OA_COLORS[row['_id'].capitalize()])
     html += '</tbody></table>'
+    title = 'Open Access DOIs'
+    if year != 'All':
+        title += f" ({year})"
+    chartscript, chartdiv = DP.pie_chart(data, title, "oa_status", width=500,
+                                         colors=palette)
     ymsg = f" for {year}" if year != 'All' else ''
     pre = f"<span style='font-size: 18pt; color: lime'>{total_oa/total*100:.1f}%</span>" \
           + f"<span style='font-size: 14pt'> of Crossref DOIs{ymsg} are open access</span>"
     html = pre + '<br>' + year_pulldown('dois_oa') + html
-    title = 'Open Access DOIs'
-    if year != 'All':
-        title += f" ({year})"
     endpoint_access()
-    return make_response(render_template('general.html', urlroot=request.url_root,
+    return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title=title, html=html,
+                                         chartscript=chartscript, chartdiv=chartdiv,
                                          navbar=generate_navbar('Journals')))
 
 
