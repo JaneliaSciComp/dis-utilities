@@ -6,7 +6,7 @@
     - The lab head (or any other author) has a Janelia affiliation
 '''
 
-__version__ = '1.0.0'
+__version__ = '1.1.0'
 
 import argparse
 import collections
@@ -191,7 +191,9 @@ def process_author(rec):
     hired = dto.strftime("%Y-%m-%d")
     rows = get_author_works(rec['orcid'])
     for row in rows:
+        COUNT['dois'] += 1
         if hired > row['publication_date'] or row['publication_date'] < DISCONFIG['min_publishing_date']:
+            LOGGER.debug(f"Skipping {row['doi']} ({row['publication_date']})")
             COUNT['skipped'] += 1
             continue
         if 'doi' in row and row['doi']:
@@ -204,12 +206,11 @@ def process_author(rec):
                 doi = row['best_oa_location']['landing_page_url'].replace('https://doi.org/', '')
                 LOGGER.warning(f"Using best_oa_location DOI: {doi}")
             else:
-                COUNT['skipped'] += 1
+                COUNT['no_doi'] += 1
                 continue
         if doi in IGNORE:
             COUNT['ignored'] += 1
             continue
-        COUNT['dois'] += 1
         drec = DL.get_doi_record(doi, DB['dis']['dois'])
         if drec:
             COUNT['in_database'] += 1
@@ -271,45 +272,58 @@ def processing():
         Returns:
           None
     '''
-    payload = {'group': {'$exists': True}, 'workerType': 'Employee',
-               'alumni': {'$exists': False}, 'orcid': {'$exists': True}}
+    if ARG.ORCID:
+        payload = {'orcid': ARG.ORCID}
+    else:
+        payload = {'group': {'$exists': True}, 'workerType': 'Employee',
+                   'alumni': {'$exists': False}, 'orcid': {'$exists': True}}
     try:
         cnt = DB['dis'].orcid.count_documents(payload)
-        LOGGER.info(f"Found {cnt} ORCIDs")
+        LOGGER.info(f"Found {cnt} ORCID{'s' if cnt != 1 else ''}")
         rows = DB['dis'].orcid.find(payload).sort('group', 1)
     except Exception as err:
         terminate_program(err)
-    for row in tqdm(rows, desc="Processing labs", total=cnt):
+    for row in tqdm(rows, desc="Processing ORCIDs", total=cnt):
+        if ARG.ORCID:
+            LOGGER.info(f"Found {row['given'][0]} {row['family'][0]} ({ARG.ORCID})")
         process_author(row)
     for okey, ovalue in OUTPUT.items():
+        fname = f"openalex_{okey}.tsv"
         if ovalue:
-            LOGGER.info(f"Writing openalex_{okey}.tsv")
-            with open(f"openalex_{okey}.tsv", 'w', encoding='utf-8') as fileout:
+            LOGGER.info(f"Writing {fname}")
+            with open(fname, 'w', encoding='utf-8') as fileout:
                 for key, val in sorted(ovalue.items()):
                     fileout.write(f"{key}\t" + '\t'.join(val) + '\n')
                     MESSAGE[okey].append('\t'.join([oalink(key), val[0]]) + "\n")
+        elif os.path.exists(fname):
+                os.remove(fname)
     if OUTPUT['sent']:
         LOGGER.info("Writing openalex_ready.txt")
         with open('openalex_ready.txt', 'w', encoding='ascii') as fileout:
             for key in sorted(OUTPUT['sent'].keys()):
                 fileout.write(key + '\n')
+    elif os.path.exists('openalex_ready.txt'):
+        os.remove('openalex_ready.txt')
     if ARG.TEST or ARG.WRITE:
         generate_emails()
-    print(f"Labs found:                     {cnt}")
-    print(f"DOIs found:                     {COUNT['dois']:,}")
-    print(f"DOIs ignored:                   {COUNT['ignored']:,}")
-    print(f"DOIs skipped:                   {COUNT['skipped']:,}")
-    print(f"DOIs with no author:            {COUNT['no_author']:,}")
-    print(f"DOIs already in database:       {COUNT['in_database']:,}")
-    print(f"DOIs to add:                    {len(MESSAGE['sent']):,}")
-    print(f"DOIs with no institutions:      {len(MESSAGE['no_institutions']):,}")
-    print(f"DOIs with institution mismatch: {len(MESSAGE['institution_mismatch']):,}")
+    print(f"ORCIDs found:                    {cnt}")
+    print(f"DOIs found:                      {COUNT['dois']:,}")
+    print(f"DOIs ignored:                    {COUNT['ignored']:,}")
+    print(f"DOIs skipped (publication date): {COUNT['skipped']:,}")
+    print(f"DOIs skipped (no DOI):           {COUNT['no_doi']:,}")
+    print(f"DOIs with no authors:            {COUNT['no_author']:,}")
+    print(f"DOIs already in database:        {COUNT['in_database']:,}")
+    print(f"DOIs to add:                     {len(MESSAGE['sent']):,}")
+    print(f"DOIs with no institutions:       {len(MESSAGE['no_institutions']):,}")
+    print(f"DOIs with institution mismatch:  {len(MESSAGE['institution_mismatch']):,}")
 
 # -----------------------------------------------------------------------------
 
 if __name__ == '__main__':
     PARSER = argparse.ArgumentParser(
         description="Find new works for current lab heads")
+    PARSER.add_argument('--orcid', dest='ORCID', action='store',
+                        default=None, help='ORCID to process')
     PARSER.add_argument('--test', dest='TEST', action='store_true',
                         default=False, help='Send email to developer')
     PARSER.add_argument('--write', dest='WRITE', action='store_true',
