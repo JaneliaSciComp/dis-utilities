@@ -9,6 +9,8 @@ from bokeh.palettes import all_palettes, plasma
 from bokeh.plotting import figure
 from bokeh.transform import cumsum
 
+OA_COLORS = {"Bronze": "#CD7F32", "Closed": "red", "Diamond": "lightgray",
+             "Gold": "#FFD700", "Green": "green", "Hybrid": "mediumblue"}
 SOURCE_PALETTE = ["mediumblue", "darkorange"]
 SOURCE3_PALETTE = ["mediumblue", "darkorange", "wheat"]
 TYPE_PALETTE = ["mediumblue", "darkorange", "wheat", "darkgray"]
