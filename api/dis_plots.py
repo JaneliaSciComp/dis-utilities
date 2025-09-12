@@ -3,6 +3,7 @@
 '''
 
 from math import pi
+from bokeh.model import data_model
 import pandas as pd
 from bokeh.embed import components
 from bokeh.palettes import all_palettes, plasma
@@ -125,6 +126,7 @@ def pie_chart(data, title, legend, height=300, width=400, location="right", colo
           legend: data key name
           height: height of the chart (optional)
           width: width of the chart (optional)
+          location: location of the legend (optional)
           colors: list of colors (optional)
         Returns:
           Figure components
@@ -136,7 +138,6 @@ def pie_chart(data, title, legend, height=300, width=400, location="right", colo
     if not colors:
         colors = all_palettes['Category10'][len(data)]
     elif isinstance(colors, str):
-        print(colors)
         colors = all_palettes[colors][len(data)]
     pdata = pd.Series(data).reset_index(name='value').rename(columns={'index': legend})
     pdata['angle'] = pdata['value']/pdata['value'].sum() * 2*pi
@@ -186,4 +187,27 @@ def stacked_bar_chart(data, title, xaxis, yaxis, colors=None, width=None, height
     plt.xgrid.grid_line_color = None
     plt.y_range.start = 0
     plt.background_fill_color = "ghostwhite"
+    return components(plt)
+
+
+def wedge_chart(data, height=100, width=100, color='green'):
+    ''' Create a pie chart
+        Keyword arguments:
+          data: dictionary of data
+          height: height of the chart (optional)
+          width: width of the chart (optional)
+          color: color of the chart (optional)
+        Returns:
+          Figure components
+    '''
+    plt = figure(toolbar_location=None, height=height, width=width, min_border_left=0,
+                 min_border_right=0, min_border_top=0, min_border_bottom=0,
+                 background_fill_color=None, outline_line_color=None)
+    plt.annular_wedge(x=data['shown'], y=data['shown'], inner_radius=0.5, outer_radius=1,
+                      start_angle_units='deg', start_angle=270,
+                      end_angle_units='deg', end_angle=270 - data['shown'] / data['total'] * 360,
+                      color=color, direction='clock')
+    plt.axis.axis_label = None
+    plt.axis.visible = False
+    plt.grid.grid_line_color = None
     return components(plt)

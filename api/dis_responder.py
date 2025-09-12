@@ -28,7 +28,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "79.1.0"
+__version__ = "80.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -4038,12 +4038,14 @@ def show_doiui_custom(year='All'):
     html = "<table id='dois' class='tablesorter standard'><thead><tr>" \
            + ''.join([f"<th>{itm}</th>" for itm in header]) + "</tr></thead><tbody>"
     works = []
-    jorp = newsletter = 0
+    jorp = newsletter = oacnt =0
     for row in rows:
         published = DL.get_publishing_date(row)
         title = DL.get_title(row)
         if not title:
             title = ""
+        if 'jrc_is_oa' in row and row['jrc_is_oa']:
+            oacnt += 1
         works.append({"published": published, "link": doi_link(row['doi']), "title": title,
                       "doi": row['doi'], \
                       "newsletter": row['jrc_newsletter'] if 'jrc_newsletter' in row else ""})
@@ -4051,6 +4053,10 @@ def show_doiui_custom(year='All'):
             newsletter += 1
         if DL.is_journal(row) or DL.is_preprint(row):
             jorp += 1
+    data = {'shown': oacnt, 'total': cnt}
+    chartscript, chartdiv = DP.wedge_chart(data) if oacnt else ['', '']
+    oamsg = f"<span style='font-size: 18pt; color: lightgray'>{oacnt/cnt*100:.1f}%</span>" \
+            + f"<span style='font-size: 12pt'><br>{oacnt:,}/{cnt:,}</span>"
     fileoutput = ""
     for row in sorted(works, key=lambda row: row['published'], reverse=True):
         html += "<tr><td>" + dloop(row, ['published', 'link', 'title', 'newsletter'], "</td><td>") \
@@ -4058,12 +4064,13 @@ def show_doiui_custom(year='All'):
         row['title'] = row['title'].replace("\n", " ")
         fileoutput += dloop(row, ['published', 'doi', 'title', 'newsletter']) + "\n"
     html += '</tbody></table>'
-    html = create_downloadable(ipd['field'], header, fileoutput) + html
-    html = f"DOIs: {len(works):,}<br>Journals/preprints: {jorp:,}<br>" \
-           + f"DOIs in newsletter: {newsletter:,}<br>" + html
+    top = f"DOIs: {len(works):,}<br>Journals/preprints: {jorp:,}<br>" \
+           + f"DOIs in newsletter: {newsletter:,}<br>" \
+           + create_downloadable(ipd['field'], header, fileoutput) + "<br>"
     endpoint_access()
-    return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title=ptitle, html=html,
+    return make_response(render_template('custom.html', urlroot=request.url_root,
+                                         title=ptitle, top=top, oamsg=oamsg, bottom=html,
+                                         chartscript=chartscript, chartdiv=chartdiv,
                                          navbar=generate_navbar('DOIs')))
 
 
@@ -5450,7 +5457,7 @@ def show_open_access(year='All'):
         total += row['count']
         if row['_id'] != 'closed':
             total_oa += row['count']
-        onclick = "onclick='nav_post_year(\"jrc_oa_status\",\"" + row['_id'].capitalize() \
+        onclick = "onclick='nav_post_year(\"jrc_oa_status\",\"" + row['_id'] \
                           + "\",\"" + year + "\")'"
         link = f"<a href='#' {onclick}>{row['count']}</a>"
         html += f"<tr><td>{row['_id'].capitalize()}</td><td>{CVTERM['oa_status'][row['_id']]['display']}</td>" \
@@ -6638,11 +6645,14 @@ def janelia_affiliations():
            + '<th>Affiliation</th><th>Count</th>' \
            + '</tr></thead><tbody>'
     for aff, count in sorted(affiliations.items(), key=lambda item: item[1], reverse=True):
+        if aff == app.config['PREFERRED_AFF']:
+            aff = f"<span style='color: lime;'>{aff}</span>"
         html += f"<tr><td>{aff}</td><td>{count:,}</td></tr>"
     html += '</tbody></table>'
+
     html = "<p> When publishing a paper, please use the following affiliation for all Janelia " \
-           + "authors:<br><span style='color: lime;'>Janelia Research Campus, Howard Hughes " \
-           + "Medical Institute, Ashburn, VA</span></p>" + html
+           + f"authors:<br><span style='color: lime;'>{app.config['PREFERRED_AFF']}</span></p>" \
+           + html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=f"DOI author affiliations ({len(affiliations):,})",
