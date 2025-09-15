@@ -6,7 +6,7 @@
     - The lab head (or any other author) has a Janelia affiliation
 '''
 
-__version__ = '1.1.0'
+__version__ = '2.0.0'
 
 import argparse
 import collections
@@ -184,15 +184,19 @@ def process_author(rec):
         Returns:
           None
     '''
-    idresp = JRC.call_people_by_id(rec['employeeId'])
-    if idresp['departmentAddress1'] != '19700 Helix Drive':
-        return
-    dto = datetime.strptime(idresp['hireDate'].split(' ')[0], "%m/%d/%Y")
-    hired = dto.strftime("%Y-%m-%d")
+    if not ARG.ALUMNI:
+        idresp = JRC.call_people_by_id(rec['employeeId'])
+        if not idresp:
+            terminate_program(f"No People record for {rec['given'][0]} {rec['family'][0]}")
+        if 'departmentAddress1' in idresp and idresp['departmentAddress1'] != '19700 Helix Drive':
+            return
+        dto = datetime.strptime(idresp['hireDate'].split(' ')[0], "%m/%d/%Y")
+        hired = dto.strftime("%Y-%m-%d")
     rows = get_author_works(rec['orcid'])
     for row in rows:
         COUNT['dois'] += 1
-        if hired > row['publication_date'] or row['publication_date'] < DISCONFIG['min_publishing_date']:
+        if not ARG.ALUMNI and (hired > row['publication_date'] \
+            or row['publication_date'] < DISCONFIG['min_publishing_date']):
             LOGGER.debug(f"Skipping {row['doi']} ({row['publication_date']})")
             COUNT['skipped'] += 1
             continue
@@ -324,6 +328,8 @@ if __name__ == '__main__':
         description="Find new works for current lab heads")
     PARSER.add_argument('--orcid', dest='ORCID', action='store',
                         default=None, help='ORCID to process')
+    PARSER.add_argument('--alumni', dest='ALUMNI', action='store_true',
+                        default=False, help='Allow alumni')
     PARSER.add_argument('--test', dest='TEST', action='store_true',
                         default=False, help='Send email to developer')
     PARSER.add_argument('--write', dest='WRITE', action='store_true',
