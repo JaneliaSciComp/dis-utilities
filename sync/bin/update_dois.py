@@ -7,7 +7,7 @@
            to DIS MongoDB.
 """
 
-__version__ = '15.1.0'
+__version__ = '16.0.0'
 
 import argparse
 import collections
@@ -938,9 +938,6 @@ def add_openalex(rec):
         Returns:
           None
     '''
-    if 'jrc_is_oa' not in rec:
-        # For now, we're only adding Open Access data, which won't change
-        return
     try:
         data = DL.get_doi_record(rec['doi'], source='openalex')
     except Exception:
@@ -1108,21 +1105,20 @@ def generate_emails():
     '''
     msg = JRC.get_run_data(__file__, __version__)
     if ARG.SOURCE:
-        msg += f"DOIs passed in from {ARG.SOURCE}\n"
-    msg += f"The following DOIs were inserted into the {ARG.MANIFOLD} MongoDB DIS database:"
+        msg += f"<br>DOIs passed in from {ARG.SOURCE}<br>"
+    msg += f"The following DOIs were inserted into the {ARG.MANIFOLD} MongoDB DIS database:<br>"
     for doi in INSERTED:
-        msg += f"\n{doi}"
+        msg += f"<a href='https://dis.int.janelia.org/doiui/{doi}'>{doi}</a><br>"
     try:
         LOGGER.info(f"Sending email to {DISCONFIG['receivers']}")
         JRC.send_email(msg, DISCONFIG['sender'], DISCONFIG['developer'] \
                        if ARG.MANIFOLD == 'dev' else DISCONFIG['receivers'],
-                       "New DOIs")
+                       "New DOIs", mime='html')
     except Exception as err:
         LOGGER.error(err)
     if not TO_BE_PROCESSED:
         return
     msg = JRC.get_run_data(__file__, __version__)
-
     msg += "The following DOIs from a previous weekly cycle have been added to the database. " \
            + "Metadata should be updated as soon as possible."
     for doi in TO_BE_PROCESSED:
