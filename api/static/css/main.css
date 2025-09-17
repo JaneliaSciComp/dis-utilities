@@ -223,6 +223,11 @@ table.property {
   flex: 1;
 }
 
+.fas { 
+  color: white; 
+  text-shadow: 1px 1px #333 
+}
+
 h1.dark, h2.dark, h3.dark, h4.dark, h5.dark, h6.dark {
   color: #66c;
 }
