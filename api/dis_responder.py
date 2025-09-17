@@ -28,7 +28,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "80.0.0"
+__version__ = "81.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -3219,12 +3219,14 @@ def doi_tabs(doi, row, data, authors):
     if 'elife' in doi.lower():
         edata = DL.get_doi_record(doi, source='elife')
         if edata and 'acknowledgements' in edata and edata['acknowledgements']:
-            acktext = []
+            acklist = []
             for ack in edata['acknowledgements']:
-                acktext.append(ack['text'])
+                acklist.append(ack['text'])
             if ahtml:
                 ahtml += "<br>"
-            ahtml += f"<h4>Acknowledgements</h4><div class='abstract'>{'<br>'.join(acktext)}</div>"
+            acktext =  ' '.join(acklist)
+            #acktext = DL.highlight_acknowledgments(acktext, DB['dis'])
+            ahtml += f"<h4>Acknowledgements</h4><div class='abstract'>{acktext}</div>"
     if ahtml:
         content['ack'] = ahtml
     # Subjects
@@ -3368,6 +3370,10 @@ def show_doi_ui(doi):
     # Title
     doilink = f"<a href='{app.config['DOI']}{doi}' target='_blank'>{doi}</a>"
     badges = get_display_badges(doi, row, data, local)
+    doilink += " <button style='background-color:transparent;border:none;' " \
+               + f"onclick=\"copyText('{doi}')\">" \
+               + "<i class='fas fa-regular fa-copy shadow' " \
+               + "style='background-color:transparent'></i></button>"
     doititle = f"{doilink} (PMID: {row['jrc_pmid']})" if row and 'jrc_pmid' in row else doilink
     doititle += badges
     endpoint_access()
@@ -5460,7 +5466,8 @@ def show_open_access(year='All'):
         onclick = "onclick='nav_post_year(\"jrc_oa_status\",\"" + row['_id'] \
                           + "\",\"" + year + "\")'"
         link = f"<a href='#' {onclick}>{row['count']}</a>"
-        html += f"<tr><td>{row['_id'].capitalize()}</td><td>{CVTERM['oa_status'][row['_id']]['display']}</td>" \
+        html += f"<tr><td>{row['_id'].capitalize()}</td>" \
+                + f"<td>{CVTERM['oa_status'][row['_id']]['display']}</td>" \
                 + f"<td>{link}</td></tr>"
         data[row['_id'].capitalize()] = row['count']
         palette.append(DP.OA_COLORS[row['_id'].capitalize()])
@@ -6603,6 +6610,38 @@ def dois_ack():
                                          navbar=generate_navbar('Tag/affiliation')))
 
 
+@app.route('/dois_janelia_affiliations/<string:aff>')
+def dois_janelia_affiliations(aff):
+    ''' Show DOIs for Janelia affiliations
+    '''
+    payload = {"$or": [{"author.affiliation.name": aff},
+                       {"creators.affiliation": aff}
+                      ]}
+    try:
+        rows = DB['dis'].dois.find(payload)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get DOIs for Janelia affiliations"),
+                               message=error_message(err))
+    html = '<table id="dois" class="tablesorter standard"><thead><tr>' \
+           + '<th>Published</th><th>DOI</th><th>Title</th></tr></thead><tbody>'
+    crossref = datacite = 0
+    for row in rows:
+        auth = ""
+        if row['jrc_obtained_from'] == 'Crossref':
+            crossref += 1
+        else:
+            datacite += 1
+        html += f"<tr><td>{row['jrc_publishing_date']}</td><td>{doi_link(row['doi'])}</td>" \
+                + f"<td>{DL.get_title(row)}</td></tr>"
+    html += '</tbody></table>'
+    html = f"<p>Crossref DOIs: {crossref:,}<br>DataCite DOIs: {datacite:,}</p>" + html
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=f"DOIs with authors affiliated with {aff}",
+                                         html=html, navbar=generate_navbar('Tag/affiliation')))
+
+
 @app.route('/janelia_affiliations')
 def janelia_affiliations():
     ''' Show Janelia affiliations
@@ -6642,17 +6681,20 @@ def janelia_affiliations():
         else:
             affiliations[row['_id']] += row['count']
     html = '<table id="affiliations" class="tablesorter numbers"><thead><tr>' \
-           + '<th>Affiliation</th><th>Count</th>' \
+           + '<th>Affiliation</th><th>Author count</th>' \
            + '</tr></thead><tbody>'
     for aff, count in sorted(affiliations.items(), key=lambda item: item[1], reverse=True):
-        if aff == app.config['PREFERRED_AFF']:
-            aff = f"<span style='color: lime;'>{aff}</span>"
-        html += f"<tr><td>{aff}</td><td>{count:,}</td></tr>"
+        daff = aff
+        if aff in app.config['PREFERRED_AFF']:
+            daff = f"<span style='color: lime;'>{aff}</span>"
+        dlink = f"<a href='/dois_janelia_affiliations/{aff}'>{count:,}</a>"
+        html += f"<tr><td>{daff}</td><td>{dlink}</td></tr>"
     html += '</tbody></table>'
-
     html = "<p> When publishing a paper, please use the following affiliation for all Janelia " \
-           + f"authors:<br><span style='color: lime;'>{app.config['PREFERRED_AFF']}</span></p>" \
-           + html
+           + f"authors:<br><span style='color: lime;'>{app.config['PREFERRED_AFF'][0]}</span>" \
+           + " (if published domestically)" \
+           + f"<br><span style='color: lime;'>{app.config['PREFERRED_AFF'][1]}</span>" \
+           + " (if published internationally)</p>" + html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=f"DOI author affiliations ({len(affiliations):,})",
