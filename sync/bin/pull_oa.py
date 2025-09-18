@@ -117,6 +117,8 @@ def parse_authors(doi, msg, ready):
         Returns:
           True if there are Janelia authors, otherwise False
     '''
+    if 'doi' not in msg:
+        msg['doi'] = doi
     adet = DL.get_author_details(msg, DB['dis']['orcid'])
     if adet:
         janelians = []

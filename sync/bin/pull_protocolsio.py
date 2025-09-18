@@ -10,7 +10,7 @@ import os
 import sys
 from tqdm import tqdm
 import jrc_common.jrc_common as JRC
-import doi_common.doi_common as DL
+import doi_common2 as DL
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation,too-many-arguments,too-many-positional-arguments
 
@@ -126,6 +126,8 @@ def parse_authors(doi, msg, ready, review, nojanelians, alumni):
         Returns:
           None
     '''
+    if 'doi' not in msg:
+        msg['doi'] = doi
     adet = DL.get_author_details(msg, DB['dis']['orcid'])
     if adet:
         alum = []

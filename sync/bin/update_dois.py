@@ -170,9 +170,9 @@ def get_dois_from_crossref(flt="janelia"):
     while not complete:
         try:
             if parts:
-                resp = JRC.call_crossref(f"{suffix}&offset={parts*1000}", timeout=20)
+                resp = JRC.call_crossref(f"{suffix}&offset={parts*1000}", timeout=30)
             else:
-                resp = JRC.call_crossref(suffix, timeout=20)
+                resp = JRC.call_crossref(suffix, timeout=30)
         except Exception as err:
             terminate_program(err)
         recs = resp['message']['items']
@@ -834,11 +834,13 @@ def add_tags(persist):
         try:
             rec = DB['dis'].dois.find_one({"doi": key})
         except Exception as err:
-            terminate_program(err)
+            terminate_program(f"Could not get {key} from MongoDB: {err}")
         try:
+            if 'doi' not in val:
+                val['doi'] = key
             authors = DL.get_author_details(val, coll)
         except Exception as err:
-            terminate_program(err)
+            terminate_program(f"Could not get authors for {key}: {err}")
         if not authors:
             continue
         # Update jrc_tag using the authors
