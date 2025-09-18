@@ -43,7 +43,6 @@ NAV = {"Home": "",
        "DOIs": {"DOIs by insertion date": "dois_insertpicker",
                 "DOI stats": "dois_source",
                 "DOIs awaiting processing": "dois_pending",
-                "DOIs by publisher": "dois_publisher",
                 "DOIs by subject": "dois_subjectpicker",
                 "DOIs by year": "dois_year",
                 "DOIs by month": "dois_month",
@@ -61,7 +60,9 @@ NAV = {"Home": "",
                      "Preprints with journal publications": "preprint_with_pub",
                      "Preprints without journal publications": "preprint_no_pub",
                      "Journal publications without preprints": "pub_no_preprint"},
-       "Journals": {"Open Access report": "dois_oa",
+       "Journals": {"DOIs by publisher": "dois_publisher",
+                    "Open access report": "dois_oa",
+                    "Open access details": "dois_oa_details",
                     "DOIs by journal": "journals_dois",
                     "Top journals": "top_journals",
                     "DOIs missing journals": "dois_nojournal",
@@ -3127,7 +3128,7 @@ def get_citation_counts(doi, row, partial=True):
         else:
             tblrow.append(f"<td>OpenAlex: {citcnt:,}{cbutton}</td>")
     # PubMed
-    if 'jrc_pmid' in row:
+    if 'jrc_pmid' in row and not partial:
         try:
             citcnt, url = DL.get_citation_count(row['jrc_pmid'], 'pubmed')
         except Exception:
@@ -3144,11 +3145,12 @@ def get_citation_counts(doi, row, partial=True):
     if citcnt:
         tblrow.append(f"<td>Semantic Scholar: {citcnt}</td>")
     # Web of Science
-    citcnt, url = DL.get_citation_count(doi, 'wos',
-                                        bool(row['jrc_obtained_from'] == 'DataCite'))
-    if citcnt:
-        tblrow.append(f"<td>Web of Science: <a href='{url}' target='_blank'>" \
-                      + f"{citcnt:,}</a></td>")
+    if not partial:
+        citcnt, url = DL.get_citation_count(doi, 'wos',
+                                            bool(row['jrc_obtained_from'] == 'DataCite'))
+        if citcnt:
+            tblrow.append(f"<td>Web of Science: <a href='{url}' target='_blank'>" \
+                          + f"{citcnt:,}</a></td>")
     if tblrow:
         doisec += "<table id='citations' class='citations'><thead>" \
                   + f"<tr><th colspan={len(tblrow)}>Citation counts&nbsp;" \
@@ -3225,7 +3227,7 @@ def doi_tabs(doi, row, data, authors):
             if ahtml:
                 ahtml += "<br>"
             acktext =  ' '.join(acklist)
-            #acktext = DL.highlight_acknowledgments(acktext, DB['dis'])
+            # acktext = DL.highlight_acknowledgments(acktext, DB['dis']) # experimental
             ahtml += f"<h4>Acknowledgements</h4><div class='abstract'>{acktext}</div>"
     if ahtml:
         content['ack'] = ahtml
@@ -4175,61 +4177,6 @@ def dois_pending():
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="DOIs awaiting processing", html=html,
                                          navbar=generate_navbar('DOIs')))
-
-@app.route('/dois_publisher/<string:year>')
-@app.route('/dois_publisher')
-def dois_publisher(year='All'):
-    ''' Show publishers with counts
-    '''
-    if year == 'All':
-        match = {}
-    else:
-        match = {"jrc_publishing_date": {"$regex": "^"+ year}}
-    payload = [{"$match": match},
-               {"$group": {"_id": {"publisher": "$publisher", "source": "$jrc_obtained_from"},
-                           "count":{"$sum": 1}}},
-               {"$sort": {"_id.publisher": 1}}
-              ]
-    try:
-        rows = DB['dis'].dois.aggregate(payload)
-    except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get publishers " \
-                                                    + "from dois collection"),
-                               message=error_message(err))
-    html = '<table id="types" class="tablesorter numbers"><thead><tr>' \
-           + '<th>Publisher</th><th>Crossref</th><th>DataCite</th>' \
-           + '</tr></thead><tbody>'
-    pubs = {}
-    for row in rows:
-        if row['_id']['publisher'] not in pubs:
-            pubs[row['_id']['publisher']] = {}
-        if row['_id']['source'] not in pubs[row['_id']['publisher']]:
-            pubs[row['_id']['publisher']][row['_id']['source']] = row['count']
-    for pub, val in pubs.items():
-        onclick = "onclick='nav_post(\"publisher\",\"" + pub + "\")'"
-        link = f"<a href='#' {onclick}>{pub}</a>"
-        html += f"<tr><td>{link}</td>"
-        for source in app.config['SOURCES']:
-            if source in val:
-                onclick = "onclick='nav_post(\"publisher\",\"" + pub \
-                          + "\",\"" + source + "\")'"
-                link = f"<a href='#' {onclick}>{val[source]:,}</a>"
-            else:
-                link = ""
-            html += f"<td>{link}</td>"
-        html += "</tr>"
-    html += '</tbody></table>'
-    html = year_pulldown('dois_publisher') + html
-    title = "DOI publishers"
-    if year != 'All':
-        title += f" for {year}"
-    title += f" ({len(pubs):,})"
-    endpoint_access()
-    return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title=title, html=html,
-                                         navbar=generate_navbar('DOIs')))
-
 
 @app.route('/dois_subjectpicker')
 def show_doi_subjectpicker():
@@ -5436,9 +5383,97 @@ def pub_no_preprint():
 # * UI endpoints (Journals)                                                    *
 # ******************************************************************************
 
-@app.route('/dois_oa/<string:year>')
+@app.route('/dois_publisher/<string:year>')
+@app.route('/dois_publisher')
+def dois_publisher(year='All'):
+    ''' Show publishers with counts
+    '''
+    if year == 'All':
+        match = {}
+    else:
+        match = {"jrc_publishing_date": {"$regex": "^"+ year}}
+    payload = [{"$match": match},
+               {"$group": {"_id": {"publisher": "$publisher", "source": "$jrc_obtained_from"},
+                           "count":{"$sum": 1}}},
+               {"$sort": {"_id.publisher": 1}}
+              ]
+    try:
+        rows = DB['dis'].dois.aggregate(payload)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get publishers " \
+                                                    + "from dois collection"),
+                               message=error_message(err))
+    html = '<table id="types" class="tablesorter numbers"><thead><tr>' \
+           + '<th>Publisher</th><th>Crossref</th><th>DataCite</th>' \
+           + '</tr></thead><tbody>'
+    pubs = {}
+    for row in rows:
+        if row['_id']['publisher'] not in pubs:
+            pubs[row['_id']['publisher']] = {}
+        if row['_id']['source'] not in pubs[row['_id']['publisher']]:
+            pubs[row['_id']['publisher']][row['_id']['source']] = row['count']
+    for pub, val in pubs.items():
+        onclick = "onclick='nav_post(\"publisher\",\"" + pub + "\")'"
+        link = f"<a href='#' {onclick}>{pub}</a>"
+        html += f"<tr><td>{link}</td>"
+        for source in app.config['SOURCES']:
+            if source in val:
+                onclick = "onclick='nav_post(\"publisher\",\"" + pub \
+                          + "\",\"" + source + "\")'"
+                link = f"<a href='#' {onclick}>{val[source]:,}</a>"
+            else:
+                link = ""
+            html += f"<td>{link}</td>"
+        html += "</tr>"
+    html += '</tbody></table>'
+    html = year_pulldown('dois_publisher') + html
+    title = "DOI publishers"
+    if year != 'All':
+        title += f" for {year}"
+    title += f" ({len(pubs):,})"
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=title, html=html,
+                                         navbar=generate_navbar('DOIs')))
+
+
 @app.route('/dois_oa')
-def show_open_access(year='All'):
+def show_open_access():
+    ''' Show DOIs by year
+    '''
+    html = "DOIs from <a href='https://openalex.org/' target='_blank'>OpenAlex</a> include all " \
+           + "Crossref DOIs from Janelia. Note that this will not include most DOIs from " \
+           + "DataCite (such as datasets, software, etc.)."
+    try:
+        resp = requests.get('https://api.openalex.org/institutions?search=Janelia', timeout=10)
+        results = resp.json()['results'][0]
+        counts = results['counts_by_year']
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get institution information " \
+                                                    + "from OpenAlex"),
+                               message=error_message(err))
+    counts = sorted(counts, key=lambda x: x['year'])
+    html += f"<h5>Total citations for Janelia DOIs since {counts[0]['year']}: " \
+            + f"{results['cited_by_count']:,}" + "</h5>"
+    data = {'years': [str(itm['year']) for itm in counts],
+            'Closed': [itm['works_count']-itm['oa_works_count'] for itm in counts],
+            'Open': [itm['oa_works_count'] for itm in counts],
+            'Citations': [itm['cited_by_count'] for itm in counts]}
+    chartscript, chartdiv = DP.stacked_bar_chart(data, 'OpenAlex DOIs', xaxis="years",
+                                                 yaxis=('Closed', 'Open'), yaxis2='Citations',
+                                                 colors=['maroon', 'green'])
+    endpoint_access()
+    return make_response(render_template('bokeh.html', urlroot=request.url_root,
+                                         title="OpenAlex DOIs by year", html=html,
+                                         chartscript=chartscript, chartdiv=chartdiv,
+                                         navbar=generate_navbar('DOIs')))
+
+
+@app.route('/dois_oa_details/<string:year>')
+@app.route('/dois_oa_details')
+def show_open_access_details(year='All'):
     ''' Show open access DOIs
     '''
     match = {'jrc_is_oa': {"$exists": True}}
@@ -5452,7 +5487,7 @@ def show_open_access(year='All'):
         rows = DB['dis'].dois.aggregate(payload)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning('Could not get Open Access data'),
+                               title=render_warning('Could not get Open access data'),
                                message=error_message(err))
     total = total_oa = 0
     html = '<table id="dois" class="tablesorter numberlast" width=500><thead><tr>' \
@@ -5472,7 +5507,7 @@ def show_open_access(year='All'):
         data[row['_id'].capitalize()] = row['count']
         palette.append(DP.OA_COLORS[row['_id'].capitalize()])
     html += '</tbody></table>'
-    title = 'Open Access DOIs'
+    title = 'Open access DOIs'
     if year != 'All':
         title += f" ({year})"
     chartscript, chartdiv = DP.pie_chart(data, title, "oa_status", width=500,
@@ -5480,7 +5515,7 @@ def show_open_access(year='All'):
     ymsg = f" for {year}" if year != 'All' else ''
     pre = f"<span style='font-size: 18pt; color: lime'>{total_oa/total*100:.1f}%</span>" \
           + f"<span style='font-size: 14pt'> of Crossref DOIs{ymsg} are open access</span>"
-    html = pre + '<br>' + year_pulldown('dois_oa') + html
+    html = pre + '<br>' + year_pulldown('dois_oa_details') + html
     endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title=title, html=html,
@@ -6627,7 +6662,6 @@ def dois_janelia_affiliations(aff):
            + '<th>Published</th><th>DOI</th><th>Title</th></tr></thead><tbody>'
     crossref = datacite = 0
     for row in rows:
-        auth = ""
         if row['jrc_obtained_from'] == 'Crossref':
             crossref += 1
         else:

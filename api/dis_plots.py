@@ -2,13 +2,13 @@
     Plot functions for the DIS UI
 '''
 
-from math import pi
-from bokeh.model import data_model
-import pandas as pd
+from math import ceil, pi
+from bokeh.models import Range1d, HoverTool, LinearAxis
 from bokeh.embed import components
 from bokeh.palettes import all_palettes, plasma
 from bokeh.plotting import figure
 from bokeh.transform import cumsum
+import pandas as pd
 
 OA_COLORS = {"Bronze": "#CD7F32", "Closed": "red", "Diamond": "lightgray",
              "Gold": "#FFD700", "Green": "green", "Hybrid": "mediumblue"}
@@ -156,7 +156,7 @@ def pie_chart(data, title, legend, height=300, width=400, location="right", colo
     return components(plt)
 
 
-def stacked_bar_chart(data, title, xaxis, yaxis, colors=None, width=None, height=None):
+def stacked_bar_chart(data, title, xaxis, yaxis, colors=None, width=None, height=None, yaxis2=None):
     ''' Create a stacked bar chart
         Keyword arguments:
           data: dictionary of data
@@ -166,6 +166,7 @@ def stacked_bar_chart(data, title, xaxis, yaxis, colors=None, width=None, height
           colors: list of colors (optional)
           width: width of chart (optional)
           height: height of chart (optional)
+          yaxis2: extra y-axis column name (optional)
         Returns:
           Figure components
     '''
@@ -179,8 +180,22 @@ def stacked_bar_chart(data, title, xaxis, yaxis, colors=None, width=None, height
         plt.height = height
     plt.vbar_stack(yaxis, x=xaxis, width=0.9,
                    color=colors, source=data,
-                   legend_label=yaxis
-                   )
+                   legend_label=yaxis)
+    if yaxis2:
+        # Secondary linear plot
+        plt.add_tools(HoverTool(tooltips=f"$name @{yaxis2}: @$name"))
+        plt.yaxis.axis_label = ' + '.join(yaxis)
+        ymax = 0
+        for y in yaxis:
+            ymax += max(data[y])
+        plt.y_range = Range1d(0, ymax)
+        ymax = max(data[yaxis2])
+        ymax = ceil(ymax / 1000) * 1000
+        plt.extra_y_ranges = {yaxis2: Range1d(start=0, end=ymax)}
+        plt.add_layout(LinearAxis(y_range_name=yaxis2, axis_label=yaxis2), 'right')
+        plt.line(xaxis, yaxis2, color="black", source=data,
+                 line_width=2, legend_label=yaxis2,
+                 y_range_name=yaxis2)
     plt.legend.location = 'top_left'
     if width and height:
         plt.add_layout(plt.legend[0], 'right')
