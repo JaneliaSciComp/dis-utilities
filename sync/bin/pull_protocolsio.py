@@ -10,7 +10,7 @@ import os
 import sys
 from tqdm import tqdm
 import jrc_common.jrc_common as JRC
-import doi_common2 as DL
+import doi_common.doi_common as DL
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation,too-many-arguments,too-many-positional-arguments
 
