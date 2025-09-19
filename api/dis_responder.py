@@ -61,7 +61,7 @@ NAV = {"Home": "",
                      "Preprints without journal publications": "preprint_no_pub",
                      "Journal publications without preprints": "pub_no_preprint"},
        "Journals": {"DOIs by publisher": "dois_publisher",
-                    "Open access report": "dois_oa",
+                    #"Open access report": "dois_oa",
                     "Open access details": "dois_oa_details",
                     "DOIs by journal": "journals_dois",
                     "Top journals": "top_journals",
@@ -5506,7 +5506,8 @@ def show_open_access_details(year='All'):
                 + f"<td>{link}</td></tr>"
         data[row['_id'].capitalize()] = row['count']
         palette.append(DP.OA_COLORS[row['_id'].capitalize()])
-    html += '</tbody></table>'
+    html += "</tbody><tfoot><tr><th colspan=2>Total</th><th style='text-align: center;'>" \
+            + f"{total:,}</th></tr></tfoot></table>"
     title = 'Open access DOIs'
     if year != 'All':
         title += f" ({year})"
