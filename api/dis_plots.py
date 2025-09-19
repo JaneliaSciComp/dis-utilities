@@ -156,7 +156,8 @@ def pie_chart(data, title, legend, height=300, width=400, location="right", colo
     return components(plt)
 
 
-def stacked_bar_chart(data, title, xaxis, yaxis, colors=None, width=None, height=None, yaxis2=None):
+def stacked_bar_chart(data, title, xaxis, yaxis, colors=None, width=None, height=None,
+                      orient=None,yaxis2=None):
     ''' Create a stacked bar chart
         Keyword arguments:
           data: dictionary of data
@@ -166,6 +167,7 @@ def stacked_bar_chart(data, title, xaxis, yaxis, colors=None, width=None, height
           colors: list of colors (optional)
           width: width of chart (optional)
           height: height of chart (optional)
+          orient: orientation of x-axis labels (optional)
           yaxis2: extra y-axis column name (optional)
         Returns:
           Figure components
@@ -181,6 +183,8 @@ def stacked_bar_chart(data, title, xaxis, yaxis, colors=None, width=None, height
     plt.vbar_stack(yaxis, x=xaxis, width=0.9,
                    color=colors, source=data,
                    legend_label=yaxis)
+    if orient:
+        plt.xaxis.major_label_orientation = orient
     if yaxis2:
         # Secondary linear plot
         plt.add_tools(HoverTool(tooltips=f"$name @{yaxis2}: @$name"))
