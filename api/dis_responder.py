@@ -8,6 +8,7 @@ from html import escape
 import inspect
 import json
 from json import JSONEncoder
+from math import pi
 from operator import attrgetter, itemgetter
 import os
 import random
@@ -28,7 +29,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "81.0.0"
+__version__ = "82.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -61,7 +62,7 @@ NAV = {"Home": "",
                      "Preprints without journal publications": "preprint_no_pub",
                      "Journal publications without preprints": "pub_no_preprint"},
        "Journals": {"DOIs by publisher": "dois_publisher",
-                    #"Open access report": "dois_oa",
+                    "Open access report": "dois_oa",
                     "Open access details": "dois_oa_details",
                     "DOIs by journal": "journals_dois",
                     "Top journals": "top_journals",
@@ -5442,9 +5443,16 @@ def dois_publisher(year='All'):
 def show_open_access():
     ''' Show DOIs by year
     '''
-    html = "DOIs from <a href='https://openalex.org/' target='_blank'>OpenAlex</a> include all " \
-           + "Crossref DOIs from Janelia. Note that this will not include most DOIs from " \
-           + "DataCite (such as datasets, software, etc.)."
+    html = '''DOIs from <a href='https://openalex.org/' target='_blank'>OpenAlex</a> include all
+    Crossref DOIs from Janelia. Note that this will not include most DOIs from DataCite (such as
+    datasets, software, etc.).
+    <ul>
+    <li>Citation counts are available starting 2012. These counts represent the number of
+    DOIs (from any source) published that year that cite any Janelia DOI (from any year).</li>
+    <li>Closed DOIs are DOIs that are in a non-Open Access journal that we cannot find
+    freely-available open text for.</li>
+    </ul>
+    '''
     try:
         resp = requests.get('https://api.openalex.org/institutions?search=Janelia', timeout=10)
         results = resp.json()['results'][0]
@@ -5455,13 +5463,46 @@ def show_open_access():
                                                     + "from OpenAlex"),
                                message=error_message(err))
     counts = sorted(counts, key=lambda x: x['year'])
+    try:
+        internal = get_oa_year_counts()
+    except Exception as err:
+            return render_template('error.html', urlroot=request.url_root,
+                                   title=render_warning('Could not get Open access data from dois collection'),
+                                   message=error_message(err))
+    adj = {}
+    for row in internal:
+        yr = str(row['_id']['year'])
+        if yr not in adj:
+            adj[yr] = {"open": 0, "closed": 0}
+        if row['_id']['status'] == 'closed':
+            adj[yr]['closed'] += row['count']
+        else:
+            adj[yr]['open'] += row['count']
+    adjusted = []
+    years = []
+    for row in counts:
+        yr = str(row['year'])
+        years.append(yr)
+        adjusted.append({"year": int(yr), "org_closed": row['works_count']-row['oa_works_count'],
+                         "org_open": row['oa_works_count'], "cited_by_count": row['cited_by_count'],
+                         "closed": adj[yr]['closed'], "open": adj[yr]['open']})
+    for key, row in adj.items():
+        if key in years:
+            continue
+        adjusted.append({"year": int(key), "org_closed": 0, "org_open": 0,
+                         "cited_by_count": 0, "closed": row['closed'], "open": row['open']})
+    adjusted = sorted(adjusted, key=lambda x: x['year'])
     html += f"<h5>Total citations for Janelia DOIs since {counts[0]['year']}: " \
             + f"{results['cited_by_count']:,}" + "</h5>"
     data = {'years': [str(itm['year']) for itm in counts],
-            'Closed': [itm['works_count']-itm['oa_works_count'] for itm in counts],
+            'Closed': [itm['works_count'] - itm['oa_works_count'] for itm in counts],
             'Open': [itm['oa_works_count'] for itm in counts],
             'Citations': [itm['cited_by_count'] for itm in counts]}
-    chartscript, chartdiv = DP.stacked_bar_chart(data, 'OpenAlex DOIs', xaxis="years",
+    data = {'years': [str(itm['year']) for itm in adjusted],
+            'Closed': [itm['closed'] for itm in adjusted],
+            'Open': [itm['open'] for itm in adjusted],
+            'Citations': [itm['cited_by_count'] for itm in adjusted]}
+    chartscript, chartdiv = DP.stacked_bar_chart(data, 'OpenAlex DOIs', xaxis="years", orient=pi/4,
                                                  yaxis=('Closed', 'Open'), yaxis2='Citations',
                                                  colors=['maroon', 'green'])
     endpoint_access()
@@ -5469,6 +5510,21 @@ def show_open_access():
                                          title="OpenAlex DOIs by year", html=html,
                                          chartscript=chartscript, chartdiv=chartdiv,
                                          navbar=generate_navbar('DOIs')))
+
+
+def get_oa_year_counts():
+    ''' Get open access year counts
+    '''
+    payload = [{'$match': {'jrc_is_oa': {'$exists': True}}},
+               {'$project': {'year': {'$substr': ['$jrc_publishing_date', 0, 4]}, 'status': '$jrc_oa_status'}},
+               {'$group': {'_id': {'year': '$year', 'status': '$status'}, 'count': {'$sum': 1}}},
+               {'$sort': {'_id.year': 1}}
+              ]
+    try:
+        rows = DB['dis'].dois.aggregate(payload)
+    except Exception as err:
+        raise err
+    return rows
 
 
 @app.route('/dois_oa_details/<string:year>')
