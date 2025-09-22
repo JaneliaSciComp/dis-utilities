@@ -29,7 +29,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "82.0.0"
+__version__ = "82.1.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -5443,9 +5443,9 @@ def dois_publisher(year='All'):
 def show_open_access():
     ''' Show DOIs by year
     '''
-    html = '''DOIs from <a href='https://openalex.org/' target='_blank'>OpenAlex</a> include all
-    Crossref DOIs from Janelia. Note that this will not include most DOIs from DataCite (such as
-    datasets, software, etc.).
+    html = '''DOIs from <a href='https://openalex.org/' target='_blank'>OpenAlex</a> include
+    nearly all Crossref DOIs from Janelia. OpenAlex will not include most DOIs from DataCite
+    (such as datasets, software, etc.).
     <ul>
     <li>Citation counts are available starting 2012. These counts represent the number of
     DOIs (from any source) published that year that cite any Janelia DOI (from any year).</li>
@@ -5466,9 +5466,10 @@ def show_open_access():
     try:
         internal = get_oa_year_counts()
     except Exception as err:
-            return render_template('error.html', urlroot=request.url_root,
-                                   title=render_warning('Could not get Open access data from dois collection'),
-                                   message=error_message(err))
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning('Could not get Open access data from ' \
+                                                    + 'dois collection'),
+                               message=error_message(err))
     adj = {}
     for row in internal:
         yr = str(row['_id']['year'])
@@ -5516,7 +5517,8 @@ def get_oa_year_counts():
     ''' Get open access year counts
     '''
     payload = [{'$match': {'jrc_is_oa': {'$exists': True}}},
-               {'$project': {'year': {'$substr': ['$jrc_publishing_date', 0, 4]}, 'status': '$jrc_oa_status'}},
+               {'$project': {'year': {'$substr': ['$jrc_publishing_date', 0, 4]},
+                             'doi': '$doi', 'status': '$jrc_oa_status'}},
                {'$group': {'_id': {'year': '$year', 'status': '$status'}, 'count': {'$sum': 1}}},
                {'$sort': {'_id.year': 1}}
               ]
@@ -5571,8 +5573,39 @@ def show_open_access_details(year='All'):
                                          colors=palette)
     ymsg = f" for {year}" if year != 'All' else ''
     pre = f"<span style='font-size: 18pt; color: lime'>{total_oa/total*100:.1f}%</span>" \
-          + f"<span style='font-size: 14pt'> of Crossref DOIs{ymsg} are open access</span>"
+          + f"<span style='font-size: 14pt'> of Janelia DOIs in OpenAlex{ymsg} are " \
+          + "open access</span>"
     html = pre + '<br>' + year_pulldown('dois_oa_details') + html
+    match = {"doi": {"$not": {"$regex": "janelia"}}}
+    if year != 'All':
+        match["jrc_publishing_date"] = {"$regex": "^"+ year}
+    payload = [{"$match": match},
+               {"$group": {"_id": {"source": "$jrc_obtained_from", "oa": "$jrc_is_oa"},
+                           "count": {"$sum": 1}}}
+              ]
+    try:
+        rows = DB['dis'].dois.aggregate(payload)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get Open access data"),
+                               message=error_message(err))
+    tbl = {"Crossref": {"in": 0, "out": 0, "total": 0}, "DataCite": {"in": 0, "out": 0, "total": 0}}
+    for row in rows:
+        if 'oa' in row['_id']:
+            tbl[row['_id']['source']]['in'] += row['count']
+        else:
+            tbl[row['_id']['source']]['out'] += row['count']
+        tbl[row['_id']['source']]['total'] += row['count']
+    html += '<h5>Janelia DOI coverage in OpenAlex</h5>' \
+            + '<table id="dois" class="tablesorter numbers"><thead><tr>' \
+            + '<th>Source</th><th>In OpenAlex</th><th>Not in OpenAlex</th><th>Total</th>' \
+            + '<th>% coverage</th></tr></thead><tbody>'
+    for key, val in tbl.items():
+        html += f"<tr><td>{key}</td><td>{val['in']:,}</td><td>{val['out']:,}</td>" \
+                + f"<td>{val['total']:,}</td><td>{val['in']/val['total']*100:.1f}%</td></tr>"
+    html += '</tbody></table>'
+    html += 'Note that DataCite DOIs do not include Janelia Figshare DOIs<br>' \
+            + '(which will never be in OpenAlex)'
     endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title=title, html=html,
