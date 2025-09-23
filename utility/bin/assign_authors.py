@@ -202,6 +202,7 @@ def processing():
                                headers=headers, timeout=10).json()
     except Exception as err:
         terminate_program(err)
+    #print(json.dumps(authors['data'], indent=4))
     jrc_authors = get_authors(authors['data'], original)
     LOGGER.debug(f"{json.dumps(jrc_authors)}")
     payload = get_payload(jrc_authors)
