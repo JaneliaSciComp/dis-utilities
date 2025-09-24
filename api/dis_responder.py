@@ -29,7 +29,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "82.1.0"
+__version__ = "83.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -976,6 +976,22 @@ def get_doi(doi):
     return source, data
 
 
+def get_oa_year_counts():
+    ''' Get open access year counts
+    '''
+    payload = [{'$match': {'jrc_is_oa': {'$exists': True}}},
+               {'$project': {'year': {'$substr': ['$jrc_publishing_date', 0, 4]},
+                             'doi': '$doi', 'status': '$jrc_oa_status'}},
+               {'$group': {'_id': {'year': '$year', 'status': '$status'}, 'count': {'$sum': 1}}},
+               {'$sort': {'_id.year': 1}}
+              ]
+    try:
+        rows = DB['dis'].dois.aggregate(payload)
+    except Exception as err:
+        raise err
+    return rows
+
+
 def get_separator(last, this):
     ''' Get a separator between dates, with a badge if the delta a day or more
         Keyword arguments:
@@ -1075,6 +1091,11 @@ def add_jrc_fields(row):
             val = ", ".join(link)
         if key == 'jrc_preprint':
             val = doi_link(val)
+        if key == 'jrc_license' and val in CVTERM['license']:
+            newval = f"{CVTERM['license'][val]['definition']}"
+            if CVTERM['license'][val]['definition'] != CVTERM['license'][val]['display']:
+                newval += f" ({CVTERM['license'][val]['display']})"
+            val = newval
         html += f"<tr><td>{CVTERM['jrc'][key]['display'] if key in CVTERM['jrc'] else key}</td>" \
                 + f"<td>{val}</td></tr>"
     html += "</table><br>"
@@ -1401,6 +1422,28 @@ def get_source_data(year):
         data['DataCite'] += row['count']
         hdict["_".join(['DataCite', row['_id'], ""])] = row['count']
     return data, hdict
+
+
+def parse_pmc_ack(edata):
+    ''' Parse PMC acknowledgements
+    '''
+    acktext = ""
+    if 'p' in edata and edata['p']:
+        try:
+            if isinstance(edata['p'], str):
+                acktext = edata['p']
+            elif isinstance(edata['p'], dict) and '#text' in edata['p']:
+                acktext = edata['p']['#text']
+            elif isinstance(edata['p'], list):
+                if isinstance(edata['p'][0], str):
+                    acktext = " ".join(edata['p'])
+                elif isinstance(edata['p'][0], dict) and '#text' in edata['p'][0]:
+                    acktext = " ".join([p['#text'] for p in edata['p']])
+        except Exception as err:
+            acktext = "<span style='color:red'>Error parsing acknowledgements: " \
+                      + f"{err}</span><br>" \
+                      + f"<pre>{json.dumps(edata['p'], indent=2)}</pre>"
+    return acktext
 
 
 def s2_citation_count(doi, fmt='plain'):
@@ -3219,6 +3262,7 @@ def doi_tabs(doi, row, data, authors):
             tags.append(f"<a href='/tag/{escape(tag['name'])}'>{tag['name']}</a>")
         if tags:
             ahtml += "<h4>Acknowledgement tags</h4>" + "<br>".join(tags)
+    acktext = ""
     if 'elife' in doi.lower():
         edata = DL.get_doi_record(doi, source='elife')
         if edata and 'acknowledgements' in edata and edata['acknowledgements']:
@@ -3228,8 +3272,31 @@ def doi_tabs(doi, row, data, authors):
             if ahtml:
                 ahtml += "<br>"
             acktext =  ' '.join(acklist)
-            # acktext = DL.highlight_acknowledgments(acktext, DB['dis']) # experimental
-            ahtml += f"<h4>Acknowledgements</h4><div class='abstract'>{acktext}</div>"
+    elif row and 'jrc_pmc' in row and row['jrc_pmc']:
+        edata = DL.get_doi_record(row['jrc_pmc'], source='pmc')
+        if edata and 'OAI-PMH' in edata and 'GetRecord' in edata['OAI-PMH']:
+            try:
+                edata = edata['OAI-PMH']['GetRecord']['record']['metadata']
+                edata = edata['article']['back']['ack']
+            except Exception as err:
+                print(f"Error in doi_tabs for {row['doi']}: {err}")
+                edata = {}
+            acktext = parse_pmc_ack(edata)
+    if acktext:
+        highlight = ""
+        try:
+            #highlight = DL.highlight_acknowledgments(acktext, DB['dis'])
+            highlight = acktext  #PLUG
+            if acktext != highlight:
+                acktext = highlight
+            else:
+                highlight = ""
+        except Exception:
+            pass
+        ahtml += f"<h4>Acknowledgements</h4><div class='abstract'>{acktext}</div>"
+        if highlight:
+            ahtml += "<br><span style='color:goldenrod'><i class='fa-solid fa-warning'></i>" \
+                     + " Acknowledgment highlighting is an experimental feature</span>"
     if ahtml:
         content['ack'] = ahtml
     # Subjects
@@ -4837,14 +4904,15 @@ def dois_no_janelia(year='All'):
 @app.route('/raw/<string:resource>/<path:doi>')
 def show_raw(resource=None, doi=None):
     ''' JSON metadata for a DOI
-    resource: biorxiv, elife, elsevier, figshare, openalex, protocols.io
+    resource: biorxiv, elife, elsevier, figshare, openalex, protocols.io, pubmed, pmc
     '''
     doi = doi.lstrip('/').rstrip('/').lower()
     result = initialize_result()
     response = None
     if resource:
         resource = resource.lower()
-    if resource in ('biorxiv', 'elife', 'elsevier', 'openalex'):
+        result['rest']['source'] = DL.doi_api_url(doi, source=resource)
+    if resource in ('biorxiv', 'elife', 'elsevier', 'openalex', 'pmc', 'pubmed'):
         try:
             response = DL.get_doi_record(doi, source=resource)
         except Exception as err:
@@ -5511,22 +5579,6 @@ def show_open_access():
                                          title="OpenAlex DOIs by year", html=html,
                                          chartscript=chartscript, chartdiv=chartdiv,
                                          navbar=generate_navbar('DOIs')))
-
-
-def get_oa_year_counts():
-    ''' Get open access year counts
-    '''
-    payload = [{'$match': {'jrc_is_oa': {'$exists': True}}},
-               {'$project': {'year': {'$substr': ['$jrc_publishing_date', 0, 4]},
-                             'doi': '$doi', 'status': '$jrc_oa_status'}},
-               {'$group': {'_id': {'year': '$year', 'status': '$status'}, 'count': {'$sum': 1}}},
-               {'$sort': {'_id.year': 1}}
-              ]
-    try:
-        rows = DB['dis'].dois.aggregate(payload)
-    except Exception as err:
-        raise err
-    return rows
 
 
 @app.route('/dois_oa_details/<string:year>')
