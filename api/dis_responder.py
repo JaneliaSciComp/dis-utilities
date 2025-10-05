@@ -15,7 +15,7 @@ import random
 import re
 import string
 import sys
-from time import time
+from time import sleep, time
 from urllib.parse import unquote
 from bokeh.palettes import all_palettes, plasma
 import bson
@@ -29,7 +29,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "83.0.0"
+__version__ = "84.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -1642,6 +1642,7 @@ def show_openalex_authors(doi, confirmed):
         Returns:
           List of HTML authors
     '''
+    sleep(0.1)
     data = DL.get_doi_record(doi, source='openalex')
     if not data:
         return "", 0
@@ -3101,6 +3102,7 @@ def get_display_badges(doi, row, data, local):
         if oresp:
             olink = f"{app.config['OAREPORT']}{doi}"
             badges += f" {tiny_badge('source', 'OA.Report', olink)}"
+        sleep(0.1)
         oresp = DL.get_doi_record(doi, source='openalex')
         if oresp:
             olink = f"/raw/openalex/{doi}"
@@ -3157,6 +3159,7 @@ def get_citation_counts(doi, row, partial=True):
         if citcnt:
             tblrow.append(f"<td>OA.Report: {citcnt:,}</td>")
     # OpenAlex
+    sleep(0.1)
     try:
         citcnt, url = DL.get_citation_count(doi, 'openalex')
     except Exception:
@@ -3969,6 +3972,53 @@ def dois_year():
     endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title="DOIs published by year", html=html,
+                                         chartscript=chartscript, chartdiv=chartdiv,
+                                         navbar=generate_navbar('DOIs')))
+
+
+@app.route('/dois/group/<string:field>')
+def show_grouped_dois(field):
+    ''' A grouping of DOIs as a table for a given field
+    '''
+    payload = ([{"$group": {"_id": f"${field}", "count": {"$sum": 1}}},
+               {"$sort": {"count": -1}}
+               ])
+    try:
+        rows = DB['dis'].dois.aggregate(payload)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get DOIs from dois collection"),
+                               message=error_message(err))
+    html = "<table id='dois' class='tablesorter standard'><thead><tr>" \
+           + f"<th>{field}</th><th>Count</th></tr></thead><tbody>"
+    total = cnt = 0
+    data = {}
+    for row in rows:
+        cnt += 1
+        html += f"<tr><td>{row['_id']}</td><td>{row['count']}</td></tr>"
+        if not (isinstance(row['_id'], list) or isinstance(row['_id'], dict)):
+            data[row['_id']] = row['count']
+        total += row['count']
+    if not total:
+        return render_template('warning.html', urlroot=request.url_root,
+                               title=render_warning("Could not find DOIs", 'warning'),
+                               message=f"Could not find any DOIs with title matching {title}")
+    html += f"</tbody><tfoot><tr><th>Total</th><th>{total}</th></tr></tfoot>"
+    html += "</table>"
+    chartscript = chartdiv = ""
+    if cnt > 1 and data:
+        colors = plasma(cnt)
+        if cnt == 2:
+            colors = DP.SOURCE_PALETTE
+        elif cnt <= 10:
+            colors = all_palettes['Category10'][cnt]
+        elif cnt <= 20:
+            colors = all_palettes['Category20'][cnt]
+        chartscript, chartdiv = DP.pie_chart(data, field, "source", width=875, height=550,
+                                             colors=colors)
+    endpoint_access()
+    return make_response(render_template('bokeh.html', urlroot=request.url_root,
+                                         title=f"{field} counts", html=html,
                                          chartscript=chartscript, chartdiv=chartdiv,
                                          navbar=generate_navbar('DOIs')))
 
@@ -5359,6 +5409,8 @@ def preprint_with_pub():
         # Calculate days between preprint and journal publication
         days = (journal_date - preprint_date).days
         day_count.append(days)
+        if 'jrc_journal' not in row:
+            row['jrc_journal'] = ""
         if row['jrc_journal'] not in day_pub:
             day_pub[row['jrc_journal']] = []
         day_pub[row['jrc_journal']].append(days)
@@ -5402,6 +5454,8 @@ def preprint_no_pub():
     for row in rows:
         cnt += 1
         ptitle = DL.get_title(row)
+        if 'jrc_journal' not in row:
+            row['jrc_journal'] = ""
         fileoutput+= "\t".join([row['jrc_publishing_date'], row['doi'], DL.get_title(row),
                                 row['jrc_journal']]) + "\n"
         html += f"<tr><td>{row['jrc_publishing_date']}</td>" \
