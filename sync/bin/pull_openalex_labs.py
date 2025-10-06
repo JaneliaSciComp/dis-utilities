@@ -6,7 +6,7 @@
     - The lab head (or any other author) has a Janelia affiliation
 '''
 
-__version__ = '2.0.0'
+__version__ = '3.0.0'
 
 import argparse
 import collections
@@ -14,6 +14,7 @@ from datetime import datetime
 from operator import attrgetter
 import os
 import sys
+from time import sleep
 import requests
 from tqdm import tqdm
 import jrc_common.jrc_common as JRC
@@ -62,6 +63,8 @@ def call_responder(server, endpoint, timeout=10):
         req = requests.get(url, timeout=timeout)
     except requests.exceptions.RequestException as err:
         terminate_program(f"Could not fetch from {url}\n{str(err)}")
+    if req.status_code == 429:
+        raise Exception("Rate limit exceeded")
     if req.status_code != 200:
         terminate_program(f"Status: {str(req.status_code)} ({url})")
     return req.json()
@@ -101,23 +104,31 @@ def initialize_program():
     LOGGER.info(f"Found {len(IGNORE):,} DOIs to ignore")
 
 
-def get_author_works(orcid):
+def get_author_works(orcid, author):
     ''' Get author works
         Keyword arguments:
           orcid: ORCID
+          author: author name
         Returns:
           List of works
     '''
     base = f"/works?filter=author.orcid:{orcid}&mailto={DISCONFIG['developer']}" \
-           + "&per-page=100&cursor="
+           + "&per-page=200&cursor="
     cursor = "*"
     rows = []
+    cnt = 1
     while cursor:
-        resp = call_responder('openalex', base + cursor)
-        rows.extend(resp['results'])
+        sleep(0.12)
+        try:
+            resp = call_responder('openalex', base + cursor)
+            rows.extend(resp['results'])
+        except Exception as err:
+            terminate_program(f"Error getting OpenAlex works for {author} on call {cnt}: {err}")
+        cnt += 1
         cursor = resp['meta']['next_cursor'] if resp['meta']['next_cursor'] else None
     LOGGER.debug(f"Found {len(rows)} works for {orcid}")
     return rows
+
 
 def janelia_affiliation(inst):
     ''' Check if institution is a Janelia affiliation
@@ -192,8 +203,11 @@ def process_author(rec):
             return
         dto = datetime.strptime(idresp['hireDate'].split(' ')[0], "%m/%d/%Y")
         hired = dto.strftime("%Y-%m-%d")
-    rows = get_author_works(rec['orcid'])
+    author = f"{rec['given'][0]} {rec['family'][0]}"
+    rows = get_author_works(rec['orcid'], author)
+    LOGGER.debug(f"{author} {len(rows)} rows")
     for row in rows:
+        sleep(0.05)
         COUNT['dois'] += 1
         if not ARG.ALUMNI and (hired > row['publication_date'] \
             or row['publication_date'] < DISCONFIG['min_publishing_date']):

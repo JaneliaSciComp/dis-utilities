@@ -7,6 +7,7 @@ import collections
 from datetime import date, timedelta
 from operator import attrgetter
 import sys
+from time import sleep
 from tqdm import tqdm
 import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
@@ -143,7 +144,11 @@ def parse_authors(doi, msg, ready, review):
     '''
     if 'doi' not in msg:
         msg['doi'] = doi
-    adet = DL.get_author_details(msg, DB['dis']['orcid'])
+    sleep(0.2)
+    try:
+        adet = DL.get_author_details(msg, DB['dis']['orcid'])
+    except Exception as err:
+        terminate_program(err)
     if adet:
         janelians = []
         mode = None
@@ -173,6 +178,7 @@ def run_search():
     ready = []
     review = []
     for doi, item in tqdm(check.items(), desc='Crossref check'):
+        sleep(0.1)
         resp = JRC.call_crossref(doi)
         if check_corresponding_institution(item, resp, ready):
             continue

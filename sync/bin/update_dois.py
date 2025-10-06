@@ -7,7 +7,7 @@
            to DIS MongoDB.
 """
 
-__version__ = '16.0.0'
+__version__ = '17.0.0'
 
 import argparse
 import collections
@@ -831,6 +831,7 @@ def add_tags(persist):
     '''
     coll = DB['dis'].orcid
     for key, val in tqdm(persist.items(), desc='Add jrc_author and jrc_tag'):
+        sleep(0.15)
         try:
             rec = DB['dis'].dois.find_one({"doi": key})
         except Exception as err:
@@ -923,7 +924,11 @@ def add_first_last_authors(rec):
     if (not first) and ('jrc_last_author' not in rec):
         return
     first = []
-    det = DL.get_author_details(rec, DB['dis']['orcid'])
+    sleep(0.15)
+    try:
+        det = DL.get_author_details(rec, DB['dis']['orcid'])
+    except Exception as err:
+        terminate_program(f"Could not get first/last authors for {rec['doi']}: {err}")
     for auth in det:
         if auth['janelian'] and 'employeeId' in auth and 'is_first' in auth:
             first.append(auth['employeeId'])
@@ -940,6 +945,7 @@ def add_openalex(rec):
         Returns:
           None
     '''
+    sleep(0.15)
     try:
         data = DL.get_doi_record(rec['doi'], source='openalex')
     except Exception:
