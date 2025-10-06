@@ -11,7 +11,7 @@
     jrc_former_status.
 """
 
-__version__ = '1.0.0'
+__version__ = '2.0.0'
 
 import argparse
 from operator import attrgetter
@@ -83,6 +83,31 @@ def get_dois():
     return dois
 
 
+def get_pmc_license(pmcid):
+    """ Get the license for a PMCID
+        Keyword arguments:
+          pmcid: PMCID
+        Returns:
+          License
+    """
+    data = DL.get_doi_record(pmcid, source='pmc')
+    if not data or 'OAI-PMH' not in data or 'GetRecord' not in data['OAI-PMH'] \
+       or 'record' not in data['OAI-PMH']['GetRecord'] \
+       or 'metadata' not in data['OAI-PMH']['GetRecord']['record'] \
+       or 'article' not in data['OAI-PMH']['GetRecord']['record']['metadata'] \
+       or 'front' not in data['OAI-PMH']['GetRecord']['record']['metadata']['article']:
+        return None
+    front = data['OAI-PMH']['GetRecord']['record']['metadata']['article']['front']
+    if 'article-meta' not in front or 'custom-meta-group' not in front['article-meta'] \
+       or 'custom-meta' not in front['article-meta']['custom-meta-group'] \
+        or not front['article-meta']['custom-meta-group']['custom-meta']:
+        return None
+    for custom_meta in front['article-meta']['custom-meta-group']['custom-meta']:
+        if custom_meta['meta-name'] == 'license':
+            return custom_meta['meta-value'].replace(" ", "-").lower()
+    return None
+
+
 def update_open_access(row):
     """ Update jrc_is_oa and jrc_oa_status
         Keyword arguments:
@@ -90,8 +115,11 @@ def update_open_access(row):
         Returns:
           None
     """
-    data = DL.get_doi_record(row['doi'], source='openalex')
-    time.sleep(.1)
+    time.sleep(.5)
+    try:
+        data = DL.get_doi_record(row['doi'], source='openalex')
+    except Exception as err:
+        terminate_program(err)
     if not data:
         if not ARG.SILENT:
             LOGGER.warning(f"{row['doi']} was not found in OpenAlex")
@@ -104,6 +132,12 @@ def update_open_access(row):
             payload['jrc_oa_status'] = data['open_access']['oa_status']
         if 'jrc_license' not in row and 'primary_location' in data and data['primary_location']:
             payload['jrc_license'] = data['primary_location']['license']
+        if ('jrc_license' not in payload or payload['jrc_license'] is None) \
+           and 'jrc_pmc' in row:
+            alt = get_pmc_license(row['jrc_pmc'])
+            if alt:
+                LOGGER.info(f"Using PMC license for {row['doi']}: {alt}")
+                payload['jrc_license'] = alt
         if not payload:
             return
     except Exception as err:
@@ -172,11 +206,13 @@ def process_dois():
             rows = DB['dis'].dois.find(payload)
         except Exception as err:
             terminate_program(err)
+    # Open Access / license data
     LOGGER.info(f"Found {cnt} DOI{'s' if cnt != 1 else ''} to process for OpenAlex")
     for row in tqdm(rows, total=cnt, desc="Add OpenAlex"):
         COUNT['dois'] += 1
         update_open_access(row)
     show_counts()
+    # Open Access status override
     COUNT['dois'] = COUNT["updated"] = COUNT["notfound"] = 0
     if dois:
         cnt = len(dois)
@@ -193,7 +229,7 @@ def process_dois():
     LOGGER.info(f"Found {cnt} DOI{'s' if cnt != 1 else ''} to process for OA status")
     for row in tqdm(rows, total=cnt, desc="Fix OA status"):
         COUNT["dois"] += 1
-        if row['jrc_is_oa'] and row['jrc_oa_status'] == "closed" and row['jrc_fulltext_url']:
+        if row['jrc_oa_status'] == "closed" and row['jrc_fulltext_url']:
             override_oa_closed(row)
     show_counts()
     if not ARG.WRITE:
@@ -215,7 +251,7 @@ if __name__ == '__main__':
                         default='prod', choices=['dev', 'prod'],
                         help='MongoDB manifold (dev, prod)')
     PARSER.add_argument('--write', dest='WRITE', action='store_true',
-                        default=False, help='Write to database/config system')
+                        default=False, help='Write to database')
     PARSER.add_argument('--silent', dest='SILENT', action='store_true',
                         default=False, help="Don't display warnings")
     PARSER.add_argument('--verbose', dest='VERBOSE', action='store_true',
