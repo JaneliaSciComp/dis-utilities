@@ -8,6 +8,7 @@ import json
 from operator import attrgetter
 import os
 import sys
+from time import sleep
 from tqdm import tqdm
 import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
@@ -128,7 +129,11 @@ def parse_authors(doi, msg, ready, review, nojanelians, alumni):
     '''
     if 'doi' not in msg:
         msg['doi'] = doi
-    adet = DL.get_author_details(msg, DB['dis']['orcid'])
+    sleep(0.25)
+    try:
+        adet = DL.get_author_details(msg, DB['dis']['orcid'])
+    except Exception as err:
+        terminate_program(err)
     if adet:
         alum = []
         janelians = []
