@@ -29,7 +29,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "84.0.0"
+__version__ = "84.1.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -1642,10 +1642,13 @@ def show_openalex_authors(doi, confirmed):
         Returns:
           List of HTML authors
     '''
-    sleep(0.1)
-    data = DL.get_doi_record(doi, source='openalex')
-    if not data:
-        return "", 0
+    sleep(.5)
+    try:
+        data = DL.get_doi_record(doi, source='openalex')
+        if not data:
+            return "", 0
+    except Exception as err:
+        return f"<span style='color:red'>Error getting OpenAlex record for {doi}:<br>{str(err)}</span>", 0
     alist = []
     for auth in data['authorships']:
         if 'author' in auth and 'display_name' in auth['author']:
@@ -3102,11 +3105,14 @@ def get_display_badges(doi, row, data, local):
         if oresp:
             olink = f"{app.config['OAREPORT']}{doi}"
             badges += f" {tiny_badge('source', 'OA.Report', olink)}"
-        sleep(0.1)
-        oresp = DL.get_doi_record(doi, source='openalex')
-        if oresp:
-            olink = f"/raw/openalex/{doi}"
-            badges += f" {tiny_badge('source', 'OpenAlex', olink)}"
+        sleep(0.2)
+        try:
+            oresp = DL.get_doi_record(doi, source='openalex')
+            if oresp:
+                olink = f"/raw/openalex/{doi}"
+                badges += f" {tiny_badge('source', 'OpenAlex', olink)}"
+        except Exception:
+            pass
     if local and 'jrc_fulltext_url' in row:
         badges += f" {tiny_badge('pdf', 'Full text', row['jrc_fulltext_url'])}"
     #badges += f" {tiny_badge('info', 'HQ migration', f'/doi/migration/{doi}')}"
