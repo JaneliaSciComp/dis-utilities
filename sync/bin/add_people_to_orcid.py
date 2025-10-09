@@ -2,7 +2,7 @@
     Add new employees to the orcid collection from the People system.
 '''
 
-__version__ = '3.0.0'
+__version__ = '4.0.0'
 
 import argparse
 import collections
@@ -265,7 +265,10 @@ def update_orcid():
             COUNT['not_janelia'] += 1
             continue
         eid = person['employeeId']
-        if eid in orcid:
+        if eid in orcid and not person['enabled']:
+            # People says this record isn't active - update the flag in orcid if necessary
+            set_alumni(person, orcid)
+        elif eid in orcid:
             if orcid[eid]:
                 # Person is active in orcid
                 if person['businessTitle'] == 'JRC Alumni':

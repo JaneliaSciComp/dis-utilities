@@ -831,7 +831,7 @@ def add_tags(persist):
     '''
     coll = DB['dis'].orcid
     for key, val in tqdm(persist.items(), desc='Add jrc_author and jrc_tag'):
-        sleep(0.25)
+        sleep(0.5)
         try:
             rec = DB['dis'].dois.find_one({"doi": key})
         except Exception as err:
@@ -924,7 +924,7 @@ def add_first_last_authors(rec):
     if (not first) and ('jrc_last_author' not in rec):
         return
     first = []
-    sleep(0.25)
+    sleep(0.5)
     try:
         det = DL.get_author_details(rec, DB['dis']['orcid'])
     except Exception as err:
