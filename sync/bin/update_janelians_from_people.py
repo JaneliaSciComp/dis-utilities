@@ -3,7 +3,7 @@
     data (names, affiliation, employee types, teams) from the People system.
 '''
 
-__version__ = '3.7.0'
+__version__ = '4.0.0'
 
 import argparse
 import collections
@@ -109,7 +109,7 @@ def reset_record(row):
         Returns:
             None
     '''
-    for key in ['affiliations', 'group', 'group_code', 'managed']:
+    for key in ['affiliations', 'group', 'group_code']:
         if key in row:
             del row[key]
 
@@ -307,8 +307,11 @@ def update_orcid():
         Returns:
           None
     '''
-    payload = {"employeeId": {"$exists": True},
-               "alumni": {"$ne": True}}
+    if ARG.ORCID:
+        payload = {"orcid": ARG.ORCID}
+    else:
+        payload = {"employeeId": {"$exists": True},
+                   "alumni": {"$ne": True}}
     try:
         cnt = DB['dis']['orcid'].count_documents(payload)
         rows = DB['dis']['orcid'].find(payload)
@@ -318,6 +321,9 @@ def update_orcid():
     for row in tqdm(rows, total=cnt, desc="Checking People"):
         if ARG.RESET:
             reset_record(row)
+        # Always reset managed teams
+        if 'managed' in row:
+            del row['managed']
         COUNT['orcid'] += 1
         try:
             idresp = JRC.call_people_by_id(row['employeeId'])
@@ -347,6 +353,8 @@ if __name__ == '__main__':
     PARSER.add_argument('--manifold', dest='MANIFOLD', action='store',
                         default='prod', choices=['dev', 'prod'],
                         help='MongoDB manifold (dev, prod)')
+    PARSER.add_argument('--orcid', dest='ORCID', action='store',
+                        default=None, help='ORCID to update')
     PARSER.add_argument('--reset', dest='RESET', action='store_true',
                         default=False, help='Reset affiliations and managesTeams')
     PARSER.add_argument('--test', dest='TEST', action='store_true',
