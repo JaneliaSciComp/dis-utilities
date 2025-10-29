@@ -130,6 +130,18 @@ table.numbercenter {
   border: 1px solid #058d95;
 }
 
+div.homebox {border: 2px solid #8ac242;
+             width: 350px;
+             height: 200px;
+             align: center;
+             text-align: center;
+             padding: 20px;
+             margin: 20px;
+             color: white;
+             background-color: darkgreen;
+             border-radius: 20px;
+}
+
 table.citations {
   text-align: center;
   font-size: 14pt;
@@ -191,6 +203,17 @@ table.property {
   padding-right: 10px;
 }
 
+.divlink {
+  display: block;
+  height: 100%;
+  width: 100%;
+  text-decoration: none;
+}
+.divlink:hover {
+  background-color: #111;
+  text-decoration: none;
+}
+
 .flexcontainer {
   display: flex;
   flex-direction: row;
@@ -214,6 +237,12 @@ table.property {
   flex-direction: row;
   flex-wrap: wrap;
   width: 100%;
+}
+
+.flexrowc {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
 }
 
 .flexcolumn {

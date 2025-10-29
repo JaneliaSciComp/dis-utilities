@@ -3,6 +3,16 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery-cookie/1.4.1/jquery.cookie.min.js"></script>
 <script src="https://cdn.bokeh.org/bokeh/release/bokeh-3.5.0.min.js"></script> 
 <script>
+function toggler(tid, fid, counter) {
+  $('.'+fid).toggle();
+  total = $('#' + tid + ' >tbody >tr:visible').length;
+  $('#'+counter).text(total)
+  if ($('#' + tid + ' >tbody >tr').is(":hidden")) {
+    $('#' + fid + 'btn').text('Show versioned DOIs');
+  } else {
+    $('#' + fid + 'btn').text('Filter versioned DOIs');
+  }
+}
 function nav_post(field, value, source="") {
   url = "/doiui/custom";
   payload = '<input type="text" name="field" value="' + field + '" />' +

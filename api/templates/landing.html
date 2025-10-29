@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+{% block script %}
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jquery-cookie/1.4.1/jquery.cookie.min.js"></script>
+<script src="/static/bootstrap-autocomplete/autocomplete.js"></script>
+<script>
+$(document).on('keypress', 'input', function(e) {
+  if (e.which === 13) {
+    var focusedElement = $(':focus');
+    var eid = focusedElement.attr('id');
+    e.preventDefault();
+  if (eid == 'input-taglist') {
+        find_tags();
+    }
+  }
+  return;
+});
+  function find_tags() {
+    if (!$('#input-taglist').val()) {
+      alert("You must enter a tag");
+      return;
+    }
+    url = "/tagnh/" + $("#input-taglist").val() + "/All";
+    window.location = url;
+    url = "/doiui/custom/All";
+    //payload = '<input type="text" name="field" value="jrc_tag.name" />'
+    //          + '<input type="text" name="value" value="' + $("#input-taglist").val() + '" />'
+    //          + '<input type="text" name="title" value="tag" />'
+    //var form = $('<form style="visibility:hidden" action="' + url + '" method="post">' +
+    //payload + '</form>');
+    //$('body').append(form);
+    //form.submit();
+  }
+</script>
+{% endblock %}
+{% block onload %}
+onload="tableInitialize();"
+{% endblock %}
+
+{% block content %}
+<br><br>
+<h4 style="text-align: center">Welcome to the Data and Information Services Internal Research
+Information System (IRIS). This site serves as a central repository for Janelia research output.</h4>
+<form>
+<div class="flexcontainer">
+  <div class="flexrowc">
+    <div class="flexitemauto">
+    <a class="divlink" href="dois_recent/Crossref">
+      <div class="homebox">
+      Show me the most recently published journal articles
+      <br>
+      <i class="fa-solid fa-file fa-4x"></i>
+      </div>
+    </a>
+    </div>
+    <div class="flexitem">
+    </div>
+    <div class="flexitemauto">
+      <a class="divlink" href="dois_recent/DataCite">
+      <div class="homebox">
+      Show me the most recently published datasets
+      <br>
+      <i class="fa-solid fa-database fa-4x"></i>
+      </div>
+      </a>
+    </div>
+    <div class="flexitem">
+    </div>
+    <div class="flexitemauto">
+      <a class="divlink" href="dois_year">
+      <div class="homebox">
+      Show me publications by year
+      <br><br>
+      <i class="fa-solid fa-chart-column fa-4x"></i>
+      </div>
+      </a>
+    </div>
+  </div>
+</div>
+<div class="flexcontainer">
+  <div class="flexrowc">
+    <div class="flexitemauto">
+      <div class="homebox">
+      Show me publications by research group or project team
+      <br>
+    <div class="form-group">
+      <div class="input-group mb-3">
+      <input type="text" class="form-control" placeholder="Select a group or project" list="list-tag" id="input-taglist">
+      <div class="input-group-append">
+        <button type="submit" id="tagb" class="btn btn-primary btn-sm" onclick="find_tags(); return false;" href="#">Go</button>
+      </div>
+      <datalist id="list-tag">
+        {{ projects | safe }}
+      </datalist>
+      </div>
+    </div>
+  <script>
+      document.addEventListener('DOMContentLoaded', e => {
+          $('#input-taglist').autocomplete()
+      }, false);
+  </script>
+      <i class="fa-solid fa-people-group fa-4x"></i>
+      </div>
+    </div>
+    <div class="flexitem">
+    </div>
+    <div class="flexitemauto">
+      <a class="divlink" href="dois_oa">
+        <div class="homebox">
+        Citations of Janelia publications from OpenAlex
+        <br>
+        <i class="fa-solid fa-quote-left fa-4x"></i>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<i class="fa-solid fa-quote-right fa-4x"></i>
+        </div>
+        </a>
+    </div>
+    <div class="flexitem">
+    </div>
+    <div class="flexitemauto">
+    </div>
+  </div>
+</div>
+</form>
+{% endblock %}
