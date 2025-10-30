@@ -6,7 +6,7 @@
     - The lab head (or any other author) has a Janelia affiliation
 '''
 
-__version__ = '3.0.0'
+__version__ = '4.0.0'
 
 import argparse
 import collections
@@ -15,12 +15,13 @@ from operator import attrgetter
 import os
 import sys
 from time import sleep
+import traceback
 import requests
 from tqdm import tqdm
 import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
 
-# pylint: disable=broad-exception-caught,logging-fstring-interpolation
+# pylint: disable=broad-exception-caught,broad-exception-raised,logging-fstring-interpolation
 
 # Database
 DB = {}
@@ -104,6 +105,28 @@ def initialize_program():
     LOGGER.info(f"Found {len(IGNORE):,} DOIs to ignore")
 
 
+def get_team_projects(orcids):
+    ''' Get ORCID records for team project managers
+        Keyword arguments:
+          orcids: list of lab head ORCIDs
+        Returns:
+          List of team project manager ORCID records
+    '''
+    dis = JRC.simplenamespace_to_dict(JRC.get_config('dis'))
+    payload = {'managed': {"$in": dis['team_projects']}, 'alumni': {'$exists': False},
+               'orcid': {'$exists': True}}
+    try:
+        rows = DB['dis'].orcid.find(payload).sort('group', 1)
+    except Exception as err:
+        terminate_program(err)
+    managers = []
+    for row in rows:
+        if row['orcid'] not in orcids:
+            orcids.append(row['orcid'])
+            managers.append(row)
+    return managers
+
+
 def get_author_works(orcid, author):
     ''' Get author works
         Keyword arguments:
@@ -143,11 +166,26 @@ def janelia_affiliation(inst):
        or ('display_name' in inst and 'Janelia' in inst['display_name'])
 
 
+def get_title(row):
+    ''' Get a work title
+        Keyword arguments:
+          row: row from OpenAlex
+        Returns:
+          title
+    '''
+    if 'title' in row and row['title']:
+        return row['title']
+    if 'titles' in row and row['titles'] and 'title' in row['titles'][0]:
+        return row['titles'][0]['title']
+    return ""
+
+
 def janelia_author(row, orcid, doi):
     ''' Check if author is a Janelia author
         Keyword arguments:
           row: row from OpenAlex
           orcid: ORCID
+          doi: DOI
         Returns:
           True if author is a Janelia author
           False otherwise
@@ -162,7 +200,7 @@ def janelia_author(row, orcid, doi):
                 if janelia_affiliation(inst):
                     if doi not in OUTPUT['sent']:
                         OUTPUT['sent'][doi] = [auth['author']['display_name'],
-                                               row['publication_date']]
+                                               row['publication_date'], get_title(row)]
                     return True
     for auth in row['authorships']:
         # Check if *any* author is from Janelia
@@ -171,7 +209,7 @@ def janelia_author(row, orcid, doi):
                 if janelia_affiliation(inst):
                     if doi not in OUTPUT['sent']:
                         OUTPUT['sent'][doi] = [auth['author']['display_name'],
-                                               row['publication_date']]
+                                               row['publication_date'], get_title(row)]
                     return True
         # The next check is for the lab head ORCID only
         if not auth['author']['orcid'] or orcid not in auth['author']['orcid']:
@@ -179,11 +217,13 @@ def janelia_author(row, orcid, doi):
         if not auth['institutions']:
             if doi not in OUTPUT['no_institutions']:
                 OUTPUT['no_institutions'][doi] = [auth['author']['display_name'],
-                                                  row['publication_date']]
+                                                  row['publication_date'], get_title(row)]
             return False
         if doi not in OUTPUT['institution_mismatch']:
+            institutions = ', '.join([inst['display_name'] for inst in auth['institutions']])
             OUTPUT['institution_mismatch'][doi] = [auth['author']['display_name'],
-                                                   row['publication_date']]
+                                                   row['publication_date'], get_title(row),
+                                                   institutions]
         return False
     return False
 
@@ -195,6 +235,7 @@ def process_author(rec):
         Returns:
           None
     '''
+    hired = ''
     if not ARG.ALUMNI:
         idresp = JRC.call_people_by_id(rec['employeeId'])
         if not idresp:
@@ -206,7 +247,7 @@ def process_author(rec):
     author = f"{rec['given'][0]} {rec['family'][0]}"
     rows = get_author_works(rec['orcid'], author)
     LOGGER.debug(f"{author} {len(rows)} rows")
-    for row in rows:
+    for row in tqdm(rows, desc=author, position=tqdm._get_free_pos(), leave=False, total=len(rows)):
         sleep(0.05)
         COUNT['dois'] += 1
         if not ARG.ALUMNI and (hired > row['publication_date'] \
@@ -222,7 +263,7 @@ def process_author(rec):
                and row['best_oa_location']['landing_page_url'] \
                and row['best_oa_location']['landing_page_url'].startswith('https://doi.org/'):
                 doi = row['best_oa_location']['landing_page_url'].replace('https://doi.org/', '')
-                LOGGER.warning(f"Using best_oa_location DOI: {doi}")
+                LOGGER.debug(f"Using best_oa_location DOI: {doi}")
             else:
                 COUNT['no_doi'] += 1
                 continue
@@ -231,6 +272,7 @@ def process_author(rec):
             continue
         drec = DL.get_doi_record(doi, DB['dis']['dois'])
         if drec:
+            IGNORE.append(doi)
             COUNT['in_database'] += 1
             continue
         if not janelia_author(row, rec['orcid'], doi):
@@ -258,7 +300,7 @@ def generate_emails():
             msg += f"  {itm}<br>"
         msg += "\n"
     if MESSAGE['institution_mismatch']:
-        msg += "<br>The following DOIs have an institution mismatch:<br>"
+        msg += "<br>The following DOIs have an institution mismatch (also see attached file):<br>"
         for itm in MESSAGE['institution_mismatch']:
             msg += f"  {itm}<br>"
     if msg:
@@ -268,8 +310,13 @@ def generate_emails():
     try:
         email = DISCONFIG['developer'] if ARG.TEST else DISCONFIG['receivers']
         LOGGER.info(f"Sending email to {email}")
-        JRC.send_email(msg, DISCONFIG['sender'], email, "Lab head DOI sync", mime='html')
+        opts = {'mime': 'html'}
+        if MESSAGE['institution_mismatch']:
+            opts['attachment'] = 'openalex_institution_mismatch.tsv'
+        JRC.send_email(msg, DISCONFIG['sender'], email, "Lab head DOI sync", **opts)
     except Exception as err:
+        print(str(err))
+        traceback.print_exc()
         terminate_program(err)
 
 
@@ -293,15 +340,16 @@ def processing():
     if ARG.ORCID:
         payload = {'orcid': ARG.ORCID}
     else:
-        payload = {'group': {'$exists': True}, 'workerType': 'Employee',
-                   'alumni': {'$exists': False}, 'orcid': {'$exists': True}}
+        payload = {"$or": [{"group": {"$exists": True}}, {"managed": {"$exists": True}}],
+                   "alumni": {"$exists": False}, "workerType": "Employee", "orcid": {"$exists": True}}
     try:
         cnt = DB['dis'].orcid.count_documents(payload)
-        LOGGER.info(f"Found {cnt} ORCID{'s' if cnt != 1 else ''}")
-        rows = DB['dis'].orcid.find(payload).sort('group', 1)
+        LOGGER.info(f"Found {cnt} ORCID{'s' if cnt != 1 else ''} for lab heads/managers")
+        rows = DB['dis'].orcid.find(payload).sort('family', 1)
     except Exception as err:
         terminate_program(err)
-    for row in tqdm(rows, desc="Processing ORCIDs", total=cnt):
+    for row in tqdm(rows, desc="Processing ORCIDs", position=tqdm._get_free_pos(), leave=False,
+                    total=cnt):
         if ARG.ORCID:
             LOGGER.info(f"Found {row['given'][0]} {row['family'][0]} ({ARG.ORCID})")
         process_author(row)
@@ -314,7 +362,7 @@ def processing():
                     fileout.write(f"{key}\t" + '\t'.join(val) + '\n')
                     MESSAGE[okey].append('\t'.join([oalink(key), val[0]]) + "\n")
         elif os.path.exists(fname):
-                os.remove(fname)
+            os.remove(fname)
     if OUTPUT['sent']:
         LOGGER.info("Writing openalex_ready.txt")
         with open('openalex_ready.txt', 'w', encoding='ascii') as fileout:
