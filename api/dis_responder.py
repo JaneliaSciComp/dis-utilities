@@ -29,7 +29,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "85.1.0"
+__version__ = "85.1.1"
 # Database
 DB = {}
 CVTERM = {}
@@ -3261,7 +3261,7 @@ def dois_mytags(orcid="0000-0003-3118-1636", year='All'):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not find DOIs for my affiliations"),
                                message=error_message(err))
-    htmlp = year_pulldown(f"orcid/tagdois/{orcid}") + "<br>"
+    htmlp = year_pulldown(f"dois/mytags/{orcid}") + "<br>"
     html, cnt = standard_doi_table(rows)
     title = "DOIs for my affiliations"
     if year != 'All':
