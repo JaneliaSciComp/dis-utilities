@@ -29,7 +29,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "85.0.0"
+__version__ = "85.1.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -1136,56 +1136,16 @@ def get_license(lic):
     return newval
 
 
-def get_legal_information(doi, row):
+def get_legal_information(row):
     ''' Get legal information from a row
         Keyword arguments:
-          doi: DOI
           row: DOI record
         Returns:
           HTML
     '''
-    try:
-        #jresp = DL.get_doi_record(doi, source='lens_scholar')
-        jresp = {} #PLUG - disable lens_scholar for now
-    except Exception:
-        jresp = {}
     ltext = ""
-    if 'data' in jresp and jresp['data']:
-        ddata = jresp['data'][0]
-        if 'patent_citations' not in ddata or not ddata['patent_citations']:
-            return ""
-        prow = []
-        for pat in ddata['patent_citations']:
-            try:
-                presp = DL.get_doi_record(pat['lens_id'], source='lens_patent')
-            except Exception as err:
-                print(f"Error in get_legal_information for {doi}: {err}")
-                presp = {}
-            if 'data' in presp and presp['data']:
-                pdata = presp['data'][0]
-                ptext = "<tr>"
-                if 'jurisdiction' in pdata:
-                    ptext += f"<td style='text-align: center;'>{pdata['jurisdiction']}</td>"
-                else:
-                    ptext += "<td></td>"
-                url = f"https://www.lens.org/lens/patent/{pat['lens_id']}/frontpage"
-                ptext += f"<td style='text-align: center;'><a href='{url}' target='_blank'>" \
-                         + f"{pdata['doc_number']}</a></td>"
-                if 'biblio' in pdata and 'invention_title' in pdata['biblio'] \
-                    and pdata['biblio']['invention_title']:
-                    title = pdata['biblio']['invention_title']
-                    ptext += f"<td>{title[0]['text']}</td>"
-                else:
-                    ptext += "<td></td>"
-                ptext += "</tr>"
-                prow.append(ptext)
-        if prow:
-            ltext = "<h4>Patents</h4><table class='standard'><tr><th>Jurisdiction</th>" \
-                    + f"<th>Patent</th><th>Title</th></tr><tbody>{''.join(prow)}</tbody></table>"
     if 'jrc_license' in row and row['jrc_license']:
-        ltext = f"<h4>License</h4>{get_license(row['jrc_license'])}<br><br>{ltext}"
-    if ltext:
-        ltext = f"<div class='abstract'>{ltext}</div>"
+        ltext = f"<h4>License</h4>{get_license(row['jrc_license'])}"
     return ltext
 
 
@@ -3267,6 +3227,54 @@ def andy():
     return make_response(render_template('landing.html', urlroot=request.url_root,
                                          projects=projects, navbar=generate_navbar('Home')))
 
+
+# ******************************************************************************
+# * UI endpoints (personalized)                                                *
+# ******************************************************************************
+
+@app.route('/dois/mytags/<string:orcid>/<string:year>')
+@app.route('/dois/mytags/<string:orcid>')
+@app.route('/dois/mytags')
+def dois_mytags(orcid="0000-0003-3118-1636", year='All'):
+    ''' Show DOIs an author's affiliations
+    '''
+    try:
+        row = DB['dis'].orcid.find_one({"orcid": orcid})
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not find DOIs for my affiliations"),
+                               message=error_message(err))
+    tags = []
+    if 'group' in row:
+        tags.append(row['group'])
+    for ttype in ('affiliations', 'managed'):
+        if ttype in row:
+            for tag in row[ttype]:
+                if tag not in tags:
+                    tags.append(tag)
+    payload = {"jrc_tag.name": {"$in": tags}}
+    if year != 'All':
+        payload['jrc_publishing_date'] = {"$regex": "^"+ year}
+    try:
+        rows = DB['dis'].dois.find(payload)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not find DOIs for my affiliations"),
+                               message=error_message(err))
+    htmlp = year_pulldown(f"orcid/tagdois/{orcid}") + "<br>"
+    html, cnt = standard_doi_table(rows)
+    title = "DOIs for my affiliations"
+    if year != 'All':
+        title += f" ({year})"
+    if cnt:
+        html = f"{htmlp}Tags: {', '.join(tags)}<br><br>{html}"
+    else:
+        html = "<br>No DOIs found for my affiliations"
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=title, html=html,
+                                         navbar=generate_navbar('Tag/affiliation')))
+
+
 # ******************************************************************************
 # * UI endpoints (DOI)                                                         *
 # ******************************************************************************
@@ -3475,7 +3483,7 @@ def doi_tabs(doi, row, data, authors):
         content['related'] = rels
     # Legal information
     if row:
-        ahtml = get_legal_information(doi, row)
+        ahtml = get_legal_information(row)
         if ahtml:
             content['legal'] = ahtml
     # Authors
