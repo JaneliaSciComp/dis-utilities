@@ -29,7 +29,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "85.1.1"
+__version__ = "85.1.2"
 # Database
 DB = {}
 CVTERM = {}
@@ -3256,7 +3256,7 @@ def dois_mytags(orcid="0000-0003-3118-1636", year='All'):
     if year != 'All':
         payload['jrc_publishing_date'] = {"$regex": "^"+ year}
     try:
-        rows = DB['dis'].dois.find(payload)
+        rows = DB['dis'].dois.find(payload).collation({"locale": "en"}).sort("jrc_publishing_date", -1)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not find DOIs for my affiliations"),
