@@ -3,10 +3,11 @@
     data (names, affiliation, employee types, teams) from the People system.
 '''
 
-__version__ = '4.0.0'
+__version__ = '5.0.0'
 
 import argparse
 import collections
+from datetime import datetime
 import json
 from operator import attrgetter
 import os
@@ -210,7 +211,7 @@ def update_managed_teams(idresp, row):
         if team['supOrgName'] not in row['affiliations']:
             row['affiliations'].append(team['supOrgName'])
             COUNT['affiliations'] += 1
-            LOGGER.warning(f"{row['given'][0]} {row['family'][0]}: {old_affiliations} -> {row['affiliations']}")
+            LOGGER.debug(f"{row['given'][0]} {row['family'][0]}: {old_affiliations} -> {row['affiliations']}")
             dirty = True
     if not dirty or 'managed' not in row:
         return dirty
@@ -218,7 +219,7 @@ def update_managed_teams(idresp, row):
         COUNT['managed'] -= 1
         dirty = False
     if dirty:
-        LOGGER.warning(f"{row['given'][0]} {row['family'][0]}: {old_managed} -> {row['managed']}")
+        LOGGER.debug(f"{row['given'][0]} {row['family'][0]}: {old_managed} -> {row['managed']}")
     return dirty
 
 
@@ -262,6 +263,17 @@ def record_updates(idresp, row):
         del row['affiliations']
     if 'managed' in row and not row['managed']:
         del row['managed']
+    # Update hire date
+    if 'hireDate' not in row and 'hireDate' in idresp:
+        try:
+            hdate = idresp['hireDate'].split(' ')[0]
+            date_object = datetime.strptime(hdate, "%m/%d/%Y")
+            row['hireDate'] = date_object.strftime('%Y-%m-%d')
+            dirty = True
+            COUNT['hireDate'] += 1
+        except Exception as err:
+            LOGGER.error(f"Error updating hire date {idresp['hireDate']} {hdate} for {row['given'][0]} {row['family'][0]}: {err}")
+            terminate_program(err)
     if pdirty or udirty or mdirty:
         dirty = True
     return dirty
@@ -280,6 +292,7 @@ def postprocessing(audit):
           + f"  Affiliations updated:   {COUNT['affiliations']:,}\n" \
           + f"  WorkerTypes updated:    {COUNT['workerType']:,}\n" \
           + f"  Managed teams updated:  {COUNT['managed']:,}\n" \
+          + f"  Hire dates updated:     {COUNT['hireDate']:,}\n" \
           + f"  Set to former employee: {COUNT['alumni']:,}\n" \
           + f"Authors written:          {COUNT['written']:,}"
     print(msg)

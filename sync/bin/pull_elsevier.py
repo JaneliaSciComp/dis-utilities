@@ -7,9 +7,7 @@ __version__ = '1.0.0'
 import argparse
 import collections
 from operator import attrgetter
-import os
 import sys
-import requests
 from tqdm import tqdm
 import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
