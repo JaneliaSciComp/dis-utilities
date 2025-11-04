@@ -30,7 +30,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "86.1.0"
+__version__ = "86.2.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -2992,7 +2992,8 @@ def show_active_oids():
     '''
     result = initialize_result()
     payload = [{"$match": {"workerType": "Employee", "alumni": {"$exists": False},
-                           "hireDate": {"$exists": True}}},
+                           "hireDate": {"$exists": True}, "employeeId": {"$exists": True},
+                           "orcid": {"$exists": True}}},
                {"$project": {"_id": 0}},
                {"$sort": {"family.0": 1}}]
     try:
