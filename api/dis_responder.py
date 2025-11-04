@@ -22,6 +22,7 @@ import bson
 from flask import (Flask, make_response, render_template, request, jsonify, redirect, send_file)
 from flask_cors import CORS
 from flask_swagger import swagger
+from pymongo.collation import Collation, CollationStrength
 import requests
 import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
@@ -29,11 +30,12 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "85.1.2"
+__version__ = "86.0.0"
 # Database
 DB = {}
 CVTERM = {}
 PROJECT = {}
+INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
 # Custom queries
 CUSTOM_REGEX = {"publishing_year": {"field": "jrc_publishing_date",
                                     "value": "^!REPLACE!"}
@@ -2974,6 +2976,36 @@ def show_oids():
     return generate_response(result)
 
 
+@app.route('/orcid/active')
+def show_active_oids():
+    '''
+    Return active ORCID records
+    Return information for active ORCID IDs
+    tags:
+      - ORCID
+    responses:
+      200:
+        description: ORCID data
+      500:
+        description: MongoDB error
+    '''
+    result = initialize_result()
+    payload = [{"$match": {"workerType": "Employee", "alumni": {"$exists": False},
+                           "hireDate": {"$exists": True}}},
+               {"$project": {"_id": 0, "employeeId": 0}},
+               {"$sort": {"family.0": 1}}]
+    try:
+        rows = list(DB['dis'].orcid.aggregate(payload, collation=INSENSITIVE))
+    except Exception as err:
+        raise InvalidUsage(str(err), 500) from err
+    result['rest']['source'] = 'mongo'
+    result['data'] = []
+    for row in rows:
+        result['data'].append(row)
+    result['rest']['row_count'] = len(result['data'])
+    return generate_response(result)
+
+
 @app.route('/orcid/<string:oid>')
 def show_oid(oid):
     '''
@@ -3010,6 +3042,49 @@ def show_oid(oid):
     result['data'] = []
     for row in rows:
         result['data'].append(row)
+    return generate_response(result)
+
+
+@app.route('/orcid/works/<string:oid>')
+def show_oid_works(oid):
+    '''
+    Show works giben an ORDIC ID
+    Return information for an ORCID ID
+    # Do not display
+    tags:
+      - ORCID
+    parameters:
+      - in: path
+        name: oid
+        schema:
+          type: string
+        required: true
+        description: ORCID ID, given name, or family name
+    responses:
+      200:
+        description: ORCID data
+      404:
+        description: ORCID ID (or employee ID) not found
+      500:
+        description: MongoDB error
+    '''
+    result = initialize_result()
+    result['rest']['source'] = 'mongo'
+    result['data'] = []
+    row = DL.single_orcid_lookup(oid, DB['dis'].orcid)
+    if not row:
+        raise InvalidUsage(f"ORCID {oid} was not found", 404)
+    if 'employeeId' in row:
+        eid = row['employeeId']
+    else:
+        raise InvalidUsage(f"ORCID {oid} has no employeee ID", 404)
+    try:
+        rows = DB['dis'].dois.find({"jrc_author": eid}, {'_id': 0})
+    except Exception as err:
+        raise InvalidUsage(str(err), 500) from err
+    for row in rows:
+        result['data'].append(row)
+    result['rest']['row_count'] = len(result['data'])
     return generate_response(result)
 
 
@@ -3256,7 +3331,8 @@ def dois_mytags(orcid="0000-0003-3118-1636", year='All'):
     if year != 'All':
         payload['jrc_publishing_date'] = {"$regex": "^"+ year}
     try:
-        rows = DB['dis'].dois.find(payload).collation({"locale": "en"}).sort("jrc_publishing_date", -1)
+        coll = DB['dis'].dois
+        rows = coll.find(payload).collation({"locale": "en"}).sort("jrc_publishing_date", -1)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not find DOIs for my affiliations"),
