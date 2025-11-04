@@ -30,7 +30,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "86.0.0"
+__version__ = "86.1.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -2981,6 +2981,7 @@ def show_active_oids():
     '''
     Return active ORCID records
     Return information for active ORCID IDs
+    # Do not display
     tags:
       - ORCID
     responses:
@@ -2992,7 +2993,7 @@ def show_active_oids():
     result = initialize_result()
     payload = [{"$match": {"workerType": "Employee", "alumni": {"$exists": False},
                            "hireDate": {"$exists": True}}},
-               {"$project": {"_id": 0, "employeeId": 0}},
+               {"$project": {"_id": 0}},
                {"$sort": {"family.0": 1}}]
     try:
         rows = list(DB['dis'].orcid.aggregate(payload, collation=INSENSITIVE))
