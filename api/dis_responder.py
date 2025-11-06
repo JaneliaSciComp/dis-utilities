@@ -30,7 +30,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "86.2.0"
+__version__ = "86.3.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -5902,6 +5902,8 @@ def show_open_access():
             'Closed': [itm['closed'] for itm in adjusted],
             'Open': [itm['open'] for itm in adjusted],
             'Citations': [itm['cited_by_count'] for itm in adjusted]}
+    html2 = "<br>Source for citations: " \
+            + "<a href='https://api.openalex.org/institutions?search=Janelia' target='_blank'>OpenAlex</a>"
     chartscript, chartdiv = DP.stacked_bar_chart(data, 'OpenAlex DOIs', xaxis="years", orient=pi/4,
                                                  yaxis=('Closed', 'Open'), yaxis2='Citations',
                                                  colors=['maroon', 'green'])
@@ -5909,6 +5911,7 @@ def show_open_access():
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title="OpenAlex DOIs/citations by year", html=html,
                                          chartscript=chartscript, chartdiv=chartdiv,
+                                         html2=html2,
                                          navbar=generate_navbar('DOIs')))
 
 

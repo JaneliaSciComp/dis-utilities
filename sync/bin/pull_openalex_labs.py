@@ -6,7 +6,7 @@
     - The lab head (or any other author) has a Janelia affiliation
 '''
 
-__version__ = '4.0.0'
+__version__ = '5.0.0'
 
 import argparse
 import collections
@@ -163,7 +163,7 @@ def janelia_affiliation(inst):
     '''
     return ('ror' in inst \
         and inst['ror'] == f"https://ror.org/{ROR['Janelia Research Campus']}") \
-       or ('display_name' in inst and 'Janelia' in inst['display_name'])
+       or ('display_name' in inst and inst['display_name'] and 'Janelia' in inst['display_name'])
 
 
 def get_title(row):
@@ -220,7 +220,11 @@ def janelia_author(row, orcid, doi):
                                                   row['publication_date'], get_title(row)]
             return False
         if doi not in OUTPUT['institution_mismatch']:
-            institutions = ', '.join([inst['display_name'] for inst in auth['institutions']])
+            ilist = []
+            for inst in auth['institutions']:
+                if inst['display_name']:
+                    ilist.append(inst['display_name'])
+            institutions = ', '.join(ilist)
             OUTPUT['institution_mismatch'][doi] = [auth['author']['display_name'],
                                                    row['publication_date'], get_title(row),
                                                    institutions]
@@ -249,6 +253,9 @@ def process_author(rec):
     LOGGER.debug(f"{author} {len(rows)} rows")
     for row in tqdm(rows, desc=author, position=tqdm._get_free_pos(), leave=False, total=len(rows)):
         sleep(0.05)
+        if 'publication_date' not in row or not row['publication_date']:
+            LOGGER.debug(f"Skipping {row['doi']} (no publication date)")
+            continue
         COUNT['dois'] += 1
         if not ARG.ALUMNI and (hired > row['publication_date'] \
             or row['publication_date'] < DISCONFIG['min_publishing_date']):
