@@ -1,3 +1,10 @@
+.oa_bronze {color: #CD7F32}
+.oa_closed {color: red}
+.oa_diamond {color: lightgray}
+.oa_gold {color: gold}
+.oa_green {color: green}
+.oa_hybrid {color: cyan}
+
 div.abstract {height: 200px;
               width: 90%;
               overflow-y: scroll;

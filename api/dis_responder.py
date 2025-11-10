@@ -30,7 +30,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "86.3.0"
+__version__ = "87.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -47,7 +47,8 @@ NAV = {"Home": "",
                 "DOI stats": "dois_source",
                 "DOIs by:": {"month": "dois_month", "year": "dois_year",
                              "subject": "dois_subjectpicker"},
-                "DOI yearly report": "dois_report"},
+                "DOI yearly report": "dois_report",
+                "Top cited DOIs": "dois_top_cited"},
        "DataCite": {"DataCite DOI stats": "datacite_dois",
                     "DataCite DOI citations": "datacite_citations",
                     "DataCite DOI downloads": "datacite_downloads",
@@ -87,7 +88,7 @@ NAV = {"Home": "",
                    "DOIs awaiting processing": "dois_pending",
                    "Latest hires": "orcid_datepicker",
                    "Authors with multiple ORCIDs": "orcid_duplicates",
-                 "Duplicate authors": "duplicate_authors"
+                   "Duplicate authors": "duplicate_authors"
                   },
        "External systems": {"Search HHMI People system": "people",
                             "HHMI Supervisory Organizations": "orgs/full",
@@ -750,7 +751,7 @@ def generate_works_table(rows, name=None, show="full"):
               + "onclick=\"toggler('pubs', 'ver', 'totalrows');\">" \
               + "Filter for versioned DOIs</button>"
     html = cbutton + create_downloadable('works', ['Published', 'DOI', 'Title'], fileoutput) + html
-    html = f"Number of DOIs: <span id='totalrows'>{len(works)}</span><br>" + html
+    html = f"Number of DOIs: <span id='totalrows'>{len(works):,}</span><br>" + html
     return html, dois
 
 
@@ -1107,6 +1108,8 @@ def add_jrc_fields(row):
             if CVTERM['license'][val]['definition'] != CVTERM['license'][val]['display']:
                 newval += f" ({CVTERM['license'][val]['display']})"
             val = newval
+        if key == 'jrc_oa_status':
+            val = f"<span class='oa_{val}' style='font-weight: bold;'>{val.capitalize()}</span>"
         html += f"<tr><td>{CVTERM['jrc'][key]['display'] if key in CVTERM['jrc'] else key}</td>" \
                 + f"<td>{val}</td></tr>"
     html += "</table><br>"
@@ -1520,13 +1523,16 @@ def standard_doi_table(rows, prefix=None):
         Returns:
           html: HTML
           cnt: number of DOIs
+          oacnt: number of Open Access
     '''
     header = ['Published', 'DOI', 'Journal', 'Title']
     html = "<table id='dois' class='tablesorter standard'><thead><tr>" \
            + ''.join([f"<th>{itm}</th>" for itm in header]) + "</tr></thead><tbody>"
     fileoutput = ""
-    cnt = 0
+    cnt = oacnt = 0
     for row in rows:
+        if 'jrc_is_oa' in row and row['jrc_is_oa']:
+            oacnt += 1
         version = DL.is_version(row)
         row['published'] = DL.get_publishing_date(row)
         row['link'] = doi_link(row['doi'])
@@ -1549,7 +1555,7 @@ def standard_doi_table(rows, prefix=None):
         cnt += 1
         fileoutput += dloop(row, ['published', 'doi', 'journal', 'title']) + "\n"
     html += '</tbody></table>'
-    counter = f"<p>Number of DOIs: <span id='totalrows'>{cnt}</span></p>"
+    counter = f"<p>Number of DOIs: <span id='totalrows'>{cnt:,}</span></p>"
     cbutton = "<button id='verbtn' class=\"btn btn-outline-warning\" " \
               + "onclick=\"toggler('dois', 'ver', 'totalrows');\">" \
               + "Filter versioned DOIs</button>&nbsp;"
@@ -1558,7 +1564,7 @@ def standard_doi_table(rows, prefix=None):
                + cbutton + create_downloadable('standard', header, fileoutput) + html
     else:
         html = counter + cbutton + create_downloadable('standard', header, fileoutput) + html
-    return html, cnt
+    return html, cnt, oacnt
 
 # ******************************************************************************
 # * Badge utility functions                                                    *
@@ -3340,7 +3346,7 @@ def dois_mytags(orcid="0000-0003-3118-1636", year='All'):
                                title=render_warning("Could not find DOIs for my affiliations"),
                                message=error_message(err))
     htmlp = year_pulldown(f"dois/mytags/{orcid}") + "<br>"
-    html, cnt = standard_doi_table(rows)
+    html, cnt, _ = standard_doi_table(rows)
     title = "DOIs for my affiliations"
     if year != 'All':
         title += f" ({year})"
@@ -3529,8 +3535,7 @@ def doi_tabs(doi, row, data, authors):
     if acktext:
         highlight = ""
         try:
-            #highlight = DL.highlight_acknowledgments(acktext, DB['dis'])
-            highlight = acktext  #PLUG
+            highlight = DL.highlight_acknowledgments(acktext, DB['dis'])
             if acktext != highlight:
                 acktext = highlight
             else:
@@ -3769,7 +3774,10 @@ def show_doi_by_type_ui(src, typ, sub, year):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get DOIs from dois collection"),
                                message=error_message(err))
-    html, _ = standard_doi_table(rows)
+    html, cnt, oacnt = standard_doi_table(rows)
+    chartscript, chartdiv = DP.wedge_chart({'shown': oacnt, 'total': cnt}) if oacnt else ['', '']
+    oamsg = f"<span style='font-size: 18pt; color: lightgray'>{oacnt/cnt*100:.1f}%</span>" \
+            + f"<span style='font-size: 12pt'><br>{oacnt:,}/{cnt:,}</span>"
     desc = f"{src} {typ}"
     if sub != 'None':
         desc += f"/{sub}"
@@ -3780,9 +3788,9 @@ def show_doi_by_type_ui(src, typ, sub, year):
                                title=render_warning("Could not find DOIs", 'warning'),
                                message="Could not find any DOIs with type/subtype matching " \
                                        + desc)
-    endpoint_access()
-    return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title=f"DOIs for {desc}", html=html,
+    return make_response(render_template('custom.html', urlroot=request.url_root,
+                                         title=f"DOIs for {desc}", html=html, oamsg=oamsg,
+                                         chartscript=chartscript, chartdiv=chartdiv,
                                          navbar=generate_navbar('DOIs')))
 
 
@@ -3814,7 +3822,7 @@ def show_doi_by_title_ui(title):
                                message=error_message(err))
     for row in rows:
         union.append(row)
-    html, _ = standard_doi_table(union)
+    html, _, _ = standard_doi_table(union)
     if not html:
         return render_template('warning.html', urlroot=request.url_root,
                                title=render_warning("Could not find DOIs", 'warning'),
@@ -3935,6 +3943,35 @@ def dois_source(year='All'):
                                          title=title, html=html,
                                          chartscript=chartscript, chartdiv=chartdiv,
                                          chartscript2=chartscript2, chartdiv2=chartdiv2,
+                                         navbar=generate_navbar('DOIs')))
+
+
+@app.route('/dois_top_cited')
+def dois_top_cited():
+    ''' Show top cited DOIs
+    '''
+    try:
+        olink = f"{app.config['OPENALEX']}works?sort=cited_by_count:desc" \
+                + "&filter=authorships.institutions.lineage:i195573530" \
+                + f"&mailto={app.config['EMAIL']}"
+        resp = requests.get(olink, timeout=5)
+        results = resp.json()['results']
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get top cited DOIs"),
+                               message=error_message(err))
+    html = "<table id='top_cited' class='tablesorter standard'><thead><tr>" \
+           + "<th>Citations</th><th>DOI</th><th>Journal</th><th>Title</th></tr></thead><tbody>"
+    for result in results:
+        doi = result['doi'].replace('https://doi.org/', '')
+        row = DL.get_doi_record(doi, coll=DB['dis'].dois)
+        html += f"<tr><td>{result['cited_by_count']:,}</td><td>{doi_link(doi)}</td>" \
+                + f"<td>{DL.get_journal(row, full=False, name_only=True)}</td>" \
+                + f"<td>{DL.get_title(row)}</td></tr>"
+    html += "</tbody></table>"
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="Top cited DOIs", html=html,
                                          navbar=generate_navbar('DOIs')))
 
 
@@ -4440,12 +4477,12 @@ def show_doiui_custom(year='All'):
         row['title'] = row['title'].replace("\n", " ")
         fileoutput += dloop(row, ['published', 'doi', 'title', 'newsletter']) + "\n"
     html += '</tbody></table>'
-    top = f"DOIs: {len(works):,}<br>Journals/preprints: {jorp:,}<br>" \
+    html = f"DOIs: {len(works):,}<br>Journals/preprints: {jorp:,}<br>" \
            + f"DOIs in newsletter: {newsletter:,}<br>" \
-           + create_downloadable(ipd['field'], header, fileoutput) + "<br>"
+           + create_downloadable(ipd['field'], header, fileoutput) + f"<br>{html}"
     endpoint_access()
     return make_response(render_template('custom.html', urlroot=request.url_root,
-                                         title=ptitle, top=top, oamsg=oamsg, bottom=html,
+                                         title=ptitle, html=html, oamsg=oamsg,
                                          chartscript=chartscript, chartdiv=chartdiv,
                                          navbar=generate_navbar('DOIs')))
 
@@ -4684,7 +4721,7 @@ def dois_recent(source='Crossref', limit=10):
                                title=render_warning("Could not get recent DOIs"),
                                message=error_message(err))
     html = source_limit_pulldown('dois_recent', source, limit) + "<br>"
-    html2, _ = standard_doi_table(rows)
+    html2, _, _ = standard_doi_table(rows)
     html += html2
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
@@ -4796,7 +4833,7 @@ def datacite_subject(subject=None, year='All'):
                                title=render_warning("Could not get DOI subjects"),
                                message=error_message(err))
     if subject:
-        html, _ = standard_doi_table(rows, prefix=f"datacite_subject/{subject}")
+        html, _, _ = standard_doi_table(rows, prefix=f"datacite_subject/{subject}")
         title = f"DOIs for {subject}"
         if year != 'All':
             title += f" (year={year})"
@@ -4903,13 +4940,21 @@ def datacite_doisd(dtype=None, pub=None, year='All'):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get data DOIs"),
                                message=error_message(err))
-    html, cnt = standard_doi_table(rows, prefix=f"datacite_dois/{dtype}/{pub}")
+    html, cnt, oacnt = standard_doi_table(rows, prefix=f"datacite_dois/{dtype}/{pub}")
     title = f"DOIs for {pub} {dtype} ({cnt:,})"
     if year != 'All':
         title += f" (year={year})"
+    chartscript, chartdiv = DP.wedge_chart({'shown': oacnt, 'total': cnt}) if oacnt else ['', '']
+    if cnt:
+        oamsg = f"<span style='font-size: 18pt; color: lightgray'>{oacnt/cnt*100:.1f}%</span>" \
+                + f"<span style='font-size: 12pt'><br>{oacnt:,}/{cnt:,}</span>"
+    else:
+        oamsg = ""
+        html += f"<br>No DOIs found for {pub} {dtype}"
     endpoint_access()
-    return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title=title, html=html,
+    return make_response(render_template('custom.html', urlroot=request.url_root,
+                                         title=title, html=html, oamsg=oamsg,
+                                         chartscript=chartscript, chartdiv=chartdiv,
                                          navbar=generate_navbar('DOIs')))
 
 
@@ -5131,7 +5176,7 @@ def doiui_firstlast(year='All', which=None):
                                                     + "from dois collection"),
                                message=error_message(err))
     if which:
-        html, _ = standard_doi_table(display_rows)
+        html, _, _ = standard_doi_table(display_rows)
         title = f"DOIs with lab head {which} author"
         if year != 'All':
             title += f" ({year})"
@@ -5433,7 +5478,7 @@ def org_summary(org='Shared Resources',year='All', which=None):
             display_rows = finds['first'] if which == 'first' else finds['last']
         else:
             display_rows = finds['firstsr'] if which == 'first' else finds['lastsr']
-        html, _ = standard_doi_table(display_rows)
+        html, _, _ = standard_doi_table(display_rows)
         if org == 'all':
             title = f"Journal publications with lab head {which} author"
         else:
@@ -5842,11 +5887,9 @@ def dois_publisher(year='All'):
 def show_open_access():
     ''' Show DOIs by year
     '''
-    html = '''DOIs from <a href='https://openalex.org/' target='_blank'>OpenAlex</a> include
-    nearly all Crossref DOIs from Janelia. OpenAlex will not include most DOIs from DataCite
-    (such as datasets, software, etc.).
+    html = '''
     <ul>
-    <li>Citation counts are available starting 2012. These counts represent the number of
+    <li>Citation counts are available starting 2010. These counts represent the number of
     DOIs (from any source) published that year that cite any Janelia DOI (from any year).</li>
     <li>Closed DOIs are DOIs that are in a non-Open Access journal that we cannot find
     freely-available open text for.</li>
@@ -5892,24 +5935,22 @@ def show_open_access():
         adjusted.append({"year": int(key), "org_closed": 0, "org_open": 0,
                          "cited_by_count": 0, "closed": row['closed'], "open": row['open']})
     adjusted = sorted(adjusted, key=lambda x: x['year'])
+    print(adjusted)
     html += f"<h5>Total citations for Janelia DOIs since {counts[0]['year']}: " \
             + f"{results['cited_by_count']:,}" + "</h5>"
-    data = {'years': [str(itm['year']) for itm in counts],
-            'Closed': [itm['works_count'] - itm['oa_works_count'] for itm in counts],
-            'Open': [itm['oa_works_count'] for itm in counts],
-            'Citations': [itm['cited_by_count'] for itm in counts]}
     data = {'years': [str(itm['year']) for itm in adjusted],
             'Closed': [itm['closed'] for itm in adjusted],
             'Open': [itm['open'] for itm in adjusted],
             'Citations': [itm['cited_by_count'] for itm in adjusted]}
     html2 = "<br>Source for citations: " \
-            + "<a href='https://api.openalex.org/institutions?search=Janelia' target='_blank'>OpenAlex</a>"
+            + "<a href='https://api.openalex.org/institutions?search=Janelia' " \
+            + "target='_blank'>OpenAlex</a>"
     chartscript, chartdiv = DP.stacked_bar_chart(data, 'OpenAlex DOIs', xaxis="years", orient=pi/4,
                                                  yaxis=('Closed', 'Open'), yaxis2='Citations',
                                                  colors=['maroon', 'green'])
     endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
-                                         title="OpenAlex DOIs/citations by year", html=html,
+                                         title="DOIs/citations by year", html=html,
                                          chartscript=chartscript, chartdiv=chartdiv,
                                          html2=html2,
                                          navbar=generate_navbar('DOIs')))
@@ -5945,24 +5986,31 @@ def show_open_access_details(year='All'):
         onclick = "onclick='nav_post_year(\"jrc_oa_status\",\"" + row['_id'] \
                           + "\",\"" + year + "\")'"
         link = f"<a href='#' {onclick}>{row['count']}</a>"
-        html += f"<tr><td>{row['_id'].capitalize()}</td>" \
+        html += f"<tr><td><span class='oa_{row['_id']}'>{row['_id'].capitalize()}</span></td>" \
                 + f"<td>{CVTERM['oa_status'][row['_id']]['display']}</td>" \
                 + f"<td>{link}</td></tr>"
         data[row['_id'].capitalize()] = row['count']
         palette.append(DP.OA_COLORS[row['_id'].capitalize()])
     html += "</tbody><tfoot><tr><th colspan=2>Total</th><th style='text-align: center;'>" \
             + f"{total:,}</th></tr></tfoot></table>"
-    title = 'Open access DOIs'
+    title = 'DOIs by Open Access status'
     if year != 'All':
         title += f" ({year})"
     chartscript, chartdiv = DP.pie_chart(data, title, "oa_status", width=500,
                                          colors=palette)
     ymsg = f" for {year}" if year != 'All' else ''
     pre = f"<span style='font-size: 18pt; color: lime'>{total_oa/total*100:.1f}%</span>" \
-          + f"<span style='font-size: 14pt'> of Janelia DOIs in OpenAlex{ymsg} are " \
+          + f"<span style='font-size: 14pt'> of Janelia DOIs {ymsg} are " \
           + "open access</span>"
     html = pre + '<br>' + year_pulldown('dois_oa_details') + html
+    endpoint_access()
+    return make_response(render_template('bokeh.html', urlroot=request.url_root,
+                                         title=title, html=html,
+                                         chartscript=chartscript, chartdiv=chartdiv,
+                                         navbar=generate_navbar('Journals')))
+    # Early exit - no need for an OpenAlex report
     match = {"doi": {"$not": {"$regex": "janelia"}}}
+    match = {"jrc_is_oa": {"$exists": True}}
     if year != 'All':
         match["jrc_publishing_date"] = {"$regex": "^"+ year}
     payload = [{"$match": match},
@@ -6145,7 +6193,7 @@ def show_journal_ui(jname, year='All'):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get DOIs for journal"),
                                message=error_message(err))
-    html, _ = standard_doi_table(rows)
+    html, _, _ = standard_doi_table(rows)
     title = f"DOIs for {jname}"
     if year != 'All':
         title += f" ({year})"
@@ -6483,7 +6531,7 @@ def show_names_ui(name):
                                message=error_message(err))
     html, count = generate_user_table(rows)
     html = f"Search term: {name}<br><p>Number of authors: " \
-           + f"<span id='totalrowsa'>{count}</span></p>" + html
+           + f"<span id='totalrowsa'>{count:,}</span></p>" + html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="Authors", html=html,
@@ -7429,7 +7477,7 @@ def project(name):
                                title=render_warning("Could not get projects from " \
                                                     + "orcid collection"),
                                message=error_message(err))
-    html, cnt = standard_doi_table(rows)
+    html, cnt, _ = standard_doi_table(rows)
     if cnt:
         html = f"<p>Number of DOIs: {cnt:,}</p>" + html
     else:
@@ -7481,7 +7529,7 @@ def orcid_affiliation(aff, year='All'):
                                                     + "in dois collection"),
                                message=error_message(err))
     htmlp += "<hr>" + year_pulldown(f"tag/{aff}")
-    html, cnt = standard_doi_table(rows)
+    html, cnt, _ = standard_doi_table(rows)
     if cnt:
         html = htmlp + html
     else:
@@ -7509,31 +7557,26 @@ def tag_nohead(aff, year='All'):
                                      {"creators.name": aff}]}
                            ]}
     try:
-        rowso = DB['dis'].dois.find(payload).sort("jrc_publishing_date", -1)
+        rows = DB['dis'].dois.find(payload).sort("jrc_publishing_date", -1)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not find tags " \
                                                     + "in dois collection"),
                                message=error_message(err))
-    htmlp = year_pulldown(f"tagnh/{aff}")
-    rows = []
-    oacnt = 0
-    for row in rowso:
-        if 'jrc_is_oa' in row and row['jrc_is_oa']:
-            oacnt += 1
-        rows.append(row)
-    html, cnt = standard_doi_table(rows)
+    html, cnt, oacnt = standard_doi_table(rows, prefix=f"tagnh/{aff}")
     chartscript, chartdiv = DP.wedge_chart({'shown': oacnt, 'total': cnt}) if oacnt else ['', '']
-    oamsg = f"<span style='font-size: 18pt; color: lightgray'>{oacnt/cnt*100:.1f}%</span>" \
-            + f"<span style='font-size: 12pt'><br>{oacnt:,}/{cnt:,}</span>"
-    if not cnt:
-        html = f"{htmlp}<br>No DOIs found for {aff}"
+    if cnt:
+        oamsg = f"<span style='font-size: 18pt; color: lightgray'>{oacnt/cnt*100:.1f}%</span>" \
+                + f"<span style='font-size: 12pt'><br>{oacnt:,}/{cnt:,}</span>"
+    else:
+        oamsg = ""
+        html += f"<br>No DOIs found for {aff}"
     title = aff
     if year != 'All':
         title += f" ({year})"
     endpoint_access()
     return make_response(render_template('custom.html', urlroot=request.url_root,
-                                         title=title, top=htmlp, bottom=html, oamsg=oamsg,
+                                         title=title, html=html, oamsg=oamsg,
                                          chartscript=chartscript, chartdiv=chartdiv,
                                          navbar=generate_navbar('Tag/affiliation')))
 
