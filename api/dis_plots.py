@@ -11,7 +11,7 @@ from bokeh.transform import cumsum
 import pandas as pd
 
 OA_COLORS = {"Bronze": "#CD7F32", "Closed": "red", "Diamond": "lightgray",
-             "Gold": "#FFD700", "Green": "green", "Hybrid": "mediumblue"}
+             "Gold": "#FFD700", "Green": "green", "Hybrid": "cyan"}
 SOURCE_PALETTE = ["mediumblue", "darkorange"]
 SOURCE3_PALETTE = ["mediumblue", "darkorange", "wheat"]
 TYPE_PALETTE = ["mediumblue", "darkorange", "wheat", "darkgray"]

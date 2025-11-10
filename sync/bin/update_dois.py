@@ -7,7 +7,7 @@
            to DIS MongoDB.
 """
 
-__version__ = '17.1.0'
+__version__ = '18.0.0'
 
 import argparse
 import collections
@@ -957,6 +957,33 @@ def add_openalex(rec):
         rec["jrc_oa_status"] = data['open_access']['oa_status']
 
 
+def add_datacite(rec):
+    ''' Add data from DataCite
+        Keyword arguments:
+          rec: DataCite record
+        Returns:
+          None
+    '''
+    try:
+        if 'rightsList' in rec and rec['rightsList']:
+            rec['jrc_license'] = rec['rightsList'][0]['rightsIdentifier']
+    except Exception:
+        pass
+    if 'jrc_is_oa' in rec and rec['jrc_is_oa']:
+        return
+    if 'publisher' not in rec or not rec['publisher']:
+        return
+    if rec['publisher'] in DISCONFIG['publisher_diamond']:
+        rec['jrc_oa_status'] = 'diamond'
+    elif rec['publisher'] in DISCONFIG['publisher_gold']:
+        rec['jrc_oa_status'] = 'gold'
+    elif 'janelia' in rec['doi']:
+        rec['jrc_oa_status'] = 'gold'
+    else:
+        return
+    rec['jrc_is_oa'] = True
+
+
 def update_mongodb(persist):
     ''' Persist DOI records in MongoDB
         Keyword arguments:
@@ -980,6 +1007,9 @@ def update_mongodb(persist):
         # Data from OpenAlex
         if 'janelia' not in key: # Janelia DataCite DOIs are [almost] never in OpenAlex
             add_openalex(val)
+        # Legal/open access data from DataCite
+        if val['jrc_obtained_from'] == 'DataCite':
+            add_datacite(val)
         # Insert/update timestamps
         if key not in EXISTING:
             val['jrc_inserted'] = datetime.today().replace(microsecond=0)
