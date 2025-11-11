@@ -5309,6 +5309,25 @@ def show_raw(resource=None, doi=None):
         result['data'] = response
     return generate_response(result)
 
+
+@app.route('/xml/<string:resource>/<path:doi>')
+def return_xml(resource='elsevier', doi=None):
+    ''' XML metadata for a DOI
+    resource: elsevier
+    '''
+    doi = doi.lstrip('/').rstrip('/').lower()
+    response = result = None
+    if resource:
+        resource = resource.lower()
+    if resource in ('elsevier'):
+        try:
+            response = DL.get_doi_record(doi, source=resource, content='xml')
+        except Exception as err:
+            raise InvalidUsage(str(err), 500) from err
+    if response:
+        result = response.content
+    return result
+
 # ******************************************************************************
 # * UI endpoints (Organizations)                                               *
 # ******************************************************************************
