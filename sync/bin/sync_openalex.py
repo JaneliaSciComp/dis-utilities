@@ -25,6 +25,7 @@ import doi_common.doi_common as DL
 
 ARG=LOGGER = None
 DB = {}
+LICENSE = {}
 COUNT = {'dois': 0, 'notfound': 0, 'updated': 0}
 
 def terminate_program(msg=None):
@@ -60,6 +61,12 @@ def initialize_program():
             DB[source] = JRC.connect_database(dbo)
         except Exception as err:
             terminate_program(err)
+    try:
+        rows = DB['dis'].cvterm.find({'cv': 'license_mapping'})
+    except Exception as err:
+        terminate_program(err)
+    for row in rows:
+        LICENSE[row['name']] = row['display']
 
 
 def get_dois():
@@ -126,18 +133,30 @@ def update_open_access(row):
         COUNT["notfound"] += 1
         return
     payload = {}
+    try_pmc = True
     try:
         if 'jrc_is_oa' not in row and 'open_access' in data and data['open_access']:
             payload['jrc_is_oa'] = bool(data['open_access']['is_oa'])
             payload['jrc_oa_status'] = data['open_access']['oa_status']
-        if 'jrc_license' not in row and 'primary_location' in data and data['primary_location']:
-            payload['jrc_license'] = data['primary_location']['license']
-        if ('jrc_license' not in payload or payload['jrc_license'] is None) \
+        if ('jrc_license' not in row or not row['jrc_license']) \
+           and 'primary_location' in data and data['primary_location'] \
+           and data['primary_location']['license'] and data['primary_location']['license'] != "False":
+            if data['primary_location']['license'] in LICENSE:
+                payload['jrc_license'] = LICENSE[data['primary_location']['license']]
+                LOGGER.info(f"Using license (primary_location) {payload['jrc_license']} for {row['doi']}")
+            else:
+                LOGGER.warning(f"Unknown license {data['primary_location']['license']} " \
+                               + f"for {row['doi']}")
+            try_pmc = False
+        if ('jrc_license' not in payload or payload['jrc_license'] is None) and try_pmc \
            and 'jrc_pmc' in row:
             alt = get_pmc_license(row['jrc_pmc'])
             if alt:
-                LOGGER.info(f"Using PMC license for {row['doi']}: {alt}")
-                payload['jrc_license'] = alt
+                if alt in LICENSE:
+                    payload['jrc_license'] = alt
+                    LOGGER.info(f"Using PMC license for {row['doi']}: {alt}")
+                else:
+                    LOGGER.warning(f"Unknown PMC license {alt} for {row['doi']}")
         if not payload:
             return
     except Exception as err:
@@ -228,6 +247,8 @@ def process_dois():
             terminate_program(err)
     LOGGER.info(f"Found {cnt} DOI{'s' if cnt != 1 else ''} to process for OA status")
     for row in tqdm(rows, total=cnt, desc="Fix OA status"):
+        if 'jrc_oa_status' not in row or not row['jrc_oa_status']:
+            continue
         COUNT["dois"] += 1
         if row['jrc_oa_status'] == "closed" and row['jrc_fulltext_url']:
             override_oa_closed(row)
