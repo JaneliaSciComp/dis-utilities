@@ -7,7 +7,7 @@
            to DIS MongoDB.
 """
 
-__version__ = '18.0.0'
+__version__ = '19.0.0'
 
 import argparse
 import collections
@@ -47,6 +47,7 @@ CROSSREF_CALL = {}
 DATACITE_CALL = {}
 IGNORE = {}
 INSERTED = {}
+LICENSE = {}
 UPDATED = {}
 MISSING = {}
 NO_AUTHOR = {}
@@ -121,6 +122,12 @@ def initialize_program():
             IGNORE[row['type']][row['key']] = True
     except Exception as err:
         terminate_program(err)
+    try:
+        rows = DB['dis'].cvterm.find({'cv': 'license_mapping'})
+    except Exception as err:
+        terminate_program(err)
+    for row in rows:
+        LICENSE[row['name']] = row['display']
 
     if ARG.TARGET == 'flyboy':
         return
@@ -966,7 +973,20 @@ def add_datacite(rec):
     '''
     try:
         if 'rightsList' in rec and rec['rightsList']:
-            rec['jrc_license'] = rec['rightsList'][0]['rightsIdentifier']
+            for right in rec['rightsList']:
+                if 'rightsIdentifier' in right and right['rightsIdentifier'] in LICENSE:
+                    rec['jrc_license'] = right['rightsIdentifier']
+                    LOGGER.debug(f"Using license (rightsIdentifier) {rec['jrc_license']} for {rec['doi']}")
+                elif 'rights' in right and right['rights'] in LICENSE:
+                    rec['jrc_license'] = LICENSE[right['rights']]
+                    LOGGER.debug(f"Using license (rights) {rec['jrc_license']} for {rec['doi']}")
+                elif 'rightsIdentifier' in right:
+                    LOGGER.error(f"Unknown license (rightsIdentifier) {right['rightsIdentifier']} for {rec['doi']}")
+                elif 'rights' in right and right['rights']:
+                    LOGGER.error(f"Unknown license (rights) {right['rights']} for {rec['doi']}")
+                else:
+                    LOGGER.error(f"Incorrect rights format {right} for {rec['doi']}")
+                break
     except Exception:
         pass
     if 'jrc_is_oa' in rec and rec['jrc_is_oa']:
