@@ -18,6 +18,7 @@ import sys
 from time import sleep, time
 from urllib.parse import unquote
 from bokeh.palettes import all_palettes, plasma
+from bokeh.transform import linear_cmap
 import bson
 from flask import (Flask, make_response, render_template, request, jsonify, redirect, send_file)
 from flask_cors import CORS
@@ -30,7 +31,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "87.0.0"
+__version__ = "88.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -48,7 +49,8 @@ NAV = {"Home": "",
                 "DOIs by:": {"month": "dois_month", "year": "dois_year",
                              "subject": "dois_subjectpicker"},
                 "DOI yearly report": "dois_report",
-                "Top cited DOIs": "dois_top_cited"},
+                "Top cited DOIs": "dois_top_cited",
+                "DOIs by license": "dois_license"},
        "DataCite": {"DataCite DOI stats": "datacite_dois",
                     "DataCite DOI citations": "datacite_citations",
                     "DataCite DOI downloads": "datacite_downloads",
@@ -86,6 +88,7 @@ NAV = {"Home": "",
                    "Endpoints": "stats_endpoints",
                    "Ignore lists": "ignore",
                    "DOIs awaiting processing": "dois_pending",
+                   "DOIs missing Open Access status": "dois_missing_oa",
                    "Latest hires": "orcid_datepicker",
                    "Authors with multiple ORCIDs": "orcid_duplicates",
                    "Duplicate authors": "duplicate_authors"
@@ -1135,10 +1138,9 @@ def get_license(lic):
     '''
     if lic not in CVTERM['license']:
         return lic
-    newval = f"{CVTERM['license'][lic]['definition']}"
-    if CVTERM['license'][lic]['definition'] != CVTERM['license'][lic]['display']:
-        newval += f" ({CVTERM['license'][lic]['display']})"
-    return newval
+    if lic == CVTERM['license'][lic]['definition']:
+        return lic
+    return f"{lic} ({CVTERM['license'][lic]['definition']})"
 
 
 def get_legal_information(row):
@@ -2167,7 +2169,7 @@ def stats():
 # * API endpoints (DOI)                                                        *
 # ******************************************************************************
 @app.route('/citations/incoming/<string:source>/<path:doi>')
-def show_incoming_citations(source, doi):
+def get_incoming_citations(source, doi):
     '''
     Download a DOI's incoming citations
     Download a file containing a DOI's incoming citations.
@@ -2211,7 +2213,7 @@ def show_incoming_citations(source, doi):
 
 
 @app.route('/doi/authors/<path:doi>')
-def show_doi_authors(doi):
+def get_doi_authors(doi):
     '''
     Return a DOI's authors
     Return information on authors for a given DOI.
@@ -2274,7 +2276,7 @@ def show_doi_authors(doi):
 
 
 @app.route('/doi/janelians/<path:doi>')
-def show_doi_janelians(doi):
+def get_doi_janelians(doi):
     '''
     Return a DOI's Janelia authors
     Return information on Janelia authors for a given DOI.
@@ -2295,7 +2297,7 @@ def show_doi_janelians(doi):
         description: MongoDB error
     '''
     result = initialize_result()
-    resp = show_doi_authors(doi)
+    resp = get_doi_authors(doi)
     data = resp.json
     result['data'] = []
     tags = []
@@ -2313,7 +2315,7 @@ def show_doi_janelians(doi):
 
 
 @app.route('/doi/migration/<path:doi>')
-def show_doi_migration(doi):
+def get_doi_migration(doi):
     '''
     Return a DOI's migration record
     Return migration information for a given DOI.
@@ -2358,7 +2360,7 @@ def show_doi_migration(doi):
 
 
 @app.route('/doi/migrations/<string:idate>', methods=['GET'])
-def show_doi_migrations(idate):
+def get_doi_migrations(idate):
     '''
     Return migration records for DOIs inserted since a specified date
     Return migration records for DOIs inserted since a specified date.
@@ -2412,7 +2414,7 @@ def show_doi_migrations(idate):
 
 
 @app.route('/doi/published/<string:start>/<string:end>', methods=['GET'])
-def show_published_dois(start, end):
+def get_published_dois(start, end):
     '''
     Return DOI records for DOIs by date range
     Return DOI records for DOIs with a publishing date in a specified date range.
@@ -2465,7 +2467,7 @@ def show_published_dois(start, end):
 
 
 @app.route('/doi/<path:doi>')
-def show_doi(doi):
+def get_doi_api(doi):
     '''
     Return a DOI
     Return Crossref or DataCite information for a given DOI.
@@ -2507,7 +2509,7 @@ def show_doi(doi):
 
 
 @app.route('/doi/inserted/<string:idate>')
-def show_inserted(idate):
+def get_inserted(idate):
     '''
     Return DOIs inserted since a specified date
     Return all DOIs that have been inserted since midnight on a specified date.
@@ -2549,7 +2551,7 @@ def show_inserted(idate):
 
 @app.route('/citation/<path:doi>')
 @app.route('/citation/dis/<path:doi>')
-def show_citation(doi):
+def get_citation(doi):
     '''
     Return a DIS-style citation
     Return a DIS-style citation for a given DOI.
@@ -3975,6 +3977,86 @@ def dois_top_cited():
                                          navbar=generate_navbar('DOIs')))
 
 
+@app.route('/dois_license/<string:source>/<string:lic>')
+@app.route('/dois_license/<string:source>')
+def dois_license_report(source, lic=None):
+    ''' Show DOIs by license
+    '''
+    payload = [{"$match": {"jrc_obtained_from": source, "jrc_license": lic}},
+               {"$sort": {"count": -1}}]
+    try:
+        rows = DB['dis'].dois.aggregate(payload)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get license data from dois"),
+                               message=error_message(err))
+    html, _, _ = standard_doi_table(rows)
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=f"{source} DOIs for license {lic}", html=html,
+                                         navbar=generate_navbar('DOIs')))
+
+
+@app.route('/dois_license')
+def dois_license():
+    ''' Show DOIs by license
+    '''
+    try:
+        total = DB['dis'].dois.count_documents({})
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get total number of DOIs"),
+                               message=error_message(err))
+    payload = [{"$group": {"_id": {"source": "$jrc_obtained_from", "license": "$jrc_license"},
+                           "count": {"$sum": 1}}},
+               {"$sort": {"license": 1}}]
+    try:
+        rows = DB['dis'].dois.aggregate(payload)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get license data from dois"),
+                               message=error_message(err))
+    html = "<table id='license' class='tablesorter numbers'><thead><tr>" \
+           + "<th>Source</th><th>Crossref</th><th>DataCite</th></tr></thead><tbody>"
+    cnt = {"Crossref": 0, "DataCite": 0}
+    data = {}
+    lines = {}
+    for row in rows:
+        orig = '/' + row['_id']['license'] if 'license' in row['_id'] else ''
+        if 'license' not in row['_id']:
+            lic = 'Not found'
+        else:
+            lic = row['_id']['license']
+        if lic not in data:
+            data[lic] = 0
+        data[lic] += row['count']
+        cnt[row['_id']['source']] += row['count']
+        if lic not in lines:
+            lines[lic] = {"Crossref": 0, "DataCite": 0, "orig": orig}
+        lines[lic][row['_id']['source']] += row['count']
+    srt = sorted(data.items(), key=lambda item: item[1], reverse=True)
+    data = dict(srt)
+    defcnt = cnt['Crossref'] + cnt['DataCite'] - data['Not found']
+    for lic in sorted(lines.keys()):
+        clink = f"<a href='/dois_license/Crossref{lines[lic]['orig']}'>" \
+                + f"{lines[lic]['Crossref']}</a>" if lines[lic]['Crossref'] else '0'
+        dlink = f"<a href='/dois_license/DataCite{lines[lic]['orig']}'>" \
+                + f"{lines[lic]['DataCite']}</a>" if lines[lic]['DataCite'] else '0'
+        html += f"<tr><td>{lic}</td><td>{clink}</td><td>{dlink}</td></tr>"
+    html += f"</tbody><tfoot><tr><th>Total</th><th>{cnt['Crossref']:,}</th>" \
+            + f"<th>{cnt['DataCite']:,}</th></tr></tfoot></table>"
+    pre = f"<span style='font-size: 18pt; color: lime'>{defcnt/total*100:.1f}%</span>" \
+          + "<span style='font-size: 14pt'> of Janelia DOIs have a known license" \
+          + f"</span><span style='font-size: 12pt'><br>{defcnt:,}/{total:,}</span><br>"
+    html = pre + html
+    chartscript, chartdiv = DP.pie_chart(data, "DOIs by license", "license", width=700, height=600,
+                                         colors=all_palettes['TolRainbow'][len(data)])
+    endpoint_access()
+    return make_response(render_template('bokeh.html', urlroot=request.url_root,
+                                         title="DOIs by license", html=html,
+                                         chartscript=chartscript, chartdiv=chartdiv,
+                                         navbar=generate_navbar('DOIs')))
+
+
 @app.route('/dois_report/<string:year>')
 @app.route('/dois_report')
 def dois_report(year=str(datetime.now().year)):
@@ -4543,45 +4625,6 @@ def dois_month(year=str(datetime.now().year)):
                                          chartscript=chartscript, chartdiv=chartdiv,
                                          navbar=generate_navbar('DOIs')))
 
-
-@app.route('/dois_pending')
-def dois_pending():
-    ''' Show DOIs awaiting processing
-    '''
-    try:
-        cnt = DB['dis'].dois_to_process.count_documents({})
-        rows = DB['dis'].dois_to_process.find({})
-    except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get DOIs " \
-                                                    + "from dois_to_process collection"),
-                               message=error_message(err))
-    html = '<table id="types" class="tablesorter numbers"><thead><tr>' \
-           + '<th>DOI</th><th>Inserted</th><th>Time waiting</th>' \
-           + '</tr></thead><tbody>'
-    if not cnt:
-        return render_template('warning.html', urlroot=request.url_root,
-                               title=render_warning("No DOIs found", 'info'),
-                               message="No DOIs are awaiting processing. This isn't an error," \
-                                       + " it just means that we're all caught up on " \
-                                       + "DOI processing.")
-    for row in rows:
-        elapsed = datetime. now() - row['inserted']
-        if elapsed.days:
-            etime = f"{elapsed.days} day{'s' if elapsed.days > 1 else ''}, " \
-                    + f"{elapsed.seconds // 3600:02}:{elapsed.seconds // 60 % 60:02}:" \
-                    + f"{elapsed.seconds % 60:02}"
-        else:
-            etime = f"{elapsed.seconds // 3600:02}:{elapsed.seconds // 60 % 60:02}:" \
-                    + f"{elapsed.seconds % 60:02}"
-        url = f"<a href='{row['url']}' target='_blank'>{row['doi']}</a>" \
-              if 'url' in row and row['url'] else doi_link(row['doi'])
-        html += f"<tr><td>{url}</td><td>{row['inserted']}</td><td>{etime}</td>"
-    html += '</tbody></table>'
-    endpoint_access()
-    return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title="DOIs awaiting processing", html=html,
-                                         navbar=generate_navbar('DOIs')))
 
 @app.route('/dois_subjectpicker')
 def show_doi_subjectpicker():
@@ -5272,7 +5315,7 @@ def dois_no_janelia(year='All'):
 
 
 @app.route('/raw/<string:resource>/<path:doi>')
-def show_raw(resource=None, doi=None):
+def get_raw(resource=None, doi=None):
     ''' JSON metadata for a DOI
     resource: biorxiv, elife, elsevier, figshare, openalex, protocols.io, pubmed, pmc
     '''
@@ -6022,44 +6065,6 @@ def show_open_access_details(year='All'):
           + f"<span style='font-size: 14pt'> of Janelia DOIs {ymsg} are " \
           + "open access</span>"
     html = pre + '<br>' + year_pulldown('dois_oa_details') + html
-    endpoint_access()
-    return make_response(render_template('bokeh.html', urlroot=request.url_root,
-                                         title=title, html=html,
-                                         chartscript=chartscript, chartdiv=chartdiv,
-                                         navbar=generate_navbar('Journals')))
-    # Early exit - no need for an OpenAlex report
-    match = {"doi": {"$not": {"$regex": "janelia"}}}
-    match = {"jrc_is_oa": {"$exists": True}}
-    if year != 'All':
-        match["jrc_publishing_date"] = {"$regex": "^"+ year}
-    payload = [{"$match": match},
-               {"$group": {"_id": {"source": "$jrc_obtained_from", "oa": "$jrc_is_oa"},
-                           "count": {"$sum": 1}}}
-              ]
-    try:
-        rows = DB['dis'].dois.aggregate(payload)
-    except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get Open access data"),
-                               message=error_message(err))
-    tbl = {"Crossref": {"in": 0, "out": 0, "total": 0}, "DataCite": {"in": 0, "out": 0, "total": 0}}
-    for row in rows:
-        if 'oa' in row['_id']:
-            tbl[row['_id']['source']]['in'] += row['count']
-        else:
-            tbl[row['_id']['source']]['out'] += row['count']
-        tbl[row['_id']['source']]['total'] += row['count']
-    html += '<h5>Janelia DOI coverage in OpenAlex</h5>' \
-            + '<table id="dois" class="tablesorter numbers"><thead><tr>' \
-            + '<th>Source</th><th>In OpenAlex</th><th>Not in OpenAlex</th><th>Total</th>' \
-            + '<th>% coverage</th></tr></thead><tbody>'
-    for key, val in tbl.items():
-        perc = "-" if not val['total'] else f"{val['in']/val['total']*100:.1f}%"
-        html += f"<tr><td>{key}</td><td>{val['in']:,}</td><td>{val['out']:,}</td>" \
-                + f"<td>{val['total']:,}</td><td>{perc}</td></tr>"
-    html += '</tbody></table>'
-    html += 'Note that DataCite DOIs do not include Janelia Figshare DOIs<br>' \
-            + '(which will never be in OpenAlex, but are Open Access)'
     endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title=title, html=html,
@@ -7825,6 +7830,82 @@ def ignore(typ=None):
     return make_response(render_template('ignore.html', urlroot=request.url_root,
                                          title=title, html=html,
                                          navbar=generate_navbar('System')))
+
+
+@app.route('/dois_pending')
+def dois_pending():
+    ''' Show DOIs awaiting processing
+    '''
+    try:
+        cnt = DB['dis'].dois_to_process.count_documents({})
+        rows = DB['dis'].dois_to_process.find({})
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get DOIs " \
+                                                    + "from dois_to_process collection"),
+                               message=error_message(err))
+    html = '<table id="types" class="tablesorter numbers"><thead><tr>' \
+           + '<th>DOI</th><th>Inserted</th><th>Time waiting</th>' \
+           + '</tr></thead><tbody>'
+    if not cnt:
+        return render_template('warning.html', urlroot=request.url_root,
+                               title=render_warning("No DOIs found", 'info'),
+                               message="No DOIs are awaiting processing. This isn't an error," \
+                                       + " it just means that we're all caught up on " \
+                                       + "DOI processing.")
+    for row in rows:
+        elapsed = datetime. now() - row['inserted']
+        if elapsed.days:
+            etime = f"{elapsed.days} day{'s' if elapsed.days > 1 else ''}, " \
+                    + f"{elapsed.seconds // 3600:02}:{elapsed.seconds // 60 % 60:02}:" \
+                    + f"{elapsed.seconds % 60:02}"
+        else:
+            etime = f"{elapsed.seconds // 3600:02}:{elapsed.seconds // 60 % 60:02}:" \
+                    + f"{elapsed.seconds % 60:02}"
+        url = f"<a href='{row['url']}' target='_blank'>{row['doi']}</a>" \
+              if 'url' in row and row['url'] else doi_link(row['doi'])
+        html += f"<tr><td>{url}</td><td>{row['inserted']}</td><td>{etime}</td>"
+    html += '</tbody></table>'
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="DOIs awaiting processing", html=html,
+                                         navbar=generate_navbar('System')))
+
+
+@app.route('/dois_missing_oa')
+def show_missing_oa():
+    ''' Show DOIs missing Open Access status
+    '''
+    payload = [{"$match": {"jrc_oa_status": {"$exists": False}}},
+               {"$sort": {"jrc_obtained_from": 1, "doi": 1}}]
+    try:
+        cnt = DB['dis'].dois.count_documents(payload[0]['$match'])
+        print(cnt)
+        rows = DB['dis'].dois.aggregate(payload)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get DOIs " \
+                                                    + "missing Open Access status"),
+                               message=error_message(err))
+    html = '<table id="types" class="tablesorter standard"><thead><tr>' \
+           + '<th>DOI</th><th>Source</th><th>Publisher</th><th>Journal</th>' \
+           + '</tr></thead><tbody>'
+    if not cnt:
+        return render_template('warning.html', urlroot=request.url_root,
+                               title=render_warning("No DOIs found", 'info'),
+                               message="No DOIs are missing Open Access status.")
+    for row in rows:
+        doi = row['doi']
+        publisher = row['publisher'] if 'publisher' in row else 'Unknown'
+        journal = DL.get_journal(row)
+        html += f"<tr><td>{doi_link(doi)}</td><td>{row['jrc_obtained_from']}</td>" \
+            + f"<td>{publisher}</td><td>{journal}</td></tr>"
+    html += '</tbody></table>'
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="DOIs missing Open Access status", html=html,
+                                         navbar=generate_navbar('System')))
+
 
 # ******************************************************************************
 # * Multi-role endpoints (ORCID)                                               *
