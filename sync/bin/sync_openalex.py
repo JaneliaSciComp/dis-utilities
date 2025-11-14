@@ -14,18 +14,21 @@
 __version__ = '2.0.0'
 
 import argparse
+import json
 from operator import attrgetter
 import sys
 import time
+import traceback
 from tqdm import tqdm
 import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
 
-# pylint: disable=broad-exception-caught,logging-fstring-interpolation
+# pylint: disable=broad-exception-caught,logging-fstring-interpolation,logging-not-lazy
 
-ARG=LOGGER = None
+ARG = DISCONFIG =LOGGER = None
 DB = {}
 LICENSE = {}
+OUTPUT = []
 COUNT = {'dois': 0, 'notfound': 0, 'updated': 0}
 
 def terminate_program(msg=None):
@@ -140,10 +143,12 @@ def update_open_access(row):
             payload['jrc_oa_status'] = data['open_access']['oa_status']
         if ('jrc_license' not in row or not row['jrc_license']) \
            and 'primary_location' in data and data['primary_location'] \
-           and data['primary_location']['license'] and data['primary_location']['license'] != "False":
+           and data['primary_location']['license'] \
+           and data['primary_location']['license'] != "False":
             if data['primary_location']['license'] in LICENSE:
                 payload['jrc_license'] = LICENSE[data['primary_location']['license']]
-                LOGGER.info(f"Using license (primary_location) {payload['jrc_license']} for {row['doi']}")
+                LOGGER.info(f"Using license (primary_location) {payload['jrc_license']} " \
+                            + f"for {row['doi']}")
             else:
                 LOGGER.warning(f"Unknown license {data['primary_location']['license']} " \
                                + f"for {row['doi']}")
@@ -167,6 +172,8 @@ def update_open_access(row):
             DB['dis']['dois'].update_one({"doi": row['doi']}, {"$set": payload})
         except Exception as err:
             terminate_program(err)
+    payload['doi'] = row['doi']
+    OUTPUT.append(payload)
     COUNT["updated"] += 1
 
 
@@ -185,6 +192,8 @@ def override_oa_closed(row):
             DB['dis']['dois'].update_one({"doi": row['doi']}, {"$set": payload})
         except Exception as err:
             terminate_program(err)
+    payload['doi'] = row['doi']
+    OUTPUT.append(payload)
     COUNT["updated"] += 1
 
 
@@ -195,10 +204,31 @@ def show_counts():
         Returns:
           None
     """
-    print(f"DOIs read:      {COUNT['dois']}")
+    msg = f"DOIs read:      {COUNT['dois']:,}\n"
     if COUNT['notfound']:
-        print(f"DOIs not found: {COUNT['notfound']}")
-    print(f"DOIs updated:   {COUNT['updated']}")
+        msg += f"DOIs not found: {COUNT['notfound']:,}\n"
+    if COUNT['updated']:
+        msg += f"DOIs updated:   {COUNT['updated']:,}\n"
+    return msg
+
+
+def generate_email(counts):
+    ''' Generate and send an email
+        Keyword arguments:
+          counts: counts message
+        Returns:
+          None
+    '''
+    msg = JRC.get_run_data(__file__, __version__) + "<br><br>" + counts.replace("\n", "<br>")
+    try:
+        email = DISCONFIG['developer'] if ARG.TEST else DISCONFIG['receivers']
+        LOGGER.info(f"Sending email to {email}")
+        opts = {'attachment': 'sync_openalex.json', 'mime': 'html'}
+        JRC.send_email(msg, DISCONFIG['sender'], email, "OpenAlex OA/license sync", **opts)
+    except Exception as err:
+        print(str(err))
+        traceback.print_exc()
+        terminate_program(err)
 
 
 def process_dois():
@@ -230,7 +260,8 @@ def process_dois():
     for row in tqdm(rows, total=cnt, desc="Add OpenAlex"):
         COUNT['dois'] += 1
         update_open_access(row)
-    show_counts()
+    msg1 = show_counts()
+    print(msg1)
     # Open Access status override
     COUNT['dois'] = COUNT["updated"] = COUNT["notfound"] = 0
     if dois:
@@ -252,7 +283,14 @@ def process_dois():
         COUNT["dois"] += 1
         if row['jrc_oa_status'] == "closed" and row['jrc_fulltext_url']:
             override_oa_closed(row)
-    show_counts()
+    msg2 = show_counts()
+    print(msg2)
+    if OUTPUT:
+        LOGGER.info("Writing output to sync_openalex.json")
+        with open('sync_openalex.json', 'w', encoding='utf-8') as fileout:
+            json.dump(OUTPUT, fileout, indent=4)
+        if ARG.TEST or ARG.WRITE:
+            generate_email(f"Updating Open Access/license data:\n{msg1}\nFixing OA status:\n{msg2}")
     if not ARG.WRITE:
         LOGGER.warning("Dry run successful, no updates were made")
 
@@ -260,7 +298,7 @@ def process_dois():
 
 if __name__ == '__main__':
     PARSER = argparse.ArgumentParser(
-        description="Add a reviewed date to one or more DOIs")
+        description="Sync Open Access/license data from OpenAlex")
     GROUP_A = PARSER.add_mutually_exclusive_group(required=False)
     GROUP_A.add_argument('--doi', dest='DOI', action='store',
                          help='Single DOI to process')
@@ -271,6 +309,8 @@ if __name__ == '__main__':
     PARSER.add_argument('--manifold', dest='MANIFOLD', action='store',
                         default='prod', choices=['dev', 'prod'],
                         help='MongoDB manifold (dev, prod)')
+    PARSER.add_argument('--test', dest='TEST', action='store_true',
+                        default=False, help='Send email to developer')
     PARSER.add_argument('--write', dest='WRITE', action='store_true',
                         default=False, help='Write to database')
     PARSER.add_argument('--silent', dest='SILENT', action='store_true',
@@ -283,7 +323,7 @@ if __name__ == '__main__':
     LOGGER = JRC.setup_logging(ARG)
     initialize_program()
     try:
-        PROJECT = DL.get_project_map(DB['dis'].project_map)
+        DISCONFIG = JRC.simplenamespace_to_dict(JRC.get_config("dis"))
     except Exception as err:
         terminate_program(err)
     process_dois()
