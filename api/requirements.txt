@@ -4,6 +4,8 @@ flask-swagger
 pyOpenSSL
 gunicorn==22.0.0
 mysqlclient==2.1.1
+pandas
+openpyxl
 pymongo==4.4.0
 git+https://github.com/JaneliaSciComp/jrc_common.git
 git+https://github.com/JaneliaSciComp/doi_common.git
