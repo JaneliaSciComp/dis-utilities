@@ -2,7 +2,7 @@
     Find referenced DOIs that have not been loaded
 """
 
-__version__ = '1.0.0'
+__version__ = '1.1.0'
 
 import argparse
 from operator import attrgetter
@@ -81,8 +81,9 @@ def processing():
         for rel in relations:
             if rel in REFERENCES:
                 for itm in relations[rel]:
-                    if itm['id-type'] == 'doi' and itm['id'] not in loaded_dois:
-                        unloaded[itm['id']] = True
+                    if itm['id-type'] == 'doi' and itm['id'].lower() not in loaded_dois:
+                        print(f"{row['doi']} {itm['id']}")
+                        unloaded[itm['id'].lower()] = True
     if unloaded:
         with open("unloaded_relations.txt", "w", encoding="ascii") as file:
             for doi in unloaded:

@@ -7,7 +7,7 @@
            to DIS MongoDB.
 """
 
-__version__ = '19.1.0'
+__version__ = '20.0.0'
 
 import argparse
 import collections
@@ -451,7 +451,7 @@ def call_datacite(doi):
         return rec
     COUNT['notfound'] += 1
     MISSING[f"Could not find {doi} in DataCite"] = True
-    raise Exception(f"Could not find {doi} in DataCite")
+    raise DOINotFound(f"Could not find {doi} in DataCite")
 
 
 def call_datacite_with_retry(doi):
@@ -467,6 +467,8 @@ def call_datacite_with_retry(doi):
         try:
             msg = call_datacite(doi)
             return msg
+        except DOINotFound as err:
+            raise err
         except Exception as err:
             if type(err).__name__ in ['ConnectTimeout', 'ReadTimeout']:
                 attempt -= 1
@@ -494,6 +496,8 @@ def get_doi_record(doi):
             try:
                 msg = call_datacite_with_retry(doi)
                 DATACITE_CALL[doi] = True
+            except DOINotFound as err:
+                LOGGER.warning(err)
             except Exception as err:
                 terminate_program(err)
     else:
@@ -976,12 +980,14 @@ def add_datacite(rec):
             for right in rec['rightsList']:
                 if 'rightsIdentifier' in right and right['rightsIdentifier'] in LICENSE:
                     rec['jrc_license'] = right['rightsIdentifier']
-                    LOGGER.debug(f"Using license (rightsIdentifier) {rec['jrc_license']} for {rec['doi']}")
+                    LOGGER.debug(f"Using license (rightsIdentifier) {rec['jrc_license']} " \
+                                 + f"for {rec['doi']}")
                 elif 'rights' in right and right['rights'] in LICENSE:
                     rec['jrc_license'] = LICENSE[right['rights']]
                     LOGGER.debug(f"Using license (rights) {rec['jrc_license']} for {rec['doi']}")
                 elif 'rightsIdentifier' in right:
-                    LOGGER.error(f"Unknown license (rightsIdentifier) {right['rightsIdentifier']} for {rec['doi']}")
+                    LOGGER.error("Unknown license (rightsIdentifier) " \
+                                 + f"{right['rightsIdentifier']} {rec['doi']}")
                 elif 'rights' in right and right['rights']:
                     LOGGER.error(f"Unknown license (rights) {right['rights']} for {rec['doi']}")
                 else:
