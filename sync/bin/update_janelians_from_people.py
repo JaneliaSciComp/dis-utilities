@@ -3,7 +3,7 @@
     data (names, affiliation, employee types, teams) from the People system.
 '''
 
-__version__ = '5.0.0'
+__version__ = '6.0.0'
 
 import argparse
 import collections
@@ -344,7 +344,7 @@ def update_orcid():
             terminate_program(f"Request failed after multiple retries: {err}")
         except Exception as err:
             terminate_program(f"Error calling People by id: {err}")
-        if not idresp:
+        if not idresp and ARG.ALUMNI:
             LOGGER.warning(f"No People record for {row}")
             row['alumni'] = True
             COUNT['alumni'] += 1
@@ -368,8 +368,10 @@ if __name__ == '__main__':
                         help='MongoDB manifold (dev, prod)')
     PARSER.add_argument('--orcid', dest='ORCID', action='store',
                         default=None, help='ORCID to update')
+    PARSER.add_argument('--alumni', dest='ALUMNI', action='store_true',
+                        default=False, help='Allow alumni processing')
     PARSER.add_argument('--reset', dest='RESET', action='store_true',
-                        default=False, help='Reset affiliations and managesTeams')
+                        default=False, help='Reset affiliations and managedTeams')
     PARSER.add_argument('--test', dest='TEST', action='store_true',
                         default=False, help='Send email to developer')
     PARSER.add_argument('--write', dest='WRITE', action='store_true',
