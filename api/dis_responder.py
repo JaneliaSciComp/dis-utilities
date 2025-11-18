@@ -18,11 +18,11 @@ import sys
 from time import sleep, time
 from urllib.parse import unquote
 from bokeh.palettes import all_palettes, plasma
-from bokeh.transform import linear_cmap
 import bson
 from flask import (Flask, make_response, render_template, request, jsonify, redirect, send_file)
 from flask_cors import CORS
 from flask_swagger import swagger
+import pandas as pd
 from pymongo.collation import Collation, CollationStrength
 import requests
 import jrc_common.jrc_common as JRC
@@ -31,7 +31,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "88.0.0"
+__version__ = "89.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -59,7 +59,8 @@ NAV = {"Home": "",
                       "DOIs by authorship": "dois_author",
                       "DOIs with lab head first/last authors": "doiui_firstlast",
                       "Top first and last authors": "dois_top_author",
-                      "DOIs without Janelia authors": "dois_no_janelia"},
+                      "DOIs without Janelia authors": "dois_no_janelia",
+                      "ORCID bulk search": "orcid/bulk_search"},
        "Preprints": {"DOIs by preprint status": "dois_preprint",
                      "DOIs by preprint status by year": "dois_preprint_year",
                      "Preprints with journal publications": "preprint_with_pub",
@@ -6818,6 +6819,75 @@ def author_duplicates():
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="Duplicate authors", html=html,
                                          navbar=generate_navbar('System')))
+
+
+@app.route('/orcid/bulk_search')
+def orcid_bulk_search():
+    ''' Show ORCID search input
+    '''
+    top = '''
+    This will allow you to bulk search the author database for author names. Input
+    is an Excel spreadsheet with two columns: "Given name" and "Family name". After hitting
+    the "Bulk search" button, the spreadsheet will be uploaded and the results will be displayed.
+    '''
+    bottom = ''
+    return make_response(render_template('upload.html', urlroot=request.url_root,
+                                         title="ORCID bulk search", top=top, bottom=bottom,
+                                         navbar=generate_navbar('Authorship')))
+
+
+@app.route('/orcid/run_bulk_search', methods=['OPTIONS', 'POST'])
+def orcid_run_bulk_search():
+    ''' Bulk search for ORCIDs
+    '''
+    file = request.files['file']
+    if not file:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("No file uploaded"),
+                               message="No file uploaded")
+    try:
+        df = pd.read_excel(file)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not read file"),
+                               message=error_message(err))
+    html = f"Read {len(df)} row{'' if len(df) == 1 else 's'}"
+    family = given = ""
+    for col in df.columns:
+        if re.search(r'given|first', col, re.IGNORECASE):
+            given = col
+        elif re.search(r'family|last', col, re.IGNORECASE):
+            family = col
+    if not given or not family:
+        arr = []
+        if not given:
+            arr.append("Given name")
+        if not family:
+            arr.append("Family name")
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not find required columns"),
+                               message="Could not find required columns: " + ", ".join(arr))
+    html += "<table id='bulk' class='tablesorter standard'><thead><tr><th>Given name</th>" \
+            + "<th>Family name</th><th>ORCID/user ID</th></tr></thead><tbody>"
+    for _, row in df.iterrows():
+        try:
+            payload = {"$and": [{"family": {"$regex": row[family].strip(), "$options" : "i"}},
+                                {"given": {"$regex": row[given].strip(), "$options" : "i"}}]}
+            orc = DB['dis'].orcid.find_one(payload)
+        except Exception as err:
+            return render_template('error.html', urlroot=request.url_root,
+                                   title=render_warning("Could not find ORCID record for " \
+                                                        + f"{row[given]} {row[family]}"),
+                                   message=error_message(err))
+        res = "<span style='color:red'>Not found</span>"
+        if orc:
+            res = f"<a href='/userui/{orc['orcid']}'>{orc['orcid']}</a>" if 'orcid' in orc \
+                  else f"<a href='/userui/{orc['userIdO365']}'>{orc['userIdO365']}</a>"
+        html += f"<tr><td>{row[given]}</td><td>{row[family]}</td><td>{res}</td></tr>"
+    html += "</tbody></table>"
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="ORCID bulk search", html=html,
+                                         navbar=generate_navbar('Authorship')))
 
 # ******************************************************************************
 # * UI endpoints (External systems)                                            *

@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block script %}
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jquery-cookie/1.4.1/jquery.cookie.min.js"></script>
+{% endblock %}
+{% block onload %}
+onload="tableInitialize();"
+{% endblock %}
+
+{% block content %}
+<h2>{{ title }}</h2>
+{{ top | safe }}
+<br><br>
+<form action="/upload" method="post" enctype="multipart/form-data">
+  <div class="w-25">
+    <label for="formFile" class="form-label">Upload Excel file:</label>
+    <input class="form-control form-control-file" type="file" id="file" name="file">
+  </div>
+  <br>
+  <button type="button" class="btn btn-primary" onclick="postBulkSearch()">Bulk search</button>
+  <script>
+    function postBulkSearch() {
+      var fileInput = document.getElementById('file');
+      if (!fileInput.files.length) {
+        alert('Please select a file.');
+        return;
+      }
+      var formData = new FormData();
+      formData.append('file', fileInput.files[0]);
+      // Remove the Bulk search button and display a message
+      var button = fileInput.form.querySelector("button[type='button']");
+      if (button) {
+        button.parentNode.removeChild(button);
+      }
+      // Create and insert a message node
+      var msg = document.createElement('div');
+      msg.id = "search-running-msg";
+      msg.className = "alert alert-info mt-3";
+      msg.textContent = "Bulk search running...";
+      fileInput.parentNode.appendChild(msg);
+      fetch('/orcid/run_bulk_search', {
+        method: 'POST',
+        body: formData,
+      })
+      .then(response => response.redirected ? window.location = response.url : response.text())
+      .then(data => {
+        // If not redirected, optionally handle response as needed
+        if (typeof data === "string") {
+          document.body.innerHTML = data;
+        }
+      })
+      .catch(error => {
+        alert('Error uploading file: ' + error);
+      });
+    }
+  </script>
+</form>
+{{ botton | safe }}
+{% endblock %}
