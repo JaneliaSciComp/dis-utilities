@@ -31,7 +31,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "89.1.0"
+__version__ = "90.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -3979,13 +3979,18 @@ def dois_top_cited():
                                          navbar=generate_navbar('DOIs')))
 
 
-@app.route('/dois_license/<string:source>/<string:lic>')
-@app.route('/dois_license/<string:source>')
-def dois_license_report(source, lic=None):
+@app.route('/dois_licenser/<string:source>/<string:lic>/<string:year>')
+@app.route('/dois_licenser/<string:source>/<string:lic>')
+@app.route('/dois_licenser/<string:source>')
+def dois_license_report(source, lic=None, year='All'):
     ''' Show DOIs by license
     '''
+    if lic == 'None':
+        lic = None
     payload = [{"$match": {"jrc_obtained_from": source, "jrc_license": lic}},
                {"$sort": {"count": -1}}]
+    if year != 'All':
+        payload[0]['$match']['jrc_publishing_date'] = {"$regex": "^"+ year}
     try:
         rows = DB['dis'].dois.aggregate(payload)
     except Exception as err:
@@ -3993,17 +3998,22 @@ def dois_license_report(source, lic=None):
                                title=render_warning("Could not get license data from dois"),
                                message=error_message(err))
     html, _, _ = standard_doi_table(rows)
+    title = f"{source} DOIs for license {lic}"
+    if year != 'All':
+        title += f" for {year}"
     return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title=f"{source} DOIs for license {lic}", html=html,
+                                         title=title, html=html,
                                          navbar=generate_navbar('DOIs')))
 
 
+@app.route('/dois_license/<string:year>')
 @app.route('/dois_license')
-def dois_license():
+def dois_license(year='All'):
     ''' Show DOIs by license
     '''
+    ypayload = {} if year == 'All' else {"jrc_publishing_date": {"$regex": "^"+ year}}
     try:
-        total = DB['dis'].dois.count_documents({})
+        total = DB['dis'].dois.count_documents(ypayload)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get total number of DOIs"),
@@ -4011,19 +4021,22 @@ def dois_license():
     payload = [{"$group": {"_id": {"source": "$jrc_obtained_from", "license": "$jrc_license"},
                            "count": {"$sum": 1}}},
                {"$sort": {"license": 1}}]
+    if year != 'All':
+        payload.insert(0, {"$match": ypayload})
     try:
         rows = DB['dis'].dois.aggregate(payload)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get license data from dois"),
                                message=error_message(err))
-    html = "<table id='license' class='tablesorter numbers'><thead><tr>" \
-           + "<th>Source</th><th>Crossref</th><th>DataCite</th></tr></thead><tbody>"
+    html = year_pulldown('dois_license')
+    html += "<table id='license' class='tablesorter numbers'><thead><tr>" \
+            + "<th>Source</th><th>Crossref</th><th>DataCite</th></tr></thead><tbody>"
     cnt = {"Crossref": 0, "DataCite": 0}
     data = {}
     lines = {}
     for row in rows:
-        orig = '/' + row['_id']['license'] if 'license' in row['_id'] else ''
+        orig = '/' + row['_id']['license'] if 'license' in row['_id'] else '/None'
         if 'license' not in row['_id']:
             lic = 'Not found'
         else:
@@ -4039,9 +4052,10 @@ def dois_license():
     data = dict(srt)
     defcnt = cnt['Crossref'] + cnt['DataCite'] - data['Not found']
     for lic in sorted(lines.keys()):
-        clink = f"<a href='/dois_license/Crossref{lines[lic]['orig']}'>" \
+        print(lic, lines[lic]['orig'])
+        clink = f"<a href='/dois_licenser/Crossref{lines[lic]['orig']}/{year}'>" \
                 + f"{lines[lic]['Crossref']}</a>" if lines[lic]['Crossref'] else '0'
-        dlink = f"<a href='/dois_license/DataCite{lines[lic]['orig']}'>" \
+        dlink = f"<a href='/dois_licenser/DataCite{lines[lic]['orig']}/{year}'>" \
                 + f"{lines[lic]['DataCite']}</a>" if lines[lic]['DataCite'] else '0'
         html += f"<tr><td>{lic}</td><td>{clink}</td><td>{dlink}</td></tr>"
     html += f"</tbody><tfoot><tr><th>Total</th><th>{cnt['Crossref']:,}</th>" \
@@ -4050,18 +4064,18 @@ def dois_license():
           + "<span style='font-size: 14pt'> of Janelia DOIs have a known license" \
           + f"</span><span style='font-size: 12pt'><br>{defcnt:,}/{total:,}</span><br>"
     html = pre + html
-    print(len(data))
-    for key, val in all_palettes.items():
-        print(key, len(val))
     if len(data) <= len(all_palettes['TolRainbow']):
         colors = all_palettes['TolRainbow'][len(data)]
     else:
         colors = turbo(len(data))
     chartscript, chartdiv = DP.pie_chart(data, "DOIs by license", "license", width=700, height=600,
                                          colors=colors)
+    title = "DOIs by license"
+    if year != 'All':
+        title += f" ({year})"
     endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
-                                         title="DOIs by license", html=html,
+                                         title=title, html=html,
                                          chartscript=chartscript, chartdiv=chartdiv,
                                          navbar=generate_navbar('DOIs')))
 
