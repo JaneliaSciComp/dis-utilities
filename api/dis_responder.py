@@ -17,7 +17,7 @@ import string
 import sys
 from time import sleep, time
 from urllib.parse import unquote
-from bokeh.palettes import all_palettes, plasma
+from bokeh.palettes import all_palettes, plasma, turbo
 import bson
 from flask import (Flask, make_response, render_template, request, jsonify, redirect, send_file)
 from flask_cors import CORS
@@ -31,7 +31,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "89.0.0"
+__version__ = "89.1.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -700,6 +700,7 @@ def generate_works_table(rows, name=None, show="full"):
         Keyword arguments:
           rows: rows from dois collection
           name: search key [optional]
+          show: show full, or journal/preprint only
         Returns:
           HTML and a list of DOIs
     '''
@@ -4049,8 +4050,15 @@ def dois_license():
           + "<span style='font-size: 14pt'> of Janelia DOIs have a known license" \
           + f"</span><span style='font-size: 12pt'><br>{defcnt:,}/{total:,}</span><br>"
     html = pre + html
+    print(len(data))
+    for key, val in all_palettes.items():
+        print(key, len(val))
+    if len(data) <= len(all_palettes['TolRainbow']):
+        colors = all_palettes['TolRainbow'][len(data)]
+    else:
+        colors = turbo(len(data))
     chartscript, chartdiv = DP.pie_chart(data, "DOIs by license", "license", width=700, height=600,
-                                         colors=all_palettes['TolRainbow'][len(data)])
+                                         colors=colors)
     endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title="DOIs by license", html=html,
@@ -6490,7 +6498,7 @@ def show_oid_ui(oid):
 @app.route('/userui/<string:eid>/<string:show>')
 @app.route('/userui/<string:eid>')
 def show_user_ui(eid, show='full'):
-    ''' Show user record by employeeId (user ID)
+    ''' Show user record by employeeId (user ID) or ORCID
     '''
     try:
         if "@" in eid:
