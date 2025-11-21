@@ -31,7 +31,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "90.0.0"
+__version__ = "90.1.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -6298,7 +6298,7 @@ def show_subscription_summary():
     errmsg = "Could not get data from subscription collection"
     try:
         cnt = DB['dis'].subscription.count_documents({})
-        oacnt = DB['dis'].subscription.count_documents({"access": "Open access"})
+        oacnt = DB['dis'].subscription.count_documents({"access": "Free to read"})
         pubcnt = DB['dis'].subscription.distinct("publisher")
         typs = DB['dis'].subscription.aggregate([{"$group": {"_id": "$type", "count": {"$sum": 1}}},
                                                  {"$sort": {"_id": 1}}])
