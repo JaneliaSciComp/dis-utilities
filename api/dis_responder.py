@@ -31,7 +31,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "90.1.0"
+__version__ = "90.2.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -1481,10 +1481,11 @@ def parse_pmc_ack(edata):
             elif isinstance(edata['p'], dict) and '#text' in edata['p']:
                 acktext = edata['p']['#text']
             elif isinstance(edata['p'], list):
-                if isinstance(edata['p'][0], str):
-                    acktext = " ".join(edata['p'])
-                elif isinstance(edata['p'][0], dict) and '#text' in edata['p'][0]:
-                    acktext = " ".join([p['#text'] for p in edata['p']])
+                for ackp in edata['p']:
+                    if isinstance(ackp, str):
+                        acktext += ackp
+                    elif isinstance(ackp, dict) and '#text' in ackp:
+                        acktext += ackp['#text']
         except Exception as err:
             acktext = "<span style='color:red'>Error parsing acknowledgements: " \
                       + f"{err}</span><br>" \
