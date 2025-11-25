@@ -11,13 +11,15 @@
        updating first/last author (if necessary).
 """
 
-__version__ = '1.1.0'
+__version__ = '2.0.0'
 
 import argparse
 import collections
+from datetime import datetime
 import json
 from operator import attrgetter
 import sys
+import time
 import inquirer
 from inquirer.themes import BlueComposure
 from tqdm import tqdm
@@ -32,6 +34,7 @@ DB = {}
 ARG = DIS = LOGGER = None
 TO_ADD = {'affiliation': {}, 'orcid': {}, 'name': {}}
 OUTPUT = {'affiliation': [], 'orcid': [], 'name': []}
+AUDIT = {'affiliation': [], 'orcid': [], 'name': []}
 IGNORE = {}
 TO_UPDATE = {}
 # Counters
@@ -165,6 +168,7 @@ def update_doi(auth, row, match):
     else:
         LOGGER.debug(payload)
     try:
+        time.sleep(0.01)
         fl_payload = DL.get_first_last_author_payload(doi)
     except Exception as err:
         LOGGER.error(f"Error getting first/last payload for {doi}: {err}")
@@ -180,7 +184,7 @@ def update_doi(auth, row, match):
     TO_ADD[match][doi].append(payload)
     fl_payload['author'] = auth['given'][0] + ' ' + auth['family'][0]
     TO_ADD[match][doi].append(fl_payload)
-    OUTPUT[match].append(f"{payload['author']} {doi}")
+    OUTPUT[match].append(f"{payload['author']} was added to {doi} ({match})")
 
 
 def current_employee(auth):
@@ -207,6 +211,38 @@ def ignore_author(auth, row):
         return True
     return False
 
+def delta_days(date1, date2):
+    ''' Calculate the number of days between two dates
+        Keyword arguments:
+          date1: date1
+          date2: date2
+        Returns:
+          number of days between two dates
+    '''
+    date1 = datetime.strptime(date1, '%Y-%m-%d')
+    date2 = datetime.strptime(date2, '%Y-%m-%d')
+    return (date1 - date2).days
+
+
+def match_message(auth, row, match_type):
+    ''' Get the message for the match
+        Keyword arguments:
+          auth: record from orcid table
+          row: record from dois table
+          match_type: match type
+        Returns:
+          message
+    '''
+    msg = f"{auth['given'][0]} {auth['family'][0]}"
+    if 'alumni' in auth:
+        msg += ' (alumni)'
+    when = ''
+    if 'jrc_publishing_date' in row and 'hireDate' in auth:
+        delta = delta_days(row['jrc_publishing_date'], auth['hireDate'])
+        if delta < 0:
+            when = f" {abs(delta)} day{'s' if abs(delta) > 1 else ''} before {auth['hireDate']}"
+    return f"{msg} is on {row['doi']} ({match_type}){when}"
+
 
 def valid_author(auth, rows):
     ''' Check if the author is valid
@@ -222,8 +258,9 @@ def valid_author(auth, rows):
             continue
         match_type = get_doi_author_matches(auth, row)
         if 'affiliation' in match_type:
-            msg = f"{auth['given'][0]} {auth['family'][0]} is on {row['doi']} (affiliation)"
+            msg = match_message(auth, row, 'affiliation')
             LOGGER.debug(msg)
+            AUDIT['affiliation'].append(msg)
             COUNT['dois'] += 1
             if not bumped:
                 COUNT['affiliation'] += 1
@@ -232,8 +269,9 @@ def valid_author(auth, rows):
             if 'Affiliation' in TO_UPDATE:
                 update_doi(auth, row, 'affiliation')
         elif 'orcid' in match_type and current_employee(auth):
-            msg = f"{auth['given'][0]} {auth['family'][0]} is on {row['doi']} (ORCID)"
+            msg = match_message(auth, row, 'ORCID')
             LOGGER.debug(msg)
+            AUDIT['orcid'].append(msg)
             if not bumped:
                 COUNT['orcid'] += 1
                 COUNT['uncredited'] += 1
@@ -241,9 +279,9 @@ def valid_author(auth, rows):
             if 'ORCID' in TO_UPDATE:
                 update_doi(auth, row, 'orcid')
         elif 'name' in match_type and current_employee(auth):
-            msg = f"{auth['given'][0]} {auth['family'][0]} is on {row['doi']} " \
-                  + f"({','.join(match_type)})"
+            msg = match_message(auth, row, ', '.join(match_type))
             LOGGER.debug(msg)
+            AUDIT['name'].append(msg)
             if not bumped:
                 COUNT['name'] += 1
                 COUNT['uncredited'] += 1
@@ -296,9 +334,11 @@ def get_authors():
         Returns:
           None
     '''
-    #payload = {"employeeId": {"$exists": True}, "alumni": {"$exists": False},
-    #           "workerType": {"$ne": "Contingent Worker"}}
-    payload = {"employeeId": {"$exists": True}}
+    if ARG.ALUMNI:
+        payload = {"employeeId": {"$exists": True}}
+    else:
+        payload = {"employeeId": {"$exists": True}, "alumni": {"$exists": False},
+                   "workerType": {"$ne": "Contingent Worker"}}
     try:
         rows = DB['dis']['orcid'].find(payload).sort('family', 1)
     except Exception as err:
@@ -389,6 +429,13 @@ def processing():
         with open(fname, encoding='utf-8', mode="w") as outstream:
             outstream.write(json.dumps(value, indent=2))
         LOGGER.info(f"Wrote {fname}")
+    for key, value in AUDIT.items():
+        if not value:
+            continue
+        fname = f"uncredited_audit_{key}.txt"
+        with open(fname, encoding='utf-8', mode="w") as outstream:
+            outstream.write("\n".join(value))
+        LOGGER.info(f"Wrote {fname}")
     if ARG.TEST or ARG.WRITE:
         send_email()
 
@@ -397,6 +444,8 @@ def processing():
 if __name__ == '__main__':
     PARSER = argparse.ArgumentParser(
         description="Update Janelia authors on DOIs")
+    PARSER.add_argument('--alumni', dest='ALUMNI', action='store_true',
+                        default=False, help='Include alumni in processing')
     PARSER.add_argument('--name', dest='NAME', action='store',
                         help='Author to process (optional)')
     PARSER.add_argument('--doi', dest='DOI', action='store',
