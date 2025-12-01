@@ -11,7 +11,7 @@
        updating first/last author (if necessary).
 """
 
-__version__ = '2.0.0'
+__version__ = '2.1.0'
 
 import argparse
 import collections
@@ -168,7 +168,7 @@ def update_doi(auth, row, match):
     else:
         LOGGER.debug(payload)
     try:
-        time.sleep(0.01)
+        time.sleep(0.02)
         fl_payload = DL.get_first_last_author_payload(doi)
     except Exception as err:
         LOGGER.error(f"Error getting first/last payload for {doi}: {err}")
