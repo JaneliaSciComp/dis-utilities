@@ -31,7 +31,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "90.2.0"
+__version__ = "91.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -695,12 +695,13 @@ def get_work_title(row):
     return DL.get_title(row)
 
 
-def generate_works_table(rows, name=None, show="full"):
+def generate_works_table(rows, name=None, show="full", eid=None):
     ''' Generate table HTML for a person's works
         Keyword arguments:
           rows: rows from dois collection
           name: search key [optional]
           show: show full, or journal/preprint only
+          eid: employee ID
         Returns:
           HTML and a list of DOIs
     '''
@@ -744,9 +745,13 @@ def generate_works_table(rows, name=None, show="full"):
         cls = []
         if version:
             cls.append('ver')
+        wrkdoi = work['doi'] if work['doi'] else '&nbsp;'
+        if eid and 'jrc_author' in work['raw'] and eid in work['raw']['jrc_author']:
+            wrkdoi = f"<i class='fa-solid fa-circle-check' style='color: lime'></i> {wrkdoi}"
+        else:
+            wrkdoi = f"&nbsp;&nbsp;&nbsp;&nbsp;{wrkdoi}"
         html += f"<tr class=\'{' '.join(cls)}\'><td>{work['date']}</td>" \
-                + f"<td>{work['doi'] if work['doi'] else '&nbsp;'}</td>" \
-                + f"<td>{work['title']}</td></tr>"
+                + f"<td>{wrkdoi}</td><td>{work['title']}</td></tr>"
     if dois:
         html += "</tbody></table>"
     if authors:
@@ -756,7 +761,16 @@ def generate_works_table(rows, name=None, show="full"):
               + "onclick=\"toggler('pubs', 'ver', 'totalrows');\">" \
               + "Filter for versioned DOIs</button>"
     html = cbutton + create_downloadable('works', ['Published', 'DOI', 'Title'], fileoutput) + html
-    html = f"Number of DOIs: <span id='totalrows'>{len(works):,}</span><br>" + html
+    preamble = f'''
+    The works below were searched for using this author's name and ORCID. A green checkmark
+    (<i class='fa-solid fa-circle-check' style='color: lime'></i>) indicates that automated or
+    manual curation has determined that the author contributed to the publication while they were
+    a Janelia employee. It is not uncommon for check marks to not appear for former employees. If
+    you have a publication below without a check mark, it's most likely that affiliation or ORCID
+    information was not provided to Crossref/DataCite. If one of your publications doesn't have a
+    check (or is missing), please email the DOI to the Library at {app.config['LIBRARY']}.
+    '''
+    html = f"<hr>{preamble}<br>Number of DOIs: <span id='totalrows'>{len(works):,}</span><br>" + html
     return html, dois
 
 
@@ -829,7 +843,8 @@ def get_orcid_from_db(oid, use_eid=False, bare=False, show="full"):
         rows = get_dois_for_orcid(oid, orc)
     except Exception as err:
         raise err
-    tablehtml, dois = generate_works_table(rows, name=None, show=show)
+    eid = orc['employeeId'] if 'employeeId' in orc else None
+    tablehtml, dois = generate_works_table(rows, name=None, show=show, eid=eid)
     sad = DL.get_single_author_details(orc, DB['dis'].orcid)
     if tablehtml:
         html = f"{' '.join(get_badges(sad, True))}{html}{tablehtml}"
@@ -934,7 +949,7 @@ def generate_user_table(rows):
         auth = DL.get_single_author_details(row, DB['dis'].orcid)
         badges = get_badges(auth, True)
         rclass = 'other' if (auth and auth['alumni']) else 'active'
-        html += f"<tr class={rclass}><td>{link}</td><td>{', '.join(sorted(row['given']))}</td>" \
+        html += f"<tr class={rclass}><td style='min-width:170px'>{link}</td><td>{', '.join(sorted(row['given']))}</td>" \
                 + f"<td>{', '.join(sorted(row['family']))}</td><td>{' '.join(badges)}</td></tr>"
     html += '</tbody></table>'
     cbutton = "<button class=\"btn btn-outline-warning\" " \
