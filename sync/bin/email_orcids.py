@@ -133,8 +133,6 @@ If you need assistance, please email datainfo@hhmi.org.
 Thank you very much,<br>
 Lauren Acquarole<br>
 Librarian, Data and Information Services<br>
-Andy Burnim<br>
-Data Management Specialist, Data and Information Services<br>
         '''
         if ARG.LIMIT and COUNT['Emails sent'] >= ARG.LIMIT:
             return
