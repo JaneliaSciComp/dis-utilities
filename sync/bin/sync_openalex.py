@@ -14,6 +14,7 @@
 __version__ = '2.0.0'
 
 import argparse
+import collections
 import json
 from operator import attrgetter
 import sys
@@ -25,11 +26,11 @@ import doi_common.doi_common as DL
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation,logging-not-lazy
 
-ARG = DISCONFIG =LOGGER = None
+ARG = DISCONFIG = LOGGER = None
 DB = {}
 LICENSE = {}
 OUTPUT = []
-COUNT = {'dois': 0, 'notfound': 0, 'updated': 0}
+COUNT = collections.defaultdict(lambda: 0, {})
 
 def terminate_program(msg=None):
     ''' Terminate the program gracefully

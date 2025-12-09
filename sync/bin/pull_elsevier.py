@@ -120,11 +120,7 @@ def processing():
 
 if __name__ == '__main__':
     PARSER = argparse.ArgumentParser(
-        description="Find new works for current lab heads")
-    PARSER.add_argument('--test', dest='TEST', action='store_true',
-                        default=False, help='Send email to developer')
-    PARSER.add_argument('--write', dest='WRITE', action='store_true',
-                        default=False, help='Flag, Send email')
+        description="Find new works from Elsevier")
     PARSER.add_argument('--verbose', dest='VERBOSE', action='store_true',
                         default=False, help='Flag, Chatty')
     PARSER.add_argument('--debug', dest='DEBUG', action='store_true',
