@@ -31,7 +31,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "92.0.0"
+__version__ = "92.1.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -5628,6 +5628,56 @@ def dois_coauthors():
 # ******************************************************************************
 # * UI endpoints (Organizations)                                               *
 # ******************************************************************************
+
+@app.route('/org_authors/<string:org_in>')
+def show_org_authors(org_in):
+    '''
+    Return authors for an organization
+    '''
+    try:
+        row = DB['dis'].org_group.find_one({"group": org_in})
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get organization groups"),
+                               message=error_message(err))
+    if row:
+        orgs = row['members']
+    else:
+        orgs = [org_in]
+    html = '<br>'.join(orgs)
+    payload = {"$or": [{"managed": {"$in": orgs}}, {"affiliations": {"$in": orgs}}]}
+    try:
+        rows = DB['dis'].orcid.find(payload).sort("family", 1)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get authors from orcid collection"),
+                               message=error_message(err))
+    header = ["Given name(s)", "Family name(s)", "Alumni", "ORCID", "Affiliations"]
+    content = ""
+    html = "<table id='authors' class='tablesorter standard'><thead><tr><th>" \
+        + "</th><th>".join(header) + "</th></tr></thead><tbody>"
+    cnt = 0
+    for row in rows:
+        given = ', '.join(row['given'])
+        family = ', '.join(row['family'])
+        alum = "YES" if 'alumni' in row and row['alumni'] else ""
+        orc = f"<a href='/userui/{row['orcid']}'>{row['orcid']}</a>" if 'orcid' in row and row['orcid'] else ""
+        affil = row['affiliations'] if 'affiliations' in row else []
+        if 'managed' in row:
+            affil.extend(row['managed'])
+        affil = sorted(list(set(affil)))
+        affil = ', '.join(affil)
+        html += f"<tr><td>{given}</td><td>{family}</td>" \
+                + f"<td style='text-align: center;'>{alum}</td><td style='min-width:170px'>{orc}</td><td>{affil}</td></tr>"
+        content += f"{given}\t{family}\t{alum}\t{row['orcid'] if 'orcid' in row else ''}\t{affil}\n"
+        cnt += 1
+    html += "</tbody></table>"
+    html = create_downloadable(f"{org_in.replace(' ', '_')}", header, content) + html
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=f"Authors for {org_in} ({cnt})", html=html,
+                                         navbar=generate_navbar('Authorship')))
+
 
 @app.route('/org_detail/<string:org_in>/<string:year>/<string:show>')
 @app.route('/org_detail/<string:org_in>/<string:year>')
