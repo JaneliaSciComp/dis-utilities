@@ -31,7 +31,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "91.0.0"
+__version__ = "92.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -41,7 +41,6 @@ INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
 CUSTOM_REGEX = {"publishing_year": {"field": "jrc_publishing_date",
                                     "value": "^!REPLACE!"}
                }
-
 # Navigation
 NAV = {"Home": "",
        "DOIs": {f"DOIs by insertion date{'&nbsp;'*10}": "dois_insertpicker",
@@ -60,7 +59,8 @@ NAV = {"Home": "",
                       "DOIs with lab head first/last authors": "doiui_firstlast",
                       "Top first and last authors": "dois_top_author",
                       "DOIs without Janelia authors": "dois_no_janelia",
-                      "ORCID bulk search": "orcid/bulk_search"},
+                      "ORCID bulk search": "orcid/bulk_search",
+                      "DOIs by coauthors": "coauth"},
        "Preprints": {"DOIs by preprint status": "dois_preprint",
                      "DOIs by preprint status by year": "dois_preprint_year",
                      "Preprints with journal publications": "preprint_with_pub",
@@ -176,6 +176,7 @@ def before_request():
         If needed, initilize global variables.
     '''
     if not DB:
+        print("Initializing global variables")
         try:
             dbconfig = JRC.get_config("databases")
         except Exception as err:
@@ -189,7 +190,7 @@ def before_request():
             return render_template('warning.html', urlroot=request.url_root,
                                    title=render_warning("Database connect error"), message=err)
         try:
-            rows = DB['dis'].cvterm.find({})
+            rows = DB['dis']['cvterm'].find({})
             for row in rows:
                 if row['cv'] not in CVTERM:
                     CVTERM[row['cv']] = {}
@@ -343,6 +344,8 @@ def receive_payload():
         Returns:
           payload dictionary
     '''
+    if request.method == 'GET' and request.args:
+        return request.args.to_dict()
     pay = {}
     if not request.get_data():
         return pay
@@ -420,6 +423,117 @@ def get_custom_payload(ipd, display_value):
 # ******************************************************************************
 # * ORCID utility functions                                                    *
 # ******************************************************************************
+
+def get_single_author_abbrev(auth, source):
+    ''' Get a single author abbreviation
+        Keyword arguments:
+          auth: author record
+          source: source of the record
+        Returns:
+          Author abbreviation (string)
+    '''
+    name = ""
+    if source == 'DataCite':
+        if 'familyName' not in auth:
+            if 'name' in auth:
+                name = auth['name']
+            else:
+                return ""
+        else:
+            name = auth['familyName']
+            if 'givenName' in auth:
+                name = f"{name}, {auth['givenName'][0]}."
+        return name
+    if 'family' not in auth:
+        if 'name' in auth:
+            name = auth['name']
+        else:
+            return ""
+    else:
+        name = auth['family']
+        if 'given' in auth:
+            name = f"{name}, {auth['given'][0]}."
+    return name
+
+
+def author_population(rec, limit=10):
+    ''' Get a population of authors for one work
+        Keyword arguments:
+          rec: DOI record
+          limit: limit of [first] authors to return
+        Returns:
+          Author list (string)
+    '''
+    cnt = 0
+    if rec['jrc_obtained_from'] == 'DataCite':
+        field = 'creators'
+    else:
+        field = 'author'
+    if field not in rec:
+        return ""
+    arec = []
+    for auth in rec[field]:
+        auth_name = get_single_author_abbrev(auth, rec['jrc_obtained_from'])
+        if not auth_name:
+            continue
+        arec.append(auth_name)
+        cnt += 1
+        if cnt == limit:
+            break
+    if len(arec) < len(rec[field]):
+        auth_name = get_single_author_abbrev(rec[field][-1], rec['jrc_obtained_from'])
+        if auth_name:
+            arec.append(auth_name)
+    return ", ".join(arec)
+
+
+def get_author_works(orc, line):
+    ''' Get the works for an author
+        Keyword arguments:
+          orc: ORCID record
+          line: list of author information
+        Returns:
+          List of works
+          Number of works
+    '''
+    works_blank = ['No works found', '', '', '', '', '', '', '', '', '']
+    works = []
+    try:
+        if 'employeeId' in orc:
+            rows = DB['dis'].dois.find({"jrc_author": orc['employeeId']})
+        else:
+            rows = []
+    except Exception:
+        rows = []
+    if not rows:
+        wrk = line.copy()
+        wrk.extend(works_blank)
+        works.append("\t".join(wrk))
+        return works, 0
+    cnt = 0
+    for row in rows:
+        wrk = line.copy()
+        if 'subtype' not in row:
+            row['subtype'] = ''
+        if 'types' in row and 'resourceTypeGeneral' in row['types']:
+            row['type'] = row['types']['resourceTypeGeneral']
+        pub = ""
+        if row['type'] in ['journal-article', 'book-chapter', 'proceedings-article', 'Preprint'] \
+           or row['subtype'] == 'preprint':
+            pub = 'Yes'
+        first = last = ""
+        if 'jrc_first_id' in row and orc['employeeId'] in row['jrc_first_id']:
+            first = 'Yes'
+        if 'jrc_last_id' in row and orc['employeeId'] == row['jrc_last_id']:
+            last = 'Yes'
+        wrk.extend([row['doi'], pub, row['type'] if 'type' in row else '',
+                    row['subtype'] if 'subtype' in row else '', first, last,
+                    row['jrc_publishing_date'], DL.get_journal(row, full=False, name_only=True),
+                    DL.get_title(row), author_population(row)])
+        works.append("\t".join(wrk))
+        cnt += 1
+    return works, cnt
+
 
 def get_leads_and_org_members(org):
     ''' Get lab head employee IDs and organization members
@@ -770,7 +884,8 @@ def generate_works_table(rows, name=None, show="full", eid=None):
     information was not provided to Crossref/DataCite. If one of your publications doesn't have a
     check (or is missing), please email the DOI to the Library at {app.config['LIBRARY']}.
     '''
-    html = f"<hr>{preamble}<br>Number of DOIs: <span id='totalrows'>{len(works):,}</span><br>" + html
+    html = f"<hr>{preamble}<br>Number of DOIs: " \
+           + f"<span id='totalrows'>{len(works):,}</span><br>" + html
     return html, dois
 
 
@@ -883,7 +998,8 @@ def add_orcid_works(data, dois, return_html=True):
                        + work['external-ids']['external-id'][0]['external-id-url']['value'] \
                        + f"' target='_blank'>{doi}</a>"
         else:
-            link = doi_link(doi)
+            link = f"{app.config['DOI']}{doi}"
+            link = f"<a href='{link}' target='_blank'>{doi}</a>"
         inner += f"<tr><td>{pdate}</td><td>{link}</td>" \
                  + f"<td>{wsumm['title']['title']['value']}</td></tr>"
         results.append({"date": pdate, "doi": doi, "title": wsumm['title']['title']['value']})
@@ -949,7 +1065,8 @@ def generate_user_table(rows):
         auth = DL.get_single_author_details(row, DB['dis'].orcid)
         badges = get_badges(auth, True)
         rclass = 'other' if (auth and auth['alumni']) else 'active'
-        html += f"<tr class={rclass}><td style='min-width:170px'>{link}</td><td>{', '.join(sorted(row['given']))}</td>" \
+        html += f"<tr class={rclass}><td style='min-width:170px'>{link}</td>" \
+                + f"<td>{', '.join(sorted(row['given']))}</td>" \
                 + f"<td>{', '.join(sorted(row['family']))}</td><td>{' '.join(badges)}</td></tr>"
     html += '</tbody></table>'
     cbutton = "<button class=\"btn btn-outline-warning\" " \
@@ -1977,8 +2094,8 @@ def create_downloadable(name, header, content, size='btn-med'):
     ''' Generate a downloadable content file
         Keyword arguments:
           name: base file name
-          header: table header
-          content: table content
+          header: table header (list of strings)
+          content: table content (string)
         Returns:
           File name
     '''
@@ -3076,7 +3193,7 @@ def show_oid(oid):
 @app.route('/orcid/works/<string:oid>')
 def show_oid_works(oid):
     '''
-    Show works giben an ORDIC ID
+    Show works given an ORCID ID
     Return information for an ORCID ID
     # Do not display
     tags:
@@ -3275,6 +3392,9 @@ def get_display_badges(doi, row, data, local):
         badges += " " + tiny_badge('source', 'eLife', f'/raw/eLife/{doi}')
     elif 'publisher' in data and data['publisher'].startswith('Elsevier'):
         badges += " " + tiny_badge('source', 'Elsevier', f'/raw/elsevier/{doi}')
+    # PLUG Not ready for prime time...
+    #elif 'zenodo' in doi.lower():
+    #    badges += " " + tiny_badge('source', 'Zenodo', f'/raw/zenodo/{doi}')
     rlink = f"/doi/{doi}"
     if local:
         jour = DL.get_journal(data)
@@ -3983,7 +4103,7 @@ def dois_top_cited():
     html = "<table id='top_cited' class='tablesorter standard'><thead><tr>" \
            + "<th>Citations</th><th>DOI</th><th>Journal</th><th>Title</th></tr></thead><tbody>"
     for result in results:
-        doi = result['doi'].replace('https://doi.org/', '')
+        doi = result['doi'].replace(app.config['DOI'], '')
         row = DL.get_doi_record(doi, coll=DB['dis'].dois)
         html += f"<tr><td>{result['cited_by_count']:,}</td><td>{doi_link(doi)}</td>" \
                 + f"<td>{DL.get_journal(row, full=False, name_only=True)}</td>" \
@@ -4379,21 +4499,23 @@ def dois_year():
                                          chartscript=chartscript, chartdiv=chartdiv,
                                          navbar=generate_navbar('DOIs')))
 
-
+@app.route('/doiui_group/<string:field>/<string:unwind>')
 @app.route('/doiui_group/<string:field>')
-def show_grouped_dois(field):
+def show_grouped_dois(field, unwind=None):
     ''' A grouping of DOIs as a table for a given field
     '''
     payload = ([{"$group": {"_id": f"${field}", "count": {"$sum": 1}}},
-               {"$sort": {"count": -1}}
+                {"$sort": {"count": -1}}
                ])
+    if unwind:
+        payload.insert(0, {"$unwind": f"${unwind}"})
     try:
         rows = DB['dis'].dois.aggregate(payload)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get DOIs from dois collection"),
                                message=error_message(err))
-    html = "<table id='dois' class='tablesorter standard'><thead><tr>" \
+    html = "<table id='dois' class='tablesorter numberlast'><thead><tr>" \
            + f"<th>{field}</th><th>Count</th></tr></thead><tbody>"
     total = cnt = 0
     data = {}
@@ -4410,7 +4532,7 @@ def show_grouped_dois(field):
     html += f"</tbody><tfoot><tr><th>Total</th><th>{total}</th></tr></tfoot>"
     html += "</table>"
     chartscript = chartdiv = ""
-    if cnt > 1 and data:
+    if cnt > 1 and cnt <= 256 and data:
         colors = plasma(cnt)
         if cnt == 2:
             colors = DP.SOURCE_PALETTE
@@ -4418,11 +4540,11 @@ def show_grouped_dois(field):
             colors = all_palettes['Category10'][cnt]
         elif cnt <= 20:
             colors = all_palettes['Category20'][cnt]
-        chartscript, chartdiv = DP.pie_chart(data, field, "source", width=875, height=550,
+        chartscript, chartdiv = DP.pie_chart(data, field, "source", width=875, height=600,
                                              colors=colors)
     endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
-                                         title=f"{field} counts", html=html,
+                                         title=f"{field} counts ({cnt:,})", html=html,
                                          chartscript=chartscript, chartdiv=chartdiv,
                                          navbar=generate_navbar('DOIs')))
 
@@ -4463,7 +4585,7 @@ def show_insert(idate):
                                title=render_warning("DOIs not found"),
                                message=f"No DOIs were inserted on or after {idate}")
     html = '<table id="dois" class="tablesorter numbers"><thead><tr>' \
-           + '<th>DOI</th><th>Type</th><th>Published</th><th>Load source</th>' \
+           + '<th>DOI</th><th>Load source</th><th>Type</th><th>Published</th>' \
            + '<th>Inserted</th><th>Is version of</th><th>Newsletter</th>' \
            + '<th>Tags</th></tr></thead><tbody>'
     fileoutput = ""
@@ -4920,15 +5042,17 @@ def datacite_subject(subject=None, year='All'):
         if year != 'All':
             title += f" (year={year})"
     else:
+        cnt = 0
         html = "<table id='subjects' class='tablesorter numberlast'><thead><tr>" \
                + "<th>Subject</th><th>Scheme</th><th>Count</th></tr></thead><tbody>"
         for row in rows:
+            cnt += 1
             scheme = row['_id']['scheme'] if 'scheme' in row['_id'] else ''
             html += f"<tr><td>{row['_id']['subject']}</td><td>{scheme}</td><td>" \
                     + f"<a href='/datacite_subject/{row['_id']['subject']}'>{row['count']}</a>" \
                     + "</td></tr>"
         html += "</tbody></table>"
-        title = "DataCite subjects"
+        title = f"DataCite subjects ({cnt:,})"
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
@@ -5356,7 +5480,7 @@ def dois_no_janelia(year='All'):
 @app.route('/raw/<string:resource>/<path:doi>')
 def get_raw(resource=None, doi=None):
     ''' JSON metadata for a DOI
-    resource: biorxiv, elife, elsevier, figshare, openalex, protocols.io, pubmed, pmc
+    resource: biorxiv, elife, elsevier, figshare, openalex, protocols.io, pubmed, pmc, zenodo
     '''
     doi = doi.lstrip('/').rstrip('/').lower()
     result = initialize_result()
@@ -5364,9 +5488,10 @@ def get_raw(resource=None, doi=None):
     if resource:
         resource = resource.lower()
         result['rest']['source'] = DL.doi_api_url(doi, source=resource)
-    if resource in ('biorxiv', 'elife', 'elsevier', 'openalex', 'pmc', 'pubmed'):
+    if resource in ('biorxiv', 'elife', 'elsevier', 'openalex', 'pmc', 'pubmed', 'zenodo'):
         try:
             response = DL.get_doi_record(doi, source=resource)
+            print(response)
         except Exception as err:
             raise InvalidUsage(str(err), 500) from err
     elif resource == 'figshare':
@@ -5409,6 +5534,96 @@ def return_xml(resource='elsevier', doi=None):
     if response:
         result = response.content
     return result
+
+@app.route('/coauth')
+def show_coauth():
+    ''' Coauthor report input
+    '''
+    people = '<option>'
+    try:
+        rows = DB['dis'].orcid.find({}).collation({"locale": "en"}).sort("family", 1)
+    except Exception as err:
+        return render_template('warning.html', urlroot=request.url_root,
+                                title=render_warning("Could not find people", 'error'),
+                                message=error_message(err))
+    for row in rows:
+        people += f"<option>{row['given'][0]}&nbsp;{row['family'][0]}</option>"
+    people += '</option>'
+    endpoint_access()
+    return make_response(render_template('coauth.html', urlroot=request.url_root,
+                                         people=people,
+                                         navbar=generate_navbar('Home')))
+
+
+@app.route('/dois_coauthors', methods=['OPTIONS', 'POST'])
+def dois_coauthors():
+    ipd = receive_payload()
+    if 'orcid1' in ipd and 'orcid2' in ipd:
+        inputs = [ipd['orcid1'], ipd['orcid2']]
+        lookup = 'orcid'
+    elif 'eid1' in ipd and 'eid2' in ipd:
+        inputs = [ipd['eid1'], ipd['eid2']]
+        lookup = 'employeeId'
+    elif 'name1' in ipd and 'name2' in ipd:
+        inputs = [ipd['name1'], ipd['name2']]
+        lookup = 'name'
+    else:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Invalid input"),
+                               message="Invalid input")
+    orc = []
+    for oid in inputs:
+        try:
+            if lookup == 'name':
+                if '\xa0' not in oid:
+                    return render_template('error.html', urlroot=request.url_root,
+                                   title=render_warning("Invalid input for name"),
+                                   message=f"Invalid input: {oid}")
+                given, family = oid.split('\xa0')
+                row = DB['dis'].orcid.find_one({"given": given, "family": family})
+            else:
+                row = DL.single_orcid_lookup(oid, DB['dis'].orcid, lookup_by=lookup)
+            orc.append(row)
+        except Exception as err:
+            return render_template('error.html', urlroot=request.url_root,
+                                   title=render_warning("Could not get ORCID data for " \
+                                                        + oid),
+                                   message=error_message(err))
+        if not row:
+            return render_template('error.html', urlroot=request.url_root,
+                                   title=render_warning("ORCID record not found for " \
+                                                        + oid),
+                                   message="ORCID record not found")
+    payload = [{"$match": {"jrc_author": orc[0]['employeeId']}},
+                   {"$match": {"jrc_author": orc[1]['employeeId']}}
+              ]
+    payload2 = [{"$match": {"$or": [{"author.family": {"$in": orc[0]['family']},
+                                     "author.given": {"$in": orc[0]['given']}},
+                                    {"creators.familyName": {"$in": orc[0]['family']},
+                                     "creators.givenName": {"$in": orc[0]['given']}}
+                                   ]}},
+                {"$match": {"$or": [{"author.family": {"$in": orc[1]['family']},
+                                     "author.given": {"$in": orc[1]['given']}},
+                                    {"creators.familyName": {"$in": orc[1]['family']},
+                                     "creators.givenName": {"$in": orc[1]['given']}}
+                                   ]}}
+               ]
+    try:
+        rows = DB['dis'].dois.aggregate(payload)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get works by co-authors"),
+                               message=error_message(err))
+    html, cnt, _ = standard_doi_table(rows)
+    title = f"Works co-authored by {orc[0]['given'][0]} {orc[0]['family'][0]} and {orc[1]['given'][0]} {orc[1]['family'][0]}"
+    if not cnt:
+        return render_template('warning.html', urlroot=request.url_root,
+                               title=render_warning("Could not find DOIs", 'warning'),
+                               message="Could not find any DOIs with co-authors " \
+                                       + f"{orc[0]['given'][0]} {orc[0]['family'][0]} and {orc[1]['given'][0]} {orc[1]['family'][0]}")
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=title, html=html,
+                                         navbar=generate_navbar('Authorship')))
 
 # ******************************************************************************
 # * UI endpoints (Organizations)                                               *
@@ -6905,8 +7120,9 @@ def orcid_run_bulk_search():
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not find required columns"),
                                message="Could not find required columns: " + ", ".join(arr))
-    html += "<table id='bulk' class='tablesorter standard'><thead><tr><th>Given name</th>" \
-            + "<th>Family name</th><th>ORCID/user ID</th></tr></thead><tbody>"
+    html += "<table id='bulk' class='tablesorter numberlast'><thead><tr><th>Given name</th>" \
+            + "<th>Family name</th><th>ORCID/user ID</th><th>Works</th></tr></thead><tbody>"
+    outrow = []
     for _, row in df.iterrows():
         try:
             payload = {"$and": [{"family": {"$regex": row[family].strip(), "$options" : "i"}},
@@ -6921,10 +7137,24 @@ def orcid_run_bulk_search():
         if orc:
             res = f"<a href='/userui/{orc['orcid']}'>{orc['orcid']}</a>" if 'orcid' in orc \
                   else f"<a href='/userui/{orc['userIdO365']}'>{orc['userIdO365']}</a>"
-        html += f"<tr><td>{row[given]}</td><td>{row[family]}</td><td>{res}</td></tr>"
+        line = [row[given], row[family], 'Yes' if orc else 'No',
+                orc['userIdO365'] if orc and 'userIdO365' in orc else '',
+                orc['orcid'] if orc and 'orcid' in orc else '']
+        pubs, cnt = get_author_works(orc, line)
+        if cnt <= 1:
+            outrow.append(pubs[0])
+        else:
+            outrow.append("\n".join(pubs))
+        html += f"<tr><td>{row[given]}</td><td>{row[family]}</td><td>{res}</td><td>{cnt}</td></tr>"
+    pre = ""
+    if outrow:
+        header = ['Given name', 'Family name', 'In database', 'User ID', 'ORCID', 'DOI',
+                  'Publication', 'Type', 'Subtype', 'First author', 'Last author', 'Published',
+                  'Journal', 'Title', 'Authors']
+        pre = create_downloadable('dois', header, "\n".join(outrow)) + "<br><br>"
     html += "</tbody></table>"
     return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title="ORCID bulk search", html=html,
+                                         title="ORCID bulk search", html=pre+html,
                                          navbar=generate_navbar('Authorship')))
 
 # ******************************************************************************
@@ -7756,7 +7986,7 @@ def stats_database():
                            + f"({humansize(stat['indexSize'], space='mem')})"}
     html += '<tfoot>'
     html += "<tr><th style='text-align:right'>TOTAL</th><th style='text-align:center'>" \
-            + dloop(val, ['objects', 'avgObjSize', 'storageSize', 'blank', 'indexSize'],
+            + dloop(val, ['objects', 'avgObjSize', 'storageSize', 'get_author', 'indexSize'],
                     "</th><th style='text-align:center'>") + "</th></tr>"
     html += '</tfoot>'
     html += '</table>'
