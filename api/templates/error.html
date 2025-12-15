@@ -2,7 +2,7 @@
 {% block content %}
 <div class="jumbotron">
   <h1 class="display-4" style="color:red">{{ title|safe }}</h1>
-  <p class="lead" style="color: #333">{{ message }}</p>
+  <p class="lead" style="color: #333">{{ message|safe }}</p>
 </div>
 <a class="btn btn-outline-primary" href="/" role="button">Return home</a>
 {% endblock %}

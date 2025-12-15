@@ -31,7 +31,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "92.1.0"
+__version__ = "93.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -3393,8 +3393,8 @@ def get_display_badges(doi, row, data, local):
     elif 'publisher' in data and data['publisher'].startswith('Elsevier'):
         badges += " " + tiny_badge('source', 'Elsevier', f'/raw/elsevier/{doi}')
     # PLUG Not ready for prime time...
-    #elif 'zenodo' in doi.lower():
-    #    badges += " " + tiny_badge('source', 'Zenodo', f'/raw/zenodo/{doi}')
+    elif 'zenodo' in doi.lower():
+        badges += " " + tiny_badge('source', 'Zenodo', f'/raw/zenodo/{doi}')
     rlink = f"/doi/{doi}"
     if local:
         jour = DL.get_journal(data)
@@ -3791,11 +3791,14 @@ def show_doi_ui(doi):
                                 title=render_warning("Could not find DOI", 'warning'),
                                 message=f"Could not find DOI {doi} in " \
                                         +f"{'DataCite' if DL.is_datacite(doi) else 'Crossref'}")
-    authors = DL.get_author_list(data, orcid=True, project_map=DB['dis'].project_map)
-    #if not authors:
-    #    return render_template('error.html', urlroot=request.url_root,
-    #                            title=render_warning("Could not generate author list"),
-    #                            message=f"Could not generate author list for {doi}")
+    try:
+        authors = DL.get_author_list(data, orcid=True, project_map=DB['dis'].project_map)
+    except Exception as err:
+        auth = data['author'] if 'author' in data else data['creators']
+        return render_template('error.html', urlroot=request.url_root,
+                                title=render_warning("Could not generate author list"),
+                                message=f"Could not generate author list for {doi}<br><pre style='color: black;'>" \
+                                        + json.dumps(auth, indent=2, default=str) + "</pre>")
     title = DL.get_title(data)
     if not title:
         return render_template('error.html', urlroot=request.url_root,
