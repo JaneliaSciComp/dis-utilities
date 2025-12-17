@@ -31,7 +31,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "93.0.0"
+__version__ = "94.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -3797,7 +3797,8 @@ def show_doi_ui(doi):
         auth = data['author'] if 'author' in data else data['creators']
         return render_template('error.html', urlroot=request.url_root,
                                 title=render_warning("Could not generate author list"),
-                                message=f"Could not generate author list for {doi}<br><pre style='color: black;'>" \
+                                message=f"Could not generate author list for {doi}" \
+                                        + "<br><pre style='color: black;'>" \
                                         + json.dumps(auth, indent=2, default=str) + "</pre>")
     title = DL.get_title(data)
     if not title:
@@ -4535,7 +4536,7 @@ def show_grouped_dois(field, unwind=None):
     html += f"</tbody><tfoot><tr><th>Total</th><th>{total}</th></tr></tfoot>"
     html += "</table>"
     chartscript = chartdiv = ""
-    if cnt > 1 and cnt <= 256 and data:
+    if 1 < cnt <= 256 and data:
         colors = plasma(cnt)
         if cnt == 2:
             colors = DP.SOURCE_PALETTE
@@ -4566,9 +4567,9 @@ def show_insert_picker():
                                          start=start, stop=str(date.today()),
                                          after=after, navbar=generate_navbar('DOIs')))
 
-
 @app.route('/doiui/insert/<string:idate>')
-def show_insert(idate):
+@app.route('/doiui/insert/<string:idate>/<string:source>')
+def show_insert(idate, source='Crossref'):
     '''
     Return DOIs that have been inserted since a specified date
     '''
@@ -4577,8 +4578,10 @@ def show_insert(idate):
     except Exception as err:
         raise InvalidUsage(str(err), 400) from err
     try:
-        rows = DB['dis'].dois.find({"jrc_inserted": {"$gte" : isodate}},
-                                   {'_id': 0}).sort([("jrc_obtained_from", 1), ("jrc_inserted", 1)])
+        rows = DB['dis'].dois.find({"jrc_inserted": {"$gte" : isodate},
+                                    "jrc_obtained_from": source},
+                                   {'_id': 0}).sort([("jrc_inserted", -1),
+                                                     ("jrc_publishing_date", -1)])
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get DOIs"),
@@ -4588,13 +4591,12 @@ def show_insert(idate):
                                title=render_warning("DOIs not found"),
                                message=f"No DOIs were inserted on or after {idate}")
     html = '<table id="dois" class="tablesorter numbers"><thead><tr>' \
-           + '<th>DOI</th><th>Load source</th><th>Type</th><th>Published</th>' \
+           + '<th>DOI</th><th>Type</th><th>Published</th>' \
            + '<th>Inserted</th><th>Is version of</th><th>Newsletter</th>' \
            + '<th>Tags</th></tr></thead><tbody>'
     fileoutput = ""
     limit = weeks_ago(2)
     for row in rows:
-        #source = row['jrc_load_source'] if row['jrc_load_source'] else "" #PLUG
         typ = subtype = ""
         if 'type' in row:
             typ = row['type']
@@ -4610,9 +4612,9 @@ def show_insert(idate):
                     version.append(ver['id'])
         version = doi_link(version) if version else ""
         news = row['jrc_newsletter'] if 'jrc_newsletter' in row else ""
-        if (not news) and (row['jrc_obtained_from'] == 'Crossref') and \
-           (row['jrc_publishing_date'] >= str(limit)) \
-           and (typ == 'journal-article' or subtype == 'preprint'):
+        if (not news) and (row['jrc_publishing_date'] >= str(limit)) \
+           and (typ == 'journal-article' or subtype == 'preprint' \
+                or row['jrc_obtained_from'] == source):
             rclass = 'candidate'
         else:
             rclass = 'other'
@@ -4621,11 +4623,11 @@ def show_insert(idate):
         tags = ', '.join(sorted([tag['name'] for tag in row['jrc_tag']])) \
                if 'jrc_tag' in row else ""
         html += f"<tr class='{rclass}'><td>" \
-                + "</td><td>".join([doi_link(row['doi']), row['jrc_obtained_from'], typ,
+                + "</td><td>".join([doi_link(row['doi']), typ,
                                     jpd, str(row['jrc_inserted']), version,
                                     news, f"<span style='font-size: 10pt;'>{tags}</span>"]) \
                                     + "</td></tr>"
-        frow = "\t".join([row['doi'], row['jrc_obtained_from'], typ, row['jrc_publishing_date'],
+        frow = "\t".join([row['doi'], typ, row['jrc_publishing_date'],
                           str(row['jrc_inserted']), version, news, tags])
         fileoutput += f"{frow}\n"
     html += '</tbody></table>'
@@ -4634,8 +4636,8 @@ def show_insert(idate):
     html = create_downloadable("jrc_inserted", None, fileoutput) + f" &nbsp;{cbutton}{html}"
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title=f"DOIs inserted on or after {idate}", html=html,
-                                         navbar=generate_navbar('DOIs')))
+                                         title=f"DOIs inserted from {source} on or after {idate}",
+                                         html=html, navbar=generate_navbar('DOIs')))
 
 
 @app.route('/doiui/custom/<string:year>', methods=['OPTIONS', 'POST'])
@@ -5091,14 +5093,20 @@ def datacite_dois():
                                title=render_warning("Could not get data DOIs"),
                                message=error_message(err))
     types = {}
-    dois = []
+    dois = {}
     for row in rows:
         if row['_id']['type'] not in types:
             types[row['_id']['type']] = 0
         types[row['_id']['type']] += row['count']
         if 'detail' not in row['_id']:
             row['_id']['detail'] = ""
-        dois.append(row)
+        if row['_id']['type'] not in dois:
+            dois[row['_id']['type']] = {}
+        if row['_id']['detail'] not in dois[row['_id']['type']]:
+            dois[row['_id']['type']][row['_id']['detail']] = {}
+        if row['_id']['pub'] not in dois[row['_id']['type']][row['_id']['detail']]:
+            dois[row['_id']['type']][row['_id']['detail']][row['_id']['pub']] = 0
+        dois[row['_id']['type']][row['_id']['detail']][row['_id']['pub']] += row['count']
     # Summary
     inner = '<table id="types" class="tablesorter numberlast"><thead><tr>' \
             + '<th>Type</th><th>Count</th>' \
@@ -5114,12 +5122,14 @@ def datacite_dois():
             + '<th>Type</th><th>Subtype</th><th>Publisher</th><th>Count</th>' \
             + '</tr></thead><tbody>'
     total = 0
-    for row in sorted(dois, key=lambda x: x['count'], reverse=True):
-        total += row['count']
-        link = f"/datacite_dois/{row['_id']['type']}/{row['_id']['pub']}"
-        inner += f"<td>{row['_id']['type']}</td><td>{row['_id']['detail']}</td>" \
-                 + f"<td>{row['_id']['pub']}</td>" \
-                 + f"<td><a href='{link}'>{row['count']}</a></td></tr>"
+    for typ, detail_dict in dois.items():
+        for detail, pub_dict in detail_dict.items():
+            for pub, cnt in pub_dict.items():
+                total += cnt
+                link = f"/datacite_dois/{typ}/{detail}/{pub}"
+                inner += f"<td>{typ}</td><td>{detail}</td>" \
+                         + f"<td>{pub}</td>" \
+                         + f"<td><a href='{link}'>{cnt}</a></td></tr>"
     inner += "</tbody><tfoot><tr><th colspan='3'>TOTAL</th>" \
              + f"<th style='text-align: center;'>{total:,}</th></tr></tfoot></table>"
     html += f"{inner}</div></div>"
@@ -5542,7 +5552,7 @@ def return_xml(resource='elsevier', doi=None):
 def show_coauth():
     ''' Coauthor report input
     '''
-    people = '<option>'
+    ppl = '<option>'
     try:
         rows = DB['dis'].orcid.find({}).collation({"locale": "en"}).sort("family", 1)
     except Exception as err:
@@ -5550,16 +5560,19 @@ def show_coauth():
                                 title=render_warning("Could not find people", 'error'),
                                 message=error_message(err))
     for row in rows:
-        people += f"<option>{row['given'][0]}&nbsp;{row['family'][0]}</option>"
-    people += '</option>'
+        ppl += f"<option>{row['given'][0]}&nbsp;{row['family'][0]}</option>"
+    ppl += '</option>'
     endpoint_access()
     return make_response(render_template('coauth.html', urlroot=request.url_root,
-                                         people=people,
+                                         people=ppl,
                                          navbar=generate_navbar('Home')))
 
 
 @app.route('/dois_coauthors', methods=['OPTIONS', 'POST'])
 def dois_coauthors():
+    '''
+    Return DOIs co-authored by two ORCIDs or employee IDs
+    '''
     ipd = receive_payload()
     if 'orcid1' in ipd and 'orcid2' in ipd:
         inputs = [ipd['orcid1'], ipd['orcid2']]
@@ -5598,19 +5611,8 @@ def dois_coauthors():
                                                         + oid),
                                    message="ORCID record not found")
     payload = [{"$match": {"jrc_author": orc[0]['employeeId']}},
-                   {"$match": {"jrc_author": orc[1]['employeeId']}}
+               {"$match": {"jrc_author": orc[1]['employeeId']}}
               ]
-    payload2 = [{"$match": {"$or": [{"author.family": {"$in": orc[0]['family']},
-                                     "author.given": {"$in": orc[0]['given']}},
-                                    {"creators.familyName": {"$in": orc[0]['family']},
-                                     "creators.givenName": {"$in": orc[0]['given']}}
-                                   ]}},
-                {"$match": {"$or": [{"author.family": {"$in": orc[1]['family']},
-                                     "author.given": {"$in": orc[1]['given']}},
-                                    {"creators.familyName": {"$in": orc[1]['family']},
-                                     "creators.givenName": {"$in": orc[1]['given']}}
-                                   ]}}
-               ]
     try:
         rows = DB['dis'].dois.aggregate(payload)
     except Exception as err:
@@ -5618,12 +5620,14 @@ def dois_coauthors():
                                title=render_warning("Could not get works by co-authors"),
                                message=error_message(err))
     html, cnt, _ = standard_doi_table(rows)
-    title = f"Works co-authored by {orc[0]['given'][0]} {orc[0]['family'][0]} and {orc[1]['given'][0]} {orc[1]['family'][0]}"
+    title = f"Works co-authored by {orc[0]['given'][0]} {orc[0]['family'][0]} " \
+            + f"and {orc[1]['given'][0]} {orc[1]['family'][0]}"
     if not cnt:
         return render_template('warning.html', urlroot=request.url_root,
                                title=render_warning("Could not find DOIs", 'warning'),
                                message="Could not find any DOIs with co-authors " \
-                                       + f"{orc[0]['given'][0]} {orc[0]['family'][0]} and {orc[1]['given'][0]} {orc[1]['family'][0]}")
+                                       + f"{orc[0]['given'][0]} {orc[0]['family'][0]} " \
+                                       + f"and {orc[1]['given'][0]} {orc[1]['family'][0]}")
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
                                          navbar=generate_navbar('Authorship')))
@@ -5664,14 +5668,16 @@ def show_org_authors(org_in):
         given = ', '.join(row['given'])
         family = ', '.join(row['family'])
         alum = "YES" if 'alumni' in row and row['alumni'] else ""
-        orc = f"<a href='/userui/{row['orcid']}'>{row['orcid']}</a>" if 'orcid' in row and row['orcid'] else ""
+        orc = f"<a href='/userui/{row['orcid']}'>{row['orcid']}</a>" \
+              if 'orcid' in row and row['orcid'] else ""
         affil = row['affiliations'] if 'affiliations' in row else []
         if 'managed' in row:
             affil.extend(row['managed'])
         affil = sorted(list(set(affil)))
         affil = ', '.join(affil)
         html += f"<tr><td>{given}</td><td>{family}</td>" \
-                + f"<td style='text-align: center;'>{alum}</td><td style='min-width:170px'>{orc}</td><td>{affil}</td></tr>"
+                + f"<td style='text-align: center;'>{alum}</td>" \
+                + f"<td style='min-width:170px'>{orc}</td><td>{affil}</td></tr>"
         content += f"{given}\t{family}\t{alum}\t{row['orcid'] if 'orcid' in row else ''}\t{affil}\n"
         cnt += 1
     html += "</tbody></table>"

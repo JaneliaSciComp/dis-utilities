@@ -6,14 +6,18 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery-cookie/1.4.1/jquery.cookie.min.js"></script>
 <script src="https://unpkg.com/gijgo@1.9.14/js/gijgo.min.js" type="text/javascript"></script>
 <script>
-function startdate() {
-  if (!$('#start').val()) {
-    alert("You must enter a date");
-    return;
-  }
-  url = "/doiui/insert/" + $("#start").val();
-  window.location = url;
-}
+    function startdate() {
+      if (!$('#start').val()) {
+        alert("You must enter a date");
+        return;
+      }
+      var source = $('input[name="source"]:checked').val();
+      var url = "/doiui/insert/" + $("#start").val();
+      if (source && source !== "Crossref") {
+        url += "/" + source;
+      }
+      window.location = url;
+    }
 </script>
 {% endblock %}
 {% block onload %}
@@ -27,6 +31,12 @@ onload="tableInitialize();"
   <script>
     $('#start').datepicker({uiLibrary: 'bootstrap5', iconsLibrary: 'fontawesome', format: 'yyyy-mm-dd', value: '{{start}}', minDate: '2014-07-10', maxDate: '{{stop}}' });
   </script>
-  <br>
+  Source: <div class="form-check form-check-inline" style="margin-top: 1em;">
+    <input class="form-check-input" type="radio" name="source" id="radioCrossref" value="Crossref" checked>
+    <label class="form-check-label" for="radioCrossref">Crossref</label>
+    <input class="form-check-input" type="radio" name="source" id="radioDataCite" value="DataCite" style="margin-left: 1.5em;">
+    <label class="form-check-label" for="radioDataCite">DataCite</label>
+  </div>
+  <br><br>
   {{ after|safe }}
 {% endblock %}

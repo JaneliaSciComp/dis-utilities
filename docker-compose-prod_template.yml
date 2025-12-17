@@ -28,6 +28,7 @@ services:
       - PROTOCOLS_API_TOKEN=<<INSERT API KEY>>
       - S2_API_KEY=<<INSERT API KEY>>
       - WOS_API_KEY=<<INSERT API KEY>>
+      - ZENODO_API_KEY=<<INSERT API KEY>>
     networks:
         - dis-net
 
