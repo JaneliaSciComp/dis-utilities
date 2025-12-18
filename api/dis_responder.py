@@ -31,7 +31,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "94.0.0"
+__version__ = "95.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -3387,22 +3387,23 @@ def get_display_badges(doi, row, data, local):
             plink = f"{app.config['PMID']}{row['jrc_pmid']}/"
             badges += f" {tiny_badge('primary', 'PubMed', plink)}"
     if '/protocols.io.' in doi:
-        badges += f" {tiny_badge('source', 'protocols.io', f'/raw/protocols.io/{doi}')}"
+        badges += f" {tiny_badge('publisher', 'protocols.io', f'/raw/protocols.io/{doi}')}"
     elif 'elife' in doi.lower():
-        badges += " " + tiny_badge('source', 'eLife', f'/raw/eLife/{doi}')
+        badges += " " + tiny_badge('publisher', 'eLife', f'/raw/eLife/{doi}')
     elif 'publisher' in data and data['publisher'].startswith('Elsevier'):
-        badges += " " + tiny_badge('source', 'Elsevier', f'/raw/elsevier/{doi}')
-    # PLUG Not ready for prime time...
+        badges += " " + tiny_badge('publisher', 'Elsevier', f'/raw/elsevier/{doi}')
+    elif 'publisher' in data and data['publisher'].startswith('Springer'):
+        badges += " " + tiny_badge('publisher', 'Springer', f'/raw/springer/{doi}')
     elif 'zenodo' in doi.lower():
-        badges += " " + tiny_badge('source', 'Zenodo', f'/raw/zenodo/{doi}')
+        badges += " " + tiny_badge('publisher', 'Zenodo', f'/raw/zenodo/{doi}')
     rlink = f"/doi/{doi}"
     if local:
         jour = DL.get_journal(data)
         if jour:
             if 'bioRxiv' in jour:
-                badges += f" {tiny_badge('source', 'bioRxiv', f'/raw/bioRxiv/{doi}')}"
+                badges += f" {tiny_badge('publisher', 'bioRxiv', f'/raw/bioRxiv/{doi}')}"
         if '/janelia.' in doi:
-            badges += f" {tiny_badge('source', 'figshare', f'/raw/figshare/{doi}')}"
+            badges += f" {tiny_badge('publisher', 'figshare', f'/raw/figshare/{doi}')}"
         badges += f" {tiny_badge('source', row['jrc_obtained_from'], rlink)}"
     else:
         badges += f" {tiny_badge('source', 'Raw data', rlink)}"
@@ -5493,7 +5494,7 @@ def dois_no_janelia(year='All'):
 @app.route('/raw/<string:resource>/<path:doi>')
 def get_raw(resource=None, doi=None):
     ''' JSON metadata for a DOI
-    resource: biorxiv, elife, elsevier, figshare, openalex, protocols.io, pubmed, pmc, zenodo
+    resource: biorxiv, elife, elsevier, figshare, openalex, protocols.io, pubmed, pmc, springer, zenodo
     '''
     doi = doi.lstrip('/').rstrip('/').lower()
     result = initialize_result()
@@ -5501,7 +5502,7 @@ def get_raw(resource=None, doi=None):
     if resource:
         resource = resource.lower()
         result['rest']['source'] = DL.doi_api_url(doi, source=resource)
-    if resource in ('biorxiv', 'elife', 'elsevier', 'openalex', 'pmc', 'pubmed', 'zenodo'):
+    if resource in ('biorxiv', 'elife', 'elsevier', 'openalex', 'pmc', 'pubmed', 'springer', 'zenodo'):
         try:
             response = DL.get_doi_record(doi, source=resource)
             print(response)

@@ -361,6 +361,10 @@ hr {border-color: #666;
    color: white;
    background-color: #098e96;
 }
+.badge-publisher {
+   color: black;
+   background-color: skyblue;
+}
 .badge-source {
    color: white;
    background-color: #0000b0;
