@@ -2,7 +2,7 @@
     Sync works from Zenodo.
 '''
 
-__version__ = '1.0.0'
+__version__ = '1.1.0'
 
 import argparse
 import collections
@@ -10,6 +10,7 @@ import json
 from operator import attrgetter
 import os
 import sys
+from time import sleep
 import requests
 import jrc_common.jrc_common as JRC
 
@@ -71,8 +72,11 @@ def get_janelia_works():
     part = 1
     url = f"https://zenodo.org/api/records?q={ARG.TERM}&size=100"
     while True:
-        response = requests.get(url, timeout=10,
-                                headers={'Authorization': f'Bearer {os.environ["ZENODO_API_KEY"]}'})
+        try:
+            response = requests.get(url, timeout=20,
+                                    headers={'Authorization': f'Bearer {os.environ["ZENODO_API_KEY"]}'})
+        except Exception as err:
+            terminate_program(err)
         if not response:
             terminate_program(f"Error in response from Zenodo: {response}")
         resp = response.json()
@@ -85,6 +89,7 @@ def get_janelia_works():
         if 'links' not in resp or 'next' not in resp['links'] or not resp['links']['next']:
             break
         url = resp['links']['next']
+        sleep(.25)
     return rows
 
 
@@ -96,7 +101,7 @@ def get_dois():
           List of DOIs
     '''
     try:
-        rows = DB['dis'].orcid.find({'orcid': {'$exists': True}})
+        rows = DB['dis'].orcid.find({'orcid': {'$exists': True}, 'workerType': 'Employee'})
     except Exception as err:
         terminate_program(err)
     orcids = []
