@@ -31,7 +31,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "95.0.0"
+__version__ = "96.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -3779,8 +3779,8 @@ def show_doi_ui(doi):
         recsec += add_jrc_fields(row)
         local = True
     else:
-        recsec = '<h5 style="color:red">This DOI is not saved locally in the ' \
-                 + 'Janelia database</h5><br>'
+        recsec = "<h4 style='color:red'><i class='fa-solid fa-warning'></i> " \
+                 + "This DOI is not saved locally in the Janelia database</h4><br>"
     try:
         _, data = get_doi(doi)
     except Exception as err:
@@ -3830,11 +3830,13 @@ def show_doi_ui(doi):
     citsec += "<br>"
     # Author details
     authors = None
-    if row:
-        try:
-            authors = DL.get_author_details(row, DB['dis'].orcid)
-        except Exception as err:
-            return inspect_error(err, 'Could not get author list details')
+    if not row:
+        row = data
+        row['jrc_obtained_from'] = 'DataCite' if DL.is_datacite(doi) else 'Crossref'
+    try:
+        authors = DL.get_author_details(row, DB['dis'].orcid)
+    except Exception as err:
+        return inspect_error(err, 'Could not get author list details')
     html += doi_tabs(doi, row, data, authors)
     # Title
     doilink = f"<a href='{app.config['DOI']}{doi}' target='_blank'>{doi}</a>"
