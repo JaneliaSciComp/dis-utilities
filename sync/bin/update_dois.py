@@ -7,7 +7,7 @@
            to DIS MongoDB.
 """
 
-__version__ = '20.0.0'
+__version__ = '20.1.0'
 
 import argparse
 import collections
@@ -979,7 +979,7 @@ def add_datacite(rec):
         if 'rightsList' in rec and rec['rightsList'] and 'jrc_license' not in rec:
             for right in rec['rightsList']:
                 if 'rightsIdentifier' in right and right['rightsIdentifier'] in LICENSE:
-                    rec['jrc_license'] = right['rightsIdentifier']
+                    rec['jrc_license'] = LICENSE[right['rightsIdentifier']]
                     LOGGER.debug(f"Using license (rightsIdentifier) {rec['jrc_license']} " \
                                  + f"for {rec['doi']}")
                 elif 'rights' in right and right['rights'] in LICENSE:
