@@ -11,7 +11,7 @@
     jrc_former_status.
 """
 
-__version__ = '2.0.0'
+__version__ = '2.1.0'
 
 import argparse
 import collections
@@ -119,13 +119,40 @@ def get_pmc_license(pmcid):
     return None
 
 
-def update_open_access(row):
-    """ Update jrc_is_oa and jrc_oa_status
+def update_datacite_license(row):
+    """ Update jrc_license from DataCite rightsList
         Keyword arguments:
-          row: row to update
+          row: row to update from dois collection
         Returns:
           None
     """
+    if 'jrc_license' in row and row['jrc_license']:
+        return
+    payload = {}
+    if 'rightsList' in row and row['rightsList']:
+        for right in row['rightsList']:
+            if 'rightsIdentifier' in right and right['rightsIdentifier'] in LICENSE:
+                payload['jrc_license'] = LICENSE[right['rightsIdentifier']]
+                LOGGER.info(f"Using license (rightsIdentifier) {payload['jrc_license']} " \
+                            + f"for {row['doi']}")
+                break
+            elif 'rights' in right and right['rights'] in LICENSE:
+                payload['jrc_license'] = LICENSE[right['rights']]
+                LOGGER.info(f"Using license (rights) {payload['jrc_license']} for {row['doi']}")
+    if payload:
+        write_record(row, payload)
+
+
+def update_open_access(row):
+    """ Update jrc_is_oa and jrc_oa_status
+        Keyword arguments:
+          row: row to update from dois collection
+        Returns:
+          None
+    """
+    payload = {}
+    if 'jrc_obtained_from' in row and row['jrc_obtained_from'] == 'DataCite':
+        update_datacite_license(row)
     time.sleep(.5)
     try:
         data = DL.get_doi_record(row['doi'], source='openalex')
@@ -136,12 +163,13 @@ def update_open_access(row):
             LOGGER.warning(f"{row['doi']} was not found in OpenAlex")
         COUNT["notfound"] += 1
         return
-    payload = {}
     try_pmc = True
     try:
+        # Open Access
         if 'jrc_is_oa' not in row and 'open_access' in data and data['open_access']:
             payload['jrc_is_oa'] = bool(data['open_access']['is_oa'])
             payload['jrc_oa_status'] = data['open_access']['oa_status']
+        # License
         if ('jrc_license' not in row or not row['jrc_license']) \
            and 'primary_location' in data and data['primary_location'] \
            and data['primary_location']['license'] \
@@ -168,6 +196,17 @@ def update_open_access(row):
     except Exception as err:
         LOGGER.error(f"Could not process {row['doi']}")
         terminate_program(err)
+    write_record(row, payload)
+
+
+def write_record(row, payload):
+    """ Write record to database
+        Keyword arguments:
+          row: record to write
+          payload: data to add/update
+        Returns:
+          None
+    """
     if ARG.WRITE:
         try:
             DB['dis']['dois'].update_one({"doi": row['doi']}, {"$set": payload})
@@ -248,9 +287,13 @@ def process_dois():
             rows.append(data)
         cnt = len(rows)
     else:
-        payload = {"doi": {"$not": {"$regex": "janelia"}},
-                   "$or": [{"jrc_is_oa": {"$exists": False}},
-                           {"jrc_license": {"$exists": False}}]}
+        payload = {"doi": {"$not": {"$regex": "janelia"}}}
+        if ARG.NEW:
+            payload["$and"] = [{"jrc_is_oa": {"$exists": False}},
+                               {"jrc_license": {"$exists": False}}]
+        else:
+            payload["$or"] = [{"jrc_is_oa": {"$exists": False}},
+                              {"jrc_license": {"$exists": False}}]
         try:
             cnt = DB['dis'].dois.count_documents(payload)
             rows = DB['dis'].dois.find(payload)
@@ -305,8 +348,8 @@ if __name__ == '__main__':
                          help='Single DOI to process')
     GROUP_A.add_argument('--file', dest='FILE', action='store',
                          help='File of DOIs to process')
-    GROUP_A.add_argument('--all', dest='ALL', action='store_true',
-                         help='Process all DOIs')
+    GROUP_A.add_argument('--new', dest='NEW', action='store_true',
+                         help='Process DOIs with no OpenAlex data')
     PARSER.add_argument('--manifold', dest='MANIFOLD', action='store',
                         default='prod', choices=['dev', 'prod'],
                         help='MongoDB manifold (dev, prod)')
