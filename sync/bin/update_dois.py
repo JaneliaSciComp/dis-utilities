@@ -7,7 +7,7 @@
            to DIS MongoDB.
 """
 
-__version__ = '20.1.0'
+__version__ = '20.2.0'
 
 import argparse
 import collections
@@ -611,7 +611,7 @@ def datacite_needs_update(doi, msg):
 
 
 def get_flyboy_attributes(msg):
-    """ Get needed attributed from a Crossref or DataCite record
+    """ Get needed attributes from a Crossref or DataCite record
         Keyword arguments:
           msg: Crossref or DataCite record
         Returns:
@@ -1124,6 +1124,7 @@ def process_dois():
     specified = {} # Dict of distinct DOIs received as input (value is True)
     persist = {} # DOIs that will be persisted in a database (value is record)
     for odoi in tqdm(rows['dois'], desc='DOIs'):
+        sleep(0.25)
         if '//' in odoi:
             terminate_program(f"Invalid DOI: {odoi}")
         doi = odoi if ARG.TARGET == 'flyboy' else odoi.lower().strip()
