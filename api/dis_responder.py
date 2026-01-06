@@ -31,7 +31,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "96.2.0"
+__version__ = "96.3.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -935,9 +935,6 @@ def get_orcid_from_db(oid, use_eid=False, bare=False, show="full"):
         return "", [], ""
     full_name = " ".join([orc['given'][0], orc['family'][0]])
     html = "<br><table class='borderless'>"
-    if use_eid and 'orcid' in orc:
-        html += f"<tr><td>ORCID:</td><td><a href='{app.config['ORCID']}{orc['orcid']}'>" \
-                + f"{orc['orcid']}</a></td></tr>"
     html += f"<tr><td>Given name:</td><td>{', '.join(sorted(orc['given']))}</td></tr>"
     html += f"<tr><td>Family name:</td><td>{', '.join(sorted(orc['family']))}</td></tr>"
     if 'orcid' in orc:
