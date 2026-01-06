@@ -31,7 +31,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "96.1.0"
+__version__ = "96.2.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -1723,6 +1723,18 @@ def tiny_badge(btype, msg, link=None, size=8):
     return html
 
 
+def worker_badge(row, badges):
+    ''' Get a badge for a worker type
+        Keyword arguments:
+          row: row from orcid collection
+          badges: list of badges
+        Returns:
+          None
+    '''
+    if 'workerType' in row and row['workerType'] and row['workerType'] != 'Employee':
+        badges.append(f"{tiny_badge('contingent', row['workerType'])}")
+
+
 def get_badges(auth, ignore_match=False, who=None):
     ''' Create a list of badges for an author
         Keyword arguments:
@@ -1748,8 +1760,7 @@ def get_badges(auth, ignore_match=False, who=None):
             badges.append(f"{tiny_badge('orcid', 'ORCID' if ignore_match else 'ORCID match')}")
         elif 'match' in auth and auth['match'] == 'name' and not ignore_match:
             badges.append(f"{tiny_badge('name', 'Name match')}")
-        if 'workerType' in auth and auth['workerType'] and auth['workerType'] != 'Employee':
-            badges.append(f"{tiny_badge('contingent', auth['workerType'])}")
+        worker_badge(auth, badges)
         if 'group' in auth:
             badges.append(f"{tiny_badge('lab', auth['group'])}")
         if 'managed' in auth and auth['managed']:
@@ -6470,7 +6481,7 @@ def top_journals(year='All', top=10):
         if len(data) >= top:
             continue
         data[key] = val
-        html += f"<tr><td><a href='/journal/{key}/{year}'>{key}</a></td><td>{val:,}</td></tr>"
+        html += f"<tr><td>{key}</td><td><a href='/journal/{key}/{year}'>{val:,}</a></td></tr>"
     html += '</tbody></table><br>' + year_pulldown('top_journals')
     title = "DOIs by journal"
     if year != 'All':
@@ -6921,8 +6932,7 @@ def show_hires(startdate, stopdate):
         badges = []
         if 'alumni' in row and row['alumni']:
             badges.append(f"{tiny_badge('alumni', 'Former employee')}")
-        if 'workerType' in row and row['workerType'] and row['workerType'] != 'Employee':
-            badges.append(f"{tiny_badge('contingent', row['workerType'])}")
+        worker_badge(row, badges)
         if 'group' in row:
             badges.append(f"{tiny_badge('lab', row['group'])}")
         if 'managed' in row and row['managed']:
@@ -8360,6 +8370,9 @@ def show_labs():
             name = f"<a href='/userui/{row['orcid']}'>{name}</a>"
         if 'alumni' in row and row['alumni']:
             name += (f" {tiny_badge('alumni', 'Former employee')}")
+        badges = []
+        worker_badge(row, badges)
+        name += f" {' '.join(badges)}"
         try:
             grow = DB['dis'].suporg.find_one({"name": row['group']})
         except Exception:
