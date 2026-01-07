@@ -31,7 +31,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "96.3.0"
+__version__ = "97.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -1870,6 +1870,10 @@ def show_openalex_authors(doi, confirmed):
                 badges = get_badges(odata, who=who)
                 if 'employeeId' in odata and odata['employeeId'] in confirmed:
                     badges.insert(0, tiny_badge('author', 'Janelia author'))
+            for inst in auth.get('institutions', []):
+                if 'Janelia' in inst['display_name']:
+                    badges.append(tiny_badge('asserted', 'Janelia affiliation'))
+                    break
             row = f"<td>{who}</td><td>{' '.join(badges)}</td>"
             alist.append(row)
     return f"<table class='borderless'><tr>{'</tr><tr>'.join(alist)}</tr></table>", \
