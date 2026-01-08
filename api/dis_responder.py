@@ -408,14 +408,14 @@ def get_custom_payload(ipd, display_value):
         ipd['field'] = CUSTOM_REGEX[ipd['field']]['field']
     elif ipd['value'] == "!EXISTS!":
         ipd['value'] = {"$exists": 1}
-    if 'title' in ipd and ipd['title']:
+    if ipd.get('title'):
         fdisplay = ipd['title']
     else:
         fdisplay = CVTERM['jrc'][ipd['field']]['display'] if ipd['field'] in CVTERM['jrc'] \
                    else ipd['field']
     ptitle = f"DOIs for {fdisplay} {display_value}"
     payload = {ipd['field']: ipd['value']}
-    if 'jrc_obtained_from' in ipd and ipd['jrc_obtained_from']:
+    if ipd.get('jrc_obtained_from'):
         payload['jrc_obtained_from'] = ipd['jrc_obtained_from']
         ptitle += f" from {ipd['jrc_obtained_from']}"
     return payload, ptitle
@@ -1282,7 +1282,7 @@ def get_legal_information(row):
           HTML
     '''
     ltext = ""
-    if 'jrc_license' in row and row['jrc_license']:
+    if row.get('jrc_license'):
         ltext = f"<h4>License</h4>{get_license(row['jrc_license'])}"
     return ltext
 
@@ -1603,7 +1603,7 @@ def parse_pmc_ack(edata):
     ''' Parse PMC acknowledgements
     '''
     acktext = ""
-    if 'p' in edata and edata['p']:
+    if edata.get('p'):
         try:
             if isinstance(edata['p'], str):
                 acktext = edata['p']
@@ -1679,8 +1679,7 @@ def standard_doi_table(rows, prefix=None):
         #                   {"subtype": "preprint"}]
         if not (('type' in row and row['type'] == 'journal-article') \
            or ('subtype' in row and row['subtype'] == 'preprint') \
-           or ('types' in row and 'resourceTypeGeneral' in row['types'] \
-           and row['types']['resourceTypeGeneral'] == 'Preprint')):
+           or (row.get('types') and row['types'].get('resourceTypeGeneral') == 'Preprint')):
             cls.append('notjournal')
         html += f"<tr class=\'{' '.join(cls)}\'><td>" \
             + dloop(row, ['published', 'link', 'journal', 'title'], "</td><td>") + "</td></tr>"
@@ -3675,8 +3674,16 @@ def doi_tabs(doi, row, data, authors):
             if ahtml:
                 ahtml += "<br>"
             acktext =  ' '.join(acklist)
-    elif row and 'jrc_pmc' in row and row['jrc_pmc']:
-        edata = DL.get_doi_record(row['jrc_pmc'], source='pmc')
+    else:
+        if row and row.get('jrc_pmc'):
+            pmcid = row['jrc_pmc']
+        else:
+            ret = DL.convert_pubmed(doi, itype='doi')
+            if ret and ret[0].get('pmcid'):
+                pmcid = ret[0]['pmcid'].replace('PMC', '')
+            else:
+                pmcid = None
+        edata = DL.get_doi_record(pmcid, source='pmc') if pmcid else None
         if edata and 'OAI-PMH' in edata and 'GetRecord' in edata['OAI-PMH']:
             try:
                 edata = edata['OAI-PMH']['GetRecord']['record']['metadata']
@@ -3835,7 +3842,7 @@ def show_doi_ui(doi):
         cittype += data['type'].replace('-', ' ')
         if 'subtype' in data:
             cittype += f" {data['subtype'].replace('-', ' ')}"
-    elif 'types' in data and 'resourceTypeGeneral' in data['types']:
+    elif data.get('types', {}).get('resourceTypeGeneral'):
         cittype += data['types']['resourceTypeGeneral']
     citsec += f"<div id='div-full' class='citation'>{citationf} {journal}.</div>"
     citsec += f"<div id='div-short' class='citation'>{citations}</div>"
@@ -4336,7 +4343,7 @@ def dois_report(year=str(datetime.now().year)):
                                title=render_warning("Could not get orcid collection entries"),
                                message=error_message(err))
     for row in rows:
-        if 'employeeId' in row and 'orcid' in row:
+        if row.get('employeeId') and row.get('orcid'):
             orcs[row['employeeId']] = True
     payload = [{"$match": {"jrc_publishing_date": {"$regex": "^"+ year}}},
                {"$unwind": "$jrc_author"},
@@ -4613,20 +4620,19 @@ def show_insert(idate, source='Crossref'):
     limit = weeks_ago(2)
     for row in rows:
         typ = subtype = ""
-        if 'type' in row:
+        if row.get('type'):
             typ = row['type']
-            if 'subtype' in row:
+            if row.get('subtype'):
                 subtype = row['subtype']
                 typ += f" {subtype}"
-        elif 'types' in row and 'resourceTypeGeneral' in row['types']:
+        elif row.get('types', {}).get('resourceTypeGeneral'):
             typ = row['types']['resourceTypeGeneral']
         version = []
-        if 'relation' in row and 'is-version-of' in row['relation']:
-            for ver in row['relation']['is-version-of']:
-                if ver['id-type'] == 'doi' and ver['id'] not in version:
-                    version.append(ver['id'])
+        for ver in row.get('relation', {}).get('is-version-of', []):
+            if ver.get('id-type') == 'doi' and ver.get('id') not in version:
+                version.append(ver.get('id'))
         version = doi_link(version) if version else ""
-        news = row['jrc_newsletter'] if 'jrc_newsletter' in row else ""
+        news = row.get('jrc_newsletter', '')
         if (not news) and (row['jrc_publishing_date'] >= str(limit)) \
            and (typ == 'journal-article' or subtype == 'preprint' \
                 or row['jrc_obtained_from'] == source):
@@ -4720,12 +4726,12 @@ def show_doiui_custom(year='All'):
         title = DL.get_title(row)
         if not title:
             title = ""
-        if 'jrc_is_oa' in row and row['jrc_is_oa']:
+        if row.get('jrc_is_oa'):
             oacnt += 1
         works.append({"published": published, "link": doi_link(row['doi']), "title": title,
                       "doi": row['doi'], \
-                      "newsletter": row['jrc_newsletter'] if 'jrc_newsletter' in row else ""})
-        if 'jrc_newsletter' in row and row['jrc_newsletter']:
+                      "newsletter": row.get('jrc_newsletter', '')})
+        if row.get('jrc_newsletter'):
             newsletter += 1
         if DL.is_journal(row) or DL.is_preprint(row):
             jorp += 1
@@ -4903,7 +4909,7 @@ def show_doi_subject(subject, partial=None):
         row['published'] = DL.get_publishing_date(row)
         row['link'] = doi_link(row['doi'])
         row['title'] = DL.get_title(row)
-        row['source'] = row['jrc_obtained_from'] if 'jrc_obtained_from' in row else 'DataCite'
+        row['source'] = row.get('jrc_obtained_from', 'DataCite')
         if row['source'] == 'Crossref':
             crossref = True
         html += "<tr><td>" \
@@ -4986,8 +4992,8 @@ def show_doi_pmc(pmcid):
     if pmidjson:
         result['rest']['row_count'] = 1
         result['rest']['source'] = 'pmc'
-        if 'OAI-PMH' in pmidjson and 'GetRecord' in pmidjson['OAI-PMH']:
-            result['data'] = pmidjson['OAI-PMH']
+        if pmidjson.get('OAI-PMH', {}).get('GetRecord'):
+            result['data'] = pmidjson.get('OAI-PMH', {})
         else:
             result['data'] = {}
     return generate_response(result)
@@ -5067,7 +5073,7 @@ def datacite_subject(subject=None, year='All'):
                + "<th>Subject</th><th>Scheme</th><th>Count</th></tr></thead><tbody>"
         for row in rows:
             cnt += 1
-            scheme = row['_id']['scheme'] if 'scheme' in row['_id'] else ''
+            scheme = row['_id'].get('scheme', '')
             html += f"<tr><td>{row['_id']['subject']}</td><td>{scheme}</td><td>" \
                     + f"<a href='/datacite_subject/{row['_id']['subject']}'>{row['count']}</a>" \
                     + "</td></tr>"
@@ -5508,7 +5514,8 @@ def dois_no_janelia(year='All'):
 @app.route('/raw/<string:resource>/<path:doi>')
 def get_raw(resource=None, doi=None):
     ''' JSON metadata for a DOI
-    resource: biorxiv, elife, elsevier, figshare, openalex, protocols.io, pubmed, pmc, springer, zenodo
+    resource: biorxiv, elife, elsevier, figshare, openalex, protocols.io, pubmed, pmc, springer,
+              zenodo
     '''
     doi = doi.lstrip('/').rstrip('/').lower()
     result = initialize_result()
@@ -5516,7 +5523,8 @@ def get_raw(resource=None, doi=None):
     if resource:
         resource = resource.lower()
         result['rest']['source'] = DL.doi_api_url(doi, source=resource)
-    if resource in ('biorxiv', 'elife', 'elsevier', 'openalex', 'pmc', 'pubmed', 'springer', 'zenodo'):
+    if resource in ('biorxiv', 'elife', 'elsevier', 'openalex', 'pmc', 'pubmed', 'springer',
+                    'zenodo'):
         try:
             response = DL.get_doi_record(doi, source=resource)
             print(response)
@@ -5525,7 +5533,7 @@ def get_raw(resource=None, doi=None):
     elif resource == 'figshare':
         try:
             response = JRC.call_figshare(doi)
-            if response and 'url' in response[0] and response[0]['url']:
+            if response and response[0].get('url'):
                 try:
                     response2 = requests.get(response[0]['url'], timeout=5)
                     if response2.status_code == 200:
@@ -5589,13 +5597,13 @@ def dois_coauthors():
     Return DOIs co-authored by two ORCIDs or employee IDs
     '''
     ipd = receive_payload()
-    if 'orcid1' in ipd and 'orcid2' in ipd:
+    if ipd.get('orcid1') and ipd.get('orcid2'):
         inputs = [ipd['orcid1'], ipd['orcid2']]
         lookup = 'orcid'
-    elif 'eid1' in ipd and 'eid2' in ipd:
+    elif ipd.get('eid1') and ipd.get('eid2'):
         inputs = [ipd['eid1'], ipd['eid2']]
         lookup = 'employeeId'
-    elif 'name1' in ipd and 'name2' in ipd:
+    elif ipd.get('name1') and ipd.get('name2'):
         inputs = [ipd['name1'], ipd['name2']]
         lookup = 'name'
     else:
@@ -5682,11 +5690,11 @@ def show_org_authors(org_in):
     for row in rows:
         given = ', '.join(row['given'])
         family = ', '.join(row['family'])
-        alum = "YES" if 'alumni' in row and row['alumni'] else ""
+        alum = "YES" if row.get('alumni') else ""
         orc = f"<a href='/userui/{row['orcid']}'>{row['orcid']}</a>" \
               if 'orcid' in row and row['orcid'] else ""
         affil = row['affiliations'] if 'affiliations' in row else []
-        if 'managed' in row:
+        if row.get('managed'):
             affil.extend(row['managed'])
         affil = sorted(list(set(affil)))
         affil = ', '.join(affil)
@@ -6801,7 +6809,7 @@ def show_oid_ui(oid):
                                message="Could not find any information for this ORCID ID")
     html = f"<h3>{who}</h3>{orciddata}"
     # Works
-    if 'works' in data['activities-summary'] and data['activities-summary']['works']['group']:
+    if data.get('activities-summary', {}).get('works', {}).get('group'):
         html += add_orcid_works(data, dois)
     endpoint_access()
     cpaste = " <button style='background-color:transparent;border:none;' " \
@@ -6928,15 +6936,15 @@ def show_hires(startdate, stopdate):
         if 'orcid' not in row:
             row['orcid'] = ""
         who = f"{row['family'][0]}, {row['given'][0]}"
-        if 'userIdO365' in row and row['userIdO365']:
+        if row.get('userIdO365'):
             who = f"<a href='/userui/{row['userIdO365']}'>{who}</a>"
         badges = []
-        if 'alumni' in row and row['alumni']:
+        if row.get('alumni'):
             badges.append(f"{tiny_badge('alumni', 'Former employee')}")
         worker_badge(row, badges)
-        if 'group' in row:
+        if row.get('group'):
             badges.append(f"{tiny_badge('lab', row['group'])}")
-        if 'managed' in row and row['managed']:
+        if row.get('managed'):
             for key in row['managed']:
                 badges.append(f"{tiny_badge('managed', key)}")
         if badges:
@@ -7036,7 +7044,7 @@ def orcid_entry():
         noorc = ""
         cnt = 0
         for row in rows:
-            if 'workerType' in row and row['workerType'] and row['workerType'] != 'Employee':
+            if row.get('workerType') and row['workerType'] != 'Employee':
                 continue
             name = f"{row['given'][0]} {row['family'][0]}"
             dois = author_doi_count(row['given'], row['family'])
@@ -7251,9 +7259,9 @@ def peoporgsle(full=None):
                                                     + "orcid collection"),
                                message=error_message(err))
     for row in rows:
-        if 'group' in row:
+        if row.get('group'):
             manager[row['group']] = ' '.join([row['given'][0], row['family'][0]])
-        if 'managed' in row:
+        if row.get('managed'):
             for mgr in row['managed']:
                 manager[mgr] = ' '.join([row['given'][0], row['family'][0]])
     # Find affiliations
@@ -8274,7 +8282,7 @@ def dois_pending():
             etime = f"{elapsed.seconds // 3600:02}:{elapsed.seconds // 60 % 60:02}:" \
                     + f"{elapsed.seconds % 60:02}"
         url = f"<a href='{row['url']}' target='_blank'>{row['doi']}</a>" \
-              if 'url' in row and row['url'] else doi_link(row['doi'])
+              if row.get('url') else doi_link(row['doi'])
         html += f"<tr><td>{url}</td><td>{row['inserted']}</td><td>{etime}</td>"
     html += '</tbody></table>'
     endpoint_access()
@@ -8291,7 +8299,6 @@ def show_missing_oa():
                {"$sort": {"jrc_obtained_from": 1, "doi": 1}}]
     try:
         cnt = DB['dis'].dois.count_documents(payload[0]['$match'])
-        print(cnt)
         rows = DB['dis'].dois.aggregate(payload)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
@@ -8307,7 +8314,7 @@ def show_missing_oa():
                                message="No DOIs are missing Open Access status.")
     for row in rows:
         doi = row['doi']
-        publisher = row['publisher'] if 'publisher' in row else 'Unknown'
+        publisher = row.get('publisher', 'Unknown')
         journal = DL.get_journal(row)
         html += f"<tr><td>{doi_link(doi)}</td><td>{row['jrc_obtained_from']}</td>" \
             + f"<td>{publisher}</td><td>{journal}</td></tr>"
@@ -8365,11 +8372,11 @@ def show_labs():
         if 'affiliations' not in row:
             row['affiliations'] = ''
         name = ' '.join([row['given'][0], row['family'][0]])
-        if 'userIdO365' in row:
+        if row.get('userIdO365'):
             name = f"<a href='/userui/{row['userIdO365']}'>{name}</a>"
-        elif 'orcid' in row:
+        elif row.get('orcid'):
             name = f"<a href='/userui/{row['orcid']}'>{name}</a>"
-        if 'alumni' in row and row['alumni']:
+        if row.get('alumni'):
             name += (f" {tiny_badge('alumni', 'Former employee')}")
         badges = []
         worker_badge(row, badges)
