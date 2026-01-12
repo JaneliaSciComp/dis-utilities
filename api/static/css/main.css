@@ -31,6 +31,11 @@ div.abstract {height: 200px;
 .yearstat {
   font: 18pt Tahoma,sans-serif;
   color: black;
+  background-color: ivory;
+}
+.yearstatd {
+  font: 18pt Tahoma,sans-serif;
+  color: black;
   background-color: #89c242;
 }
 table.proplist {
@@ -266,6 +271,11 @@ table.property {
 
 h1.dark, h2.dark, h3.dark, h4.dark, h5.dark, h6.dark {
   color: #66c;
+}
+
+h1.green1, h2.green1, h3.green1, h4.green1, h5.green1, h6.green1 {
+  font-size: 20pt;
+  color: #00a450;
 }
 
 div.scroll {height: 200px;
