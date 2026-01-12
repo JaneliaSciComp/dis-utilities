@@ -17,6 +17,7 @@ import string
 import sys
 from time import sleep, time
 from urllib.parse import unquote
+from bokeh.core.property.struct import T
 from bokeh.palettes import all_palettes, plasma, turbo
 import bson
 from flask import (Flask, make_response, render_template, request, jsonify, redirect, send_file)
@@ -31,7 +32,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "97.0.0"
+__version__ = "98.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -47,7 +48,7 @@ NAV = {"Home": "",
                 "DOI stats": "dois_source",
                 "DOIs by:": {"month": "dois_month", "year": "dois_year",
                              "subject": "dois_subjectpicker"},
-                "DOI yearly report": "dois_report",
+                "DOI yearly report": "dois_yearly",
                 "Top cited DOIs": "dois_top_cited",
                 "DOIs by license": "dois_license"},
        "DataCite": {"DataCite DOI stats": "datacite_dois",
@@ -58,9 +59,11 @@ NAV = {"Home": "",
                       "DOIs by authorship": "dois_author",
                       "DOIs with lab head first/last authors": "doiui_firstlast",
                       "Top first and last authors": "dois_top_author",
-                      "DOIs without Janelia authors": "dois_no_janelia",
                       "ORCID bulk search": "orcid/bulk_search",
-                      "DOIs by coauthors": "coauth"},
+                      "DOIs by coauthors": "coauth",
+                      "DOIs without Janelia authors": "dois_no_janelia",
+                      "DOIs with invalid authors": "dois_invalid_auth",
+                      },
        "Preprints": {"DOIs by preprint status": "dois_preprint",
                      "DOIs by preprint status by year": "dois_preprint_year",
                      "Preprints with journal publications": "preprint_with_pub",
@@ -98,6 +101,8 @@ NAV = {"Home": "",
                             "HHMI Supervisory Organizations": "orgs/full",
                             "ROR": "ror"}
       }
+# Global
+BOLD = "<span style='font-weight: bold'>"
 
 # ******************************************************************************
 # * Classes                                                                    *
@@ -4297,11 +4302,11 @@ def dois_report(year=str(datetime.now().year)):
             if key in anyauth:
                 additional.append(f"{anyauth[key]:,} with any Janelian author")
             additional = f" ({', '.join(additional)})" if additional else ""
-            stat[val] = f"<span style='font-weight: bold'>{typed[key]:,}</span> {val.lower()}"
+            stat[val] = f"{BOLD}{typed[key]:,}</span> {val.lower()}"
             if val in ('Journal articles', 'Preprints'):
                 sheet.append(f"{val}\t{typed[key]}")
                 if val == 'Journal articles':
-                    stat[val] += f" in <span style='font-weight: bold'>{cnt:,}</span> journals"
+                    stat[val] += f" in {BOLD}{cnt:,}</span> journals"
                     sheet.append(f"\tJournals\t{cnt}")
                 if key in first:
                     sheet.append(f"\tFirst authors\t{first[key]}")
@@ -4318,7 +4323,7 @@ def dois_report(year=str(datetime.now().year)):
                {"$group": {"_id": "$jrc_author", "count": {"$sum": 1}}}]
     try:
         cnt = coll.count_documents(payload[0]['$match'])
-        stat['figshare'] = f"<span style='font-weight: bold'>{cnt:,}</span> " \
+        stat['figshare'] = f"{BOLD}{cnt:,}</span> " \
                            + "figshare (unversioned) articles"
         sheet.append(f"figshare (unversioned) articles\t{cnt}")
         rows = coll.aggregate(payload)
@@ -4330,7 +4335,7 @@ def dois_report(year=str(datetime.now().year)):
         cnt = 0
         for row in rows:
             cnt += 1
-        stat['figshare'] += f" with <span style='font-weight: bold'>{cnt:,}</span> " \
+        stat['figshare'] += f" with {BOLD}{cnt:,}</span> " \
                             + "Janelia authors<br>"
         sheet.append(f"\tJanelia authors\t{cnt}")
     # ORCID stats
@@ -4360,9 +4365,9 @@ def dois_report(year=str(datetime.now().year)):
         cnt += 1
         if row['_id'] in orcs:
             orc += 1
-    stat['ORCID'] = f"<span style='font-weight: bold'>{cnt:,}</span> " \
+    stat['ORCID'] = f"{BOLD}{cnt:,}</span> " \
                     + "distinct Janelia authors for all entries, " \
-                    + f"<span style='font-weight: bold'>{orc:,}</span> " \
+                    + f"{BOLD}{orc:,}</span> " \
                     + f"({orc/cnt*100:.2f}%) with ORCIDs"
     sheet.extend([f"Distinct Janelia authors\t{cnt}", f"Janelia authors with ORCIDs\t{orc}"])
     # Entries
@@ -4370,14 +4375,14 @@ def dois_report(year=str(datetime.now().year)):
         typed['DataCite'] = 0
     for key in ('DataCite', 'Crossref'):
         sheet.insert(0, f"{key} entries\t{typed[key]}")
-    stat['Entries'] = f"<span style='font-weight: bold'>{typed['Crossref']:,}" \
+    stat['Entries'] = f"{BOLD}{typed['Crossref']:,}" \
                       + "</span> Crossref entries<br>" \
-                      + f"<span style='font-weight: bold'>{typed['DataCite']:,}" \
+                      + f"{BOLD}{typed['DataCite']:,}" \
                       + "</span> DataCite entries"
     if 'Journal articles' not in stat:
-        stat['Journal articles'] = "<span style='font-weight: bold'>0</span> journal articles<br>"
+        stat['Journal articles'] = "{BOLD}0</span> journal articles<br>"
     if 'Preprints' not in stat:
-        stat['Preprints'] = "<span style='font-weight: bold'>0</span> preprints<br>"
+        stat['Preprints'] = "{BOLD}0</span> preprints<br>"
     # Authors
     try:
         rows = coll.find({"jrc_publishing_date": {"$regex": "^"+ year}})
@@ -4394,11 +4399,11 @@ def dois_report(year=str(datetime.now().year)):
             cnt += 1
         elif 'jrc_author' not in row:
             middle += 1
-    stat['Author'] = f"<span style='font-weight: bold'>{cnt:,}</span> " \
+    stat['Author'] = f"{BOLD}{cnt:,}</span> " \
                      + "entries with all Janelia authors<br>"
-    stat['Author'] += f"<span style='font-weight: bold'>{total-cnt:,}</span> " \
+    stat['Author'] += f"{BOLD}{total-cnt:,}</span> " \
                       + "entries with at least one external collaborator<br>"
-    stat['Author'] += f"<span style='font-weight: bold'>{middle:,}</span> " \
+    stat['Author'] += f"{BOLD}{middle:,}</span> " \
                       + "entries with no Janelia first or last authors<br>"
     sheet.append(f"Entries with all Janelia authors\t{cnt}")
     sheet.append(f"Entries with external collaborators\t{total-cnt}")
@@ -4410,9 +4415,9 @@ def dois_report(year=str(datetime.now().year)):
         for src in ['Crossref', 'DataCite']:
             if src in no_relation and atype in no_relation[src]:
                 cnt[atype] += no_relation[src][atype]
-    stat['Preprints'] += f"<span style='font-weight: bold'>{cnt['journal']:,}" \
+    stat['Preprints'] += f"{BOLD}{cnt['journal']:,}" \
                          + "</span> journal articles without preprints<br>"
-    stat['Preprints'] += f"<span style='font-weight: bold'>{cnt['preprint']:,}" \
+    stat['Preprints'] += f"{BOLD}{cnt['preprint']:,}" \
                          + "</span> preprints without journal articles<br>"
     # Journals
     journal = get_top_journals(year)
@@ -4443,7 +4448,7 @@ def dois_report(year=str(datetime.now().year)):
             continue
         cnt += 1
         total += row['numtags']
-    stat['Tags'] = f"<span style='font-weight: bold'>{total/cnt:.1f}</span> " \
+    stat['Tags'] = f"{BOLD}{total/cnt:.1f}</span> " \
                    + "average tags per tagged entry"
     sheet.append(f"Average tags per tagged entry\t{total/cnt:.1f}")
     sheet = create_downloadable(f"{year}_in_review", None, "\n".join(sheet))
@@ -4457,8 +4462,130 @@ def dois_report(year=str(datetime.now().year)):
            + "<h2 class='dark'>Top journals</h2>" \
            + f"<p style='font-size: 14pt;line-height:90%;'>{stat['Topjournals']}</p>"
     html = f"<div class='titlestat'>{year} YEAR IN REVIEW</div>{sheet}<br>" \
-           + f"<div class='yearstat'>{html}</div>"
+           + f"<div class='yearstatd'>{html}</div>"
     html += '<br>' + year_pulldown('dois_report', all_years=False)
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=f"{year}", html=html,
+                                         navbar=generate_navbar('DOIs')))
+
+
+@app.route('/dois_yearly/<string:year>')
+@app.route('/dois_yearly')
+def dois_yearly(year=str(datetime.now().year)):
+    ''' Show year in review
+    '''
+    pmap = {"journal-article": "Journal articles", "posted-content": "Posted content",
+            "preprints": "Preprints", "proceedings-article": "Proceedings articles",
+            "book-chapter": "Book chapters", "datasets": "Datasets",
+            "peer-review": "Peer reviews", "grant": "Grants", "other": "Other"}
+    payload = [{"$match": {"jrc_publishing_date": {"$regex": "^"+ year}}},
+               {"$group": {"_id": {"type": "$type", "subtype": "$subtype",
+                                   "DataCite": "$types.resourceTypeGeneral"}, "count": {"$sum": 1}}}
+              ]
+    coll = DB['dis'].dois
+    try:
+        rows = coll.aggregate(payload)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get yearly metrics " \
+                                                    + "from dois collection"),
+                               message=error_message(err))
+    typed = counts_by_type(rows)
+    first, last, anyauth = get_first_last_authors(year)
+    stat = {}
+    # Journal count
+    payload = [{"$unwind" : "$container-title"},
+               {"$match": {"container-title": {"$exists": True}, "type": "journal-article",
+                           "jrc_publishing_date": {"$regex": "^"+ year}}},
+               {"$group": {"_id": "$container-title", "count":{"$sum": 1}}}
+              ]
+    try:
+        rows = coll.aggregate(payload)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get journal metrics " \
+                                                    + "from dois collection"),
+                               message=error_message(err))
+    cnt = 0
+    for row in rows:
+        if row['_id']:
+            cnt += 1
+    typed['Crossref'] = 0
+    for key, val in pmap.items():
+        if key in typed:
+            if key not in ('DataCite', 'preprints'):
+                typed['Crossref'] += typed[key]
+            additional = {}
+            if key in first:
+                additional['first'] = first[key]
+            if key in last:
+                additional['last'] = last[key]
+            if key in anyauth:
+                additional['any'] = anyauth[key]
+            stat[val] = f"{BOLD}{typed[key]:,}</span> {val.lower()}"
+            if val in ('Journal articles', 'Preprints'):
+                if val == 'Journal articles':
+                    stat[val] += f" in {BOLD}{cnt:,}</span> journals<br>"
+                    if additional.get('first'):
+                        stat[val] += f"&nbsp;&nbsp;{BOLD}{additional['first']}</span> " \
+                                     + "with Janelian first author<br>"
+                    if additional.get('last'):
+                        stat[val] += f"&nbsp;&nbsp;{BOLD}{additional['last']}</span> " \
+                                     + "with Janelian last author<br>"
+                    if additional.get('any'):
+                        stat[val] += f"&nbsp;&nbsp;{BOLD}{additional['any']}</span> " \
+                                     + "with any current Janelian author"
+    # ORCID stats
+    orcs = {}
+    try:
+        ocoll = DB['dis'].orcid
+        rows = ocoll.find({})
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get orcid collection entries"),
+                               message=error_message(err))
+    for row in rows:
+        if row.get('employeeId') and row.get('orcid'):
+            orcs[row['employeeId']] = True
+    payload = [{"$match": {"jrc_publishing_date": {"$regex": "^"+ year}}},
+               {"$unwind": "$jrc_author"},
+               {"$group": {"_id": "$jrc_author", "count": {"$sum": 1}}}
+              ]
+    try:
+        rows = coll.aggregate(payload)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get jrc_author"),
+                               message=error_message(err))
+    cnt = orc = 0
+    for row in rows:
+        cnt += 1
+        if row['_id'] in orcs:
+            orc += 1
+    stat['ORCID'] = f"{BOLD}{cnt:,}</span> " \
+                    + "distinct Janelia authors for all entries, " \
+                    + f"{BOLD}{orc:,}</span> " \
+                    + f"({orc/cnt*100:.2f}%) with ORCIDs"
+    # Journals
+    journal = get_top_journals(year)
+    cnt = 0
+    stat['Topjournals'] = ""
+    for key in sorted(journal, key=journal.get, reverse=True):
+        if key in ('Janelia Research Campus (non-publication)', 'Zenodo', 'protocols.io',
+                   'arXiv', 'OpenAlex', 'figshare', 'Research Square'):
+            continue
+        stat['Topjournals'] += f"&nbsp;&nbsp;&nbsp;&nbsp;{key}: {journal[key]}<br>"
+        cnt += 1
+        if cnt >= 10:
+            break
+    html = f"<h2 class='green1'>Articles</h2>{stat['Journal articles']}<br>{stat['Preprints']}" \
+           + f"<br><br><h2 class='green1'>Authors</h2>{stat['ORCID']}" \
+           + "<br><br><h2 class='green1'>Top journals</h2>" \
+           + f"<p style='font-size: 14pt;line-height:90%;'>{stat['Topjournals']}</p>"
+    html = f"<div class='titlestat'>{year} YEAR IN REVIEW</div><br>" \
+           + f"<div class='yearstat'>{html}</div>"
+    html += '<br>' + year_pulldown('dois_yearly', all_years=False)
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=f"{year}", html=html,
@@ -5465,6 +5592,69 @@ def doiui_firstlast(year='All', which=None):
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title=title, html=html,
                                          chartscript=chartscript, chartdiv=chartdiv,
+                                         navbar=generate_navbar('Authorship')))
+
+
+@app.route('/dois_invalid_auth')
+def dois_invalid_auth():
+    ''' Show DOIs with invalid authors
+    '''
+    payload = {"$or": [{"author.given": {"$exists": True}, "author.family": {"$exists": False}},
+                       {"author.given": {"$exists": False}, "author.family": {"$exists": True}},
+                       {"author.given": {"$exists": False}, "author.family": {"$exists": False},
+                        "author.name": {"$exists": False}, "author": {"$exists": True}},
+                       {"creators.givenName": {"$exists": True},
+                        "creators.familyName": {"$exists": False}},
+                       {"creators.givenName": {"$exists": False},
+                        "creators.familyName": {"$exists": True}},
+                       {"creators.givenName": {"$exists": False},
+                        "creators.familyName": {"$exists": False},
+                        "creators.name": {"$exists": False},
+                        "creators": {"$exists": True}}]}
+    try:
+        rows = DB['dis'].dois.find(payload, {"doi": 1, "author": 1,
+                                             "creators": 1, "jrc_author": 1}).sort([("doi", 1)])
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get DOIs with invalid authors " \
+                                                    + "from dois collection"),
+                               message=error_message(err))
+    title = "DOIs with invalid authors"
+    html = "<table id='invalid_auth' class='tablesorter standard'><thead><tr><th>DOI</th>" \
+           + "<th>Name</th></tr></thead><tbody>"
+    fam = "<span style='color: red;'>Family:</span> "
+    giv = "<span style='color: red;'>Given:</span> "
+    cnt = 0
+    for row in rows:
+        cnt += 1
+        names = []
+        if row.get('author'):
+            for auth in row['author']:
+                if auth.get('family') and auth.get('given'):
+                    continue
+                if auth.get('given'):
+                    names.append(f"{giv}{auth.get('given', '')}")
+                if auth.get('family'):
+                    names.append(f"{fam}{auth.get('family', '')}")
+        elif row.get('creators'):
+            for auth in row['creators']:
+                if auth.get('givenName') and auth.get('familyName'):
+                    continue
+                if auth.get('givenName'):
+                    names.append(f"{giv}{auth.get('givenName', '')}")
+                if auth.get('familyName'):
+                    names.append(f"{fam}{auth.get('familyName', '')}")
+        cls = 'tagged' if row.get('jrc_author') else 'not'
+        html += f"<tr class='{cls}'><td>{doi_link(row['doi'])}</td><td>{', '.join(names)}</td></tr>"
+    html += "</tbody></table>"
+    cbutton = "<button class=\"btn btn-outline-warning\" " \
+              + "onclick=\"toggler('invalid_auth', 'tagged', 'totalrows');\">" \
+              + "Filter for DOIs with tagged authors</button>"
+    html = cbutton + html
+    title += f" (<span id='totalrows'>{cnt:,}</span>)"
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=title, html=html,
                                          navbar=generate_navbar('Authorship')))
 
 
