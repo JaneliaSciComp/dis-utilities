@@ -32,7 +32,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "98.0.0"
+__version__ = "98.1.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -103,6 +103,7 @@ NAV = {"Home": "",
       }
 # Global
 BOLD = "<span style='font-weight: bold'>"
+ITALIC = "<span style='font-style: italic'>"
 
 # ******************************************************************************
 # * Classes                                                                    *
@@ -4572,10 +4573,9 @@ def dois_yearly(year=str(datetime.now().year)):
     cnt = 0
     stat['Topjournals'] = ""
     for key in sorted(journal, key=journal.get, reverse=True):
-        if key in ('Janelia Research Campus (non-publication)', 'Zenodo', 'protocols.io',
-                   'arXiv', 'OpenAlex', 'figshare', 'Research Square'):
+        if key in app.config["REPOSITORY"]:
             continue
-        stat['Topjournals'] += f"&nbsp;&nbsp;&nbsp;&nbsp;{key}: {journal[key]}<br>"
+        stat['Topjournals'] += f"&nbsp;&nbsp;&nbsp;&nbsp;{ITALIC}{key}</span>: {journal[key]}<br>"
         cnt += 1
         if cnt >= 10:
             break
