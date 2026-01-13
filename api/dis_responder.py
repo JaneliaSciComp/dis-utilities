@@ -32,7 +32,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "98.1.0"
+__version__ = "98.2.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -1243,6 +1243,8 @@ def add_jrc_fields(row):
             val = ", ".join(link)
         if key == 'jrc_preprint':
             val = doi_link(val)
+        if key == 'jrc_pmc':
+            val = f"<a href='{app.config['PMCID']}PMC{val}/' target='_blank'>{val}</a>"
         if key == 'jrc_license' and val in CVTERM['license']:
             newval = f"{CVTERM['license'][val]['definition']}"
             if CVTERM['license'][val]['definition'] != CVTERM['license'][val]['display']:
@@ -3395,14 +3397,7 @@ def get_display_badges(doi, row, data, local):
         Returns:
           Badges as a string
     '''
-    badges = "<span class='paperdata'>"
-    if local:
-        if 'jrc_pmc' in row:
-            plink = f"{app.config['PMCID']}PMC{row['jrc_pmc']}/"
-            badges += f" {tiny_badge('primary', 'PMC', plink)}"
-        if 'jrc_pmid' in row:
-            plink = f"{app.config['PMID']}{row['jrc_pmid']}/"
-            badges += f" {tiny_badge('primary', 'PubMed', plink)}"
+    badges = "&nbsp;&nbsp;<span class='paperdata'>"
     if '/protocols.io.' in doi:
         badges += f" {tiny_badge('publisher', 'protocols.io', f'/raw/protocols.io/{doi}')}"
     elif 'elife' in doi.lower():
@@ -3421,9 +3416,16 @@ def get_display_badges(doi, row, data, local):
                 badges += f" {tiny_badge('publisher', 'bioRxiv', f'/raw/bioRxiv/{doi}')}"
         if '/janelia.' in doi:
             badges += f" {tiny_badge('publisher', 'figshare', f'/raw/figshare/{doi}')}"
-        badges += f" {tiny_badge('source', row['jrc_obtained_from'], rlink)}"
+        badges += f" {tiny_badge('primarysource', row['jrc_obtained_from'], rlink)}"
     else:
         badges += f" {tiny_badge('source', 'Raw data', rlink)}"
+    if local:
+        if 'jrc_pmc' in row:
+            plink = f"/raw/pmc/{row['jrc_pmc']}"
+            badges += f" {tiny_badge('source', 'PMC', plink)}"
+        if 'jrc_pmid' in row:
+            plink = f"/raw/pubmed/{row['jrc_pmid']}"
+            badges += f" {tiny_badge('source', 'PubMed', plink)}"
     if 'janelia' not in doi:
         oresp = JRC.call_oa(doi)
         if oresp:
@@ -3870,7 +3872,11 @@ def show_doi_ui(doi):
                + f"onclick=\"copyText('{doi}')\">" \
                + "<i class='fas fa-regular fa-copy shadow' " \
                + "style='background-color:transparent'></i></button>"
-    doititle = f"{doilink} (PMID: {row['jrc_pmid']})" if row and 'jrc_pmid' in row else doilink
+    if row and row.get('jrc_pmid'):
+        doititle = f"{doilink} (PMID: <a href='{app.config['PMID']}{row['jrc_pmid']}/' " \
+                   + f"target='_blank'>{row['jrc_pmid']}</a>)"
+    else:
+        doititle = doilink
     doititle += badges
     endpoint_access()
     return make_response(render_template('doi.html', urlroot=request.url_root, pagetitle=doi,
@@ -4220,7 +4226,6 @@ def dois_license(year='All'):
     data = dict(srt)
     defcnt = cnt['Crossref'] + cnt['DataCite'] - data['Not found']
     for lic in sorted(lines.keys()):
-        print(lic, lines[lic]['orig'])
         clink = f"<a href='/dois_licenser/Crossref{lines[lic]['orig']}/{year}'>" \
                 + f"{lines[lic]['Crossref']}</a>" if lines[lic]['Crossref'] else '0'
         dlink = f"<a href='/dois_licenser/DataCite{lines[lic]['orig']}/{year}'>" \
@@ -5717,7 +5722,6 @@ def get_raw(resource=None, doi=None):
                     'zenodo'):
         try:
             response = DL.get_doi_record(doi, source=resource)
-            print(response)
         except Exception as err:
             raise InvalidUsage(str(err), 500) from err
     elif resource == 'figshare':
@@ -6523,7 +6527,6 @@ def show_open_access():
         adjusted.append({"year": int(key), "org_closed": 0, "org_open": 0,
                          "cited_by_count": 0, "closed": row['closed'], "open": row['open']})
     adjusted = sorted(adjusted, key=lambda x: x['year'])
-    print(adjusted)
     html += f"<h5>Total citations for Janelia DOIs since {counts[0]['year']}: " \
             + f"{results['cited_by_count']:,}" + "</h5>"
     data = {'years': [str(itm['year']) for itm in adjusted],

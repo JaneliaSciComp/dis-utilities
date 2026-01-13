@@ -375,6 +375,10 @@ hr {border-color: #666;
    color: black;
    background-color: skyblue;
 }
+.badge-primarysource {
+   color: white;
+   background-color: #058d96;
+}
 .badge-source {
    color: white;
    background-color: #0000b0;
