@@ -32,7 +32,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "98.2.0"
+__version__ = "98.3.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -5715,13 +5715,14 @@ def get_raw(resource=None, doi=None):
     doi = doi.lstrip('/').rstrip('/').lower()
     result = initialize_result()
     response = None
+    content = 'json'
     if resource:
         resource = resource.lower()
         result['rest']['source'] = DL.doi_api_url(doi, source=resource)
     if resource in ('biorxiv', 'elife', 'elsevier', 'openalex', 'pmc', 'pubmed', 'springer',
                     'zenodo'):
         try:
-            response = DL.get_doi_record(doi, source=resource)
+            response = DL.get_doi_record(doi, source=resource, content=content)
         except Exception as err:
             raise InvalidUsage(str(err), 500) from err
     elif resource == 'figshare':
