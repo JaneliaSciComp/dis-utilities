@@ -6,6 +6,7 @@ import collections
 from datetime import date, datetime, timedelta
 from html import escape
 import inspect
+from io import BytesIO
 import json
 from json import JSONEncoder
 from math import pi
@@ -17,7 +18,6 @@ import string
 import sys
 from time import sleep, time
 from urllib.parse import unquote
-from bokeh.core.property.struct import T
 from bokeh.palettes import all_palettes, plasma, turbo
 import bson
 from flask import (Flask, make_response, render_template, request, jsonify, redirect, send_file)
@@ -32,7 +32,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "98.3.0"
+__version__ = "99.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -54,7 +54,8 @@ NAV = {"Home": "",
        "DataCite": {"DataCite DOI stats": "datacite_dois",
                     "DataCite DOI citations": "datacite_citations",
                     "DataCite DOI downloads": "datacite_downloads",
-                    "DataCite subjects": "datacite_subject"},
+                    "DataCite subjects": "datacite_subject",
+                    "DataCite top publishers": "top_publishers/All/DataCite"},
        "Authorship": {"Authors": "orcid_entry",
                       "DOIs by authorship": "dois_author",
                       "DOIs with lab head first/last authors": "doiui_firstlast",
@@ -71,7 +72,7 @@ NAV = {"Home": "",
                      "Journal publications without preprints": "pub_no_preprint"},
        "Journals": {"DOIs by:": {"publisher": "dois_publisher", "journal": "journals_dois"},
                     "Open access:": {"report": "dois_oa", "details": "dois_oa_details"},
-                    "Top journals": "top_journals",
+                    "Top:": {"publishers": "top_publishers", "journals": "top_journals"},
                     f"DOIs missing journals{'&nbsp;'*9}": "dois_nojournal",
                     "Journals referenced": "journals_referenced"},
        "Subscriptions": {"Summary": "subscriptions",
@@ -1159,6 +1160,20 @@ def get_separator(last, this):
     return "&nbsp;&nbsp;&rarr;&nbsp;&nbsp;"
 
 
+def is_ignored(doi):
+    ''' Check if a DOI is ignored
+        Keyword arguments:
+          doi: DOI
+        Returns:
+          True if the DOI is ignored, False otherwise
+    '''
+    try:
+        row = DB['dis'].to_ignore.find_one({"type": "doi", "key": doi})
+    except Exception as err:
+        raise err
+    return row is not None
+
+
 def add_update_times(row):
     ''' Produce a horizontal list of important record times
         Keyword arguments:
@@ -1960,6 +1975,40 @@ def get_top_journals(year, maxpub=False, janelia=True):
         return {}
     return journal
 
+
+def get_top_publishers(year, source, maxpub=False):
+    ''' Get top publishers
+        Keyword arguments:
+          year: year to get data for
+          source: source of DOIs
+          maxpub: if True, get max publishing date
+        Returns:
+          Publisher data
+    '''
+    match = {"jrc_obtained_from": source,
+             "doi": {"$not": {"$regex": r"^10\.(1101|64898)\/"}}}
+    if year != 'All':
+        match["jrc_publishing_date"] = {"$regex": "^"+ year}
+    payload = [{"$match": match},
+               {"$group": {"_id": "$publisher", "count":{"$sum": 1},
+                           "maxpub": {"$max": "$jrc_publishing_date"}}},
+               {"$sort": {"count": -1}}
+              ]
+    try:
+        rows = DB['dis'].dois.aggregate(payload)
+    except Exception as err:
+        raise err
+    publisher = {}
+    for row in rows:
+        print(row)
+        if maxpub:
+            publisher[row['_id']] = {"count": row['count'], "maxpub": row['maxpub']}
+        else:
+            publisher[row['_id']] = row['count']
+    if not publisher:
+        return {}
+    return publisher
+
 # ******************************************************************************
 # * Suporg utility functions                                                   *
 # ******************************************************************************
@@ -2224,10 +2273,12 @@ def source_limit_pulldown(prefix, source, limit):
     return html
 
 
-def year_pulldown(prefix, all_years=True):
+def year_pulldown(prefix, all_years=True, suffix = ''):
     ''' Generate a year pulldown
         Keyword arguments:
           prefix: navigation prefix
+          all_years: if True, include all years
+          suffix: suffix to add to the pulldown
         Returns:
           Pulldown HTML
     '''
@@ -2238,7 +2289,7 @@ def year_pulldown(prefix, all_years=True):
            + "data-toggle='dropdown' aria-haspopup='true' aria-expanded='false'>" \
            + "Select publishing year</button><div class='dropdown-menu'>"
     for year in years:
-        html += f"<a class='dropdown-item' href='/{prefix}/{year}'>{year}</a>"
+        html += f"<a class='dropdown-item' href='/{prefix}/{year}{suffix}'>{year}</a>"
     html += "</div></div>"
     return html
 
@@ -3107,6 +3158,84 @@ def set_jrc_author(doi):
         result['data'] = jrc_author
     return generate_response(result)
 
+
+@app.route('/raw/<string:resource>/<path:doi>')
+def get_raw(resource=None, doi=None):
+    ''' JSON metadata for a DOI
+    resource: biorxiv, elife, elsevier, figshare, openalex, protocols.io, pubmed, pmc, springer,
+              zenodo
+    '''
+    doi = doi.lstrip('/').rstrip('/').lower()
+    result = initialize_result()
+    response = None
+    content = 'json'
+    if resource:
+        resource = resource.lower()
+        result['rest']['source'] = DL.doi_api_url(doi, source=resource)
+    if resource in ('biorxiv', 'elife', 'elsevierx', 'openalex', 'pmc', 'pubmed', 'springer',
+                    'zenodo'):
+        try:
+            response = DL.get_doi_record(doi, source=resource, content=content)
+        except Exception as err:
+            raise InvalidUsage(str(err), 500) from err
+    elif resource == 'figshare':
+        try:
+            response = JRC.call_figshare(doi)
+            if response and response[0].get('url'):
+                try:
+                    response2 = requests.get(response[0]['url'], timeout=5)
+                    if response2.status_code == 200:
+                        response = response2.json()
+                except Exception:
+                    pass
+        except Exception as err:
+            raise InvalidUsage(str(err), 500) from err
+    elif resource == 'protocols.io':
+        suffix = f"protocols/{doi}"
+        try:
+            response = JRC.call_protocolsio(suffix)
+        except Exception as err:
+            raise InvalidUsage(str(err), 500) from err
+    if response:
+        result['data'] = response
+    return generate_response(result)
+
+
+@app.route('/xml/download/<string:resource>/<path:doi>')
+def download_xml(resource='elsevier', doi=None):
+    ''' Stream an XML metadata file for a DOI
+    resource: elsevier
+    '''
+    doi = doi.lstrip('/').rstrip('/').lower()
+    resource = resource.lower()
+    try:
+        rec = DL.get_doi_record(doi, source='elsevier', content='xml')
+        stream = BytesIO(rec.content)
+        stream.seek(0)
+        filename = f"{doi.replace('/', '_')}.xml"
+        return send_file(stream,as_attachment=True,
+                         download_name=filename, mimetype='application/xml')
+    except Exception as err:
+        raise InvalidUsage(str(err), 500) from err
+
+
+@app.route('/xml/<string:resource>/<path:doi>')
+def return_xml(resource='elsevier', doi=None):
+    ''' XML metadata for a DOI
+    resource: elsevier
+    '''
+    doi = doi.lstrip('/').rstrip('/').lower()
+    response = result = None
+    resource = resource.lower()
+    if resource in ('elsevier'):
+        try:
+            response = DL.get_doi_record(doi, source=resource, content='xml')
+        except Exception as err:
+            raise InvalidUsage(str(err), 500) from err
+    if response:
+        result = response.content
+    return result
+
 # ******************************************************************************
 # * API endpoints (ORCID)                                                      *
 # ******************************************************************************
@@ -3808,6 +3937,9 @@ def show_doi_ui(doi):
     else:
         recsec = "<h4 style='color:red'><i class='fa-solid fa-warning'></i> " \
                  + "This DOI is not saved locally in the Janelia database</h4><br>"
+        if is_ignored(doi):
+            recsec += "<h4 style='color:red'><i class='fa-solid fa-warning'></i> " \
+                     + "This DOI is in the ignore list</h4><br>"
     try:
         _, data = get_doi(doi)
     except Exception as err:
@@ -4241,7 +4373,7 @@ def dois_license(year='All'):
         colors = all_palettes['TolRainbow'][len(data)]
     else:
         colors = turbo(len(data))
-    chartscript, chartdiv = DP.pie_chart(data, "DOIs by license", "license", width=700, height=600,
+    chartscript, chartdiv = DP.pie_chart(data, "DOIs by license", "license", width=700, height=700,
                                          colors=colors)
     title = "DOIs by license"
     if year != 'All':
@@ -4745,7 +4877,7 @@ def show_insert(idate, source='Crossref'):
                                title=render_warning("DOIs not found"),
                                message=f"No DOIs were inserted on or after {idate}")
     html = '<table id="dois" class="tablesorter numbers"><thead><tr>' \
-           + '<th>DOI</th><th>Type</th><th>Published</th>' \
+           + '<th>DOI</th><th>Type</th><th>Published</th><th>Publisher</th>' \
            + '<th>Inserted</th><th>Is version of</th><th>Newsletter</th>' \
            + '<th>Tags</th></tr></thead><tbody>'
     fileoutput = ""
@@ -4777,7 +4909,7 @@ def show_insert(idate, source='Crossref'):
                if 'jrc_tag' in row else ""
         html += f"<tr class='{rclass}'><td>" \
                 + "</td><td>".join([doi_link(row['doi']), typ,
-                                    jpd, str(row['jrc_inserted']), version,
+                                    jpd, row['publisher'], str(row['jrc_inserted']), version,
                                     news, f"<span style='font-size: 10pt;'>{tags}</span>"]) \
                                     + "</td></tr>"
         frow = "\t".join([row['doi'], typ, row['jrc_publishing_date'],
@@ -5689,12 +5821,12 @@ def dois_no_janelia(year='All'):
            + year_pulldown('dois_no_janelia')
     if cnt:
         html += "<table id='nojanelia' class='tablesorter standard'>" \
-                + "<thead><tr><th>DOI</th><th>Title</th><th>Published</th></tr></thead>" \
-                + "<tbody>"
+                + "<thead><tr><th>DOI</th><th>Publisher</th><th>Title</th><th>Published</th>" \
+                + "</tr></thead><tbody>"
         for row in rows:
             title = DL.get_title(row)
-            html += f"<tr><td>{doi_link(row['doi'])}</td><td>{title}</td>" \
-                    + f"<td>{row['jrc_publishing_date']}</td></tr>"
+            html += f"<tr><td>{doi_link(row['doi'])}</td><td>{row['publisher']}</td>" \
+                    + f"<td>{title}</td><td>{row['jrc_publishing_date']}</td></tr>"
         html += "</tbody></table>"
     title = "DOIs without Janelia authors"
     if year != 'All':
@@ -5705,66 +5837,6 @@ def dois_no_janelia(year='All'):
                                          title=title, html=html,
                                          navbar=generate_navbar('Authorship')))
 
-
-@app.route('/raw/<string:resource>/<path:doi>')
-def get_raw(resource=None, doi=None):
-    ''' JSON metadata for a DOI
-    resource: biorxiv, elife, elsevier, figshare, openalex, protocols.io, pubmed, pmc, springer,
-              zenodo
-    '''
-    doi = doi.lstrip('/').rstrip('/').lower()
-    result = initialize_result()
-    response = None
-    content = 'json'
-    if resource:
-        resource = resource.lower()
-        result['rest']['source'] = DL.doi_api_url(doi, source=resource)
-    if resource in ('biorxiv', 'elife', 'elsevier', 'openalex', 'pmc', 'pubmed', 'springer',
-                    'zenodo'):
-        try:
-            response = DL.get_doi_record(doi, source=resource, content=content)
-        except Exception as err:
-            raise InvalidUsage(str(err), 500) from err
-    elif resource == 'figshare':
-        try:
-            response = JRC.call_figshare(doi)
-            if response and response[0].get('url'):
-                try:
-                    response2 = requests.get(response[0]['url'], timeout=5)
-                    if response2.status_code == 200:
-                        response = response2.json()
-                except Exception:
-                    pass
-        except Exception as err:
-            raise InvalidUsage(str(err), 500) from err
-    elif resource == 'protocols.io':
-        suffix = f"protocols/{doi}"
-        try:
-            response = JRC.call_protocolsio(suffix)
-        except Exception as err:
-            raise InvalidUsage(str(err), 500) from err
-    if response:
-        result['data'] = response
-    return generate_response(result)
-
-
-@app.route('/xml/<string:resource>/<path:doi>')
-def return_xml(resource='elsevier', doi=None):
-    ''' XML metadata for a DOI
-    resource: elsevier
-    '''
-    doi = doi.lstrip('/').rstrip('/').lower()
-    response = result = None
-    if resource:
-        resource = resource.lower()
-    if resource in ('elsevier'):
-        try:
-            response = DL.get_doi_record(doi, source=resource, content='xml')
-        except Exception as err:
-            raise InvalidUsage(str(err), 500) from err
-    if response:
-        result = response.content
-    return result
 
 @app.route('/coauth')
 def show_coauth():
@@ -6451,6 +6523,7 @@ def dois_publisher(year='All'):
             pubs[row['_id']['publisher']] = {}
         if row['_id']['source'] not in pubs[row['_id']['publisher']]:
             pubs[row['_id']['publisher']][row['_id']['source']] = row['count']
+    total = {src: 0 for src in app.config['SOURCES']}
     for pub, val in pubs.items():
         onclick = "onclick='nav_post(\"publisher\",\"" + pub + "\")'"
         link = f"<a href='#' {onclick}>{pub}</a>"
@@ -6460,11 +6533,16 @@ def dois_publisher(year='All'):
                 onclick = "onclick='nav_post(\"publisher\",\"" + pub \
                           + "\",\"" + source + "\")'"
                 link = f"<a href='#' {onclick}>{val[source]:,}</a>"
+                total[source] += val[source]
             else:
                 link = ""
             html += f"<td>{link}</td>"
         html += "</tr>"
-    html += '</tbody></table>'
+    html += '</tbody>'
+    html += '<tfoot><tr><th>TOTAL</th>'
+    for source in app.config['SOURCES']:
+        html += f"<th style='text-align: center;'>{total[source]:,}</th>"
+    html += "</tr></tfoot></table>"
     html = year_pulldown('dois_publisher') + html
     title = "DOIs by publisher"
     if year != 'All':
@@ -6700,6 +6778,51 @@ def top_journals(year='All', top=10):
                                          chartscript=chartscript, chartdiv=chartdiv,
                                          navbar=generate_navbar('Journals')))
 
+
+@app.route('/top_publishers/<string:year>/<string:source>/<int:top>')
+@app.route('/top_publishers/<string:year>/<string:source>')
+@app.route('/top_publishers/<string:year>')
+@app.route('/top_publishers')
+def top_publishers(year='All', source='crossref', top=10):
+    ''' Show top publishers
+    '''
+    top = min(top, 20)
+    fsource = 'Crossref' if source.lower() == 'crossref' else 'DataCite'
+    try:
+        publisher = get_top_publishers(year, fsource, maxpub=True)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get publisher data from dois"),
+                               message=error_message(err))
+    if not publisher:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get publisher data from dois"),
+                               message='No publishers were found')
+    html = '<table id="journals" class="tablesorter numberlast"><thead><tr>' \
+           + '<th>Publisher</th><th>Count</th></tr></thead><tbody>'
+    data = {}
+    for key, val in publisher.items():
+        if len(data) >= top:
+            continue
+        data[key] = val['count']
+        onclick = "onclick='nav_post(\"publisher\",\"" + key + "\")'"
+        link = f"<a href='#' {onclick}>{val['count']:,}</a>"
+        print(link)
+        html += f"<tr><td>{key}</td><td>{link}</td></tr>"
+    html += '</tbody></table><br>' + year_pulldown('top_publishers', suffix=f"/{fsource}/{top}")
+    title = f"DOIs by publisher for {fsource}"
+    if year != 'All':
+        title += f" ({year})"
+    chartscript, chartdiv = DP.pie_chart(data, title, "source", width=1100, height=650,
+                                         colors='Category20')
+    title = f"Top {top} DOI publishers for {fsource}"
+    if year != 'All':
+        title += f" ({year})"
+    endpoint_access()
+    return make_response(render_template('bokeh.html', urlroot=request.url_root,
+                                         title=title, html=html,
+                                         chartscript=chartscript, chartdiv=chartdiv,
+                                         navbar=generate_navbar('Journals')))
 
 @app.route('/dois_nojournal')
 def dois_nojournal():
@@ -7666,6 +7789,7 @@ def dois_tag():
            + '<th>Tag</th><th>SupOrg</th><th>Crossref</th><th>DataCite</th>' \
            + '</tr></thead><tbody>'
     tags = {}
+    total = {src: 0 for src in app.config['SOURCES']}
     for row in rows:
         if row['_id']['tag'] not in tags:
             tags[row['_id']['tag']] = {}
@@ -7688,11 +7812,15 @@ def dois_tag():
                 onclick = "onclick='nav_post(\"jrc_tag.name\",\"" + tag \
                           + "\",\"" + source + "\")'"
                 link = f"<a href='#' {onclick}>{val[source]:,}</a>"
+                total[source] += val[source]
             else:
                 link = ""
             html += f"<td>{link}</td>"
         html += "</tr>"
-    html += '</tbody></table>'
+    html += '</tbody><tfoot><tr><th colspan="2">TOTAL</th>'
+    for source in app.config['SOURCES']:
+        html += f"<th style='text-align: center;'>{total[source]:,}</th>"
+    html += "</tr></tfoot></table>"
     cbutton = "<button class=\"btn btn-outline-warning\" " \
               + "onclick=\"$('.other').toggle();\">Filter for active SupOrgs</button>"
     html = cbutton + html
@@ -8261,7 +8389,7 @@ def stats_database():
                            + f"({humansize(stat['indexSize'], space='mem')})"}
     html += '<tfoot>'
     html += "<tr><th style='text-align:right'>TOTAL</th><th style='text-align:center'>" \
-            + dloop(val, ['objects', 'avgObjSize', 'storageSize', 'get_author', 'indexSize'],
+            + dloop(val, ['objects', 'avgObjSize', 'storageSize', 'blank', 'indexSize'],
                     "</th><th style='text-align:center'>") + "</th></tr>"
     html += '</tfoot>'
     html += '</table>'
