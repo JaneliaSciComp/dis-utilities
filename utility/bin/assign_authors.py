@@ -2,7 +2,7 @@
     Add/remove JRC authors for a given DOI
 """
 
-__version__ = '1.2.0'
+__version__ = '2.0.0'
 
 import argparse
 import json
@@ -69,14 +69,28 @@ def get_potential_authors(authors, original):
     potential = {}
     defaults = []
     for auth in authors:
+        if not auth.get('given'):
+            if auth.get('family'):
+                LOGGER.warning(f"Author with family name [{auth['family']}] has no given name")
+        if not auth.get('family'):
+            if auth.get('given'):
+                LOGGER.warning(f"Author with given name [{auth['given']}] has no family name")
         if not auth['in_database']:
             continue
         name = " ".join([auth['given'], auth['family']])
         notes = ''
-        if 'alumni' in auth and auth['alumni']:
-            notes = f" {Fore.YELLOW}{Back.BLACK}Alumni{Style.RESET_ALL}"
+        if auth.get('affiliations'):
+            janelia = False
+            for aff in auth['affiliations']:
+                if 'Janelia' in aff:
+                    janelia = True
+                    break
+            if janelia:
+                notes += f" {Fore.GREEN}{Back.BLACK}Affiliation{Style.RESET_ALL}"
+        if auth.get('alumni'):
+            notes += f" {Fore.YELLOW}{Back.BLACK}Alumni{Style.RESET_ALL}"
         elif 'workerType' in auth and auth['workerType'] != 'Employee':
-            notes = f" {Fore.YELLOW}{Back.BLACK}{auth['workerType']}{Style.RESET_ALL}"
+            notes += f" {Fore.YELLOW}{Back.BLACK}{auth['workerType']}{Style.RESET_ALL}"
         if 'tags' in auth and auth['tags']:
             notes = ' '.join([notes, ', '.join(auth['tags'])])
         if 'employeeId' in auth and auth['employeeId'] in original:
@@ -89,15 +103,40 @@ def get_potential_authors(authors, original):
     return potential, defaults
 
 
+def auto_assign(authors):
+    ''' Auto assign asserted authors
+        Keyword arguments:
+          authors: list of authors
+        Returns:
+          list of JRC authors
+    '''
+    try:
+        rec = DB['dis']['dois'].find_one({'doi': ARG.DOI})
+    except Exception as err:
+        terminate_program(err)
+    jrc_authors = rec.get('jrc_author', [])
+    cnt = len(jrc_authors)
+    for auth in authors:
+        if auth['asserted'] and auth.get('employeeId'):
+            if auth['employeeId'] not in jrc_authors:
+                jrc_authors.append(auth['employeeId'])
+    if len(jrc_authors) == cnt:
+        LOGGER.warning(f"No additional authors to assign for {ARG.DOI}")
+        terminate_program()
+    return jrc_authors
+
+
 def get_authors(authors, original):
     ''' Get the JRC authors
         Keyword arguments:
           authors: list of authors
           original: list of original authors
         Returns:
-          list of JRC authors
+          list of JRC author employee IDs
     '''
     potential, defaults = get_potential_authors(authors, original)
+    if ARG.AUTO:
+        return auto_assign(authors)
     quest = [(inquirer.Checkbox('checklist', carousel=True,
                                 message='Select authors',
                                 choices=list(potential.keys()),
@@ -234,6 +273,8 @@ if __name__ == '__main__':
         description="Add/remove JRC authors for a given DOI")
     PARSER.add_argument('--doi', dest='DOI', action='store',
                         required=True, help='DOI')
+    PARSER.add_argument('--auto', dest='AUTO', action='store_true',
+                        default=False, help='Auto assign asserted authors')
     PARSER.add_argument('--manifold', dest='MANIFOLD', action='store',
                         default='prod', choices=['dev', 'prod'],
                         help='MongoDB manifold (dev, [prod])')

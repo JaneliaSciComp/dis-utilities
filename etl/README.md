@@ -4,6 +4,7 @@
 
 | Name                   | Description                                                            |
 | ---------------------- | ---------------------------------------------------------------------- |
+| add_author.py          | Add an author (or authors) to the orcid collection                     |
 | add_hq_newsletter.py   | Add jrc_newsletter dates to DOIs                                       |
 | add_hq_tags.py         | Add tags from HQ database used to populate janelia.org                 |
 | convert_tags.py        | Convert tag lists to tag dictionaries                                  |
