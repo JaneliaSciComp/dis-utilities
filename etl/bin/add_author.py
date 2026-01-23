@@ -2,7 +2,7 @@
     Add authors from an Excel spreadsheet or command line
 '''
 
-__version__ = '1.0.0'
+__version__ = '1.0.1'
 
 import argparse
 import collections
@@ -81,7 +81,7 @@ def handle_single_author(row):
     if present:
         return
     payload = {'given': row['Given name'], 'family': row['Family name'],
-               'employeeType': 'Employee', 'alumni': True}
+               'workerType': 'Employee', 'alumni': True}
     if row.get('Employee ID') and not pd.isna(row.get('Employee ID')):
         payload['employeeId'] = row['Employee ID']
     if row.get('User ID') and not pd.isna(row.get('User ID')):

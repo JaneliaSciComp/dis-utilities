@@ -1,7 +1,7 @@
 import argparse
-from datetime import datetime
 from operator import attrgetter
 import sys
+import time
 from tqdm import tqdm
 import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
@@ -46,33 +46,13 @@ def initialize_program():
             terminate_program(err)
 
 
-def update_load(doi):
-    """ Process a list of DOIs
+def update_authors(row):
+    """ Update first and last authors
         Keyword arguments:
-          None
+          doi: DOI to update
         Returns:
           None
     """
-    doi = doi.lower()
-    LOGGER.info(doi)
-    COUNT["dois"] += 1
-    coll = DB['dis'].dois
-    row = coll.find_one({"doi": doi})
-    if not row:
-        LOGGER.warning(f"{doi} was not found")
-        COUNT["notfound"] += 1
-        return
-    payload = {"jrc_load_source": "Manual", "jrc_loaded_by": "Virginia Scarlett"}
-    if ARG.WRITE:
-        try:
-            coll.update_one({"doi": doi}, {"$set": payload})
-        except Exception as err:
-            terminate_program(err)
-        COUNT["updated"] += 1
-
-
-def update_authors(row):
-    COUNT["dois"] += 1
     first = []
     last = None
     if 'jrc_obtained_from' in row and row['jrc_obtained_from'] == "DataCite":
@@ -116,6 +96,30 @@ def update_authors(row):
                 terminate_program(err)
 
 
+def update_load(doi):
+    """ Update jrc_load_source and jrc_loaded_by
+        Keyword arguments:
+          doi: DOI to update
+        Returns:
+          None
+    """
+    doi = doi.lower()
+    LOGGER.info(doi)
+    coll = DB['dis'].dois
+    row = coll.find_one({"doi": doi})
+    if not row:
+        LOGGER.warning(f"{doi} was not found")
+        COUNT["notfound"] += 1
+        return
+    payload = {"jrc_load_source": "Manual", "jrc_loaded_by": "Virginia Scarlett"}
+    if ARG.WRITE:
+        try:
+            coll.update_one({"doi": doi}, {"$set": payload})
+        except Exception as err:
+            terminate_program(err)
+        COUNT["updated"] += 1
+
+
 def process_dois():
     """ Process a list of DOIs
         Keyword arguments:
@@ -123,25 +127,34 @@ def process_dois():
         Returns:
           None
     """
+    dois = []
     if ARG.DOI:
-        update_load(ARG.DOI)
+        dois = [ARG.DOI]
     elif ARG.FILE:
         try:
             with open(ARG.FILE, "r", encoding="ascii") as instream:
-                for doi in tqdm(instream.read().splitlines(), desc="DOIs"):
-                    update_load(doi.lower().strip())
+                for doi in instream.read().splitlines():
+                    dois.append(doi.lower().strip())
         except Exception as err:
             LOGGER.error(f"Could not process {ARG.FILE}")
             terminate_program(err)
     else:
+        payload = {"jrc_is_oa": {"$exists": True}, "jrc_oa_status": "closed",
+                   "jrc_fulltext_url": {"$exists": True}
+                  }
         try:
-            cnt = DB['dis'].dois.count_documents({})
-            rows = DB['dis'].dois.find({})
+            cnt = DB['dis'].dois.count_documents(payload)
+            rows = DB['dis'].dois.find(payload)
         except Exception as err:
             terminate_program(err)
-        for row in tqdm(rows, desc="DOIs", total=cnt):
-            #update_load(row['doi'])
-            update_authors(row)
+        for row in tqdm(rows, total=cnt, desc="Payload"):
+            dois.append(row)
+            #dois.append(row['doi'])
+
+    for doi in tqdm(dois, desc="DOIs"):
+        COUNT["dois"] += 1
+        #update_load(doi)
+        #update_authors(doi)
     print(f"DOIs read:      {COUNT['dois']}")
     if COUNT['notfound']:
         print(f"DOIs not found: {COUNT['notfound']}")
@@ -154,7 +167,7 @@ def process_dois():
 if __name__ == '__main__':
     PARSER = argparse.ArgumentParser(
         description="Add a reviewed date to one or more DOIs")
-    GROUP_A = PARSER.add_mutually_exclusive_group(required=True)
+    GROUP_A = PARSER.add_mutually_exclusive_group(required=False)
     GROUP_A.add_argument('--doi', dest='DOI', action='store',
                          help='Single DOI to process')
     GROUP_A.add_argument('--file', dest='FILE', action='store',
