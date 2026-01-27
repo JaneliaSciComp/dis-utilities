@@ -2,7 +2,7 @@
     Add/remove JRC authors for a given DOI
 """
 
-__version__ = '2.0.0'
+__version__ = '3.0.0'
 
 import argparse
 import json
@@ -97,13 +97,10 @@ def get_potential_authors(authors, original):
             defaults.append(name + notes)
         if 'employeeId' in auth and auth['employeeId']:
             potential[name + notes] = auth['employeeId']
-    if not potential:
-        LOGGER.error("No potential authors found")
-        terminate_program()
     return potential, defaults
 
 
-def auto_assign(authors):
+def auto_assign(doi, authors):
     ''' Auto assign asserted authors
         Keyword arguments:
           authors: list of authors
@@ -111,7 +108,7 @@ def auto_assign(authors):
           list of JRC authors
     '''
     try:
-        rec = DB['dis']['dois'].find_one({'doi': ARG.DOI})
+        rec = DB['dis']['dois'].find_one({'doi': doi})
     except Exception as err:
         terminate_program(err)
     jrc_authors = rec.get('jrc_author', [])
@@ -121,22 +118,30 @@ def auto_assign(authors):
             if auth['employeeId'] not in jrc_authors:
                 jrc_authors.append(auth['employeeId'])
     if len(jrc_authors) == cnt:
-        LOGGER.warning(f"No additional authors to assign for {ARG.DOI}")
+        LOGGER.warning(f"No additional authors to assign for {doi}")
         terminate_program()
     return jrc_authors
 
 
-def get_authors(authors, original):
+def get_authors(doi, authors, original):
     ''' Get the JRC authors
         Keyword arguments:
+          doi: DOI
           authors: list of authors
           original: list of original authors
         Returns:
           list of JRC author employee IDs
     '''
     potential, defaults = get_potential_authors(authors, original)
+    if not potential:
+        msg = f"No potential authors found for {doi}"
+        if ARG.DOI:
+            terminate_program(msg)
+        else:
+            LOGGER.warning(msg)
+            return []
     if ARG.AUTO:
-        return auto_assign(authors)
+        return auto_assign(doi, authors)
     quest = [(inquirer.Checkbox('checklist', carousel=True,
                                 message='Select authors',
                                 choices=list(potential.keys()),
@@ -221,38 +226,41 @@ def set_author_payload():
     return payload
 
 
-def processing():
+def process_doi(doi):
     ''' Process the request
         Keyword arguments:
-          None
+          doi: DOI
         Returns:
           None
     '''
     try:
-        rec = DB['dis']['dois'].find_one({'doi': ARG.DOI})
+        rec = DB['dis']['dois'].find_one({'doi': doi})
         if not rec:
-            terminate_program(f"Could not find DOI {ARG.DOI}")
+            terminate_program(f"Could not find DOI {doi}")
         original = rec['jrc_author'] if 'jrc_author' in rec else []
     except Exception as err:
         terminate_program(err)
     try:
         headers = {"Authorization": f"Bearer {os.environ['DIS_JWT']}"}
-        authors = requests.get(f"{REST['dis']['url']}doi/authors/{ARG.DOI}",
+        authors = requests.get(f"{REST['dis']['url']}doi/authors/{doi}",
                                headers=headers, timeout=10).json()
     except Exception as err:
         terminate_program(err)
     #print(json.dumps(authors['data'], indent=4))
-    jrc_authors = get_authors(authors['data'], original)
+    jrc_authors = get_authors(doi, authors['data'], original)
+    if not jrc_authors:
+        return
     LOGGER.debug(f"{json.dumps(jrc_authors)}")
     payload = get_payload(jrc_authors)
+    LOGGER.info(f"{doi} {len(original)} -> {len(jrc_authors)}")
     if not ARG.WRITE:
         print(json.dumps(payload, indent=2, default=str))
     else:
         LOGGER.debug(json.dumps(payload, indent=2, default=str))
         try:
-            result = DB['dis']['dois'].update_one({'doi': ARG.DOI}, payload)
+            result = DB['dis']['dois'].update_one({'doi': doi}, payload)
             if hasattr(result, 'matched_count') and result.modified_count:
-                print(f"DOI {ARG.DOI} updated with jrc_author")
+                print(f"DOI {doi} updated with jrc_author")
         except Exception as err:
             terminate_program(err)
     if not jrc_authors or not ARG.WRITE:
@@ -260,19 +268,37 @@ def processing():
     payload = set_author_payload()
     LOGGER.debug(json.dumps(payload, indent=2, default=str))
     try:
-        result = DB['dis']['dois'].update_one({'doi': ARG.DOI}, payload)
+        result = DB['dis']['dois'].update_one({'doi': doi}, payload)
         if hasattr(result, 'matched_count') and result.modified_count:
-            print(f"DOI {ARG.DOI} updated with first/last author information")
+            print(f"DOI {doi} updated with first/last author information")
     except Exception as err:
         terminate_program(err)
+
+
+def processing():
+    ''' Process the request
+        Keyword arguments:
+          None
+        Returns:
+          None
+    '''
+    if ARG.DOI:
+        process_doi(ARG.DOI)
+    elif ARG.FILE:
+        with open(ARG.FILE, 'r', encoding='ascii') as file:
+            for doi in file.read().splitlines():
+                process_doi(doi)
 
 # -----------------------------------------------------------------------------
 
 if __name__ == '__main__':
     PARSER = argparse.ArgumentParser(
         description="Add/remove JRC authors for a given DOI")
-    PARSER.add_argument('--doi', dest='DOI', action='store',
-                        required=True, help='DOI')
+    GROUP_A = PARSER.add_mutually_exclusive_group(required=True)
+    GROUP_A.add_argument('--doi', dest='DOI', action='store',
+                         help='Single DOI to process')
+    GROUP_A.add_argument('--file', dest='FILE', action='store',
+                         help='File of DOIs to process')
     PARSER.add_argument('--auto', dest='AUTO', action='store_true',
                         default=False, help='Auto assign asserted authors')
     PARSER.add_argument('--manifold', dest='MANIFOLD', action='store',
