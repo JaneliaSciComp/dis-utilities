@@ -11,7 +11,7 @@
        updating first/last author (if necessary).
 """
 
-__version__ = '2.1.0'
+__version__ = '3.0.0'
 
 import argparse
 import collections
@@ -22,6 +22,7 @@ import sys
 import time
 import inquirer
 from inquirer.themes import BlueComposure
+from pymongo.collation import CollationStrength
 from tqdm import tqdm
 import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
@@ -30,6 +31,7 @@ import doi_common.doi_common as DL
 
 # Database
 DB = {}
+INSENSITIVE = {'locale': 'en', 'strength': CollationStrength.PRIMARY}
 # Globals
 ARG = DIS = LOGGER = None
 TO_ADD = {'affiliation': {}, 'orcid': {}, 'name': {}}
@@ -302,8 +304,7 @@ def select_author():
                        {"given": ARG.NAME}]
               }
     try:
-        rows = DB['dis']['orcid'].find(payload).collation( {'locale': 'en_US',
-                                                            'strength': 1}).sort('family', 1)
+        rows = DB['dis']['orcid'].find(payload).collation(INSENSITIVE).sort('family', 1)
     except Exception as err:
         terminate_program(err)
     names = []

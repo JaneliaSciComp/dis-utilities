@@ -7,7 +7,7 @@
            to DIS MongoDB.
 """
 
-__version__ = '20.2.0'
+__version__ = '21.0.0'
 
 import argparse
 import collections
@@ -128,6 +128,13 @@ def initialize_program():
         terminate_program(err)
     for row in rows:
         LICENSE[row['name']] = row['display']
+    try:
+        rows = DB['dis'].cvterm.find({'cv': 'license'})
+    except Exception as err:
+        terminate_program(err)
+    for row in rows:
+        if row['name'] not in LICENSE:
+            LICENSE[row['name']] = row['name']
 
     if ARG.TARGET == 'flyboy':
         return
@@ -769,10 +776,17 @@ def persist_author(key, authors, persist):
     jrc_author = []
     alumni = []
     for auth in authors:
-        if auth['janelian'] and 'employeeId' in auth and auth['employeeId']:
+        if 'alumni' in auth and auth['alumni']:
+            if auth['match'] == 'asserted' and auth.get('employeeId'):
+                if ARG.VERBOSE:
+                    print(f"Added alumni author {auth['given']} {auth['family']} ({auth['match']})")
+                jrc_author.append(auth['employeeId'])
+            else:
+                alumni.append(f"{auth['given'][0]} {auth['family'][0]} is alumni")
+        elif auth['janelian'] and auth.get('employeeId'):
+            if ARG.VERBOSE:
+                print(f"Added author {auth['given']} {auth['family']} ({auth['match']})")
             jrc_author.append(auth['employeeId'])
-        elif 'alumni' in auth and auth['alumni']:
-            alumni.append(f"{auth['given'][0]} {auth['family'][0]} is alumni")
     if jrc_author:
         LOGGER.debug(f"Added jrc_author {jrc_author} to {key}")
         persist[key]['jrc_author'] = jrc_author
