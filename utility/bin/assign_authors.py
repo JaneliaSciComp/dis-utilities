@@ -2,7 +2,7 @@
     Add/remove JRC authors for a given DOI
 """
 
-__version__ = '3.0.0'
+__version__ = '4.0.0'
 
 import argparse
 import json
@@ -19,6 +19,7 @@ import jrc_common.jrc_common as JRC
 
 # Database
 DB = {}
+INSENSITIVE = {'locale': 'en', 'strength': 1}
 # Globals
 ARG = LOGGER = REST = None
 
@@ -113,13 +114,16 @@ def auto_assign(doi, authors):
         terminate_program(err)
     jrc_authors = rec.get('jrc_author', [])
     cnt = len(jrc_authors)
+    added = []
     for auth in authors:
         if auth['asserted'] and auth.get('employeeId'):
             if auth['employeeId'] not in jrc_authors:
                 jrc_authors.append(auth['employeeId'])
+                added.append(f"{auth['given']} {auth['family']}")
     if len(jrc_authors) == cnt:
         LOGGER.warning(f"No additional authors to assign for {doi}")
-        terminate_program()
+    else:
+        LOGGER.warning(f"Added to {doi}: {', '.join(added)}")
     return jrc_authors
 
 
@@ -252,9 +256,10 @@ def process_doi(doi):
         return
     LOGGER.debug(f"{json.dumps(jrc_authors)}")
     payload = get_payload(jrc_authors)
-    LOGGER.info(f"{doi} {len(original)} -> {len(jrc_authors)}")
+    LOGGER.debug(f"{doi} {len(original)} -> {len(jrc_authors)}")
     if not ARG.WRITE:
-        print(json.dumps(payload, indent=2, default=str))
+        if ARG.DEBUG:
+            print(json.dumps(payload, indent=2, default=str))
     else:
         LOGGER.debug(json.dumps(payload, indent=2, default=str))
         try:
@@ -288,6 +293,30 @@ def processing():
         with open(ARG.FILE, 'r', encoding='ascii') as file:
             for doi in file.read().splitlines():
                 process_doi(doi)
+    elif ARG.FAMILY:
+        if not ARG.GIVEN:
+            terminate_program("Given name is required when family name is provided")
+        payload = {"family": ARG.FAMILY, "given": ARG.GIVEN}
+        try:
+            rows = DB['dis'].orcid.find(payload).collation(INSENSITIVE)
+        except Exception as err:
+            terminate_program(err)
+        givenl = []
+        familyl = []
+        for row in rows:
+            givenl.extend(row['given'])
+            familyl.extend(row['family'])
+        if not (givenl and familyl):
+            LOGGER.warning(f"No authors found for {ARG.GIVEN} {ARG.FAMILY}")
+        payload = {"$or": [{"author.family": {"$in": familyl}, "author.given": {"$in": givenl}},
+                           {"creators.familyName": {"$in": familyl},
+                           "creators.givenName": {"$in": givenl}}]}
+        try:
+            rows = DB['dis'].dois.find(payload)
+        except Exception as err:
+            terminate_program(err)
+        for row in rows:
+            process_doi(row['doi'])
 
 # -----------------------------------------------------------------------------
 
@@ -299,6 +328,10 @@ if __name__ == '__main__':
                          help='Single DOI to process')
     GROUP_A.add_argument('--file', dest='FILE', action='store',
                          help='File of DOIs to process')
+    GROUP_A.add_argument('--family', dest='FAMILY', action='store',
+                         help='Family name')
+    PARSER.add_argument('--given', dest='GIVEN', action='store',
+                         help='Given name')
     PARSER.add_argument('--auto', dest='AUTO', action='store_true',
                         default=False, help='Auto assign asserted authors')
     PARSER.add_argument('--manifold', dest='MANIFOLD', action='store',
