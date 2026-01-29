@@ -32,7 +32,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "99.0.1"
+__version__ = "99.1.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -3210,7 +3210,7 @@ def download_xml(resource='elsevier', doi=None):
     resource = resource.lower()
     try:
         rec = DL.get_doi_record(doi, source='elsevier', content='xml')
-        stream = BytesIO(rec.content)
+        stream = BytesIO(rec)
         stream.seek(0)
         filename = f"{doi.replace('/', '_')}.xml"
         return send_file(stream,as_attachment=True,
@@ -3227,13 +3227,13 @@ def return_xml(resource='elsevier', doi=None):
     doi = doi.lstrip('/').rstrip('/').lower()
     response = result = None
     resource = resource.lower()
-    if resource in ('elsevier'):
+    if resource in ('elsevier', 'pmc', 'pubmed'):
         try:
             response = DL.get_doi_record(doi, source=resource, content='xml')
         except Exception as err:
             raise InvalidUsage(str(err), 500) from err
     if response:
-        result = response.content
+        result = response
     return result
 
 # ******************************************************************************
