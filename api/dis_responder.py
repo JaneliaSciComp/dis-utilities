@@ -32,7 +32,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "99.1.0"
+__version__ = "99.2.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -3872,7 +3872,9 @@ def doi_tabs(doi, row, data, authors):
         alist, count = show_tagged_authors(authors, row['jrc_author'] \
                        if 'jrc_author' in row else [])
         if alist:
-            ahtml = f"<h4>Potential Janelia authors ({count})</h4>" \
+            abtn = tiny_badge('source', 'Details', f'/doi/authors/{doi}') \
+                if count else ""
+            ahtml = f"<h4>Potential Janelia authors ({count}) {abtn}</h4>" \
                     + f"<div class='scroll'>{''.join(alist)}</div>"
         if not alist or not count:
             alist, count = show_openalex_authors(doi, row['jrc_author'] \
