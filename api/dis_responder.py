@@ -2000,7 +2000,6 @@ def get_top_publishers(year, source, maxpub=False):
         raise err
     publisher = {}
     for row in rows:
-        print(row)
         if maxpub:
             publisher[row['_id']] = {"count": row['count'], "maxpub": row['maxpub']}
         else:
@@ -6809,7 +6808,6 @@ def top_publishers(year='All', source='crossref', top=10):
         data[key] = val['count']
         onclick = "onclick='nav_post(\"publisher\",\"" + key + "\")'"
         link = f"<a href='#' {onclick}>{val['count']:,}</a>"
-        print(link)
         html += f"<tr><td>{key}</td><td>{link}</td></tr>"
     html += '</tbody></table><br>' + year_pulldown('top_publishers', suffix=f"/{fsource}/{top}")
     title = f"DOIs by publisher for {fsource}"

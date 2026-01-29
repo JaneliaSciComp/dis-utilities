@@ -250,6 +250,9 @@ def process_doi(doi):
                                headers=headers, timeout=10).json()
     except Exception as err:
         terminate_program(err)
+    if not authors.get('data'):
+        LOGGER.error(f"No authors found for {doi}")
+        return
     #print(json.dumps(authors['data'], indent=4))
     jrc_authors = get_authors(doi, authors['data'], original)
     if not jrc_authors:
