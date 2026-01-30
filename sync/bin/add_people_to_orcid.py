@@ -2,7 +2,7 @@
     Add new employees to the orcid collection from the People system.
 '''
 
-__version__ = '4.0.0'
+__version__ = '5.0.0'
 
 import argparse
 import collections
@@ -142,17 +142,28 @@ def add_new_record(person, output):
     payload = {"userIdO365": rec["userIdO365"],
                "employeeId": rec["employeeId"]
               }
+    # Family name
     family = [rec["nameLastPreferred"]]
     if rec["nameLast"] not in family:
         family.append(rec["nameLast"])
     payload['family'] = family
+    # Given name
     given = [rec["nameFirstPreferred"]]
     if rec["nameFirst"] not in given:
         given.append(rec["nameFirst"])
     add_middle_name(rec, given)
     payload['given'] = given
+    for given in payload['given']:
+        stripped = JRC.convert_diacritics(given)
+        if stripped is not None and stripped not in payload['given']:
+            payload['given'].append(stripped)
+    for family in payload['family']:
+        stripped = JRC.convert_diacritics(family)
+        if stripped is not None and stripped not in payload['family']:
+            payload['family'].append(stripped)
     output['new'].append(json.dumps(payload, indent=2))
     if not ARG.WRITE:
+        print(json.dumps(payload, indent=2))
         return
     try:
         result = DB['dis']['orcid'].insert_one(payload)
@@ -265,7 +276,7 @@ def update_orcid():
             COUNT['not_janelia'] += 1
             continue
         eid = person['employeeId']
-        if eid in orcid and not person['enabled']:
+        if eid in orcid and ('enabled' in person and not person['enabled']):
             # People says this record isn't active - update the flag in orcid if necessary
             set_alumni(person, orcid)
         elif eid in orcid:
