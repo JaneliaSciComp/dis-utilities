@@ -2,7 +2,7 @@
     Apply ORCIDs from the ORCID API to the orcid collection
 '''
 
-__version__ = '1.1.0'
+__version__ = '2.0.0'
 
 import argparse
 import collections
@@ -11,6 +11,7 @@ import json
 from operator import attrgetter
 import os
 import sys
+from pymongo.collation import Collation
 import requests
 from tqdm import tqdm
 import jrc_common.jrc_common as JRC
@@ -84,21 +85,22 @@ def check_orcid(oid, name, family, given):
           given: given name
     '''
     LOGGER.debug(f"{oid}: {family}, {given}")
-    coll = DB['dis'].orcid
+    coll = DB['dis']['orcid']
     try:
         cnt = coll.count_documents({'orcid': oid})
         if cnt:
             OUTPUT['orcid_exists'].append(name)
             return
         payload = {'family': family, 'given': given}
-        cnt = coll.count_documents(payload)
+        print("HERE")
+        cnt = coll.count_documents(payload, collation=Collation(locale='en_US', strength=1))
         if not cnt:
             OUTPUT['name_not_found'].append(name)
             return
         if cnt > 1:
             OUTPUT['name_multi_records'].append(name)
             return
-        rec = coll.find_one(payload)
+        rec = coll.find_one(payload, collation=Collation(locale='en_US', strength=1))
     except Exception as err:
         terminate_program(err)
     if 'orcid' in rec:
