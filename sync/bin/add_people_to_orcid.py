@@ -2,7 +2,7 @@
     Add new employees to the orcid collection from the People system.
 '''
 
-__version__ = '5.0.0'
+__version__ = '6.0.0'
 
 import argparse
 import collections
@@ -129,13 +129,13 @@ def add_new_record(person, output):
     '''
     rec = JRC.call_people_by_id(person['employeeId'])
     if not rec:
-        LOGGER.warning(f"No record found for {person['nameFirstPreferred']} " \
+        LOGGER.warning(f"No record found in People for {person['nameFirstPreferred']} " \
                        + f"{person['nameLastPreferred']}")
         COUNT['skipped'] += 1
         return
     if not rec['supOrgName'] or rec['supOrgName'] in IGNORE:
-        LOGGER.warning(f"Skipping {rec['nameFirstPreferred']} {rec['nameLastPreferred']} " \
-                       + f"({rec['supOrgName']})")
+        output['skipped'].append(f"{rec['nameFirstPreferred']} {rec['nameLastPreferred']} " \
+                                 + f"({rec['supOrgName']})")
         COUNT['skipped'] += 1
         return
     COUNT['new'] += 1
@@ -161,6 +161,10 @@ def add_new_record(person, output):
         stripped = JRC.convert_diacritics(family)
         if stripped is not None and stripped not in payload['family']:
             payload['family'].append(stripped)
+    if rec.get('hireDate'):
+        hdate = rec['hireDate'].split(' ')[0]
+        date_object = datetime.strptime(hdate, "%m/%d/%Y")
+        payload['hireDate'] = date_object.strftime('%Y-%m-%d')
     output['new'].append(json.dumps(payload, indent=2))
     if not ARG.WRITE:
         print(json.dumps(payload, indent=2))
@@ -270,7 +274,7 @@ def update_orcid():
         #resp = call_responder("people", "People/Search/ByOther/Janelia Research Campus")
         resp = call_responder("people", "People/GetForExternal/JANELIA_SITE/7")
     COUNT['people'] = len(resp)
-    output = {'boomerang': [], 'new': []}
+    output = {'boomerang': [], 'new': [], 'skipped': []}
     for person in tqdm(resp):
         if person['locationName'] != 'Janelia Research Campus':
             COUNT['not_janelia'] += 1
