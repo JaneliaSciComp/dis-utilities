@@ -296,10 +296,13 @@ def processing():
         with open(ARG.FILE, 'r', encoding='ascii') as file:
             for doi in file.read().splitlines():
                 process_doi(doi)
-    elif ARG.FAMILY:
-        if not ARG.GIVEN:
-            terminate_program("Given name is required when family name is provided")
-        payload = {"family": ARG.FAMILY, "given": ARG.GIVEN}
+    else:
+        if ARG.ORCID:
+            payload = {"orcid": ARG.ORCID}
+        else:
+            if not ARG.GIVEN:
+                terminate_program("Given name is required when family name is provided")
+            payload = {"family": ARG.FAMILY, "given": ARG.GIVEN}
         try:
             rows = DB['dis'].orcid.find(payload).collation(INSENSITIVE)
         except Exception as err:
@@ -310,12 +313,16 @@ def processing():
             givenl.extend(row['given'])
             familyl.extend(row['family'])
         if not (givenl and familyl):
-            LOGGER.warning(f"No authors found for {ARG.GIVEN} {ARG.FAMILY}")
+            if ARG.ORCID:
+                LOGGER.warning(f"No authors found for {ARG.ORCID}")
+            else:
+                LOGGER.warning(f"No authors found for {ARG.GIVEN} {ARG.FAMILY}")
+            return
         payload = {"$or": [{"author.family": {"$in": familyl}, "author.given": {"$in": givenl}},
                            {"creators.familyName": {"$in": familyl},
                            "creators.givenName": {"$in": givenl}}]}
         try:
-            rows = DB['dis'].dois.find(payload)
+            rows = DB['dis'].dois.find(payload, collation=INSENSITIVE)
         except Exception as err:
             terminate_program(err)
         for row in rows:
@@ -331,6 +338,8 @@ if __name__ == '__main__':
                          help='Single DOI to process')
     GROUP_A.add_argument('--file', dest='FILE', action='store',
                          help='File of DOIs to process')
+    GROUP_A.add_argument('--orcid', dest='ORCID', action='store',
+                         help='ORCID to process')
     GROUP_A.add_argument('--family', dest='FAMILY', action='store',
                          help='Family name')
     PARSER.add_argument('--given', dest='GIVEN', action='store',
