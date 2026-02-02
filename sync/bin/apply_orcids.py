@@ -92,7 +92,6 @@ def check_orcid(oid, name, family, given):
             OUTPUT['orcid_exists'].append(name)
             return
         payload = {'family': family, 'given': given}
-        print("HERE")
         cnt = coll.count_documents(payload, collation=Collation(locale='en_US', strength=1))
         if not cnt:
             OUTPUT['name_not_found'].append(name)
@@ -107,7 +106,10 @@ def check_orcid(oid, name, family, given):
         OUTPUT['orcid_mismatch'].append(name)
         return
     OUTPUT['orcid_added'].append(rec)
-    email = rec['userIdO365']
+    email = rec.get('userIdO365')
+    if not email:
+        LOGGER.warning(f"{oid}: {given} {family} has no email")
+        return
     ADDED.append(f"{oid}: <a href='https://dis.int.janelia.org/userui/" \
                  + f"{email}'>{given} {family}</a>")
     if ARG.WRITE:
