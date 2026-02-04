@@ -6,7 +6,7 @@
     - The lab head (or any other author) has a Janelia affiliation
 '''
 
-__version__ = '5.0.0'
+__version__ = '6.0.0'
 
 import argparse
 import collections
@@ -61,7 +61,8 @@ def call_responder(server, endpoint, timeout=10):
     url = ((getattr(getattr(REST, server), "url") if server else "") if "REST" in globals() \
            else (os.environ.get('CONFIG_SERVER_URL') if server else "")) + endpoint
     try:
-        req = requests.get(url, timeout=timeout)
+        req = requests.get(url, timeout=timeout,
+                           headers={'Authorization': f'Bearer {os.environ["OPENALEX_API_KEY"]}'})
     except requests.exceptions.RequestException as err:
         terminate_program(f"Could not fetch from {url}\n{str(err)}")
     if req.status_code == 429:
@@ -78,6 +79,8 @@ def initialize_program():
         Returns:
           None
     '''
+    if "OPENALEX_API_KEY" not in os.environ:
+        terminate_program("Missing API key - set in OPENALEX_API_KEY environment variable")
     try:
         dbconfig = JRC.get_config("databases")
     except Exception as err:
