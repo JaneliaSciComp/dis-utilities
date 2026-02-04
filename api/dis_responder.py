@@ -32,7 +32,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "99.2.0"
+__version__ = "100.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -6720,7 +6720,12 @@ def show_journals_dois(year='All'):
                   else f"<span style='color: yellowgreen'>{subscribed[key]['access']}</span>"
         else:
             jour = key
-            publisher = sub = ''
+            sub = ''
+            try:
+                rows = DB['dis'].dois.distinct('publisher', {'jrc_journal': key})
+                publisher = '<br>'.join(sorted(rows))
+            except Exception as err:
+                publisher = ''
         html += f"<tr><td>{jour}</td><td>{publisher}</td>" \
                 + f"<td><a href='/journal/{key}/{year}'>{journal[key]['count']:,}</a></td>" \
                 + f"<td>{journal[key]['maxpub']}</td><td>{sub}</td></tr>"
