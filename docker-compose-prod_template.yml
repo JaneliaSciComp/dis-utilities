@@ -24,6 +24,7 @@ services:
       - CONFIG_SERVER_URL=https://config.int.janelia.org/
       - ELSEVIER_API_KEY=<<INSERT API KEY>>
       - NCBI_API_KEY=<<INSERT API KEY>>
+      - OPENALEX_API_KEY=<<INSERT API KEY>>
       - PEOPLE_API_KEY=<<INSERT API KEY>>
       - PROTOCOLS_API_TOKEN=<<INSERT API KEY>>
       - S2_API_KEY=<<INSERT API KEY>>

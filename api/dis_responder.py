@@ -32,7 +32,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "100.0.0"
+__version__ = "101.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -7076,9 +7076,15 @@ def show_subscription(sid):
         return render_template('warning.html', urlroot=request.url_root,
                                title=render_warning(errmsg),
                                message=f"No subscription was found for {sid}")
+    dlio = row.get('date_last_issue_online') if isinstance(row['date_last_issue_online'], str) else ''
+    lio = row.get('num_last_issue_online') if isinstance(row['num_last_issue_online'], str) else ''
+    nvo = row.get('num_last_vol_online') if isinstance(row['num_last_vol_online'], str) else ''
     html = f"<table class='proplist'><tr><td>Publisher</td><td>{row['publisher']}</td></tr>" \
            + f"<tr><td>Type</td><td>{row['type']}</td></tr>" \
            + f"<tr><td>Access</td><td>{row['access']}</td></tr>" \
+           + f"<tr><td>Volumes online</td><td>{row['num_first_vol_online']} - {nvo}</td></tr>" \
+           + f"<tr><td>Issues online</td><td>{row['date_first_issue_online']} - {dlio}</td></tr>" \
+           + f"<tr><td>Issues online</td><td>{row['num_first_issue_online']} - {lio}</td></tr>" \
            + f"<tr><td>Provider</td><td>{row['provider']}</td></tr>" \
            + f"<tr><td>Title ID</td><td>{row['title-id']}</td></tr>"
     html += "</table>"
