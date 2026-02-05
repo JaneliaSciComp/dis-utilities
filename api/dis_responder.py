@@ -29,7 +29,7 @@ import pandas as pd
 from pymongo.collation import Collation, CollationStrength
 import requests
 import jrc_common.jrc_common as JRC
-import doi_common as DL
+import doi_common.doi_common as DL
 import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
