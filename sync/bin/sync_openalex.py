@@ -11,12 +11,14 @@
     jrc_former_status.
 """
 
-__version__ = '2.1.0'
+__version__ = '3.0.0'
 
 import argparse
 import collections
+from datetime import datetime
 import json
 from operator import attrgetter
+import os
 import sys
 import time
 import traceback
@@ -119,6 +121,29 @@ def get_pmc_license(pmcid):
     return None
 
 
+def update_processing(doi, action, notes=None):
+    ''' Update the processing status for a DOI
+        Keyword arguments:
+          doi: DOI to update
+          notes: notes to add to the processing record
+        Returns:
+          None
+    '''
+    proc = {'action': action,
+            'program': os.path.basename(__file__),
+            'version': __version__,
+            'timestamp': datetime.now().isoformat()}
+    if notes is not None:
+        proc['notes'] = notes
+    if not ARG.WRITE:
+        return
+    try:
+        DB['dis'].processing.update_one({'type': 'doi', 'key': doi},
+                                        {'$push': {'processes': proc}}, upsert=True)
+    except Exception as err:
+        terminate_program(err)
+
+
 def update_datacite_license(row):
     """ Update jrc_license from DataCite rightsList
         Keyword arguments:
@@ -126,7 +151,7 @@ def update_datacite_license(row):
         Returns:
           None
     """
-    if 'jrc_license' in row and row['jrc_license']:
+    if row.get('jrc_license'):
         return
     payload = {}
     if 'rightsList' in row and row['rightsList']:
@@ -141,6 +166,8 @@ def update_datacite_license(row):
                 LOGGER.info(f"Using license (rights) {payload['jrc_license']} for {row['doi']}")
     if payload:
         write_record(row, payload)
+        update_processing(row['doi'], 'sync_openaccess_license',
+                          f"update_datacite_license: {payload['jrc_license']}")
 
 
 def update_open_access(row):
@@ -153,7 +180,7 @@ def update_open_access(row):
     payload = {}
     if 'jrc_obtained_from' in row and row['jrc_obtained_from'] == 'DataCite':
         update_datacite_license(row)
-    time.sleep(.5)
+    time.sleep(.05)
     try:
         data = DL.get_doi_record(row['doi'], source='openalex')
     except Exception as err:
@@ -196,7 +223,17 @@ def update_open_access(row):
     except Exception as err:
         LOGGER.error(f"Could not process {row['doi']}")
         terminate_program(err)
+    if data.get('id'):
+        payload['jrc_openalex_id'] = data['id']
     write_record(row, payload)
+    notes = "update_openalex"
+    if payload.get('jrc_is_oa'):
+        notes += f" OA: {payload.get('jrc_is_oa')}"
+    if payload.get('jrc_oa_status'):
+        notes += f" Status: {payload.get('jrc_oa_status')}"
+    if payload.get('jrc_license'):
+        notes += f" License: {payload.get('jrc_license')}"
+    update_processing(row['doi'], 'sync_openaccess_license', notes)
 
 
 def write_record(row, payload):

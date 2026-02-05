@@ -18,6 +18,8 @@ import string
 import sys
 from time import sleep, time
 from urllib.parse import unquote
+import dateutil.parser
+import dateutil.tz
 from bokeh.palettes import all_palettes, plasma, turbo
 import bson
 from flask import (Flask, make_response, render_template, request, jsonify, redirect, send_file)
@@ -27,12 +29,12 @@ import pandas as pd
 from pymongo.collation import Collation, CollationStrength
 import requests
 import jrc_common.jrc_common as JRC
-import doi_common.doi_common as DL
+import doi_common as DL
 import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "101.0.0"
+__version__ = "102.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -88,6 +90,7 @@ NAV = {"Home": "",
                            "Labs": "labs",
                            "Projects": "projects"},
        "System" : {"Database stats": "stats_database",
+                   "API rate limits": "ratelimit/openalex",
                    "Controlled vocabularies": "cv",
                    "DOI relationships": "doi_relationships",
                    "Endpoints": "stats_endpoints",
@@ -1856,7 +1859,7 @@ def show_openalex_authors(doi, confirmed):
         Returns:
           List of HTML authors
     '''
-    sleep(.5)
+    sleep(.05)
     try:
         data = DL.get_doi_record(doi, source='openalex')
         if not data:
@@ -3559,14 +3562,15 @@ def get_display_badges(doi, row, data, local):
         if oresp:
             olink = f"{app.config['OAREPORT']}{doi}"
             badges += f" {tiny_badge('source', 'OA.Report', olink)}"
-        sleep(0.2)
-        try:
-            oresp = DL.get_doi_record(doi, source='openalex')
-            if oresp:
-                olink = f"/raw/openalex/{doi}"
-                badges += f" {tiny_badge('source', 'OpenAlex', olink)}"
-        except Exception:
-            pass
+        if row.get('jrc_openalex_id'):
+            sleep(0.02)
+            try:
+                oresp = DL.get_doi_record(doi, source='openalex')
+                if oresp:
+                    olink = f"/raw/openalex/{doi}"
+                    badges += f" {tiny_badge('source', 'OpenAlex', olink)}"
+            except Exception:
+                pass
     if local and 'jrc_fulltext_url' in row:
         badges += f" {tiny_badge('pdf', 'Full text', row['jrc_fulltext_url'])}"
     #badges += f" {tiny_badge('info', 'HQ migration', f'/doi/migration/{doi}')}"
@@ -3693,7 +3697,7 @@ def get_citation_counts(doi, row, partial=True):
         if citcnt:
             tblrow.append(f"<td>OA.Report: {citcnt:,}</td>")
     # OpenAlex
-    sleep(0.1)
+    sleep(0.01)
     try:
         citcnt, url = DL.get_citation_count(doi, 'openalex')
     except Exception:
@@ -7076,7 +7080,8 @@ def show_subscription(sid):
         return render_template('warning.html', urlroot=request.url_root,
                                title=render_warning(errmsg),
                                message=f"No subscription was found for {sid}")
-    dlio = row.get('date_last_issue_online') if isinstance(row['date_last_issue_online'], str) else ''
+    dlio = row.get('date_last_issue_online') if isinstance(row['date_last_issue_online'], str) \
+                                             else ''
     lio = row.get('num_last_issue_online') if isinstance(row['num_last_issue_online'], str) else ''
     nvo = row.get('num_last_vol_online') if isinstance(row['num_last_vol_online'], str) else ''
     html = f"<table class='proplist'><tr><td>Publisher</td><td>{row['publisher']}</td></tr>" \
@@ -7482,6 +7487,26 @@ def author_duplicates():
                                          title="Duplicate authors", html=html,
                                          navbar=generate_navbar('System')))
 
+
+@app.route('/ratelimit/openalex')
+def openalex_ratelimit():
+    ''' Show OpenAlex rate limit
+    '''
+    resp = requests.get('https://api.openalex.org/rate-limit', timeout=5,
+                        headers={'Authorization': \
+                                 f'Bearer {os.environ["OPENALEX_API_KEY"]}'}).json()
+    limit = resp['rate_limit']['credits_limit']
+    used = resp['rate_limit']['credits_used']
+    dt_object_utc = dateutil.parser.parse(resp['rate_limit']['resets_at'])
+    dt_object_local = dt_object_utc.astimezone(dateutil.tz.gettz())
+    ral = dt_object_local.strftime("%Y-%m-%d %H:%M:%S %Z")
+    html = "<br><span style='font: normal 800 16pt sans-serif; color: white;'>" \
+           + f"{used:,} / {limit:,} &nbsp;({used/limit*100:.2f}%) credits used<br></span>" \
+           + "<br><span style='font: normal 400 16pt sans-serif'>" \
+           + f"Resets at {ral}</span>"
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="OpenAlex rate limits", html=html,
+                                         navbar=generate_navbar('System')))
 
 @app.route('/orcid/bulk_search')
 def orcid_bulk_search():
