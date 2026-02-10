@@ -1,10 +1,12 @@
 """ assign_authors.py
-    Add/remove JRC authors for a given DOI
+    Add/remove JRC authors for a given DOI.
 """
 
-__version__ = '4.0.0'
+__version__ = '5.0.0'
 
 import argparse
+import collections
+from datetime import datetime, timedelta
 import json
 from operator import attrgetter
 import os
@@ -21,7 +23,10 @@ import jrc_common.jrc_common as JRC
 DB = {}
 INSENSITIVE = {'locale': 'en', 'strength': 1}
 # Globals
-ARG = LOGGER = REST = None
+ARG = DIS = LOGGER = REST = None
+MSG = []
+# Counters
+COUNT = collections.defaultdict(lambda: 0, {})
 
 def terminate_program(msg=None):
     ''' Terminate the program gracefully
@@ -85,6 +90,7 @@ def get_potential_authors(authors, original):
             for aff in auth['affiliations']:
                 if 'Janelia' in aff:
                     janelia = True
+                    COUNT['janelia'] += 1
                     break
             if janelia:
                 notes += f" {Fore.GREEN}{Back.BLACK}Affiliation{Style.RESET_ALL}"
@@ -122,8 +128,13 @@ def auto_assign(doi, authors):
                 added.append(f"{auth['given']} {auth['family']}")
     if len(jrc_authors) == cnt:
         LOGGER.warning(f"No additional authors to assign for {doi}")
+        COUNT['no_additional'] += 1
     else:
+        COUNT['dois_added'] += 1
+        COUNT['authors_added'] += len(added)
         LOGGER.warning(f"Added to {doi}: {', '.join(added)}")
+        MSG.append(f"Added to <a href='https://dis.int.janelia.org/doiui/{doi}'>{doi}</a>: " \
+                   + f"{', '.join(added)}")
     return jrc_authors
 
 
@@ -223,9 +234,9 @@ def set_author_payload():
                 last_id = auth['employeeId']
     pset = get_mongo_set(first, first_id, last, last_id)
     if pset:
-        payload = {"$set": pset}
+        payload = {'$set': pset}
     else:
-        payload = {"$unset": {'jrc_first_author': None, 'jrc_first_id':  None,
+        payload = {'$unset': {'jrc_first_author': None, 'jrc_first_id':  None,
                'jrc_last_author': None, 'jrc_last_id': None}}
     return payload
 
@@ -237,6 +248,7 @@ def process_doi(doi):
         Returns:
           None
     '''
+    COUNT['read'] += 1
     try:
         rec = DB['dis']['dois'].find_one({'doi': doi})
         if not rec:
@@ -256,9 +268,32 @@ def process_doi(doi):
     #print(json.dumps(authors['data'], indent=4))
     jrc_authors = get_authors(doi, authors['data'], original)
     if not jrc_authors:
+        if original:
+            if not ARG.WRITE:
+                LOGGER.warning(f"DOI {doi} updated to remove JRC authors")
+                return
+            payload = {'$unset': {'jrc_author': None, 'jrc_first_author': None,
+                                  'jrc_first_id': None, 'jrc_last_author': None,
+                                  'jrc_last_id': None}}
+            try:
+                result = DB['dis']['dois'].update_one({'doi': doi}, payload)
+            except Exception as err:
+                terminate_program(err)
+            if hasattr(result, 'matched_count') and result.modified_count:
+                LOGGER.warning(f"DOI {doi} updated to remove JRC authors")
         return
-    LOGGER.debug(f"{json.dumps(jrc_authors)}")
+    LOGGER.debug(f"New authors: {json.dumps(jrc_authors)}")
     payload = get_payload(jrc_authors)
+    for auth in original:
+        if auth in jrc_authors:
+            continue
+        print(f"Remove {auth}")
+        if rec.get('jrc_last_id') == auth:
+            payload['$unset'] = {}
+            payload['$unset']['jrc_last_author'] = None
+            payload['$unset']['jrc_last_id'] = None
+        if rec.get('jrc_first_id') and auth in rec.get('jrc_first_id'):
+            LOGGER.error(f"Must remove {auth} from first author for {doi}")
     LOGGER.debug(f"{doi} {len(original)} -> {len(jrc_authors)}")
     if not ARG.WRITE:
         if ARG.DEBUG:
@@ -271,16 +306,33 @@ def process_doi(doi):
                 print(f"DOI {doi} updated with jrc_author")
         except Exception as err:
             terminate_program(err)
-    if not jrc_authors or not ARG.WRITE:
+    if not jrc_authors:
         return
     payload = set_author_payload()
-    LOGGER.debug(json.dumps(payload, indent=2, default=str))
-    try:
-        result = DB['dis']['dois'].update_one({'doi': doi}, payload)
-        if hasattr(result, 'matched_count') and result.modified_count:
-            print(f"DOI {doi} updated with first/last author information")
-    except Exception as err:
-        terminate_program(err)
+    if not ARG.WRITE:
+        LOGGER.debug(json.dumps(payload, indent=2, default=str))
+    else:
+        try:
+            result = DB['dis']['dois'].update_one({'doi': doi}, payload)
+            if hasattr(result, 'matched_count') and result.modified_count:
+                print(f"DOI {doi} updated with first/last author information")
+        except Exception as err:
+            terminate_program(err)
+
+
+def send_email():
+    ''' Send an email summary
+        Keyword arguments:
+          None
+        Returns:
+          None
+    '''
+    text = "The following DOIs were automatically updated with authors " \
+           + "(with Janelia affiliations):<br><br>"
+    text += "<br>".join(MSG)
+    subject = "Automatically added Janelia-affiliated authors to DOIs"
+    email = DIS['developer'] if ARG.TEST else DIS['receivers']
+    JRC.send_email(text, DIS['sender'], email, subject, mime='html')
 
 
 def processing():
@@ -296,7 +348,7 @@ def processing():
         with open(ARG.FILE, 'r', encoding='ascii') as file:
             for doi in file.read().splitlines():
                 process_doi(doi)
-    else:
+    elif ARG.ORCID or ARG.FAMILY:
         if ARG.ORCID:
             payload = {"orcid": ARG.ORCID}
         else:
@@ -327,13 +379,32 @@ def processing():
             terminate_program(err)
         for row in rows:
             process_doi(row['doi'])
-
+    else:
+        week_ago = (datetime.today() - timedelta(days=ARG.DAYS))
+        payload = {"jrc_inserted": {"$gte": week_ago}, "jrc_obtained_from": ARG.SOURCE,
+                   "jrc_newsletter": {"$exists": False}}
+        try:
+            rows = DB['dis'].dois.find(payload).sort([("jrc_inserted", -1),
+                                                      ("jrc_publishing_date", -1)])
+        except Exception as err:
+            terminate_program(err)
+        for row in rows:
+            process_doi(row['doi'])
+    print(f"DOIs read:                       {COUNT['read']:,}")
+    print(f"Janelia authors:                 {COUNT['janelia']:,}")
+    if not ARG.AUTO:
+        return
+    print(f"DOIs with no additional authors: {COUNT['no_additional']:,}")
+    print(f"DOIs with authors added:         {COUNT['dois_added']:,}")
+    print(f"Authors added:                   {COUNT['authors_added']:,}")
+    if ARG.AUTO and COUNT['dois_added'] and (ARG.TEST or ARG.WRITE):
+        send_email()
 # -----------------------------------------------------------------------------
 
 if __name__ == '__main__':
     PARSER = argparse.ArgumentParser(
         description="Add/remove JRC authors for a given DOI")
-    GROUP_A = PARSER.add_mutually_exclusive_group(required=True)
+    GROUP_A = PARSER.add_mutually_exclusive_group(required=False)
     GROUP_A.add_argument('--doi', dest='DOI', action='store',
                          help='Single DOI to process')
     GROUP_A.add_argument('--file', dest='FILE', action='store',
@@ -344,11 +415,18 @@ if __name__ == '__main__':
                          help='Family name')
     PARSER.add_argument('--given', dest='GIVEN', action='store',
                          help='Given name')
+    PARSER.add_argument('--source', dest='SOURCE', action='store',
+                        default='crossref', choices=['crossref', 'datacite'],
+                        help='Source of DOIs (crossref or datacite)')
     PARSER.add_argument('--auto', dest='AUTO', action='store_true',
                         default=False, help='Auto assign asserted authors')
+    PARSER.add_argument('--days', dest='DAYS', action='store', type=int,
+                        default=7, help='Number of days to go back for DOIs')
     PARSER.add_argument('--manifold', dest='MANIFOLD', action='store',
                         default='prod', choices=['dev', 'prod'],
                         help='MongoDB manifold (dev, [prod])')
+    PARSER.add_argument('--test', dest='TEST', action='store_true',
+                        default=False, help='Flag, Send email to developer only')
     PARSER.add_argument('--write', dest='WRITE', action='store_true',
                         default=False, help='Write to database')
     PARSER.add_argument('--verbose', dest='VERBOSE', action='store_true',
@@ -360,6 +438,8 @@ if __name__ == '__main__':
     if "DIS_JWT" not in os.environ:
         terminate_program("Missing token - set in DIS_JWT environment variable")
     REST = JRC.simplenamespace_to_dict(JRC.get_config("rest_services"))
+    DIS = JRC.simplenamespace_to_dict(JRC.get_config("dis"))
     initialize_program()
+    ARG.SOURCE = 'Crossref' if ARG.SOURCE.lower() == 'crossref' else 'DataCite'
     processing()
     terminate_program()

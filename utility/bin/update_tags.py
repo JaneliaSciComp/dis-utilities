@@ -2,7 +2,7 @@
     Update tags for selected DOIs
 """
 
-__version__ = '6.0.0'
+__version__ = '7.0.0'
 
 import argparse
 import collections
@@ -16,14 +16,15 @@ from inquirer.themes import BlueComposure
 import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
 
-# pylint: disable=broad-exception-caught,logging-fstring-interpolation
+# pylint: disable=broad-exception-caught,logging-fstring-interpolation, logging-not-lazy, too-many-branches
 
 # Parameters
-ARG = LOGGER = None
+ARG = DIS = LOGGER = None
 # Database
 DB = {}
 PROJECT = {}
 SUPORG = {}
+MSG = []
 # Counters
 COUNT = collections.defaultdict(lambda: 0, {})
 
@@ -99,16 +100,21 @@ def get_dois():
             terminate_program(f"Error reading file {ARG.FILE.name} line ({linenum}): {err}")
         except Exception as err:
             terminate_program(err)
-    LOGGER.info(f"Finding DOIs from the last {ARG.DAYS} day{'' if ARG.DAYS == 1 else 's'}")
     week_ago = (datetime.today() - timedelta(days=ARG.DAYS))
+    payload = {"jrc_inserted": {"$gte": week_ago}, "jrc_obtained_from": ARG.SOURCE}
+    if ARG.AUTO:
+        payload["jrc_newsletter"] = {"$exists": False}
     try:
-        rows = DB['dis'].dois.find({"jrc_inserted": {"$gte": week_ago}})
+        cnt = DB['dis'].dois.count_documents(payload)
+        rows = DB['dis'].dois.find(payload).sort([("jrc_inserted", -1),
+                                                  ("jrc_publishing_date", -1)])
     except Exception as err:
         terminate_program(err)
+    LOGGER.info(f"Found {cnt} DOIs from the last {ARG.DAYS} day{'' if ARG.DAYS == 1 else 's'}" \
+                + f" from {ARG.SOURCE}")
     dois = []
     for row in rows:
         dois.append(row['doi'])
-    COUNT['specified'] = len(dois)
     return dois
 
 
@@ -126,10 +132,13 @@ def append_tags(auth, janelians, atags):
     if 'group' in auth:
         if auth['group'] not in atags:
             atags.append(auth['group'])
-    if 'tags' in auth:
-        for tag in auth['tags']:
-            if tag not in atags:
-                atags.append(tag)
+    if 'managedTeams' in auth:
+        for tag in auth['managedTeams']:
+            if tag.get('supOrgSubType') != 'Lab' and tag.get('supOrgName') not in atags:
+                atags.append(tag.get('supOrgName'))
+    for tag in auth.get('tags', []):
+        if tag not in atags and tag in DIS['default_tags']:
+            atags.append(tag)
     if 'name' in auth:
         if auth['name'] not in PROJECT:
             LOGGER.warning(f"Project {auth['name']} is not defined")
@@ -150,9 +159,14 @@ def get_tags(authors):
     janelians = []
     tagauth = {}
     for auth in authors:
+        if ARG.AUTO:
+            if not auth.get('group') and not auth.get('managedTeams') and not auth.get('tags'):
+                continue
         atags = []
         append_tags(auth, janelians, atags)
         for tag in atags:
+            if tag == 'Group Leader/Lab Head':
+                continue
             if tag not in tags:
                 tags.append(tag)
             if tag not in tagauth:
@@ -182,6 +196,8 @@ def get_tag_choices(tags, tagauth, rec):
     for tag in tags:
         alert = ""
         if tag not in SUPORG:
+            if ARG.AUTO:
+                continue
             alert = f" {Fore.RED}{Back.BLACK}(not a supervisory organization){Style.RESET_ALL}"
         newtag = f"{tag} ({', '.join(tagauth[tag])}) {alert}"
         if tag in tagnames:
@@ -269,7 +285,8 @@ def tag_single_doi(rec, jrc_term):
     if jrc_term in rec:
         for tag in rec[jrc_term]:
             if ARG.ACKNOWLEDGE and ARG.ACKNOWLEDGE == tag['name']:
-                LOGGER.warning(f"Acknowledgement {ARG.ACKNOWLEDGE} already exists for DOI {rec['doi']}")
+                LOGGER.warning(f"Acknowledgement {ARG.ACKNOWLEDGE} " \
+                               + f"already exists for DOI {rec['doi']}")
                 return
             if ARG.TAG and ARG.TAG == tag['name']:
                 LOGGER.warning(f"Tag {ARG.TAG} already exists for DOI {rec['doi']}")
@@ -305,33 +322,50 @@ def update_single_doi(rec):
     if not tags:
         LOGGER.warning(f"No tags for DOI {rec['doi']}")
     tagd, current = get_tag_choices(tags, tagauth, rec)
-    print(f"DOI: {rec['doi']}")
-    print(f"{DL.get_title(rec)}")
-    print('Janelia authors:', ', '.join(janelians))
-    if 'jrc_newsletter' in rec and rec['jrc_newsletter']:
-        print(f"{Fore.LIGHTYELLOW_EX}{Back.BLACK}DOI has newsletter date of " \
-              + f"{rec['jrc_newsletter']}{Style.RESET_ALL}")
     today = datetime.today().strftime('%Y-%m-%d')
-    quest = []
-    try:
+    if ARG.AUTO:
+        ans = {}
         if tagd:
-            quest.append(inquirer.Checkbox('checklist', carousel=True,
-                                           message='Select tags',
-                                           choices=tagd, default=current))
-        quest.append(inquirer.List('additional',
-                                   message="Would you like to add any additional tags?",
-                                   choices=['Yes', 'No'], default='No'))
-        quest.append(inquirer.List('newsletter',
-                                   message=f"Set jrc_newsletter to {today}",
-                                   choices=['Yes', 'No']))
-        ans = inquirer.prompt(quest, theme=BlueComposure())
-    except KeyboardInterrupt:
-        terminate_program("User cancelled program")
-    if not ans:
-        return
+            ans = {'checklist': []}
+        for key in tagd:
+            ans['checklist'].append(key)
+        if tags:
+            doi = rec['doi']
+            MSG.append(f"Updated <a href='https://dis.int.janelia.org/doiui/{doi}'>{doi}</a> " \
+                       + f"with tags: {', '.join(tags)}")
+        ans['newsletter'] = 'No'
+    else:
+        print(f"DOI: {rec['doi']}")
+        print(f"{DL.get_title(rec)}")
+        print('Janelia authors:', ', '.join(janelians))
+        if 'jrc_newsletter' in rec and rec['jrc_newsletter']:
+            print(f"{Fore.LIGHTYELLOW_EX}{Back.BLACK}DOI has newsletter date of " \
+                  + f"{rec['jrc_newsletter']}{Style.RESET_ALL}")
+        quest = []
+        try:
+            if tagd:
+                quest.append(inquirer.Checkbox('checklist', carousel=True,
+                                               message='Select tags',
+                                               choices=tagd, default=current))
+            quest.append(inquirer.List('additional',
+                                       message="Would you like to add any additional tags?",
+                                       choices=['Yes', 'No'], default='No'))
+            quest.append(inquirer.List('newsletter',
+                                       message=f"Set jrc_newsletter to {today}",
+                                       choices=['Yes', 'No']))
+            ans = inquirer.prompt(quest, theme=BlueComposure())
+        except KeyboardInterrupt:
+            terminate_program("User cancelled program")
+        if not ans:
+            return
+    if ARG.AUTO and rec.get('jrc_tag'):
+        for tag in rec.get('jrc_tag', []):
+            if f"{tag['name']}" not in tagd.values():
+                ans['checklist'].append(f"{tag['name']} ")
+                tagd[f"{tag['name']} "] = tag['name']
     payload = process_tags(ans, tagd)
     # Newsletter
-    if 'newsletter' in ans and ans['newsletter'] == 'Yes':
+    if ans.get('newsletter') == 'Yes':
         payload['jrc_newsletter'] = today
     COUNT['selected'] += 1
     if not payload:
@@ -344,8 +378,22 @@ def update_single_doi(rec):
         if hasattr(result, 'matched_count') and result.matched_count:
             COUNT['updated'] += 1
     else:
-        print(f"{rec['doi']}\n{json.dumps(payload, indent=2)}")
+        print(f"*************** {rec['doi']} ***************\n{json.dumps(payload, indent=2)}")
         COUNT['updated'] += 1
+
+
+def send_email():
+    ''' Send an email summary
+        Keyword arguments:
+          None
+        Returns:
+          None
+    '''
+    text = "The following DOIs were automatically updated with tags:<br><br>"
+    text += "<br>".join(MSG)
+    subject = "Automatically tagged DOIs"
+    email = DIS['developer'] if ARG.TEST else DIS['receivers']
+    JRC.send_email(text, DIS['sender'], email, subject, mime='html')
 
 
 def update_tags():
@@ -376,17 +424,19 @@ def update_tags():
         else:
             update_single_doi(rec)
     print(f"DOIs specified:           {COUNT['specified']}")
-    print(f"DOIs not found:           {COUNT['notfound']}")
+    if not ARG.AUTO:
+        print(f"DOIs not found:           {COUNT['notfound']}")
     print(f"DOIs selected for update: {COUNT['selected']}")
     print(f"DOIs updated:             {COUNT['updated']}")
-    if not ARG.WRITE:
+    if ARG.AUTO and COUNT['updated'] and (ARG.TEST or ARG.WRITE):
+        send_email()
+    if not ARG.WRITE and not ARG.AUTO:
         LOGGER.warning("Dry run successful, no updates were made")
 
 # -----------------------------------------------------------------------------
 
 if __name__ == '__main__':
-    PARSER = argparse.ArgumentParser(
-        description="Update tags")
+    PARSER = argparse.ArgumentParser(description="Update tags")
     PARSER.add_argument('--doi', dest='DOI', action='store',
                         help='Single DOI to process')
     PARSER.add_argument('--file', dest='FILE', action='store',
@@ -399,9 +449,16 @@ if __name__ == '__main__':
                      help='Acknowledgement to apply to all specified DOIs')
     PARSER.add_argument('--days', dest='DAYS', action='store', type=int,
                         default=7, help='Number of days to go back for DOIs')
+    PARSER.add_argument('--source', dest='SOURCE', action='store',
+                        default='crossref', choices=['crossref', 'datacite'],
+                        help='Source of DOIs (crossref or datacite)')
     PARSER.add_argument('--manifold', dest='MANIFOLD', action='store',
                         default='prod', choices=['dev', 'prod'],
                         help='MongoDB manifold (dev, prod)')
+    PARSER.add_argument('--auto', dest='AUTO', action='store_true',
+                        default=False, help='Auto assign tags')
+    PARSER.add_argument('--test', dest='TEST', action='store_true',
+                        default=False, help='Flag, Send email to developer only')
     PARSER.add_argument('--write', dest='WRITE', action='store_true',
                         default=False, help='Write to database/config system')
     PARSER.add_argument('--verbose', dest='VERBOSE', action='store_true',
@@ -415,5 +472,7 @@ if __name__ == '__main__':
     if ARG.ACKNOWLEDGE and not ARG.FILE:
         terminate_program("The --acknowledge parm only works with --file")
     initialize_program()
+    DIS = JRC.simplenamespace_to_dict(JRC.get_config("dis"))
+    ARG.SOURCE = 'Crossref' if ARG.SOURCE.lower() == 'crossref' else 'DataCite'
     update_tags()
     terminate_program()
