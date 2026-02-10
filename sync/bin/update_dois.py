@@ -7,7 +7,7 @@
            to DIS MongoDB.
 """
 
-__version__ = '21.0.0'
+__version__ = '22.0.0'
 
 import argparse
 import collections
@@ -773,22 +773,24 @@ def persist_author(key, authors, persist):
           None
     '''
     # Update jrc_author
-    jrc_author = []
+    jrc_author = persist[key]['jrc_author'] if persist[key].get('jrc_author') else []
     alumni = []
     for auth in authors:
         if 'alumni' in auth and auth['alumni']:
-            if auth['match'] == 'asserted' and auth.get('employeeId'):
+            if auth['match'] == 'asserted' and auth.get('employeeId') \
+               and auth['employeeId'] not in jrc_author:
                 if ARG.VERBOSE:
                     print(f"Added alumni author {auth['given']} {auth['family']} ({auth['match']})")
                 jrc_author.append(auth['employeeId'])
             else:
                 alumni.append(f"{auth['given'][0]} {auth['family'][0]} is alumni")
-        elif auth['janelian'] and auth.get('employeeId'):
+        elif auth['janelian'] and auth.get('employeeId') and auth['employeeId'] not in jrc_author:
             if ARG.VERBOSE:
                 print(f"Added author {auth['given']} {auth['family']} ({auth['match']})")
             jrc_author.append(auth['employeeId'])
     if jrc_author:
-        LOGGER.debug(f"Added jrc_author {jrc_author} to {key}")
+        if ARG.VERBOSE:
+            print(f"Added jrc_author {jrc_author} to {key}")
         persist[key]['jrc_author'] = jrc_author
     elif alumni:
         LOGGER.warning(f"No Janelia authors for {key} (alumni)")
@@ -847,7 +849,7 @@ def get_tags(persist, rec):
     return tags
 
 
-def add_tags(persist):
+def add_tags_and_authors(persist):
     ''' Add tags to DOI records that will be persisted (jrc_author, jrc_tag)
         Keyword arguments:
           persist: dict keyed by DOI with value of the Crossref/DataCite record
@@ -882,8 +884,8 @@ def add_tags(persist):
         if tags:
             LOGGER.debug(f"Added jrc_tag {list(t['name'] for t in tags)} to {key}")
             persist[key]['jrc_tag'] = tags
-        if rec and 'jrc_newsletter' in rec:
-            LOGGER.warning(f"Skipping jrc_author update for {key}")
+        if rec and 'jrc_newsletter' in rec and not ARG.FORCE:
+            LOGGER.warning(f"Skipping jrc_author update for {key} (has newsletter)")
         else:
             persist_author(key, authors, persist)
 
@@ -909,58 +911,22 @@ def add_first_last_authors(rec):
           None
     '''
     first = []
-    field, datacite = get_field(rec)
-    if field in rec:
-        if not datacite:
-            # First author(s)
-            for auth in rec[field]:
-                if 'sequence' in auth and auth['sequence'] == 'additional':
-                    break
-                if not('given' in auth and 'family' in auth):
-                    LOGGER.warning(f"Missing author name in {rec['doi']} author {auth}")
-                    break
-                try:
-                    janelian = DL.is_janelia_author(auth, DB['dis'].orcid, PROJECT)
-                except Exception as err:
-                    LOGGER.error(auth)
-                    LOGGER.error("Could not process author in for DL.is_janelia_author" \
-                                 + rec['doi'])
-                    terminate_program(err)
-                if janelian:
-                    first.append(janelian)
-        else:
-            janelian = DL.is_janelia_author(rec[field][0], DB['dis'].orcid, PROJECT)
-            if janelian:
-                first.append(janelian)
-        okay = True
-        if not datacite:
-            if not('given' in rec[field][-1] and 'family' in rec[field][-1]):
-                okay = False
-        elif not('givenName' in rec[field][-1] and 'familyName' in rec[field][-1]):
-            okay = False
-        if okay:
-            janelian = DL.is_janelia_author(rec[field][-1], DB['dis'].orcid, PROJECT)
-            if janelian:
-                rec["jrc_last_author"] = janelian
-        else:
-            LOGGER.warning(f"Missing author name in {rec['doi']} author {rec[field][-1]}")
-    if first:
-        rec["jrc_first_author"] = first
-    if (not first) and ('jrc_last_author' not in rec):
-        return
-    first = []
+    firstn = []
     sleep(0.5)
     try:
         det = DL.get_author_details(rec, DB['dis']['orcid'])
     except Exception as err:
         terminate_program(f"Could not get first/last authors for {rec['doi']}: {err}")
     for auth in det:
-        if auth['janelian'] and 'employeeId' in auth and 'is_first' in auth:
+        if 'employeeId' in auth and 'is_first' in auth and auth['employeeId'] in rec['jrc_author']:
             first.append(auth['employeeId'])
-        if auth['janelian'] and 'employeeId' in auth and 'is_last' in auth:
+            firstn.append(', '.join([auth['family'], auth['given']]))
+        if 'employeeId' in auth and 'is_last' in auth and auth['employeeId'] in rec['jrc_author']:
             rec["jrc_last_id"] = auth['employeeId']
+            rec["jrc_last_author"] = ', '.join([auth['family'], auth['given']])
     if first:
         rec["jrc_first_id"] = first
+        rec["jrc_first_author"] = ', '.join(firstn)
 
 
 def add_openalex(rec):
@@ -1043,7 +1009,7 @@ def update_mongodb(persist):
         add_first_last_authors(val)
         for aname in ('jrc_first_author', 'jrc_first_id', 'jrc_last_author', 'jrc_last_id'):
             if aname in val:
-                LOGGER.debug(f"Added {aname} {val[aname]} to {key}")
+                print(f"Added {aname} {val[aname]} to {key}")
         # Data from OpenAlex
         if 'janelia' not in key: # Janelia DataCite DOIs are [almost] never in OpenAlex
             add_openalex(val)
@@ -1097,7 +1063,7 @@ def update_dois(specified, persist):
             perform_backcheck(specified)
         update_config_database(persist)
     elif ARG.TARGET == 'dis':
-        add_tags(persist)
+        add_tags_and_authors(persist)
         update_mongodb(persist)
 
 
@@ -1110,16 +1076,24 @@ def persist_if_updated(doi, msg, persist):
         Returns:
           None
     """
+    save_authors = []
+    saved = DL.get_doi_record(doi, DB['dis'].dois)
+    if saved and saved.get('jrc_author'):
+        save_authors = saved['jrc_author']
     if DL.is_datacite(doi):
         # DataCite
         if datacite_needs_update(doi, msg['data']):
             persist[doi] = msg['data']['attributes']
+            if save_authors:
+                persist[doi]['jrc_author'] = save_authors
             persist[doi]['jrc_obtained_from'] = 'DataCite'
         COUNT['foundd'] += 1
     else:
         # Crossref
         if crossref_needs_update(doi, msg['message']):
             persist[doi] = msg['message']
+            if save_authors:
+                persist[doi]['jrc_author'] = save_authors
             persist[doi]['jrc_obtained_from'] = 'Crossref'
         COUNT['foundc'] += 1
 
@@ -1255,6 +1229,7 @@ def post_activities():
     print(f"DOI calls to Crossref: {len(CROSSREF_CALL):,}")
     print(f"DOI calls to DataCite: {len(DATACITE_CALL):,}")
     # Email
+    return #PLUG
     if INSERTED and ARG.WRITE:
         generate_emails()
     if not ARG.WRITE:
