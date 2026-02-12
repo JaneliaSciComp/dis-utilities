@@ -14,8 +14,8 @@ import sys
 from colorama import Fore, Back, Style
 import inquirer
 from inquirer.themes import BlueComposure
-import requests
 import jrc_common.jrc_common as JRC
+import doi_common.doi_common as DL
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation,logging-not-lazy
 
@@ -203,25 +203,21 @@ def get_mongo_set(first, first_id, last, last_id):
     return pset
 
 
-def set_author_payload():
+def set_author_payload(jrc_authors, authors):
     ''' Set the author payload
         Keyword arguments:
-          None
+          jrc_authors: list of JRC authors from DOI record
+          authors: processed list of authors
         Returns:
           payload to set/unset first/last author data
     '''
-    try:
-        headers = {"Authorization": f"Bearer {os.environ['DIS_JWT']}"}
-        authors = requests.get(f"{REST['dis']['url']}doi/authors/{ARG.DOI}",
-                               headers=headers, timeout=10).json()
-    except Exception as err:
-        terminate_program(err)
     first = []
     first_id = []
     last = None
     last_id = None
-    for auth in authors['data']:
-        if not auth['in_database']:
+    for auth in authors:
+        if not auth['in_database'] or not auth.get('employeeId') \
+           or auth['employeeId'] not in jrc_authors:
             continue
         name = ", ".join([auth['family'], auth['given']])
         if 'is_first' in auth and auth['is_first']:
@@ -249,24 +245,16 @@ def process_doi(doi):
           None
     '''
     COUNT['read'] += 1
-    try:
-        rec = DB['dis']['dois'].find_one({'doi': doi})
-        if not rec:
-            terminate_program(f"Could not find DOI {doi}")
-        original = rec['jrc_author'] if 'jrc_author' in rec else []
-    except Exception as err:
-        terminate_program(err)
-    try:
-        headers = {"Authorization": f"Bearer {os.environ['DIS_JWT']}"}
-        authors = requests.get(f"{REST['dis']['url']}doi/authors/{doi}",
-                               headers=headers, timeout=10).json()
-    except Exception as err:
-        terminate_program(err)
-    if not authors.get('data'):
+    rec = DL.get_doi_record(doi, DB['dis']['dois'])
+    if not rec:
+        terminate_program(f"Could not find DOI {doi}")
+    original = rec['jrc_author'] if 'jrc_author' in rec else []
+    authors = DL.get_author_details(rec, DB['dis'].orcid)
+    if not authors:
         LOGGER.error(f"No authors found for {doi}")
         return
-    #print(json.dumps(authors['data'], indent=4))
-    jrc_authors = get_authors(doi, authors['data'], original)
+    #print(json.dumps(authors, indent=4))
+    jrc_authors = get_authors(doi, authors, original)
     if not jrc_authors:
         if original:
             if not ARG.WRITE:
@@ -308,10 +296,9 @@ def process_doi(doi):
             terminate_program(err)
     if not jrc_authors:
         return
-    payload = set_author_payload()
-    if not ARG.WRITE:
-        LOGGER.debug(json.dumps(payload, indent=2, default=str))
-    else:
+    payload = set_author_payload(jrc_authors, authors)
+    LOGGER.debug(json.dumps(payload, indent=2, default=str))
+    if ARG.WRITE:
         try:
             result = DB['dis']['dois'].update_one({'doi': doi}, payload)
             if hasattr(result, 'matched_count') and result.modified_count:
