@@ -79,6 +79,7 @@ NAV = {"Home": "",
                     "Journals referenced": "journals_referenced"},
        "Subscriptions": {"Summary": "subscriptions",
                          "Journals": "subscriptions/Journal",
+                         "Repositories": "subscriptions/Repository",
                          "Books": "subscriptions/Book",
                          "Book series": "subscriptions/Book series",
                          "Monographs": "subscriptions/Monograph"},
@@ -6687,12 +6688,12 @@ def show_open_access_details(year='All'):
 
 @app.route('/journals_dois/<string:year>')
 @app.route('/journals_dois')
-def show_journals_dois(year='All'):
+def show_journals_dois(year=str(datetime.now().year)):
     ''' Show journals in a table
     '''
     errmsg = "Could not get journal data from subscription collection"
     try:
-        rows = DB['dis'].subscription.find({"type": "Journal"})
+        rows = DB['dis'].subscription.find({"type": {"$in": ["Journal", "Repository"]}})
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning(errmsg),
@@ -6716,9 +6717,9 @@ def show_journals_dois(year='All'):
            + '<th>Subscription</th></tr></thead><tbody>'
     for key in sorted(journal, key=lambda x: journal[x]['count'], reverse=True):
         if key in subscribed:
-            jour = f"<a href='{subscribed[key]['url']}'>{key}</a>"
+            jour = f"<a href='{subscribed[key]['urls'][0]}'>{key}</a>"
             jour = f"<a href='/subscription/{str(subscribed[key]['_id'])}'>{key}</a>"
-            publisher = subscribed[key]['publisher']
+            publisher = subscribed[key].get('publisher', '')
             sub = '<span style="color: lime">YES</span>' \
                   if subscribed[key]['access'] == 'Subscription' \
                   else f"<span style='color: yellowgreen'>{subscribed[key]['access']}</span>"
@@ -6879,14 +6880,37 @@ def show_journal_ui(jname, year='All'):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get DOIs for journal"),
                                message=error_message(err))
-    html, _, _ = standard_doi_table(rows)
+    html, cnt, _ = standard_doi_table(rows)
+    payload = [{"$match": payload},
+               {"$group": {"_id": "$jrc_oa_status", "count": {"$sum": 1}}}]
+    try:
+        rows = DB['dis'].dois.aggregate(payload)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get status counts for journal"),
+                               message=error_message(err))
+    total = 0
+    data = {}
+    for row in rows:
+        total += row['count']
+        data[row['_id'].capitalize() if row['_id'] else 'Unknown'] = row.get('count', 0)
+    if total < cnt:
+        data['Unknown'] = data.get('Unknown', 0) + cnt - total
+    top = '<table id="journals" class="tablesorter numbers"><thead><tr>' \
+          + '<th>Open Access status</th><th>Count</th></tr></thead><tbody>'
+    for key, val in sorted(data.items(), key=lambda item: item[1], reverse=True):
+        stat = DP.OA_COLORS.get(key.capitalize(), 'crimson')
+        top += f"<tr><td><span style='color: {stat}'>{key.capitalize()}</span></td>" \
+               + f"<td>{val:,}</td></tr>"
+    top += '</tbody></table>'
     title = f"DOIs for {jname}"
     if year != 'All':
         title += f" ({year})"
+    html = top + html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
-                                            title=title, html=html,
-                                            navbar=generate_navbar('Journals')))
+                                         title=title, html=html,
+                                         navbar=generate_navbar('Journals')))
 
 
 @app.route('/journals_referenced/<string:year>')
@@ -7015,7 +7039,7 @@ def show_subscriptions(jtype):
         jlist[row['title']] = True
         publist[row['publisher']] = True
         publist[row['publisher']] = True
-        jour = f"<a href='{row['url']}'>{row['title']}</a>"
+        jour = f"<a href='{row['urls'][0]}'>{row['title']}</a>"
         jour = f"<a href='/subscription/{str(row['_id'])}'>{row['title']}</a>"
         html += f"<tr><td>{jour}</td><td>{row['publisher']}</td>" \
                 + f"<td>{row['provider']}</td></tr>"
@@ -7080,22 +7104,41 @@ def show_subscription(sid):
         return render_template('warning.html', urlroot=request.url_root,
                                title=render_warning(errmsg),
                                message=f"No subscription was found for {sid}")
-    dlio = row.get('date_last_issue_online') if isinstance(row['date_last_issue_online'], str) \
-                                             else ''
-    lio = row.get('num_last_issue_online') if isinstance(row['num_last_issue_online'], str) else ''
-    nvo = row.get('num_last_vol_online') if isinstance(row['num_last_vol_online'], str) else ''
+    row['publisher'] = row.get('publisher', 'Unknown')
+    dlio = row.get('date_last_issue_online', '')
+    lio = row.get('num_last_issue_online', '')
+    nvo = row.get('num_last_vol_online', '')
     html = f"<table class='proplist'><tr><td>Publisher</td><td>{row['publisher']}</td></tr>" \
            + f"<tr><td>Type</td><td>{row['type']}</td></tr>" \
            + f"<tr><td>Access</td><td>{row['access']}</td></tr>" \
-           + f"<tr><td>Volumes online</td><td>{row['num_first_vol_online']} - {nvo}</td></tr>" \
-           + f"<tr><td>Issues online</td><td>{row['date_first_issue_online']} - {dlio}</td></tr>" \
-           + f"<tr><td>Issues online</td><td>{row['num_first_issue_online']} - {lio}</td></tr>" \
            + f"<tr><td>Provider</td><td>{row['provider']}</td></tr>" \
            + f"<tr><td>Title ID</td><td>{row['title-id']}</td></tr>"
+    vols = []
+    idates = []
+    if row.get('volumes'):
+        for vol in row['volumes']:
+            txt = []
+            if vol.get('num_first_vol_online'):
+                txt.append(f"Volumes online: {vol['num_first_vol_online']} - {nvo}")
+            if vol.get('num_first_issue_online'):
+                txt.append(f"Issues online: {vol['num_first_issue_online']} - {lio}")
+            if vol.get('date_first_issue_online'):
+                txt.append(f"Issue dates online: {vol['date_first_issue_online']} - {dlio}")
+                idates.append(f"{vol['date_first_issue_online']} - {dlio}")
+            if txt:
+                vols.append(", ".join(txt))
+        if vols:
+            html += f"<tr><td>Volumes</td><td>{'<br>'.join(vols)}</td></tr>"
     html += "</table>"
-    link = f"window.location.href=\'{row['url']}\'"
-    html += '<br><div><button id="toggle-to-all" type="button" class="btn btn-success btn-small"' \
-            + f"onclick=\"{link}\">Access {row['type']}</button></div>"
+    idx = 0
+    for url in row['urls']:
+        link = f"window.location.href=\'{url}\'"
+        label = row['type']
+        if len(row['urls']) > 1 and idates[idx]:
+            label += f" ({idates[idx]})"
+        idx += 1
+        html += '<br><div><button id="toggle-to-all" type="button" class="btn btn-success btn-small"' \
+                + f"onclick=\"{link}\">Access {label}</button></div>"
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=row['title'], html=html,

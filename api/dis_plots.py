@@ -118,7 +118,8 @@ def preprint_pie_charts(data, year, coll):
 # * Basic charts                                                               *
 # ******************************************************************************
 
-def pie_chart(data, title, legend, height=300, width=400, location="right", colors=None):
+def pie_chart(data, title, legend, height=300, width=400, location="right",
+              colors=None, style=None):
     ''' Create a pie chart
         Keyword arguments:
           data: dictionary of data
@@ -128,12 +129,13 @@ def pie_chart(data, title, legend, height=300, width=400, location="right", colo
           width: width of the chart (optional)
           location: location of the legend (optional)
           colors: list of colors (optional)
+          style: "bare" for a borderless chart
         Returns:
           Figure components
     '''
-    if len(data) == 1:
+    if len(data) == 1 and colors is None:
         colors = ["mediumblue"]
-    elif len(data) == 2:
+    elif len(data) == 2 and colors is None:
         colors = SOURCE_PALETTE
     if not colors:
         colors = all_palettes['Category10'][len(data)]
@@ -144,11 +146,20 @@ def pie_chart(data, title, legend, height=300, width=400, location="right", colo
     pdata['percentage'] = pdata['value']/pdata['value'].sum()*100
     pdata['color'] = colors
     tooltips = f"@{legend}: @value (@percentage%)"
-    plt = figure(title=title, toolbar_location=None, height=height, width=width,
-                 tools="hover", tooltips=tooltips, x_range=(-0.5, 1.0))
-    plt.wedge(x=0, y=1, radius=0.4,
-              start_angle=cumsum('angle', include_zero=True), end_angle=cumsum('angle'),
-              line_color="white", fill_color='color', legend_field=legend, source=pdata)
+    if style == 'bare':
+        print("BARE")
+        plt = figure(toolbar_location=None, height=height, width=width, min_border_left=0,
+                 min_border_right=0, min_border_top=0, min_border_bottom=0,
+                 background_fill_color=None, outline_line_color=None)
+        plt.wedge(x=0, y=1, radius=0.4,
+                  start_angle=cumsum('angle', include_zero=True), end_angle=cumsum('angle'),
+                  line_color="white", fill_color='color', source=pdata)
+    else:
+        plt = figure(title=title, toolbar_location=None, height=height, width=width,
+                     tools="hover", tooltips=tooltips, x_range=(-0.5, 1.0))
+        plt.wedge(x=0, y=1, radius=0.4,
+                  start_angle=cumsum('angle', include_zero=True), end_angle=cumsum('angle'),
+                  line_color="white", fill_color='color', legend_field=legend, source=pdata)
     plt.axis.axis_label = None
     plt.axis.visible = False
     plt.grid.grid_line_color = None
