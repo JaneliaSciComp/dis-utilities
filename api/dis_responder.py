@@ -34,7 +34,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "102.0.0"
+__version__ = "104.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -5072,8 +5072,7 @@ def dois_month(year=str(datetime.now().year)):
         html += f"<th style='text-align: center;'>{counter[source]:,}</th>"
     html += "</tr></tfoot>"
     html += '</table><br>' + year_pulldown('dois_month', all_years=False)
-    chartscript, chartdiv = DP.stacked_bar_chart(data, title,
-                                                 xaxis="months",
+    chartscript, chartdiv = DP.stacked_bar_chart(data, title, xaxis="months",
                                                  yaxis=('Crossref', 'DataCite'),
                                                  colors=DP.SOURCE_PALETTE)
     endpoint_access()
@@ -6224,8 +6223,7 @@ def org_year(org="Shared Resources"):
     html += '</tfoot></table><br>'
     data[f"With {org} authors"] = data.pop(org)
     data[f"No {org} authors"] = data.pop("Janelia")
-    chartscript, chartdiv = DP.stacked_bar_chart(data, title,
-                                                 xaxis="years",
+    chartscript, chartdiv = DP.stacked_bar_chart(data, title, xaxis="years",
                                                  yaxis=(f"No {org} authors", f"With {org} authors"),
                                                  colors=DP.SOURCE_PALETTE)
     endpoint_access()
@@ -6621,9 +6619,10 @@ def show_open_access():
     html2 = "<br>Source for citations: " \
             + "<a href='https://api.openalex.org/institutions?search=Janelia' " \
             + "target='_blank'>OpenAlex</a>"
+    tt = [("Year", "@years"), ("Open", "@Open")]
     chartscript, chartdiv = DP.stacked_bar_chart(data, 'OpenAlex DOIs', xaxis="years", orient=pi/4,
                                                  yaxis=('Closed', 'Open'), yaxis2='Citations',
-                                                 colors=['maroon', 'green'])
+                                                 colors=['maroon', 'green'], tooltip=tt)
     endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title="DOIs/citations by year", html=html,
@@ -6720,9 +6719,9 @@ def show_journals_dois(year=str(datetime.now().year)):
             jour = f"<a href='{subscribed[key]['urls'][0]}'>{key}</a>"
             jour = f"<a href='/subscription/{str(subscribed[key]['_id'])}'>{key}</a>"
             publisher = subscribed[key].get('publisher', '')
-            sub = '<span style="color: lime">YES</span>' \
+            sub = '<span style="color: yellowgreen">YES</span>' \
                   if subscribed[key]['access'] == 'Subscription' \
-                  else f"<span style='color: yellowgreen'>{subscribed[key]['access']}</span>"
+                  else f"<span style='color: lime'>{subscribed[key]['access']}</span>"
         else:
             jour = key
             sub = ''
@@ -6959,9 +6958,19 @@ def show_subscription_summary():
     ''' Show subscription summary
     '''
     errmsg = "Could not get data from subscription collection"
+    provider = {}
+    try:
+        rows = DB['dis'].subscription.find({'provider': {"$exists": True}})
+        for row in rows:
+            provider[row['publisher']] = row['provider']
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning(errmsg),
+                               message=error_message(err))
     try:
         cnt = DB['dis'].subscription.count_documents({})
         oacnt = DB['dis'].subscription.count_documents({"access": "Free to read"})
+        pcount = len(DB['dis'].subscription.distinct("provider"))
         pubcnt = DB['dis'].subscription.distinct("publisher")
         typs = DB['dis'].subscription.aggregate([{"$group": {"_id": "$type", "count": {"$sum": 1}}},
                                                  {"$sort": {"_id": 1}}])
@@ -6969,8 +6978,8 @@ def show_subscription_summary():
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning(errmsg),
                                message=error_message(err))
-    html = f"<h4>Found {cnt:,} subscriptions ({oacnt:,} open access) across " \
-           + f"{len(pubcnt):,} publishers</h4>"
+    html = f"<h4>Found {cnt:,} subscriptions ({oacnt/cnt*100:.2f}% open access) across " \
+           + f"{len(pubcnt):,} publishers and {pcount} providers</h4>"
     types = {}
     for row in typs:
         types[row['_id']] = int(row['count'])
@@ -6991,7 +7000,7 @@ def show_subscription_summary():
         transform[row['_id']['publisher']][row['_id']['type']] = row['count']
         transform[row['_id']['publisher']]['TOTAL'] += row['count']
     html += "<table id='journals' class='tablesorter numbers'><thead><tr>" \
-            + "<th>Publisher</th><th>" + ("</th><th>".join(types)) \
+            + "<th>Publisher</th><th>Provider</th><th>" + ("</th><th>".join(types)) \
             + "</th><th>TOTAL</th></tr></thead><tbody>"
     for publisher, data in transform.items():
         count = []
@@ -7002,15 +7011,72 @@ def show_subscription_summary():
             else:
                 tcnt = ""
             count.append(tcnt)
-        html += f"<tr><td>{publisher}</td><td>" + "</td><td>".join(count) \
-                + f"</td><td>{data['TOTAL']:,}</td></tr>"
-    html += "</tbody><tfoot><tr><td style='text-align:right'>TOTAL</td><td>" \
+        html += f"<tr><td>{publisher}</td><td>{provider.get(publisher, '')}</td><td>" \
+            + "</td><td>".join(count) + f"</td><td>{data['TOTAL']:,}</td></tr>"
+    html += "</tbody><tfoot><tr><td style='text-align:right' colspan=2>TOTAL</td><td>" \
             + "</td><td>".join(f"<a href='/subscriptions/{key}'>{val:,}</a>" \
                                for key, val in types.items()) \
             + f"</td><td>{cnt:,}</td></tr></tfoot>"
     html += '</table>'
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title='Subscription summary', html=html,
+                                         navbar=generate_navbar('Subscriptions')))
+
+
+@app.route('/subscription_cost')
+@app.route('/subscription_cost/<string:provider>')
+def show_subscription_costs(provider=None):
+    ''' Show subscription costs
+    '''
+    errmsg = "Could not get data from subscription collection"
+    payload = [{"$project": {"costArray": {"$objectToArray": "$cost" }}},
+                            {"$unwind": "$costArray"},
+                            {"$group": {"_id": "$costArray.k",
+                                        "totalCost": {"$sum": {"$toDouble": "$costArray.v"}},
+                                        "count": {"$sum": 1}
+                              }},
+                              {"$sort": {"_id": 1}}]
+    if provider:
+        payload.insert(0, {"$match": {"provider": provider}})
+    try:
+        rows = DB['dis'].subscription.aggregate(payload)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning(errmsg),
+                               message=error_message(err))
+    data = {'Year': [], 'Cost': [], 'Count': []}
+    last_cost = 0
+    perc = {}
+    for row in rows:
+        perc[row['_id']] = {'percent': None, 'count': row['count'], 'cost': row['totalCost']}
+        if last_cost:
+            perc[row['_id']]['percent'] = ((row['totalCost'] - last_cost) / last_cost) * 100
+        last_cost = row['totalCost']
+        data['Year'].append(row['_id'])
+        data['Cost'].append(row['totalCost'])
+        data['Count'].append(row['count'])
+    title = 'Subscription costs by year'
+    html = "<table id='costs' class='tablesorter numbers'><thead><tr>" \
+           + "<th>Year</th><th>Subscriptions</th><th>Cost</th><th>% change</th></tr></thead><tbody>"
+    perclist = []
+    for year, val in perc.items():
+        if val['percent'] is not None:
+            perclist.append(val['percent'])
+            pp = f"{val['percent']:+.2f}%"
+        else:
+            pp = ""
+        html += f"<tr><td>{year}</td><td>{val['count']}</td><td>${val['cost']:,.2f}</td>" \
+                + f"<td>{pp}</td></tr>"
+    html += "</tbody><tfoot><tr><td colspan=3 style='text-align:right'>AVERAGE % change</td>" \
+            + f"<td>{sum(perclist)/len(perclist):+.2f}%</td></tr></tfoot></tbody></table>"
+    chartscript, chartdiv = DP.dual_axis_chart(data, title=title,
+                                               x_field='Year', bar_field='Cost',
+                                               line_field='Count')
+    endpoint_access()
+    title = f"Subscription costs for {provider}" if provider else "Subscription costs"
+    return make_response(render_template('bokeh.html', urlroot=request.url_root,
+                                         title=title, html=html,
+                                         chartscript=chartscript, chartdiv=chartdiv,
                                          navbar=generate_navbar('Subscriptions')))
 
 
@@ -7076,11 +7142,15 @@ def show_subscriptionlist(sub, stype='Journal', field='title'):
         return redirect(f"/subscription/{rows[0]['_id']}")
     html = "<table id='journals' class='tablesorter standard'><thead><tr>" \
            + '<th>Title</th><th>Publisher</th><th>Provider</th><th>Title ID</th>' \
-           + '</tr></thead><tbody>'
+           + '<th>Access</th></tr></thead><tbody>'
     for row in rows:
         link = f"<a href='/subscription/{str(row['_id'])}'>{row['title']}</a>"
+        access = '<span style="color: yellowgreen">YES</span>' \
+                  if row['access'] == 'Subscription' \
+                  else f"<span style='color: lime'>{row['access']}</span>"
         html += f"<tr><td>{link}</td><td>{row['publisher']}</td>" \
-                + f"<td>{row['provider']}</td><td>{row['title-id']}</td></tr>"
+                + f"<td>{row['provider']}</td><td>{row['title-id']}</td>" \
+                + f"<td>{access}</td></tr>"
     html += '</tbody></table>'
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
@@ -7129,6 +7199,27 @@ def show_subscription(sid):
                 vols.append(", ".join(txt))
         if vols:
             html += f"<tr><td>Volumes</td><td>{'<br>'.join(vols)}</td></tr>"
+    # Cost
+    chartscript = chartdiv = ""
+    if row.get('cost'):
+        data = {'year': [str(itm) for itm in row['cost'].keys()],
+                'cost': [float(itm) for itm in row['cost'].values()]}
+                #'cost2': [0.00] * len(row['cost'])}
+        html += f"<tr><td>Cost for FY {data['year'][-1]}</td><td>" \
+                + f"${data['cost'][-1]:,.2f}</td></tr>"
+        if len(data['year']) > 1:
+            delta = ((data['cost'][-1] - data['cost'][-2]) / data['cost'][-2]) * 100
+            delta = f"+{delta:.2f}" if delta > 0 else f"{delta:.2f}"
+            html += f"<tr><td>% cost change from FY {data['year'][-2]}</td><td>" \
+                    + f"{delta}%</td></tr>"
+        title = 'Subscription cost by year'
+        tt = [("Year", "@year"), ("Cost", "$@$name{0.2f}")]
+        chartscript, chartdiv = DP.stacked_bar_chart(data, title,
+                                                     xaxis='year', yaxis=('cost', 'cost2'),
+                                                     orient=pi/4, width=500, height=400,
+                                                     colors=['green']*2, legend=False,
+                                                     tooltip=tt)
+    # Close table and show button(s)
     html += "</table>"
     idx = 0
     for url in row['urls']:
@@ -7137,11 +7228,13 @@ def show_subscription(sid):
         if len(row['urls']) > 1 and idates[idx]:
             label += f" ({idates[idx]})"
         idx += 1
-        html += '<br><div><button id="toggle-to-all" type="button" class="btn btn-success btn-small"' \
+        html += '<br><div><button id="toggle-to-all" type="button" ' \
+                + 'class="btn btn-success btn-small"' \
                 + f"onclick=\"{link}\">Access {label}</button></div>"
     endpoint_access()
-    return make_response(render_template('general.html', urlroot=request.url_root,
+    return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title=row['title'], html=html,
+                                         chartscript=chartscript, chartdiv=chartdiv,
                                          navbar=generate_navbar('Subscriptions')))
 
 # ******************************************************************************
