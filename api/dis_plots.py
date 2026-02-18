@@ -3,7 +3,7 @@
 '''
 
 from math import ceil, pi
-from bokeh.models import Range1d, HoverTool, LinearAxis
+from bokeh.models import Range1d, HoverTool, LinearAxis, ColumnDataSource, NumeralTickFormatter
 from bokeh.embed import components
 from bokeh.palettes import all_palettes, plasma
 from bokeh.plotting import figure
@@ -168,7 +168,7 @@ def pie_chart(data, title, legend, height=300, width=400, location="right",
 
 
 def stacked_bar_chart(data, title, xaxis, yaxis, colors=None, width=None, height=None,
-                      orient=None,yaxis2=None):
+                      orient=None,yaxis2=None, tooltip=None, legend=True):
     ''' Create a stacked bar chart
         Keyword arguments:
           data: dictionary of data
@@ -180,20 +180,27 @@ def stacked_bar_chart(data, title, xaxis, yaxis, colors=None, width=None, height
           height: height of chart (optional)
           orient: orientation of x-axis labels (optional)
           yaxis2: extra y-axis column name (optional)
+          tooltip: list of tooltip tuples (optional)
+          legend: display legend (optional)
         Returns:
           Figure components
     '''
     if not colors:
         colors = plasma(len(yaxis))
+    tt = tooltip if tooltip else f"$name @{xaxis}: @$name"
     plt = figure(x_range=data[xaxis], title=title,
                  toolbar_location=None, tools="hover",
-                 tooltips=f"$name @{xaxis}: @$name")
+                 tooltips=tt)
     if width and height:
         plt.width = width
         plt.height = height
-    plt.vbar_stack(yaxis, x=xaxis, width=0.9,
-                   color=colors, source=data,
-                   legend_label=yaxis)
+    if legend:
+        plt.vbar_stack(yaxis, x=xaxis, width=0.9,
+                       color=colors, source=data,
+                       legend_label=yaxis)
+    else:
+        plt.vbar_stack(yaxis, x=xaxis, width=0.9,
+                       color=colors, source=data)
     if orient:
         plt.xaxis.major_label_orientation = orient
     if yaxis2:
@@ -205,19 +212,109 @@ def stacked_bar_chart(data, title, xaxis, yaxis, colors=None, width=None, height
             ymax += max(data[y])
         plt.y_range = Range1d(0, ymax)
         ymax = max(data[yaxis2])
-        ymax = ceil(ymax / 1000) * 1000
+        if ymax > 1000:
+            ymax = ceil(ymax / 1000) * 1000
         plt.extra_y_ranges = {yaxis2: Range1d(start=0, end=ymax)}
         plt.add_layout(LinearAxis(y_range_name=yaxis2, axis_label=yaxis2), 'right')
-        plt.line(xaxis, yaxis2, color="black", source=data,
-                 line_width=2, legend_label=yaxis2,
-                 y_range_name=yaxis2)
-    plt.legend.location = 'top_left'
-    if width and height:
+        if legend:
+            plt.line(xaxis, yaxis2, color="black", source=data,
+                     line_width=2, legend_label=yaxis2,
+                     y_range_name=yaxis2)
+        else:
+            plt.line(xaxis, yaxis2, color="black", source=data,
+                     line_width=2, y_range_name=yaxis2)
+    if legend:
+        plt.legend.location = 'top_left'
+    if width and height and legend:
         plt.add_layout(plt.legend[0], 'right')
     plt.xgrid.grid_line_color = None
     plt.y_range.start = 0
     plt.background_fill_color = "ghostwhite"
     return components(plt)
+
+
+def dual_axis_chart(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+    data,
+    title="Cost and Count by Year",
+    x_field="Year",
+    bar_field="Cost",
+    line_field=None,
+    bar_label=None,
+    line_label=None,
+    bar_color="green",
+    line_color="black",
+    bar_format="$0,0",
+    line_format="0,0",
+    width=900,
+    height=450,
+):
+    """
+    Generate Bokeh chart script and div for a dual-axis chart with a
+    categorical X-axis, a vertical bar series on the left Y-axis, and
+    an optional line series on the right Y-axis.
+    Args:
+        data       : dict with list values keyed by x_field, bar_field,
+                     and line_field
+        title      : chart title string
+        x_field    : key for categorical X-axis values
+        bar_field  : key for left Y-axis (vertical bars)
+        line_field : key for right Y-axis (line); omit or pass None to disable
+        bar_label  : legend label for bars  (defaults to bar_field)
+        line_label : legend label for line  (defaults to line_field)
+        bar_color  : hex/CSS color for bars
+        line_color : hex/CSS color for line
+        bar_format : NumeralJS format string for the left Y-axis (default "$0,0")
+        line_format: NumeralJS format string for the right Y-axis (default "0,0")
+        width      : figure width in pixels
+        height     : figure height in pixels
+    Returns:
+        (chartscript, chartdiv) — Bokeh JS <script> block and HTML <div>
+    """
+    bar_label = bar_label or bar_field
+    line_label = line_label or line_field
+    x_vals = [str(v) for v in data[x_field]]
+    bar_vals = list(data[bar_field])
+    source_data = {x_field: x_vals, bar_field: bar_vals}
+    if line_field:
+        line_vals = list(data[line_field])
+        source_data[line_field] = line_vals
+    source = ColumnDataSource(source_data)
+    # Left y-axis range (bars), with headroom for legend
+    bar_max = max(bar_vals) * 1.2
+    p = figure(x_range=x_vals, y_range=(0, bar_max), title=title, width=width, height=height,
+               toolbar_location=None, background_fill_color = "ghostwhite")
+    # --- Left Y-axis: vertical bars ---
+    bars = p.vbar(x=x_field, top=bar_field, source=source, width=0.6,
+                  color=bar_color, alpha=0.85, legend_label=bar_label)
+    # --- Right Y-axis: line (optional) ---
+    if line_field:
+        line_min = min(line_vals) * 0.85
+        line_max = max(line_vals) * 1.15
+        p.extra_y_ranges = {"right": Range1d(start=line_min, end=line_max)}
+        p.add_layout(LinearAxis(y_range_name="right",
+                                axis_label=line_label,
+                                formatter=NumeralTickFormatter(format=line_format)), "right")
+        p.line(x=x_field,
+               y=line_field, source=source, color=line_color, line_width=2.5,
+               y_range_name="right", legend_label=line_label)
+    # --- Axis styling ---
+    p.xaxis.axis_label = x_field
+    p.yaxis[0].axis_label = bar_label
+    p.yaxis[0].formatter = NumeralTickFormatter(format=bar_format)
+    p.xaxis.major_label_orientation = 0.6
+    # --- Hover tool (attached to bars) ---
+    tooltips = [
+        (x_field, f"@{x_field}"),
+        (bar_label, f"@{bar_field}{{{bar_format}}}"),
+    ]
+    if line_field:
+        tooltips.append((line_label, f"@{line_field}{{{line_format}}}"))
+    p.add_tools(HoverTool(renderers=[bars], tooltips=tooltips))
+    # --- Legend ---
+    p.legend.location = "top_left"
+    p.legend.click_policy = "hide"
+    chartscript, chartdiv = components(p)
+    return chartscript, chartdiv
 
 
 def wedge_chart(data, height=100, width=100, color='green'):

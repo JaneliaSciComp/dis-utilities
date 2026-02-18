@@ -2,10 +2,11 @@
     This program will load publications from a KBART file
 '''
 
-__version__ = '1.0.0'
+__version__ = '2.0.0'
 
 import argparse
 import collections
+from datetime import datetime
 import json
 from operator import attrgetter
 import sys
@@ -18,6 +19,8 @@ import jrc_common.jrc_common as JRC
 # pylint: disable=broad-exception-caught, logging-fstring-interpolation, no-member, too-many-arguments
 # Database
 DB = {}
+CORRELATE = {}
+SUBSCRIBED = {}
 # Counters
 COUNT = collections.defaultdict(lambda: 0, {})
 # Globals
@@ -50,8 +53,8 @@ def initialize_program():
         terminate_program(err)
     dbs = ['dis']
     for source in dbs:
-        dbo = attrgetter(f"{source}.{ARG.MANIFOLD}.write")(dbconfig)
-        LOGGER.info("Connecting to %s %s on %s as %s", dbo.name, ARG.MANIFOLD, dbo.host, dbo.user)
+        dbo = attrgetter(f"{source}.prod.write")(dbconfig)
+        LOGGER.info(f"Connecting to {dbo.name} prod on {dbo.host} as {dbo.user}")
         try:
             DB[source] = JRC.connect_database(dbo)
         except Exception as err:
@@ -75,8 +78,68 @@ def fallback_publisher(title):
     return None
 
 
+def get_identifier(row):
+    ''' Get identifier for a single publication
+        Keyword arguments:
+          row: row from data frame
+        Returns:
+          identifier
+    '''
+    ident = row['online_identifier'].strip() if row.get('online_identifier') \
+                                                and not pd.isna(row['online_identifier']) else ''
+    if not ident:
+        ident = row['print_identifier'].strip() if row.get('print_identifier') \
+                                                   and not pd.isna(row['print_identifier']) else ''
+    if not ident:
+        ident = row['title_id'].strip() if row.get('title_id') \
+                                        and not pd.isna(row['title_id']) else '-'
+    if not ident:
+        ident = '-'
+    return ident
+
+
+def add_volume(row, payload):
+    ''' Add volume information to payload
+        Keyword arguments:
+          row: row from data frame
+          payload: publication payload to set
+        Returns:
+          None
+    '''
+    vol = {}
+    for additional in ['date_first_issue_online', 'num_first_vol_online',
+                       'num_first_issue_online', 'date_last_issue_online', 'num_last_vol_online',
+                       'num_last_issue_online']:
+        if row.get(additional) and not pd.isna(row[additional]):
+            vol[additional] = row[additional]
+    if vol:
+        payload['volumes'].append(vol)
+
+
+def add_correlation(payload):
+    ''' Process a row
+        Keyword arguments:
+          payload: publication payload to update
+        Returns:
+          None
+    '''
+    if payload.get('access') != 'Subscription':
+        return
+    cost = {}
+    crec = CORRELATE.get(payload['title'])
+    for year in range(2011, datetime.now().year + 1):
+        if not pd.isna(crec[f'FY{str(year)}']):
+            cost[str(year)] = crec[f'FY{str(year)}']
+    if not cost:
+        LOGGER.warning("No cost found for %s", crec['Publication'])
+        return
+    payload['cost']= cost
+    LOGGER.warning(f"Correlated {payload['title']}")
+    COUNT['correlated'] += 1
+
+
 def set_payload(row, payload):
-    ''' Set payload
+    ''' Set payload for a single publication
         Keyword arguments:
           row: row from data frame
           payload: payload to set
@@ -94,35 +157,29 @@ def set_payload(row, payload):
     title = str(row['publication_title']).strip()
     if title == 'nan':
         terminate_program(f"Title not found for {row['publication_title']}")
-    for field in ['title_url', 'publisher_name']:
-        if pd.isna(row[field]):
-            fallback = ''
-            if field == 'publisher_name':
-                fallback = fallback_publisher(title)
-                if fallback:
-                    row[field] = fallback
-            if not fallback:
-                LOGGER.warning(f"{field} not found for {row['publication_title']}")
-                COUNT['skipped'] += 1
-                return
+    # Get publisher name
+    if pd.isna(row['publisher_name']):
+        fallback = fallback_publisher(title)
+        if fallback:
+            row['publisher_name'] = fallback
+        else:
+            LOGGER.warning(f"{field} not found for {row['publication_title']}")
+            COUNT['skipped'] += 1
+            return
     if pd.isna(row['publication_title']) or pd.isna(row['title_url']) \
        or pd.isna(row['publisher_name']):
         COUNT['skipped'] += 1
         return
     title_url = str(row['title_url']).strip()
-    ident = row['online_identifier'].strip() if row.get('online_identifier') \
-                                                and not pd.isna(row['online_identifier']) else ''
-    if not ident:
-        ident = row['print_identifier'].strip() if row.get('print_identifier') \
-                                                   and not pd.isna(row['print_identifier']) else ''
-    if not ident:
-        ident = row['title_id'].strip() if row.get('title_id') \
-                                        and not pd.isna(row['title_id']) else '-'
-    if not ident:
-        ident = '-'
+    # Get identifier
+    ident = get_identifier(row)
+    # Get publication type
     ptype = row['publication_type'].strip() if row.get('publication_type', '') \
         in ['Journal', 'Book', 'Book series', 'Monograph', 'Repository'] else ARG.TYPE
+    # Set payload
+    initial_load = False
     if not payload.get(title):
+        initial_load = True
         payload[title] = {'title': title,
                           'identifier': ident,
                           'provider': provider,
@@ -136,8 +193,6 @@ def set_payload(row, payload):
     if ident != payload[title]['identifier']:
         terminate_program(f"identifier mismatch for {title} " \
                           + f"({ident} != {payload[title]['identifier']})")
-    #if title_url != payload[title]['url']:
-    #    LOGGER.warning(f"url mismatch for {title} ({title_url} != {payload[title]['url']})")
     if row.get('publisher_name') and not pd.isna(row['publisher_name']):
         payload[title]['publisher'] = row.get('publisher_name')
     if ARG.TYPE == 'Book':
@@ -147,15 +202,10 @@ def set_payload(row, payload):
     # Add URL information
     if title_url not in payload[title]['urls']:
         payload[title]['urls'].append(title_url)
-    # Add volume information
-    vol = {}
-    for additional in ['date_first_issue_online', 'num_first_vol_online',
-                       'num_first_issue_online', 'date_last_issue_online', 'num_last_vol_online',
-                       'num_last_issue_online']:
-        if row.get(additional) and not pd.isna(row[additional]):
-            vol[additional] = row[additional]
-    if vol:
-        payload[title]['volumes'].append(vol)
+    add_volume(row, payload[title])
+    # Add info from correlation file
+    if initial_load and title in CORRELATE:
+        add_correlation(payload[title])
 
 
 def insert_record(val):
@@ -184,11 +234,29 @@ def insert_record(val):
         terminate_program(err)
 
 
+def get_subscriptions():
+    ''' Get subscriptions from the subscription collection
+        Keyword arguments:
+          None
+        Returns:
+          subscriptions
+    '''
+    try:
+        rows = DB['dis'].subscription.find({})
+    except Exception as err:
+        terminate_program(err)
+    cnt = 0
+    for row in rows:
+        SUBSCRIBED[row['title']] = row
+        cnt += 1
+    LOGGER.info(f"Found {cnt:,} current subscriptions")
+
+
 def processing():
     ''' Processing
     '''
-    if '.xls' in ARG.FILE:
-        tabs = pd.ExcelFile(ARG.FILE).sheet_names
+    if '.xls' in ARG.KBART:
+        tabs = pd.ExcelFile(ARG.KBART).sheet_names
         LOGGER.info(f"Available sheets: {', '.join(tabs)}")
         if len(tabs) > 1:
             if ARG.SHEET:
@@ -199,15 +267,23 @@ def processing():
                                             choices=tabs)]
                 answers = inquirer.prompt(questions, theme=BlueComposure())
                 selected_tab = answers['sheet']
-            pdf = pd.read_excel(ARG.FILE, sheet_name=selected_tab, header=0, dtype=str)
+            pdf = pd.read_excel(ARG.KBART, sheet_name=selected_tab, header=0, dtype=str)
         else:
-            pdf = pd.read_excel(ARG.FILE, header=0, dtype=str)
+            pdf = pd.read_excel(ARG.KBART, header=0, dtype=str)
     else:
-        pdf = pd.read_csv(ARG.FILE, header=0, sep="\t",  dtype=str)
+        pdf = pd.read_csv(ARG.KBART, header=0, sep="\t",  dtype=str)
+    #ARG.CORRELATE = 'HHMICollectionsBudgetPivots_7-31-2025.xlsx'
+    if ARG.CORRELATE:
+        correlate = pd.read_excel(ARG.CORRELATE, header=0, sheet_name='Libraries Site Licenses', dtype=str)
+        for _, row in correlate.iterrows():
+            if pd.isna(row['Publication']):
+                continue
+            COUNT['correlate'] += 1
+            CORRELATE[row['Publication']] = row
+        LOGGER.info(f"Found {COUNT['correlate']:,} publications in correlation file")
     payload = {}
     for _, row in tqdm(pdf.iterrows(), total=len(pdf), desc="Processing"):
         COUNT['read'] += 1
-        LOGGER.debug(json.dumps(row, default=str))
         if not row.get('title_id'):
             row['title_id'] = '-'
         if row['publication_title'] and row['title_id'] and row['title_url'] \
@@ -225,6 +301,7 @@ def processing():
     print(f"Journals read:    {COUNT['read']:,}")
     print(f"Records skipped:  {COUNT['skipped']:,}")
     print(f"Tokens:           {COUNT['token']:,}")
+    print(f"Correlated:       {COUNT['correlated']:,}")
     print(f"Records inserted: {COUNT['inserted']:,}")
     print(f"Records updated:  {COUNT['updated']:,}")
 
@@ -235,18 +312,15 @@ if __name__ == '__main__':
         description="Load journals for one publisher")
     PARSER.add_argument('--provider', dest='PROVIDER', action='store',
                         help='Provider')
-    PARSER.add_argument('--file', dest='FILE', action='store',
-                        required=True, help='Excel file')
+    PARSER.add_argument('--kbart', dest='KBART', action='store',
+                        required=True, help='KBART file (text or Excel)')
     PARSER.add_argument('--sheet', dest='SHEET', action='store',
-                        default=None, help='Sheet name')
+                        default=None, help='Sheet name for KBART file (Excel only)')
+    PARSER.add_argument('--correlate', dest='CORRELATE', action='store',
+                        help='Excel correlation file')
     PARSER.add_argument('--type', dest='TYPE', action='store',
                         default='Journal', choices=['Journal', 'Book', 'Monograph'],
-                        help='Resource type (Journal, Book, Monograph)')
-    PARSER.add_argument('--manifold', dest='MANIFOLD', action='store',
-                        default='prod', choices=['dev', 'prod'],
-                        help='MongoDB manifold (dev, prod)')
-    PARSER.add_argument('--test', dest='TEST', action='store_true',
-                        default=False, help='Send email to developer')
+                        help='Resource type (Journal, Book, Monograph, etc.)')
     PARSER.add_argument('--write', dest='WRITE', action='store_true',
                         default=False, help='Write to database/config system')
     PARSER.add_argument('--verbose', dest='VERBOSE', action='store_true',
