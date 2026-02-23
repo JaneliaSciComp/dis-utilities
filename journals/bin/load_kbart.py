@@ -2,7 +2,7 @@
     This program will load publications from a KBART file
 '''
 
-__version__ = '2.0.0'
+__version__ = '3.0.0'
 
 import argparse
 import collections
@@ -16,7 +16,7 @@ import pandas as pd
 from tqdm import tqdm
 import jrc_common.jrc_common as JRC
 
-# pylint: disable=broad-exception-caught, logging-fstring-interpolation, no-member, too-many-arguments
+# pylint: disable=broad-exception-caught, logging-fstring-interpolation, no-member, too-many-arguments, too-many-branches
 # Database
 DB = {}
 CORRELATE = {}
@@ -54,7 +54,7 @@ def initialize_program():
     dbs = ['dis']
     for source in dbs:
         dbo = attrgetter(f"{source}.prod.write")(dbconfig)
-        LOGGER.info(f"Connecting to {dbo.name} prod on {dbo.host} as {dbo.user}")
+        LOGGER.info(f"Connecting to {dbo.name} {ARG.MANIFOLD} on {dbo.host} as {dbo.user}")
         try:
             DB[source] = JRC.connect_database(dbo)
         except Exception as err:
@@ -131,7 +131,7 @@ def add_correlation(payload):
         if not pd.isna(crec[f'FY{str(year)}']):
             cost[str(year)] = crec[f'FY{str(year)}']
     if not cost:
-        LOGGER.warning("No cost found for %s", crec['Publication'])
+        LOGGER.warning(f"No cost found for {crec['Publication']}")
         return
     payload['cost']= cost
     LOGGER.warning(f"Correlated {payload['title']}")
@@ -163,7 +163,7 @@ def set_payload(row, payload):
         if fallback:
             row['publisher_name'] = fallback
         else:
-            LOGGER.warning(f"{field} not found for {row['publication_title']}")
+            LOGGER.warning(f"Publisher not found for {row['publication_title']}")
             COUNT['skipped'] += 1
             return
     if pd.isna(row['publication_title']) or pd.isna(row['title_url']) \
@@ -185,8 +185,6 @@ def set_payload(row, payload):
                           'provider': provider,
                           'publisher': str(row['publisher_name']).strip(),
                           'urls': [],
-                          'title-id': '-' if pd.isna(row.get('title_id')) \
-                                          else row.get('title_id').strip(),
                           'type': ptype,
                           'access': 'Subscription',
                           'volumes': []}
@@ -195,6 +193,10 @@ def set_payload(row, payload):
                           + f"({ident} != {payload[title]['identifier']})")
     if row.get('publisher_name') and not pd.isna(row['publisher_name']):
         payload[title]['publisher'] = row.get('publisher_name')
+    for field in ['online_identifier', 'print_identifier', 'title_id']:
+        key = field.replace('_', '-')
+        payload[title][key] = '-' if pd.isna(row.get(field)) \
+                                  else row.get(field).strip()
     if ARG.TYPE == 'Book':
         payload[title]['type'] = 'Book series' if 'bookseries' in title_url else 'Book'
     if 'access_type' in row and row['access_type'] in ['Complimentary', 'Free-To-Read', 'F']:
@@ -231,6 +233,8 @@ def insert_record(val):
         else:
             COUNT['updated'] += 1
     except Exception as err:
+        LOGGER.error("Could not upsert record")
+        print(json.dumps(val, indent=2))
         terminate_program(err)
 
 
@@ -274,7 +278,8 @@ def processing():
         pdf = pd.read_csv(ARG.KBART, header=0, sep="\t",  dtype=str)
     #ARG.CORRELATE = 'HHMICollectionsBudgetPivots_7-31-2025.xlsx'
     if ARG.CORRELATE:
-        correlate = pd.read_excel(ARG.CORRELATE, header=0, sheet_name='Libraries Site Licenses', dtype=str)
+        correlate = pd.read_excel(ARG.CORRELATE, header=0, sheet_name='Libraries Site Licenses',
+                                  dtype=str)
         for _, row in correlate.iterrows():
             if pd.isna(row['Publication']):
                 continue
@@ -294,7 +299,7 @@ def processing():
             set_payload(row, payload)
         else:
             COUNT['skipped'] += 1
-            LOGGER.warning("Skipping row %s", row['publication_title'])
+            LOGGER.warning(f"Skipping row {row['publication_title']}")
     if payload:
         for val in tqdm(payload.values(), desc="Inserting records"):
             insert_record(val)
@@ -323,6 +328,9 @@ if __name__ == '__main__':
                         help='Resource type (Journal, Book, Monograph, etc.)')
     PARSER.add_argument('--write', dest='WRITE', action='store_true',
                         default=False, help='Write to database/config system')
+    PARSER.add_argument('--manifold', dest='MANIFOLD', action='store',
+                        default='prod', choices=['dev', 'prod'],
+                        help='MongoDB manifold (dev, prod)')
     PARSER.add_argument('--verbose', dest='VERBOSE', action='store_true',
                         default=False, help='Flag, Chatty')
     PARSER.add_argument('--debug', dest='DEBUG', action='store_true',

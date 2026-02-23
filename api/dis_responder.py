@@ -34,7 +34,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "104.0.0"
+__version__ = "105.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -78,11 +78,11 @@ NAV = {"Home": "",
                     f"DOIs missing journals{'&nbsp;'*9}": "dois_nojournal",
                     "Journals referenced": "journals_referenced"},
        "Subscriptions": {"Summary": "subscriptions",
-                         "Journals": "subscriptions/Journal",
-                         "Repositories": "subscriptions/Repository",
-                         "Books": "subscriptions/Book",
-                         "Book series": "subscriptions/Book series",
-                         "Monographs": "subscriptions/Monograph"},
+                         "Journals": "subscriptions/type/Journal",
+                         "Repositories": "subscriptions/type/Repository",
+                         "Books": "subscriptions/type/Book",
+                         "Book series": "subscriptions/type/Book series",
+                         "Monographs": "subscriptions/type/Monograph"},
        "Tag/affiliation": {"DOIs by:": {"tag": "dois_tag", "acknowledgement": "dois_ack",
                                         "lab": "dois_lab"},
                            f"Top DOI tags by year{'&nbsp;'*22}": "dois_top",
@@ -6930,7 +6930,6 @@ def journals_referenced(year='All'):
         payload[0]['$match']['jrc_publishing_date'] = {"$regex": "^"+ year}
     try:
         rows = DB['dis'].dois.aggregate(payload)
-        # , collation={"locale": "en"}
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get DOIs"),
@@ -6978,8 +6977,9 @@ def show_subscription_summary():
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning(errmsg),
                                message=error_message(err))
+    link = f"<a href='/subscription/provider'>{pcount} providers</a>"
     html = f"<h4>Found {cnt:,} subscriptions ({oacnt/cnt*100:.2f}% open access) across " \
-           + f"{len(pubcnt):,} publishers and {pcount} providers</h4>"
+           + f"{len(pubcnt):,} publishers and {link}</h4>"
     types = {}
     for row in typs:
         types[row['_id']] = int(row['count'])
@@ -7011,10 +7011,15 @@ def show_subscription_summary():
             else:
                 tcnt = ""
             count.append(tcnt)
-        html += f"<tr><td>{publisher}</td><td>{provider.get(publisher, '')}</td><td>" \
+        pp = provider.get(publisher, '')
+        if pp:
+            link = f"<a href='/subscription/provider/{provider.get(publisher, '')}'>{pp}</a>"
+        else:
+            link = ""
+        html += f"<tr><td>{publisher}</td><td>{link}</td><td>" \
             + "</td><td>".join(count) + f"</td><td>{data['TOTAL']:,}</td></tr>"
     html += "</tbody><tfoot><tr><td style='text-align:right' colspan=2>TOTAL</td><td>" \
-            + "</td><td>".join(f"<a href='/subscriptions/{key}'>{val:,}</a>" \
+            + "</td><td>".join(f"<a href='/subscriptions/type/{key}'>{val:,}</a>" \
                                for key, val in types.items()) \
             + f"</td><td>{cnt:,}</td></tr></tfoot>"
     html += '</table>'
@@ -7022,12 +7027,77 @@ def show_subscription_summary():
                                          title='Subscription summary', html=html,
                                          navbar=generate_navbar('Subscriptions')))
 
+@app.route('/subscription/provider/<string:prov>')
+def show_subscription_summary_by_provider(prov):
+    ''' Show subscription summary by provider
+    '''
+    errmsg = "Could not get data from subscription collection"
+    try:
+        typs = DB['dis'].subscription.aggregate([{"$match": {"provider": prov}},
+                                                 {"$group": {"_id": "$type", "count": {"$sum": 1}}},
+                                                 {"$sort": {"_id": 1}}])
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning(errmsg),
+                               message=error_message(err))
+    types = {}
+    for row in typs:
+        types[row['_id']] = int(row['count'])
+    payload = [{"$match": {"provider": prov}},
+               {"$group": {"_id": {"publisher": "$publisher", "type": "$type"},
+                           "count": {"$sum": 1}}},
+               {"$sort": {"_id.publisher": 1, "_id.type": 1}}
+              ]
+    try:
+        rows = DB['dis'].subscription.aggregate(payload)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning(errmsg),
+                               message=error_message(err))
+    transform = {}
+    cnt = 0
+    for row in rows:
+        if row['_id']['publisher'] not in transform:
+            transform[row['_id']['publisher']] = collections.defaultdict(lambda: 0, {})
+        transform[row['_id']['publisher']][row['_id']['type']] = row['count']
+        transform[row['_id']['publisher']]['TOTAL'] += row['count']
+    html = "<table id='journals' class='tablesorter numbers'><thead><tr>" \
+            + "<th>Publisher</th><th>" + ("</th><th>".join(types)) \
+            + "</th><th>TOTAL</th></tr></thead><tbody>"
+    cnt = 0
+    for publisher, data in transform.items():
+        count = []
+        for typ in types:
+            if typ in data:
+                tcnt = f"<a href='/subscriptionlist/{publisher}/{typ}/publisher'>" \
+                       + f"{data[typ]:,}</a>"
+                cnt += data[typ]
+            else:
+                tcnt = ""
+            count.append(tcnt)
+        html += f"<tr><td>{publisher}</td><td>" \
+            + "</td><td>".join(count) + f"</td><td>{data['TOTAL']:,}</td></tr>"
+    html += "</tbody><tfoot><tr><td style='text-align:right' colspan=1>TOTAL</td><td>" \
+            + "</td><td>".join(f"<a href='/subscriptions/type/{key}'>{val:,}</a>" \
+                               for key, val in types.items()) \
+            + f"</td><td>{cnt:,}</td></tr></tfoot>"
+    html += '</table>'
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=f"Subscription summary for {prov}", html=html,
+                                         navbar=generate_navbar('Subscriptions')))
 
-@app.route('/subscription_cost')
-@app.route('/subscription_cost/<string:provider>')
-def show_subscription_costs(provider=None):
+
+@app.route('/subscription/cost')
+@app.route('/subscription/cost/<string:max_year>')
+@app.route('/subscription/cost/<string:max_year>/<string:provider>')
+def show_subscription_costs(max_year=None, provider=None):
     ''' Show subscription costs
     '''
+    if provider is not None:
+        max_year = 'provider'
+    elif not max_year:
+        max_year = str(datetime.now().year)
     errmsg = "Could not get data from subscription collection"
     payload = [{"$project": {"costArray": {"$objectToArray": "$cost" }}},
                             {"$unwind": "$costArray"},
@@ -7038,6 +7108,17 @@ def show_subscription_costs(provider=None):
                               {"$sort": {"_id": 1}}]
     if provider:
         payload.insert(0, {"$match": {"provider": provider}})
+        providers = []
+    else:
+        pipeline = [{"$match": {"cost": {"$exists": True}}},
+                    {"$group": {"_id": None, "providers": {"$addToSet": "$provider"}}}]
+        try:
+            rows = DB['dis'].subscription.aggregate(pipeline)
+        except Exception as err:
+            return render_template('error.html', urlroot=request.url_root,
+                                   title=render_warning(errmsg),
+                                   message=error_message(err))
+        providers = sorted(list(rows)[0]['providers'])
     try:
         rows = DB['dis'].subscription.aggregate(payload)
     except Exception as err:
@@ -7048,6 +7129,8 @@ def show_subscription_costs(provider=None):
     last_cost = 0
     perc = {}
     for row in rows:
+        if max_year != 'provider' and row['_id'] > max_year:
+            continue
         perc[row['_id']] = {'percent': None, 'count': row['count'], 'cost': row['totalCost']}
         if last_cost:
             perc[row['_id']]['percent'] = ((row['totalCost'] - last_cost) / last_cost) * 100
@@ -7056,31 +7139,73 @@ def show_subscription_costs(provider=None):
         data['Cost'].append(row['totalCost'])
         data['Count'].append(row['count'])
     title = 'Subscription costs by year'
+    # Table
     html = "<table id='costs' class='tablesorter numbers'><thead><tr>" \
            + "<th>Year</th><th>Subscriptions</th><th>Cost</th><th>% change</th></tr></thead><tbody>"
     perclist = []
+    pyear = datetime.now().year - 1
     for year, val in perc.items():
         if val['percent'] is not None:
             perclist.append(val['percent'])
             pp = f"{val['percent']:+.2f}%"
         else:
             pp = ""
+        pyear = year
         html += f"<tr><td>{year}</td><td>{val['count']}</td><td>${val['cost']:,.2f}</td>" \
                 + f"<td>{pp}</td></tr>"
     html += "</tbody><tfoot><tr><td colspan=3 style='text-align:right'>AVERAGE % change</td>" \
             + f"<td>{sum(perclist)/len(perclist):+.2f}%</td></tr></tfoot></tbody></table>"
+    if not provider:
+        html += "<br><br><h3>Providers</h3>"
+        html += '<br>'.join([f"<a href='/subscription/cost/provider/{pp}'>{pp}</a>" \
+                for pp in providers])
+    # Bar/line chart
     chartscript, chartdiv = DP.dual_axis_chart(data, title=title,
                                                x_field='Year', bar_field='Cost',
                                                line_field='Count')
+    if provider is None:
+        # Pie chart
+        payload = [{"$project": {"costArray": {"$objectToArray": "$cost" },
+                                 "provider": "$provider"}},
+                                {"$unwind": "$costArray"},
+                                {"$group": {"_id": {"provider": "$provider",
+                                                    "year": "$costArray.k"},
+                                            "totalCost": {"$sum": {"$toDouble": "$costArray.v"}}}},
+                                {"$match": {"_id.year": str(pyear)}},
+                                {"$sort": {"totalCost": -1}}]
+        try:
+            rows = DB['dis'].subscription.aggregate(payload)
+        except Exception as err:
+            return render_template('error.html', urlroot=request.url_root,
+                                   title=render_warning(errmsg),
+                                   message=error_message(err))
+        data = {}
+        for row in rows:
+            data[row['_id']['provider']] = row['totalCost']
+        cnt = len(data)
+        colors = plasma(cnt)
+        if cnt == 1:
+            colors = ['green']
+        elif cnt == 2:
+            colors = DP.SOURCE_PALETTE
+        elif cnt <= 10:
+            colors = all_palettes['Category10'][cnt]
+        elif cnt <= 20:
+            colors = all_palettes['Category20'][cnt]
+        piescript, piediv = DP.pie_chart(data, f'Subscription costs by provider for {pyear}',
+                                         'provider', colors=colors,
+                                         width=600, height=450, location="top_right")
+        chartscript += piescript
+        chartdiv += piediv
     endpoint_access()
-    title = f"Subscription costs for {provider}" if provider else "Subscription costs"
+    title = f"Subscription costs for {provider}" if provider is not None else "Subscription costs"
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title=title, html=html,
                                          chartscript=chartscript, chartdiv=chartdiv,
                                          navbar=generate_navbar('Subscriptions')))
 
 
-@app.route('/subscriptions/<string:jtype>')
+@app.route('/subscriptions/type/<string:jtype>')
 def show_subscriptions(jtype):
     ''' Show journals, books, etc. in a table
     '''
@@ -7105,7 +7230,7 @@ def show_subscriptions(jtype):
         jlist[row['title']] = True
         publist[row['publisher']] = True
         publist[row['publisher']] = True
-        jour = f"<a href='{row['urls'][0]}'>{row['title']}</a>"
+        jour = f"<a href='{row['urls'][0]}'>{row['title']}</a>" if row.get('urls') else row['title']
         jour = f"<a href='/subscription/{str(row['_id'])}'>{row['title']}</a>"
         html += f"<tr><td>{jour}</td><td>{row['publisher']}</td>" \
                 + f"<td>{row['provider']}</td></tr>"
@@ -7121,15 +7246,17 @@ def show_subscriptions(jtype):
                                          html=html, sub=jtype,
                                          navbar=generate_navbar('Subscriptions')))
 
-
+@app.route('/subscriptionlist/<string:sub>')
 @app.route('/subscriptionlist/<string:sub>/<string:stype>/<string:field>')
-def show_subscriptionlist(sub, stype='Journal', field='title'):
+def show_subscriptionlist(sub, stype=None, field='publisher'):
     ''' Show subscription list for a title
     '''
     errmsg = "Could not get data from subscription collection"
+    payload = {field: sub, "type": stype} if stype else {field: sub}
     try:
-        cnt = DB['dis'].subscription.count_documents({field: sub, "type": stype})
-        rows = DB['dis'].subscription.find({field: sub, "type": stype})
+        cnt = DB['dis'].subscription.count_documents(payload)
+        srt = [("type", 1), ("title", 1)]
+        rows = DB['dis'].subscription.find(payload).collation({"locale": "en"}).sort(srt)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning(errmsg),
@@ -7140,28 +7267,138 @@ def show_subscriptionlist(sub, stype='Journal', field='title'):
                                message=f"No subscriptions were found for {sub}")
     if cnt == 1:
         return redirect(f"/subscription/{rows[0]['_id']}")
-    html = "<table id='journals' class='tablesorter standard'><thead><tr>" \
-           + '<th>Title</th><th>Publisher</th><th>Provider</th><th>Title ID</th>' \
-           + '<th>Access</th></tr></thead><tbody>'
+    html = "<table id='journals' class='tablesorter standard'><thead><tr>"
+    if not stype:
+        html += "<th>Type</th>"
+    html += "<th>Title</th><th>Publisher</th><th>Provider</th><th>Title ID</th>" \
+            + '<th>Access</th></tr></thead><tbody>'
     for row in rows:
+        ptype = f"<td>{row['type']}</td>" if not stype else ''
         link = f"<a href='/subscription/{str(row['_id'])}'>{row['title']}</a>"
         access = '<span style="color: yellowgreen">YES</span>' \
                   if row['access'] == 'Subscription' \
                   else f"<span style='color: lime'>{row['access']}</span>"
-        html += f"<tr><td>{link}</td><td>{row['publisher']}</td>" \
+        html += f"<tr>{ptype}<td>{link}</td><td>{row['publisher']}</td>" \
                 + f"<td>{row['provider']}</td><td>{row['title-id']}</td>" \
                 + f"<td>{access}</td></tr>"
     html += '</tbody></table>'
+    title = f"ubscriptions for {field} {sub} ({cnt:,})"
+    title = f"{stype} s{title}" if stype else f"S{title}"
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title=f"{stype} subscriptions for {field} " \
-                                               + f"{sub} ({cnt:,})", html=html,
+                                         title=title, html=html,
+                                         navbar=generate_navbar('Subscriptions')))
+
+
+@app.route('/subscription/provider')
+def show_subscription_providers():
+    ''' Show subscription information across all providers
+    '''
+    errmsg = "Could not get data from subscription collection"
+    payload = [{"$group": {"_id": {"provider": "$provider", "type": "$type"},
+                "count":      {"$sum": 1},
+                "publishers": {"$addToSet": "$publisher"}}},
+               {"$group": {"_id": "$_id.provider","count": {"$sum": "$count"},
+                           "publishers": {"$push": "$publishers"},
+                           "types": {"$push": {"type": "$_id.type", "count": "$count"}}}},
+               {"$project": {"count": 1,
+                             "distinct_publishers": {"$size":
+                                                     {"$reduce":
+                                                      {"input": "$publishers",
+                                                       "initialValue": [],
+                                                       "in": {"$setUnion": ["$$value", "$$this"]}
+                                                      }}}, "types": 1}},
+               {"$sort": {"count": -1, "_id": 1}}]
+    cnt = 0
+    try:
+        rows = DB['dis'].subscription.aggregate(payload)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning(errmsg), message=error_message(err))
+    html = "<table id='providers' class='tablesorter standard'><thead><tr>" \
+           + "<th>Provider</th><th>Publication count</th><th>Publishers</th>" \
+           + "<th>Publication types</th></tr></thead><tbody>"
+    for row in rows:
+        cnt += 1
+        types = "<br>".join(f"{typ['type']}: {typ['count']:,}"
+                            for typ in sorted(row['types'], key=lambda x: x['count'],
+                                              reverse=True))
+        link = f"<a href='/subscription/provider/{row['_id']}'>{row['_id']}</a>"
+        if row['distinct_publishers'] == 1:
+            link = f"<a href='/subscriptionlist/{row['_id']}/{row['types'][0]['type']}" \
+                + f"/publisher'>{row['_id']}</a>"
+        html += (
+            f"<tr><td>{link}</td>"
+            f"<td style='text-align: center'>{row['count']:,}</td>"
+            f"<td style='text-align: center'>{row['distinct_publishers']}</td>"
+            f"<td>{types}</td></tr>"
+        )
+    html += "</tbody></table>"
+    # Subscription charges
+    html += "<br><br><h3>Subscription charges</h3>"
+    payload = [{"$match": {"type": {"$ne": "Collection"}, "cost": {"$exists": True, "$ne": None}}},
+               {"$project": {"title": 1, "provider": 1,
+                             "latestCost": {"$reduce": {"input": {"$objectToArray": "$cost"},
+                                                        "initialValue": {"k": "", "v": 0},
+                                                        "in": {"$cond": {"if":
+                                                                         {"$gt": ["$$this.k",
+                                                                                  "$$value.k"]},
+                                                                         "then": "$$this",
+                                                                         "else": "$$value"}}}}}},
+               {"$set": {"costValue": {"$toDouble": "$latestCost.v"}}},
+               {"$match": {"costValue": {"$ne": None}}},
+               {"$sort": {"costValue": 1}},
+               {"$group": {"_id": "-", "minv": {"$first": "$costValue"},
+                           "mint": {"$first": "$title"}, "minp": {"$first": "$provider"},
+                           "maxv": {"$last": "$costValue"}, "maxt": {"$last": "$title"},
+                           "maxp": {"$last": "$provider"},
+                           "avg": {"$avg": "$costValue"}}},
+               {"$project": {"_id": 0, "minv": 1, "mint": 1, "minp": 1, "maxv": 1,
+                             "maxt": 1, "maxp": 1, "avg": {"$round": ["$avg", 2]}}}]
+    try:
+        rows = DB['dis'].subscription.aggregate(payload)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning(errmsg),
+                               message=error_message(err))
+    row = list(rows)[0]
+    html += f"Minimum: ${row['minv']:,.2f} ({row['minp']} - {row['mint']})<br>"
+    html += f"Maximum: ${row['maxv']:,.2f} ({row['maxp']} - {row['maxt']})<br>"
+    html += f"Average: ${row['avg']:,.2f}"
+    # APCs
+    html += "<br><br><h3>Account Processing Charges (APCs)</h3>"
+    payload = [{"$project": {"title": 1, "provider": 1, "apcValues": {"$objectToArray": "$apc"}}},
+               {"$unwind": "$apcValues"},
+               {"$set": {"apcValue": {"$toDouble": "$apcValues.v"}}},
+               {"$sort": {"apcValue": 1}},
+               {"$group": {"_id": "-", "minv": {"$first": "$apcValue"},
+                           "mint": {"$first": "$title"}, "minp": {"$first": "$provider"},
+                           "maxv": {"$last": "$apcValue"},
+                           "maxt": {"$last": "$title"}, "maxp": {"$last": "$provider"},
+                           "avg": {"$avg": "$apcValue"}}},
+               {"$project": {"_id": 0, "minv": 1, "mint": 1,
+                             "maxv": 1, "maxt": 1, "minp": 1, "maxp": 1,
+                             "avg": {"$round": ["$avg", 2]}}}]
+    try:
+        rows = DB['dis'].subscription.aggregate(payload)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning(errmsg),
+                               message=error_message(err))
+    row = list(rows)[0]
+    html += f"Minimum APC: ${row['minv']:,.2f} ({row['minp']} - {row['mint']})<br>"
+    html += f"Maximum APC: ${row['maxv']:,.2f} ({row['maxp']} - {row['maxt']})<br>"
+    html += f"Average APC: ${row['avg']:,.2f}"
+    title = f"Subscription providers ({cnt:,})"
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=title, html=html,
                                          navbar=generate_navbar('Subscriptions')))
 
 
 @app.route('/subscription/<string:sid>')
 def show_subscription(sid):
-    ''' Show subscription
+    ''' Show subscription information for a single publication (by ID)
     '''
     errmsg = "Could not get data from subscription collection"
     try:
@@ -7178,13 +7415,21 @@ def show_subscription(sid):
     dlio = row.get('date_last_issue_online', '')
     lio = row.get('num_last_issue_online', '')
     nvo = row.get('num_last_vol_online', '')
+    color = 'yellowgreen' if row['access'] == 'Subscription' else 'lime'
     html = f"<table class='proplist'><tr><td>Publisher</td><td>{row['publisher']}</td></tr>" \
            + f"<tr><td>Type</td><td>{row['type']}</td></tr>" \
-           + f"<tr><td>Access</td><td>{row['access']}</td></tr>" \
-           + f"<tr><td>Provider</td><td>{row['provider']}</td></tr>" \
+           + f"<tr><td>Access</td><td><span style='color: {color}'>{row['access']}</span>" \
+           + f"</td></tr><tr><td>Provider</td><td>{row['provider']}</td></tr>" \
+           + f"<tr><td>Print ISSN</td><td>{row['print-identifier']}</td></tr>" \
+           + f"<tr><td>Online ISSN</td><td>{row['online-identifier']}</td></tr>" \
            + f"<tr><td>Title ID</td><td>{row['title-id']}</td></tr>"
     vols = []
     idates = []
+    if row.get('apc'):
+        apc_html = "<br>".join(
+            f"{year}: ${value:,.2f}" for year, value in sorted(row['apc'].items())
+        )
+        html += f"<tr><td>APC</td><td>{apc_html}</td></tr>"
     if row.get('volumes'):
         for vol in row['volumes']:
             txt = []
@@ -7221,16 +7466,17 @@ def show_subscription(sid):
                                                      tooltip=tt)
     # Close table and show button(s)
     html += "</table>"
-    idx = 0
-    for url in row['urls']:
-        link = f"window.location.href=\'{url}\'"
-        label = row['type']
-        if len(row['urls']) > 1 and idates[idx]:
-            label += f" ({idates[idx]})"
-        idx += 1
-        html += '<br><div><button id="toggle-to-all" type="button" ' \
-                + 'class="btn btn-success btn-small"' \
-                + f"onclick=\"{link}\">Access {label}</button></div>"
+    if row.get('urls'):
+        idx = 0
+        for url in row['urls']:
+            link = f"window.location.href=\'{url}\'"
+            label = row['type']
+            if len(row['urls']) > 1 and idates[idx]:
+                label += f" ({idates[idx]})"
+            idx += 1
+            html += '<br><div><button id="toggle-to-all" type="button" ' \
+                    + 'class="btn btn-success btn-small"' \
+                    + f"onclick=\"{link}\">Access {label}</button></div>"
     endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title=row['title'], html=html,
