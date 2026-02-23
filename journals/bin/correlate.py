@@ -2,7 +2,7 @@
     This program will correlate a budgeting spreadsheet with the subscription collection
 '''
 
-__version__ = '1.0.0'
+__version__ = '2.0.0'
 
 import argparse
 import collections
@@ -54,11 +54,28 @@ def initialize_program():
     dbs = ['dis']
     for source in dbs:
         dbo = attrgetter(f"{source}.{ARG.MANIFOLD}.write")(dbconfig)
-        LOGGER.info("Connecting to %s %s on %s as %s", dbo.name, ARG.MANIFOLD, dbo.host, dbo.user)
+        LOGGER.info(f"Connecting to {dbo.name} {ARG.MANIFOLD} on {dbo.host} as {dbo.user}")
         try:
             DB[source] = JRC.connect_database(dbo)
         except Exception as err:
             terminate_program(err)
+
+
+def find_cost(row):
+    ''' Find the cost for a row
+        Keyword arguments:
+          row: row to process
+        Returns:
+          cost: cost dictionary
+    '''
+    cost = {}
+    for year in range(2011, datetime.now().year + 1):
+        LOGGER.debug(f"{row['Publication']} FY{str(year)}: {row[f'FY{str(year)}']}")
+        if not pd.isna(row[f'FY{str(year)}']):
+            cost[str(year)] = row[f'FY{str(year)}']
+    if not cost:
+        LOGGER.warning(f"No cost found for {row['Publication']}")
+    return cost
 
 
 def process_row(row, subscribed):
@@ -74,13 +91,13 @@ def process_row(row, subscribed):
         return
     COUNT['subscription'] += 1
     cost = {}
-    print("Process row", row['Publication'])
+    LOGGER.debug("Process row", row['Publication'])
     for year in range(2011, datetime.now().year + 1):
-        print(f"{row['Publication']} FY{str(year)}: {row[f'FY{str(year)}']}")
+        LOGGER.debug(f"{row['Publication']} FY{str(year)}: {row[f'FY{str(year)}']}")
         if not pd.isna(row[f'FY{str(year)}']):
             cost[str(year)] = row[f'FY{str(year)}']
     if not cost:
-        LOGGER.warning("No cost found for %s", row['Publication'])
+        LOGGER.warning(f"No cost found for {row['Publication']}")
         return
     payload = {"$set": {"cost": cost}}
     OUTPUT.append({row['Publication']: cost})
@@ -93,6 +110,52 @@ def process_row(row, subscribed):
             terminate_program(err)
     else:
         COUNT['updated'] += 1
+
+
+def process_collection(row):
+    ''' Process a collection row
+        Keyword arguments:
+          row: row to process
+        Returns:
+          None
+    '''
+    try:
+        srow = DB['dis'].subscription.find_one({'publisher': row['Publisher']})
+    except Exception as err:
+        terminate_program(err)
+    if not srow and row['Publisher'] == 'Elsevier':
+        srow = {'provider': 'Elsevier', 'publisher': 'Elsevier'}
+    if not srow:
+        LOGGER.warning(f"Collection publisher {row['Publisher']} not found")
+        return
+    cost = find_cost(row)
+    if not cost:
+        COUNT['skipped'] += 1
+        return
+    payload = {"type": "Collection",
+               "title": row['Publication'],
+               "provider": srow['provider'],
+               "publisher": srow['publisher'],
+               "online-identifier": "-",
+               "print-identifier": "-",
+               "title-id": "-",
+               "identifier": "-",
+               "access": "Subscription",
+               "cost": cost
+              }
+    if ARG.WRITE:
+        try:
+            match = {'title': payload['title'], 'provider': payload['provider']}
+            result = DB['dis'].subscription.update_one(match, {"$set": payload}, upsert=True)
+            if hasattr(result, 'upserted_count') and result.upserted_count:
+                COUNT['inserted'] += result.upserted_count
+            elif hasattr(result, 'modified_count') and result.modified_count:
+                COUNT['updated'] += result.modified_count
+        except Exception as err:
+            terminate_program(err)
+    else:
+        print(payload)
+        COUNT['inserted'] += 1
 
 
 def processing():
@@ -128,16 +191,17 @@ def processing():
         if pd.isna(row['Publication']):
             COUNT['skipped'] += 1
         if row['Publication'] in subscribed:
-            if row['Publication'] == 'Nature':
-                print(json.dumps(row, default=str))
             COUNT['matched'] += 1
             process_row(row, subscribed[row['Publication']])
-    with open("cost_updates.json", 'w') as outfile:
+        elif row.get('Type') == "Journal - Collection":
+            process_collection(row)
+    with open("cost_updates.json", 'w', encoding='utf-8') as outfile:
         outfile.write(json.dumps(OUTPUT, default=str, indent=2))
     print(f"Licenses read:     {COUNT['read']:,}")
     print(f"Subscriptions:     {COUNT['subscription']:,}")
     print(f"Licenses skipped:  {COUNT['skipped']:,}")
     print(f"Licenses matched:  {COUNT['matched']:,}")
+    print(f"Records inserted:  {COUNT['inserted']:,}")
     print(f"Records updated:   {COUNT['updated']:,}")
 
 # -----------------------------------------------------------------------------
