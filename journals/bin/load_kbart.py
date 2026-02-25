@@ -2,7 +2,7 @@
     This program will load publications from a KBART file
 '''
 
-__version__ = '3.0.0'
+__version__ = '4.0.0'
 
 import argparse
 import collections
@@ -10,6 +10,7 @@ from datetime import datetime
 import json
 from operator import attrgetter
 import sys
+from dateutil.parser import parse
 import inquirer
 from inquirer.themes import BlueComposure
 import pandas as pd
@@ -23,6 +24,7 @@ CORRELATE = {}
 SUBSCRIBED = {}
 # Counters
 COUNT = collections.defaultdict(lambda: 0, {})
+PUBTYPE = collections.defaultdict(lambda: 0, {})
 # Globals
 ARG = LOGGER = None
 
@@ -106,14 +108,31 @@ def add_volume(row, payload):
         Returns:
           None
     '''
+    last_issue = ''
+    if payload.get('last_issue'):
+        del payload['last_issue']
     vol = {}
     for additional in ['date_first_issue_online', 'num_first_vol_online',
                        'num_first_issue_online', 'date_last_issue_online', 'num_last_vol_online',
                        'num_last_issue_online']:
         if row.get(additional) and not pd.isna(row[additional]):
+            if additional in ['date_first_issue_online', 'date_last_issue_online']:
+                try:
+                    dto = parse(row[additional])
+                except ValueError:
+                    terminate_program(f"Invalid date {row[additional]} for {additional}")
+                formatted = dto.strftime('%Y-%m-%d')
+                row[additional] = formatted
             vol[additional] = row[additional]
+            if additional == 'date_last_issue_online':
+                if not last_issue or row[additional] > last_issue:
+                    last_issue = row[additional]
+        elif additional == 'num_last_issue_online' and last_issue and not row.get(additional, ''):
+            last_issue = ''
     if vol:
         payload['volumes'].append(vol)
+    if last_issue:
+        payload['last_issue'] = last_issue
 
 
 def add_correlation(payload):
@@ -174,8 +193,14 @@ def set_payload(row, payload):
     # Get identifier
     ident = get_identifier(row)
     # Get publication type
-    ptype = row['publication_type'].strip() if row.get('publication_type', '') \
-        in ['Journal', 'Book', 'Book series', 'Monograph', 'Repository'] else ARG.TYPE
+    ptype = row['publication_type'].strip() if row.get('publication_type', '') else ARG.TYPE
+    if ptype in ['Serial', 'serial']:
+        ptype = 'Journal'
+    elif ptype == 'monograph':
+        ptype = 'Monograph'
+    if ptype not in ['Journal', 'Book', 'Book series', 'Monograph', 'Repository']:
+        LOGGER.warning(f"Unexpected publication type {ptype} for {title}")
+    PUBTYPE[ptype] += 1
     # Set payload
     initial_load = False
     if not payload.get(title):
@@ -303,7 +328,10 @@ def processing():
     if payload:
         for val in tqdm(payload.values(), desc="Inserting records"):
             insert_record(val)
-    print(f"Journals read:    {COUNT['read']:,}")
+    print("Publication types:")
+    for ptype, count in PUBTYPE.items():
+        print(f"  {ptype}: {count:,}")
+    print(f"\nJournals read:    {COUNT['read']:,}")
     print(f"Records skipped:  {COUNT['skipped']:,}")
     print(f"Tokens:           {COUNT['token']:,}")
     print(f"Correlated:       {COUNT['correlated']:,}")
