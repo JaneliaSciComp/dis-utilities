@@ -2,7 +2,7 @@
     This program will correlate a budgeting spreadsheet with the subscription collection
 '''
 
-__version__ = '2.0.0'
+__version__ = '3.0.0'
 
 import argparse
 import collections
@@ -23,6 +23,11 @@ DB = {}
 COUNT = collections.defaultdict(lambda: 0, {})
 # Globals
 ARG = LOGGER = None
+TYPEMAP = {"Journal - Collection": "Collection",
+           "Journal - Individual": "Journal",
+           "Journal - Contract Package": "Collection",
+           "Ebook Collection": "Collection"}
+
 # Output file
 OUTPUT = []
 
@@ -61,6 +66,25 @@ def initialize_program():
             terminate_program(err)
 
 
+def is_valid_cost(cost):
+    ''' Check if a cost is valid
+        Keyword arguments:
+          cost: cost to check
+        Returns:
+          True if cost is valid, False otherwise
+    '''
+    if pd.isna(cost):
+        return False
+    if cost.isdigit():
+        return int(cost) > 0
+    try:
+        float(cost)
+        return float(cost) > 0
+    except Exception:
+        return False
+    return False
+
+
 def find_cost(row):
     ''' Find the cost for a row
         Keyword arguments:
@@ -71,7 +95,7 @@ def find_cost(row):
     cost = {}
     for year in range(2011, datetime.now().year + 1):
         LOGGER.debug(f"{row['Publication']} FY{str(year)}: {row[f'FY{str(year)}']}")
-        if not pd.isna(row[f'FY{str(year)}']):
+        if is_valid_cost(row[f'FY{str(year)}']):
             cost[str(year)] = row[f'FY{str(year)}']
     if not cost:
         LOGGER.warning(f"No cost found for {row['Publication']}")
@@ -86,19 +110,18 @@ def process_row(row, subscribed):
         Returns:
           None
     '''
-    if subscribed.get('access') != 'Subscription':
-        print(row['Publication'], subscribed.get('access'))
-        return
     COUNT['subscription'] += 1
     cost = {}
-    LOGGER.debug("Process row", row['Publication'])
+    LOGGER.debug(f"Process row {row['Publication']}")
     for year in range(2011, datetime.now().year + 1):
         LOGGER.debug(f"{row['Publication']} FY{str(year)}: {row[f'FY{str(year)}']}")
-        if not pd.isna(row[f'FY{str(year)}']):
+        if is_valid_cost(row[f'FY{str(year)}']):
             cost[str(year)] = row[f'FY{str(year)}']
     if not cost:
-        LOGGER.warning(f"No cost found for {row['Publication']}")
+        LOGGER.warning(f"No costs found for {row['Publication']}")
         return
+    if subscribed.get('access') != 'Subscription':
+        LOGGER.warning(f"{row['Publication']} is {subscribed.get('access')} but has costs")
     payload = {"$set": {"cost": cost}}
     OUTPUT.append({row['Publication']: cost})
     if ARG.WRITE:
@@ -123,8 +146,10 @@ def process_collection(row):
         srow = DB['dis'].subscription.find_one({'publisher': row['Publisher']})
     except Exception as err:
         terminate_program(err)
-    if not srow and row['Publisher'] == 'Elsevier':
-        srow = {'provider': 'Elsevier', 'publisher': 'Elsevier'}
+    if row['Publisher'] == 'Wiley':
+        srow = {'provider': 'Wiley', 'publisher': 'Wiley'}
+    elif ARG.PUBLISHER and row['Publisher'] == ARG.PUBLISHER:
+        srow = {'provider': ARG.PUBLISHER, 'publisher': ARG.PUBLISHER}
     if not srow:
         LOGGER.warning(f"Collection publisher {row['Publisher']} not found")
         return
@@ -132,7 +157,7 @@ def process_collection(row):
     if not cost:
         COUNT['skipped'] += 1
         return
-    payload = {"type": "Collection",
+    payload = {"type": TYPEMAP.get(row['Type'], "Collection"),
                "title": row['Publication'],
                "provider": srow['provider'],
                "publisher": srow['publisher'],
@@ -143,6 +168,7 @@ def process_collection(row):
                "access": "Subscription",
                "cost": cost
               }
+    OUTPUT.append(payload)
     if ARG.WRITE:
         try:
             match = {'title': payload['title'], 'provider': payload['provider']}
@@ -154,7 +180,6 @@ def process_collection(row):
         except Exception as err:
             terminate_program(err)
     else:
-        print(payload)
         COUNT['inserted'] += 1
 
 
@@ -184,8 +209,12 @@ def processing():
         terminate_program(err)
     subscribed = {}
     for row in rows:
+        if subscribed.get(row['title']) and row['type'] == subscribed[row['title']]['type']:
+            LOGGER.error(f"Duplicate subscription found for {row['title']} {row['publisher']}")
         subscribed[row['title']] = row
     for _, row in tqdm(pdf.iterrows(), total=len(pdf), desc="Processing"):
+        if ARG.PUBLISHER and row['Publisher'] != ARG.PUBLISHER:
+            continue
         COUNT['read'] += 1
         LOGGER.debug(json.dumps(row, default=str))
         if pd.isna(row['Publication']):
@@ -193,10 +222,12 @@ def processing():
         if row['Publication'] in subscribed:
             COUNT['matched'] += 1
             process_row(row, subscribed[row['Publication']])
-        elif row.get('Type') == "Journal - Collection":
+        elif row.get('Type') in  TYPEMAP.keys():
+            COUNT['matched'] += 1
             process_collection(row)
-    with open("cost_updates.json", 'w', encoding='utf-8') as outfile:
-        outfile.write(json.dumps(OUTPUT, default=str, indent=2))
+    if OUTPUT:
+        with open("cost_updates.json", 'w', encoding='utf-8') as outfile:
+            outfile.write(json.dumps(OUTPUT, default=str, indent=2))
     print(f"Licenses read:     {COUNT['read']:,}")
     print(f"Subscriptions:     {COUNT['subscription']:,}")
     print(f"Licenses skipped:  {COUNT['skipped']:,}")
@@ -213,6 +244,8 @@ if __name__ == '__main__':
                         required=True, help='Excel file')
     PARSER.add_argument('--sheet', dest='SHEET', action='store',
                         default=None, help='Sheet name')
+    PARSER.add_argument('--publisher', dest='PUBLISHER', action='store',
+                        default=None, help='Publisher')
     PARSER.add_argument('--manifold', dest='MANIFOLD', action='store',
                         default='prod', choices=['dev', 'prod'],
                         help='MongoDB manifold (dev, prod)')

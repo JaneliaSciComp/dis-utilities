@@ -119,7 +119,7 @@ def preprint_pie_charts(data, year, coll):
 # ******************************************************************************
 
 def pie_chart(data, title, legend, height=300, width=400, location="right",
-              colors=None, style=None):
+              colors=None, style=None, fmt=None):
     ''' Create a pie chart
         Keyword arguments:
           data: dictionary of data
@@ -130,6 +130,7 @@ def pie_chart(data, title, legend, height=300, width=400, location="right",
           location: location of the legend (optional)
           colors: list of colors (optional)
           style: "bare" for a borderless chart
+          fmt: format string for the values (optional)
         Returns:
           Figure components
     '''
@@ -145,7 +146,7 @@ def pie_chart(data, title, legend, height=300, width=400, location="right",
     pdata['angle'] = pdata['value']/pdata['value'].sum() * 2*pi
     pdata['percentage'] = pdata['value']/pdata['value'].sum()*100
     pdata['color'] = colors
-    tooltips = f"@{legend}: @value (@percentage%)"
+    tooltips = f"@{legend}: @value{fmt if fmt else ''} (@percentage%)"
     if style == 'bare':
         print("BARE")
         plt = figure(toolbar_location=None, height=height, width=width, min_border_left=0,
