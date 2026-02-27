@@ -114,6 +114,24 @@ def preprint_pie_charts(data, year, coll):
         raise err
     return chartscript, chartdiv
 
+def get_colors_by_count(cnt):
+    ''' Get colors by count
+        Keyword arguments:
+          cnt: count
+        Returns:
+          List of colors
+    '''
+    colors = plasma(cnt)
+    if cnt == 1:
+        colors = ['green']
+    elif cnt == 2:
+        colors = SOURCE_PALETTE
+    elif cnt <= 10:
+        colors = all_palettes['Category10'][cnt]
+    elif cnt <= 20:
+        colors = all_palettes['Category20'][cnt]
+    return colors
+
 # ******************************************************************************
 # * Basic charts                                                               *
 # ******************************************************************************

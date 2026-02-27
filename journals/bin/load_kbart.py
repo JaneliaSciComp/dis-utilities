@@ -2,7 +2,7 @@
     This program will load publications from a KBART file
 '''
 
-__version__ = '4.0.0'
+__version__ = '5.0.0'
 
 import argparse
 import collections
@@ -27,6 +27,10 @@ COUNT = collections.defaultdict(lambda: 0, {})
 PUBTYPE = collections.defaultdict(lambda: 0, {})
 # Globals
 ARG = LOGGER = None
+IGNORE = ['Book Series Volume']
+TYPEMAP = {"Book Series": "Book series",
+           "Book Series Volume": "Book series",
+           "Handbook Series": "Book series"}
 
 def terminate_program(msg=None):
     ''' Terminate the program gracefully
@@ -198,9 +202,6 @@ def set_payload(row, payload):
         ptype = 'Journal'
     elif ptype == 'monograph':
         ptype = 'Monograph'
-    if ptype not in ['Journal', 'Book', 'Book series', 'Monograph', 'Repository']:
-        LOGGER.warning(f"Unexpected publication type {ptype} for {title}")
-    PUBTYPE[ptype] += 1
     # Set payload
     initial_load = False
     if not payload.get(title):
@@ -210,12 +211,22 @@ def set_payload(row, payload):
                           'provider': provider,
                           'publisher': str(row['publisher_name']).strip(),
                           'urls': [],
-                          'type': ptype,
                           'access': 'Subscription',
                           'volumes': []}
     if ident != payload[title]['identifier']:
-        terminate_program(f"identifier mismatch for {title} " \
+        if ptype in IGNORE:
+            COUNT['skipped'] += 1
+            return
+        print(f"identifier mismatch for {title} " \
                           + f"({ident} != {payload[title]['identifier']})")
+    if ptype in TYPEMAP:
+        ptype = TYPEMAP[ptype]
+    if ptype not in ['Journal', 'Book', 'Book series', 'Monograph', 'Repository']:
+        if ptype not in IGNORE:
+            LOGGER.warning(f"Unexpected publication type {ptype} for {title}")
+    if 'type' not in payload[title]:
+        payload[title]['type'] = ptype
+    PUBTYPE[ptype] += 1
     if row.get('publisher_name') and not pd.isna(row['publisher_name']):
         payload[title]['publisher'] = row.get('publisher_name')
     for field in ['online_identifier', 'print_identifier', 'title_id']:

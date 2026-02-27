@@ -2,7 +2,7 @@
     Update tags for selected DOIs
 """
 
-__version__ = '7.0.0'
+__version__ = '8.0.0'
 
 import argparse
 import collections
@@ -324,6 +324,8 @@ def update_single_doi(rec):
     tagd, current = get_tag_choices(tags, tagauth, rec)
     today = datetime.today().strftime('%Y-%m-%d')
     if ARG.AUTO:
+        if not tagd:
+            return
         ans = {}
         if tagd:
             ans = {'checklist': []}
