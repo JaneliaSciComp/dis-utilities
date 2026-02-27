@@ -34,7 +34,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "106.0.0"
+__version__ = "107.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -2276,17 +2276,20 @@ def source_limit_pulldown(prefix, source, limit):
     return html
 
 
-def year_pulldown(prefix, all_years=True, suffix = ''):
+def year_pulldown(prefix, all_years=True, suffix = '', start_year=2005):
     ''' Generate a year pulldown
         Keyword arguments:
           prefix: navigation prefix
           all_years: if True, include all years
           suffix: suffix to add to the pulldown
+          start_year: start year
         Returns:
           Pulldown HTML
     '''
     years = ['All'] if all_years else []
-    for year in range(datetime.now().year, 2005, -1):
+    if start_year:
+        start_year -= 1
+    for year in range(datetime.now().year, start_year, -1):
         years.append(str(year))
     html = "<div class='btn-group'><button type='button' class='btn btn-info dropdown-toggle' " \
            + "data-toggle='dropdown' aria-haspopup='true' aria-expanded='false'>" \
@@ -4829,13 +4832,7 @@ def show_grouped_dois(field, unwind=None):
     html += "</table>"
     chartscript = chartdiv = ""
     if 1 < cnt <= 256 and data:
-        colors = plasma(cnt)
-        if cnt == 2:
-            colors = DP.SOURCE_PALETTE
-        elif cnt <= 10:
-            colors = all_palettes['Category10'][cnt]
-        elif cnt <= 20:
-            colors = all_palettes['Category20'][cnt]
+        colors = DP.get_colors_by_count(cnt)
         chartscript, chartdiv = DP.pie_chart(data, field, "source", width=875, height=600,
                                              colors=colors)
     endpoint_access()
@@ -7026,6 +7023,7 @@ def show_subscription_summary():
                                          title='Subscription summary', html=html,
                                          navbar=generate_navbar('Subscriptions')))
 
+
 @app.route('/subscription/provider/<string:prov>')
 def show_subscription_summary_by_provider(prov):
     ''' Show subscription summary by provider
@@ -7089,16 +7087,50 @@ def show_subscription_summary_by_provider(prov):
                                          html=html, navbar=generate_navbar('Subscriptions')))
 
 
+@app.route('/subscription/year')
+@app.route('/subscription/year/<string:year>')
+def show_subscription_year(year=str(datetime.now().year)):
+    ''' Show subscription costs for a specific year
+    '''
+    errmsg = "Could not get data from subscription collection"
+    sortorder = [("provider", 1), ("publisher", 1), ("title", 1)]
+    try:
+        rows = DB['dis'].subscription.find({f"cost.{year}": {"$exists": True}}).sort(sortorder)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning(errmsg),
+                               message=error_message(err))
+    html = "<br>" + year_pulldown("subscription/year", all_years=False, start_year=2011)
+    html2 = "<table id='costs' class='tablesorter numberlast'><thead><tr>"
+    html2 += "<th>Provider</th><th>Publisher</th><th>Title</th><th>Cost</th></tr></thead><tbody>"
+    data = {}
+    total = 0
+    for row in rows:
+        if row['provider'] not in data:
+            data[row['provider']] = 0
+        total += float(row["cost"][year])
+        data[row['provider']] += float(row["cost"][year])
+        html2 += f"<tr><td>{row['provider']}</td><td>{row['publisher']}</td>" \
+                 + f"<td>{row['title']}</td><td>${float(row['cost'][year]):,.2f}</td></tr>"
+    html2 += "</tbody><tfoot><tr><th colspan='3' style='text-align:right'>TOTAL</th>" \
+             + f"<th>${total:,.2f}</th></tr></tfoot></table>"
+    colors = DP.get_colors_by_count(len(data))
+    piescript, piediv = DP.pie_chart(data, f'Subscription costs by provider for {year}',
+                                     'provider', colors=colors,
+                                     width=650, height=450, location="top_right", fmt='{$0,0}')
+    endpoint_access()
+    return make_response(render_template('bokeh.html', urlroot=request.url_root,
+                                        title=f"Subscription costs by provider for {year}",
+                                        html=html, html2=html2,
+                                        chartscript2=piescript, chartdiv2=piediv,
+                                        navbar=generate_navbar('Subscriptions')))
+
+
 @app.route('/subscription/cost')
-@app.route('/subscription/cost/<string:max_year>')
-@app.route('/subscription/cost/<string:max_year>/<string:provider>')
-def show_subscription_costs(max_year=None, provider=None):
+@app.route('/subscription/cost/<string:provider>')
+def show_subscription_costs(provider=None):
     ''' Show subscription costs
     '''
-    if provider is not None:
-        max_year = 'provider'
-    elif not max_year:
-        max_year = str(datetime.now().year)
     errmsg = "Could not get data from subscription collection"
     payload = [{"$project": {"costArray": {"$objectToArray": "$cost" }}},
                             {"$unwind": "$costArray"},
@@ -7130,8 +7162,6 @@ def show_subscription_costs(max_year=None, provider=None):
     last_cost = 0
     perc = {}
     for row in rows:
-        if max_year != 'provider' and row['_id'] > max_year:
-            continue
         perc[row['_id']] = {'percent': None, 'count': row['count'], 'cost': row['totalCost']}
         if last_cost:
             perc[row['_id']]['percent'] = ((row['totalCost'] - last_cost) / last_cost) * 100
@@ -7152,76 +7182,62 @@ def show_subscription_costs(max_year=None, provider=None):
         else:
             pp = ""
         pyear = year
-        html += f"<tr><td>{year}</td><td>{val['count']}</td><td>${val['cost']:,.2f}</td>" \
+        link = f"<a href='/subscription/year/{year}'>{year}</a>"
+        html += f"<tr><td>{link}</td><td>{val['count']}</td><td>${val['cost']:,.2f}</td>" \
                 + f"<td>{pp}</td></tr>"
-    html += "</tbody><tfoot><tr><td colspan=3 style='text-align:right'>AVERAGE % change</td>" \
-            + f"<td>{sum(perclist)/len(perclist):+.2f}%</td></tr></tfoot></tbody></table>"
+    html += "</tbody><tfoot><tr><th colspan=3 style='text-align:right'>AVERAGE % change</th>" \
+            + f"<th>{sum(perclist)/len(perclist):+.2f}%</th></tr></tfoot></tbody></table>"
     if not provider:
         html += "<br><br><h3>Providers</h3>"
-        html += '<br>'.join([f"<a href='/subscription/cost/provider/{pp}'>{pp}</a>" \
+        html += '<br>'.join([f"<a href='/subscription/cost/{pp}'>{pp}</a>" \
                 for pp in providers])
     # Bar/line chart
     chartscript, chartdiv = DP.dual_axis_chart(data, title=title,
                                                x_field='Year', bar_field='Cost',
                                                line_field='Count')
     data = {}
-    if provider is None:
-        # Pie chart
-        payload = [{"$project": {"costArray": {"$objectToArray": "$cost" },
-                                 "provider": "$provider"}},
-                                {"$unwind": "$costArray"},
-                                {"$group": {"_id": {"provider": "$provider",
-                                                    "year": "$costArray.k"},
-                                            "totalCost": {"$sum": {"$toDouble": "$costArray.v"}}}},
-                                {"$match": {"_id.year": str(pyear)}},
-                                {"$sort": {"totalCost": -1}}]
-    else:
-        payload = [{"$match": {"provider": provider, "cost": {"$exists": True}}},
-        {"$addFields": {"costArray": {"$objectToArray": "$cost"}}},
-        {"$addFields": {"maxYear": {"$max": "$costArray.k"}}},
-        {"$addFields": {"recentCost":
-                        {"$toDouble":
-                         {"$arrayElemAt":
-                          [{"$map":
-                            {"input":
-                             {"$filter":
-                              {"input": "$costArray", "as": "e",
-                               "cond": {"$eq": ["$$e.k", "$maxYear"]}}},
-                             "as": "e", "in": "$$e.v"}}, 0]}}}},
-        {"$group": {"_id": "$type", "totalCost": {"$sum": "$recentCost"},
-                    "mostRecentYear": {"$max":"$maxYear"}}},
-        {"$sort": {"totalCost": -1}}]
+    # Pie chart
+    #    payload = [{"$project": {"costArray": {"$objectToArray": "$cost" },
+    #                             "provider": "$provider"}},
+    #                            {"$unwind": "$costArray"},
+    #                            {"$group": {"_id": {"provider": "$provider",
+    #                                                "year": "$costArray.k"},
+    #                                        "totalCost": {"$sum": {"$toDouble": "$costArray.v"}}}},
+    #                            {"$match": {"_id.year": str(pyear)}},
+    #                            {"$sort": {"totalCost": -1}}]
+    payload = [{"$match": {"provider": provider, "cost": {"$exists": True}}},
+    {"$addFields": {"costArray": {"$objectToArray": "$cost"}}},
+    {"$addFields": {"maxYear": {"$max": "$costArray.k"}}},
+    {"$addFields": {"recentCost":
+                    {"$toDouble":
+                     {"$arrayElemAt":
+                      [{"$map":
+                        {"input":
+                         {"$filter":
+                          {"input": "$costArray", "as": "e",
+                           "cond": {"$eq": ["$$e.k", "$maxYear"]}}},
+                         "as": "e", "in": "$$e.v"}}, 0]}}}},
+    {"$group": {"_id": "$type", "totalCost": {"$sum": "$recentCost"},
+                "mostRecentYear": {"$max":"$maxYear"}}},
+    {"$sort": {"totalCost": -1}}]
     try:
         rows = DB['dis'].subscription.aggregate(payload)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning(errmsg),
                                message=error_message(err))
-    if provider is None:
-        for row in rows:
-            data[row['_id']['provider']] = row['totalCost']
-    else:
-        for row in rows:
-            data[row['_id']] = row['totalCost']
-    cnt = len(data)
-    colors = plasma(cnt)
-    if cnt == 1:
-        colors = ['green']
-    elif cnt == 2:
-        colors = DP.SOURCE_PALETTE
-    elif cnt <= 10:
-        colors = all_palettes['Category10'][cnt]
-    elif cnt <= 20:
-        colors = all_palettes['Category20'][cnt]
-    field = 'provider' if provider is None else 'type'
-    piescript, piediv = DP.pie_chart(data, f'Subscription costs by {field} for {pyear}',
-                                     'provider', colors=colors,
-                                     width=650, height=450, location="top_right", fmt='{$0,0}')
-    chartscript += piescript
-    chartdiv += piediv
+    for row in rows:
+        data[row['_id']] = row['totalCost']
+    if provider and len(data) > 1:
+        colors = DP.get_colors_by_count(len(data))
+        piescript, piediv = DP.pie_chart(data, f'Subscription costs by type for {pyear}',
+                                         'provider', colors=colors,
+                                         width=650, height=450, location="top_right", fmt='{$0,0}')
+        chartscript += piescript
+        chartdiv += piediv
     endpoint_access()
     title = f"Subscription costs for {provider}" if provider is not None \
-            else f"Subscription costs (2011-{max_year})"
+            else f"Subscription costs (2011-{datetime.now().year})"
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title=title, html=html,
                                          chartscript=chartscript, chartdiv=chartdiv,
@@ -7295,7 +7311,21 @@ def show_subscriptionlist(sub, stype=None, field='publisher'):
     if not stype:
         html += "<th>Type</th>"
     html += "<th>Title</th><th>Publisher</th><th>Provider</th><th>Title ID</th>" \
-            + '<th>Access</th></tr></thead><tbody>'
+            + '<th>Access</th>'
+    pubcount = {}
+    if field == 'publisher':
+        html += "<th>Janelia publications</th>"
+        try:
+            payload = [{"$match": {"jrc_journal": {"$exists": 1}}},
+                       {"$group": {"_id": "$jrc_journal", "count": {"$sum": 1}}}]
+            pubs = DB['dis'].dois.aggregate(payload)
+            for row in pubs:
+                pubcount[row['_id']] = row['count']
+        except Exception as err:
+            return render_template('error.html', urlroot=request.url_root,
+                                   title=render_warning(errmsg),
+                                   message=error_message(err))
+    html += "</tr></thead><tbody>"
     for row in rows:
         ptype = f"<td>{row['type']}</td>" if not stype else ''
         link = f"<a href='/subscription/{str(row['_id'])}'>{row['title']}</a>"
@@ -7304,8 +7334,13 @@ def show_subscriptionlist(sub, stype=None, field='publisher'):
                   else f"<span style='color: lime'>{row['access']}</span>"
         html += f"<tr>{ptype}<td>{link}</td><td>{row['publisher']}</td>" \
                 + f"<td>{row['provider']}</td><td>{row['title-id']}</td>" \
-                + f"<td>{access}</td></tr>"
-    html += '</tbody></table>'
+                + f"<td>{access}</td>"
+        if field == 'publisher':
+            print(row['title'], pubcount.get(row['title'], ''))
+            link = f"<a href='/journal/{row['title']}'>{pubcount.get(row['title'])}</a>" \
+                   if pubcount.get(row['title']) else ''
+            html += f"<td style='text-align: center'>{link}</td>"
+    html += '</tr></tbody></table>'
     title = f"ubscriptions for {field} {sub} ({cnt:,})"
     title = f"{stype} s{title}" if stype else f"S{title}"
     endpoint_access()
@@ -7383,6 +7418,7 @@ def show_subscription_providers():
     html = "<table id='providers' class='tablesorter standard'><thead><tr>" \
            + "<th>Provider</th><th>Publishers</th><th>Publication count</th>" \
            + "<th>Publication types</th></tr></thead><tbody>"
+    centered = "style='text-align: center; vertical-align: middle;'"
     for row in rows:
         cnt += 1
         types = "<br>".join(f"{typ['type']}: {typ['count']:,}"
@@ -7390,9 +7426,9 @@ def show_subscription_providers():
                                               reverse=True))
         link = f"<a href='/subscription/provider/{row['_id']}'>{row['_id']}</a>"
         html += (
-            f"<tr><td>{link}</td>"
-            f"<td style='text-align: center'>{row['distinct_publishers']}</td>"
-            f"<td style='text-align: center'>{row['count']:,}</td><td>{types}</td></tr>"
+            f"<tr><td style='vertical-align: middle'>{link}</td>"
+            f"<td {centered}>{row['distinct_publishers']}</td>"
+            f"<td {centered}>{row['count']:,}</td><td>{types}</td></tr>"
         )
     html += "</tbody></table>"
     # Subscription charges
@@ -7454,13 +7490,14 @@ def show_subscription(sid):
         lio = vol['num_last_issue_online'] if vol.get('num_last_issue_online') else ''
         nvo = vol['num_last_vol_online'] if vol.get('num_last_vol_online') else ''
     color = 'yellowgreen' if row['access'] == 'Subscription' else 'lime'
-    html = f"<table class='proplist'><tr><td>Publisher</td><td>{row['publisher']}</td></tr>" \
-           + f"<tr><td>Type</td><td>{row['type']}</td></tr>" \
-           + f"<tr><td>Access</td><td><span style='color: {color}'>{row['access']}</span>" \
-           + f"</td></tr><tr><td>Provider</td><td>{row['provider']}</td></tr>" \
-           + f"<tr><td>Print ISSN</td><td>{row['print-identifier']}</td></tr>" \
-           + f"<tr><td>Online ISSN</td><td>{row['online-identifier']}</td></tr>" \
-           + f"<tr><td>Title ID</td><td>{row['title-id']}</td></tr>"
+    html = ''
+    html += f"<table class='proplist'><tr><td>Publisher</td><td>{row['publisher']}</td></tr>" \
+            + f"<tr><td>Type</td><td>{row['type']}</td></tr>" \
+            + f"<tr><td>Access</td><td><span style='color: {color}'>{row['access']}</span>" \
+            + f"</td></tr><tr><td>Provider</td><td>{row['provider']}</td></tr>" \
+            + f"<tr><td>Print ISSN</td><td>{row['print-identifier']}</td></tr>" \
+            + f"<tr><td>Online ISSN</td><td>{row['online-identifier']}</td></tr>" \
+            + f"<tr><td>Title ID</td><td>{row['title-id']}</td></tr>"
     vols = []
     idates = []
     if row.get('apc'):
@@ -7502,21 +7539,32 @@ def show_subscription(sid):
                                                      colors=['green']*2, legend=False,
                                                      tooltip=tt)
     # Close table and show button(s)
-    html += "</table>"
+    html += '</table>'
     if row.get('urls'):
         idx = 0
         for url in row['urls']:
             link = f"window.location.href=\'{url}\'"
             label = row['type']
-            if len(row['urls']) > 1 and idates[idx]:
-                label += f" ({idates[idx]})"
+            if len(row['urls']) > 1:
+                if idates:
+                    label += f" ({idates[idx]})"
+                else:
+                    label += f" ({dlio if dlio else 'unknown'})"
             idx += 1
             html += '<br><div><button id="toggle-to-all" type="button" ' \
                     + 'class="btn btn-success btn-small"' \
                     + f"onclick=\"{link}\">Access {label}</button></div>"
+    try:
+        rows = DB['dis'].dois.find({"jrc_journal": row['title']})
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url.root,
+                               title=render_warning("Could not get DOIs for journal"),
+                               message=error_message(err))
+    jtbl, cnt, _ = standard_doi_table(rows)
+    html2 = f"<br><br><h3>DOIs</h3>{jtbl}" if cnt else ''
     endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
-                                         title=row['title'], html=html,
+                                         title=row['title'], html=html, html2=html2,
                                          chartscript=chartscript, chartdiv=chartdiv,
                                          navbar=generate_navbar('Subscriptions')))
 
