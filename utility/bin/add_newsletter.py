@@ -2,7 +2,10 @@
     Update the jrc_newsletter date for one or more DOIs
 '''
 
+__version__ = '1.0.0'
+
 import argparse
+import collections
 from datetime import datetime
 from operator import attrgetter
 import sys
@@ -11,8 +14,12 @@ import jrc_common.jrc_common as JRC
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation
 
+# Database
 DB = {}
-COUNT = {'dois': 0, 'notfound': 0, 'updated': 0}
+# Counters
+COUNT = collections.defaultdict(lambda: 0, {})
+# Globals
+ARG = LOGGER = None
 
 def terminate_program(msg=None):
     ''' Terminate the program gracefully
@@ -42,7 +49,7 @@ def initialize_program():
     dbs = ['dis']
     for source in dbs:
         dbo = attrgetter(f"{source}.{ARG.MANIFOLD}.write")(dbconfig)
-        LOGGER.info("Connecting to %s %s on %s as %s", dbo.name, ARG.MANIFOLD, dbo.host, dbo.user)
+        LOGGER.info(f"Connecting to {dbo.name} {ARG.MANIFOLD} on {dbo.host} as {dbo.user}")
         try:
             DB[source] = JRC.connect_database(dbo)
         except Exception as err:
@@ -50,9 +57,9 @@ def initialize_program():
 
 
 def update_single_doi(doi):
-    """ Process a list of DOIs
+    """ Update a single DOI with a newsletter date
         Keyword arguments:
-          None
+          doi: DOI to update
         Returns:
           None
     """
@@ -64,6 +71,10 @@ def update_single_doi(doi):
     if not row:
         LOGGER.warning(f"{doi} was not found")
         COUNT["notfound"] += 1
+        return
+    if row.get('jrc_newsletter') and ARG.IGNORE:
+        LOGGER.warning(f"{doi} already has a newsletter date")
+        COUNT["ignore"] += 1
         return
     payload = {"jrc_newsletter": ARG.DATE}
     if ARG.WRITE:
@@ -104,6 +115,8 @@ def process_dois():
     print(f"DOIs read:      {COUNT['dois']}")
     if COUNT['notfound']:
         print(f"DOIs not found: {COUNT['notfound']}")
+    if COUNT['ignore']:
+        print(f"DOIs ignored:   {COUNT['ignore']}")
     print(f"DOIs updated:   {COUNT['updated']}")
     if not ARG.WRITE:
         LOGGER.warning("Dry run successful, no updates were made")
@@ -125,8 +138,10 @@ if __name__ == '__main__':
     PARSER.add_argument('--manifold', dest='MANIFOLD', action='store',
                         default='prod', choices=['dev', 'prod'],
                         help='MongoDB manifold (dev, prod)')
+    PARSER.add_argument('--ignore', dest='IGNORE', action='store_true',
+                        default=False, help='Ignore DOIs with newsletter dates')
     PARSER.add_argument('--write', dest='WRITE', action='store_true',
-                        default=False, help='Write to database/config system')
+                        default=False, help='Write to database')
     PARSER.add_argument('--verbose', dest='VERBOSE', action='store_true',
                         default=False, help='Flag, Chatty')
     PARSER.add_argument('--debug', dest='DEBUG', action='store_true',
