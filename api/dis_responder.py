@@ -34,7 +34,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "107.0.0"
+__version__ = "107.1.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -7169,6 +7169,10 @@ def show_subscription_costs(provider=None):
         data['Year'].append(row['_id'])
         data['Cost'].append(row['totalCost'])
         data['Count'].append(row['count'])
+    if not data['Year']:
+        return render_template('error.html', urlroot=request.url_root,
+                               title='No costs found',
+                               message=f"No costs found for provider {provider}")
     title = 'Subscription costs by year'
     # Table
     html = "<table id='costs' class='tablesorter numbers'><thead><tr>" \
@@ -7433,7 +7437,7 @@ def show_subscription_providers():
     html += "</tbody></table>"
     # Subscription charges
     html += "<br><br><h3>Subscription charges</h3>"
-    for ptype in ['Journal', 'Collection']:
+    for ptype in ['Journal', 'Collection', 'Database', 'DataService']:
         phtml = process_charges(ptype)
         html += phtml
     # APCs

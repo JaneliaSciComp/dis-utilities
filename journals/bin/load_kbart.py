@@ -221,9 +221,11 @@ def set_payload(row, payload):
                           + f"({ident} != {payload[title]['identifier']})")
     if ptype in TYPEMAP:
         ptype = TYPEMAP[ptype]
-    if ptype not in ['Journal', 'Book', 'Book series', 'Monograph', 'Repository']:
+    if ptype not in DIS['valid_types']:
         if ptype not in IGNORE:
             LOGGER.warning(f"Unexpected publication type {ptype} for {title}")
+        COUNT['skipped'] += 1
+        return
     if 'type' not in payload[title]:
         payload[title]['type'] = ptype
     PUBTYPE[ptype] += 1
@@ -254,7 +256,14 @@ def insert_record(val):
           None
     '''
     if not ARG.WRITE:
-        COUNT['inserted'] += 1
+        try:
+            row = DB['dis'].subscription.find_one({'title': val['title'],
+                                                   'identifier': val['identifier']})
+        except Exception as err:
+            terminate_program(err)
+        if not row:
+            LOGGER.info(f"Inserted {val['title']}")
+        COUNT['updated' if row else 'inserted'] += 1
         if ARG.DEBUG:
             print(json.dumps(val, indent=2))
         return
@@ -377,5 +386,6 @@ if __name__ == '__main__':
     ARG = PARSER.parse_args()
     LOGGER = JRC.setup_logging(ARG)
     initialize_program()
+    DIS = JRC.get_config("dis")
     processing()
     terminate_program()

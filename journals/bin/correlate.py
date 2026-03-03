@@ -2,7 +2,7 @@
     This program will correlate a budgeting spreadsheet with the subscription collection
 '''
 
-__version__ = '3.0.0'
+__version__ = '4.0.0'
 
 import argparse
 import collections
@@ -23,10 +23,6 @@ DB = {}
 COUNT = collections.defaultdict(lambda: 0, {})
 # Globals
 ARG = LOGGER = None
-TYPEMAP = {"Journal - Collection": "Collection",
-           "Journal - Individual": "Journal",
-           "Journal - Contract Package": "Collection",
-           "Ebook Collection": "Collection"}
 
 # Output file
 OUTPUT = []
@@ -121,7 +117,7 @@ def process_row(row, subscribed):
         LOGGER.warning(f"No costs found for {row['Publication']}")
         return
     if subscribed.get('access') != 'Subscription':
-        LOGGER.warning(f"{row['Publication']} is {subscribed.get('access')} but has costs")
+        LOGGER.debug(f"{row['Publication']} is {subscribed.get('access')} but has costs")
     payload = {"$set": {"cost": cost}}
     OUTPUT.append({row['Publication']: cost})
     if ARG.WRITE:
@@ -151,13 +147,13 @@ def process_collection(row):
     elif ARG.PUBLISHER and row['Publisher'] == ARG.PUBLISHER:
         srow = {'provider': ARG.PUBLISHER, 'publisher': ARG.PUBLISHER}
     if not srow:
-        LOGGER.warning(f"Collection publisher {row['Publisher']} not found")
+        LOGGER.debug(f"Collection publisher {row['Publisher']} not found")
         return
     cost = find_cost(row)
     if not cost:
         COUNT['skipped'] += 1
         return
-    payload = {"type": TYPEMAP.get(row['Type'], "Collection"),
+    payload = {"type": DIS['sub_cost_map'].get(row['Type'], "Collection"),
                "title": row['Publication'],
                "provider": srow['provider'],
                "publisher": srow['publisher'],
@@ -173,13 +169,14 @@ def process_collection(row):
         try:
             match = {'title': payload['title'], 'provider': payload['provider']}
             result = DB['dis'].subscription.update_one(match, {"$set": payload}, upsert=True)
-            if hasattr(result, 'upserted_count') and result.upserted_count:
-                COUNT['inserted'] += result.upserted_count
+            if hasattr(result, 'upserted_count') and result.upserted_id:
+                COUNT['inserted'] += 1
             elif hasattr(result, 'modified_count') and result.modified_count:
                 COUNT['updated'] += result.modified_count
         except Exception as err:
             terminate_program(err)
     else:
+        print(payload)
         COUNT['inserted'] += 1
 
 
@@ -219,10 +216,15 @@ def processing():
         LOGGER.debug(json.dumps(row, default=str))
         if pd.isna(row['Publication']):
             COUNT['skipped'] += 1
+            continue
+        if row['Publication'] in ['Science', 'Science Signaling']:
+            continue
         if row['Publication'] in subscribed:
+            # The publisher is known, so we can process the row
             COUNT['matched'] += 1
             process_row(row, subscribed[row['Publication']])
-        elif row.get('Type') in  TYPEMAP.keys():
+        elif row.get('Type') in DIS['sub_cost_map'].keys():
+            # The publisher is not known, but the type is valid, so we can process the row
             COUNT['matched'] += 1
             process_collection(row)
     if OUTPUT:
@@ -243,7 +245,7 @@ if __name__ == '__main__':
     PARSER.add_argument('--file', dest='FILE', action='store',
                         required=True, help='Excel file')
     PARSER.add_argument('--sheet', dest='SHEET', action='store',
-                        default=None, help='Sheet name')
+                        default='Libraries Site Licenses', help='Sheet name')
     PARSER.add_argument('--publisher', dest='PUBLISHER', action='store',
                         default=None, help='Publisher')
     PARSER.add_argument('--manifold', dest='MANIFOLD', action='store',
@@ -258,5 +260,6 @@ if __name__ == '__main__':
     ARG = PARSER.parse_args()
     LOGGER = JRC.setup_logging(ARG)
     initialize_program()
+    DIS = JRC.simplenamespace_to_dict(JRC.get_config("dis"))
     processing()
     terminate_program()
