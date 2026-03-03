@@ -1229,7 +1229,6 @@ def post_activities():
     print(f"DOI calls to Crossref: {len(CROSSREF_CALL):,}")
     print(f"DOI calls to DataCite: {len(DATACITE_CALL):,}")
     # Email
-    return #PLUG
     if INSERTED and ARG.WRITE:
         generate_emails()
     if not ARG.WRITE:
