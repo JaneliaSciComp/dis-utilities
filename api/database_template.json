@@ -1,0 +1,22 @@
+{
+    "dis": {
+        "prod": {
+            "read": {
+                "client": "dis",
+                "host": <HOST>,
+                "name": "DIS MongoDB",
+                "type": "mongo",
+                "user": <READ USER>,
+                "uri": <URI>
+            },
+            "write": {
+                "client": "dis",
+                "host": <HOST>,
+                "name": "DISMongoDB",
+                "type": "mongo",
+                "user": <WRITE USER>,
+                "uri": <URI>
+            }
+        }
+    }
+}

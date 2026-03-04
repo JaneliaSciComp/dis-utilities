@@ -17,6 +17,7 @@ import re
 import string
 import sys
 from time import sleep, time
+from types import SimpleNamespace
 from urllib.parse import unquote
 import dateutil.parser
 import dateutil.tz
@@ -34,7 +35,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "107.1.0"
+__version__ = "108.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -189,7 +190,10 @@ def before_request():
     if not DB:
         print("Initializing global variables")
         try:
-            dbconfig = JRC.get_config("databases")
+            with open('database.json', 'r', encoding='utf-8') as stream:
+                data = json.load(stream)
+            dbconfig = json.loads(json.dumps(data),
+                                  object_hook=lambda dat: SimpleNamespace(**dat))
         except Exception as err:
             return render_template('warning.html', urlroot=request.url_root,
                                    title=render_warning("Config error"), message=err)
@@ -7340,7 +7344,6 @@ def show_subscriptionlist(sub, stype=None, field='publisher'):
                 + f"<td>{row['provider']}</td><td>{row['title-id']}</td>" \
                 + f"<td>{access}</td>"
         if field == 'publisher':
-            print(row['title'], pubcount.get(row['title'], ''))
             link = f"<a href='/journal/{row['title']}'>{pubcount.get(row['title'])}</a>" \
                    if pubcount.get(row['title']) else ''
             html += f"<td style='text-align: center'>{link}</td>"
