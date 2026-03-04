@@ -2,7 +2,7 @@
     Add new employees to the orcid collection from the People system.
 '''
 
-__version__ = '6.0.0'
+__version__ = '7.0.0'
 
 import argparse
 import collections
@@ -15,7 +15,7 @@ import requests
 from tqdm import tqdm
 import jrc_common.jrc_common as JRC
 
-# pylint: disable=broad-exception-caught,logging-fstring-interpolation
+# pylint: disable=broad-exception-caught,logging-fstring-interpolation,logging-not-lazy
 
 # Database
 DB = {}
@@ -228,9 +228,11 @@ def set_alumni(person, orcid):
     LOGGER.warning(f"Setting alumni flag for {name}")
     if not ARG.WRITE:
         return
+    now = datetime.now()
     try:
         result = DB['dis']['orcid'].update_one({'employeeId': person['employeeId']},
-                                      {'$set': {'alumni': True}})
+                                      {'$set': {'alumni': True,
+                                                'alumni_date': now.strftime("%Y-%m-%d")}})
         if hasattr(result, 'modified_count') and result.modified_count:
             COUNT['update'] += 1
     except Exception as err:

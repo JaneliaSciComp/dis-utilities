@@ -2,7 +2,7 @@
     Add/remove JRC authors for a given DOI.
 """
 
-__version__ = '5.0.0'
+__version__ = '6.0.0'
 
 import argparse
 import collections
@@ -269,6 +269,8 @@ def process_doi(doi):
                 terminate_program(err)
             if hasattr(result, 'matched_count') and result.modified_count:
                 LOGGER.warning(f"DOI {doi} updated to remove JRC authors")
+            DL.add_doi_process(doi, action='assign_authors', coll=DB['dis']['processing'],
+                               notes='Removed JRC authors')
         return
     LOGGER.debug(f"New authors: {json.dumps(jrc_authors)}")
     payload = get_payload(jrc_authors)
@@ -283,6 +285,9 @@ def process_doi(doi):
         if rec.get('jrc_first_id') and auth in rec.get('jrc_first_id'):
             LOGGER.error(f"Must remove {auth} from first author for {doi}")
     LOGGER.debug(f"{doi} {len(original)} -> {len(jrc_authors)}")
+    if ARG.WRITE:
+        DL.add_doi_process(doi, action='assign_authors', coll=DB['dis']['processing'],
+                           notes='Auto-assign authors' if ARG.AUTO else 'Assign authors')
     if not ARG.WRITE:
         if ARG.DEBUG:
             print(json.dumps(payload, indent=2, default=str))
