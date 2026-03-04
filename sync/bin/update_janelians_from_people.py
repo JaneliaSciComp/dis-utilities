@@ -58,9 +58,9 @@ def initialize_program():
     dbs = ['dis']
     for source in dbs:
         dbo = attrgetter(f"{source}.{ARG.MANIFOLD}.write")(dbconfig)
-        LOGGER.info("Connecting to %s %s on %s as %s", dbo.name, ARG.MANIFOLD, dbo.host, dbo.user)
+        LOGGER.info(f"Connecting to {dbo.name} {ARG.MANIFOLD} on {dbo.host} as {dbo.user}")
         try:
-            DB[source] = JRC.connect_database(dbo)
+            DB['dis'] = JRC.connect_database(dbo)
         except Exception as err:
             terminate_program(err)
     try:
@@ -85,11 +85,18 @@ def update_preferred_name(idresp, row):
     name = {'given': 'nameFirstPreferred',
             'family': 'nameLastPreferred'}
     for key,val in name.items():
-        if val in idresp and idresp[val] and idresp[val] != row[key][0]:
-            if idresp[val] in row[key]:
-                row[key].remove(idresp[val])
-            row[key].insert(0, idresp[val])
-            dirty = True
+        try:
+            if val in idresp and idresp[val] and idresp[val] != row[key][0]:
+                if idresp[val] in row[key]:
+                    row[key].remove(idresp[val])
+                row[key].insert(0, idresp[val])
+        except Exception as err:
+            print(f"Key: {key}   Value: {val}\nidresp:")
+            print(json.dumps(idresp, indent=2))
+            print("row:")
+            print(json.dumps(idresp, indent=2))
+            terminate_program(err)
+        dirty = True
     if not dirty:
         return dirty
     if sorted(old_given) == sorted(row['given']) and sorted(old_family) == sorted(row['family']):
@@ -353,11 +360,16 @@ def update_orcid():
             terminate_program(f"Request failed after multiple retries: {err}")
         except Exception as err:
             terminate_program(f"Error calling People by id: {err}")
-        if not idresp and ARG.ALUMNI:
-            LOGGER.warning(f"No People record for {row}")
-            row['alumni'] = True
-            COUNT['alumni'] += 1
-            dirty = True
+        if not idresp:
+            if ARG.ALUMNI:
+                LOGGER.warning(f"No People record for {row}")
+                row['alumni'] = True
+                now = datetime.now()
+                row['alumni_date'] = now.strftime("%Y-%m-%d")
+                COUNT['alumni'] += 1
+                dirty = True
+            else:
+                terminate_program(f"No People record for {row}")
         else:
             dirty = record_updates(idresp, row)
         LOGGER.debug(json.dumps(row, indent=4, default=str))
