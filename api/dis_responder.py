@@ -35,7 +35,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "108.0.0"
+__version__ = "108.1.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -3790,9 +3790,8 @@ def doi_tabs(doi, row, data, authors):
     abstract = ahtml = ""
     if 'type' in data and data['type'] == 'grant':
         if 'project' in data and data['project']:
-            if all(['project-description' in data['project'][0],
-                    data['project'][0]['project-description'],
-                    'description' in data['project'][0]['project-description'][0]]):
+            if data['project'][0].get('project-description', {}) \
+               and data['project'][0]['project-description'][0].get('description', {}):
                 abstract = data['project'][0]['project-description'][0]['description']
                 ptitle = ""
                 if 'project-title' in data['project'][0] and data['project'][0]['project-title']:
@@ -3896,7 +3895,7 @@ def doi_tabs(doi, row, data, authors):
                         + f"authors in {row['jrc_obtained_from']})</span></h4>" \
                         + f"<div class='scroll'>{''.join(alist)}</div>"
     if not authors and not content:
-        return ""
+        return "&nbsp;"
     # Tabs
     html = '<ul class="nav nav-tabs" id="myTab" role="tablist">'
     html += '<li class="nav-item" role="presentation">' \
@@ -7028,7 +7027,7 @@ def show_subscription_summary():
                                          navbar=generate_navbar('Subscriptions')))
 
 
-@app.route('/subscription/provider/<string:prov>')
+@app.route('/subscription/provider/<path:prov>')
 def show_subscription_summary_by_provider(prov):
     ''' Show subscription summary by provider
     '''
@@ -7293,8 +7292,8 @@ def show_subscriptions(jtype):
                                          html=html, sub=jtype,
                                          navbar=generate_navbar('Subscriptions')))
 
-@app.route('/subscriptionlist/<string:sub>')
-@app.route('/subscriptionlist/<string:sub>/<string:stype>/<string:field>')
+@app.route('/subscriptionlist/<path:sub>')
+@app.route('/subscriptionlist/<path:sub>/<string:stype>/<string:field>')
 def show_subscriptionlist(sub, stype=None, field='publisher'):
     ''' Show subscription list for a title
     '''
