@@ -9,7 +9,7 @@
     - Sends citations email to the user that ran the program
 """
 
-__version__ = '1.0.0'
+__version__ = '2.0.0'
 
 import argparse
 from datetime import datetime
@@ -25,7 +25,7 @@ import doi_common.doi_common as DL
 # Database
 DB = {}
 # Global
-ARG = LOGGER = None
+ARG = DIS = LOGGER = None
 
 def terminate_program(msg=None):
     ''' Terminate the program gracefully
@@ -73,11 +73,12 @@ def run_subprocess(cmd, file):
     '''
     cmd.insert(0, sys.executable)
     if 'get_citation' not in cmd[1]:
+        # get_citation.py has none of these parms
         cmd.append("--verbose")
-    if ARG.WRITE:
-        cmd.append("--write")
-    if ARG.DEBUG:
-        cmd.append("--debug")
+        if ARG.WRITE:
+            cmd.append("--write")
+        if ARG.DEBUG:
+            cmd.append("--debug")
     print(f"{'-'*80}\nRunning {cmd[1]} on {file}\n")
     try:
         proc = subprocess.run(cmd,
@@ -92,7 +93,7 @@ def run_subprocess(cmd, file):
     if stdout:
         print(stdout)
     if exit_code:
-        terminate_program(f"Error from cmd[1]: {stderr}")
+        terminate_program(f"Error from {cmd[1]}: {stderr}")
     return stdout if stdout else ''
 
 
@@ -168,6 +169,7 @@ def processing():
           None
     '''
     dois = []
+    input_dois = []
     new = []
     if ARG.DOI:
         input_dois = [ARG.DOI]

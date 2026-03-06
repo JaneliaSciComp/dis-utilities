@@ -7,7 +7,7 @@
            to DIS MongoDB.
 """
 
-__version__ = '22.0.0'
+__version__ = '22.1.0'
 
 import argparse
 import collections
@@ -552,7 +552,11 @@ def too_old(doi, msg):
         Returns:
           True or False
     """
-    pdate = DL.get_publishing_date(msg)
+    try:
+        pdate = DL.get_publishing_date(msg)
+    except Exception as err:
+        LOGGER.error(f"Could not get publishing date for {doi}\n{err}")
+        return True
     if pdate < '2006-04-01':
         LOGGER.warning(f"Skipping {doi} because it was published before 2006-04")
         return True
@@ -858,7 +862,7 @@ def add_tags_and_authors(persist):
     '''
     coll = DB['dis'].orcid
     for key, val in tqdm(persist.items(), desc='Add jrc_author and jrc_tag'):
-        sleep(0.5)
+        sleep(0.25)
         try:
             rec = DB['dis'].dois.find_one({"doi": key})
         except Exception as err:
@@ -912,7 +916,7 @@ def add_first_last_authors(rec):
     '''
     first = []
     firstn = []
-    sleep(0.5)
+    sleep(0.25)
     try:
         det = DL.get_author_details(rec, DB['dis']['orcid'])
     except Exception as err:
@@ -1112,11 +1116,9 @@ def process_dois():
     specified = {} # Dict of distinct DOIs received as input (value is True)
     persist = {} # DOIs that will be persisted in a database (value is record)
     for odoi in tqdm(rows['dois'], desc='DOIs'):
-        sleep(0.25)
         if '//' in odoi:
             terminate_program(f"Invalid DOI: {odoi}")
         doi = odoi if ARG.TARGET == 'flyboy' else odoi.lower().strip()
-        COUNT['found'] += 1
         if doi in IGNORE['doi']:
             LOGGER.warning(f"Skipping {doi} because it is in the ignore list")
             COUNT['skipped'] += 1
@@ -1124,6 +1126,9 @@ def process_dois():
         if doi in specified:
             continue
         specified[doi] = True
+        if not ARG.INSERT:
+            sleep(0.25)
+        COUNT['found'] += 1
         if ARG.INSERT:
             if doi in EXISTING:
                 continue
