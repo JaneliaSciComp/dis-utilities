@@ -2,7 +2,7 @@
     This program will load publications from a KBART file
 '''
 
-__version__ = '5.0.0'
+__version__ = '6.0.0'
 
 import argparse
 import collections
@@ -177,6 +177,8 @@ def set_payload(row, payload):
         #terminate_program(f"Provider not found for {row['publication_title']}")
         COUNT['skipped'] += 1
         return
+    if provider == 'Elsevier':
+        provider = 'ScienceDirect'
     title = str(row['publication_title']).strip()
     if title == 'nan':
         terminate_program(f"Title not found for {row['publication_title']}")
@@ -262,7 +264,7 @@ def insert_record(val):
         except Exception as err:
             terminate_program(err)
         if not row:
-            LOGGER.info(f"Inserted {val['title']}")
+            LOGGER.info(f"Inserted {val['title']} ({val['provider']}/{val['publisher']})")
         COUNT['updated' if row else 'inserted'] += 1
         if ARG.DEBUG:
             print(json.dumps(val, indent=2))
@@ -270,13 +272,12 @@ def insert_record(val):
     try:
         result = DB['dis'].subscription.update_one(
             {'title': val['title'], 'identifier': val['identifier']},
-            {'$set': val},
-            upsert=True
+            {'$set': val}, upsert=True
         )
-        if result.upserted_id:
+        if hasattr(result, 'modified_count') and result.modified_count:
+            COUNT['updated'] += result.modified_count
+        if hasattr(result, 'upserted_id') and result.upserted_id:
             COUNT['inserted'] += 1
-        else:
-            COUNT['updated'] += 1
     except Exception as err:
         LOGGER.error("Could not upsert record")
         print(json.dumps(val, indent=2))
@@ -386,6 +387,6 @@ if __name__ == '__main__':
     ARG = PARSER.parse_args()
     LOGGER = JRC.setup_logging(ARG)
     initialize_program()
-    DIS = JRC.get_config("dis")
+    DIS = JRC.simplenamespace_to_dict(JRC.get_config("dis"))
     processing()
     terminate_program()

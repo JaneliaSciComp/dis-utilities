@@ -2,7 +2,7 @@
     This program will correlate a budgeting spreadsheet with the subscription collection
 '''
 
-__version__ = '4.0.0'
+__version__ = '5.0.0'
 
 import argparse
 import collections
@@ -22,10 +22,11 @@ DB = {}
 # Counters
 COUNT = collections.defaultdict(lambda: 0, {})
 # Globals
-ARG = LOGGER = None
-
-# Output file
-OUTPUT = []
+ARG = DIS = LOGGER = None
+TITLE = {}
+WARNINGS = []
+# Output files
+OUTPUT = {'records': [], 'updates': [], 'inserted': []}
 
 def terminate_program(msg=None):
     ''' Terminate the program gracefully
@@ -115,16 +116,24 @@ def process_row(row, subscribed):
             cost[str(year)] = row[f'FY{str(year)}']
     if not cost:
         LOGGER.warning(f"No costs found for {row['Publication']}")
+        COUNT['nocost'] += 1
         return
     if subscribed.get('access') != 'Subscription':
         LOGGER.debug(f"{row['Publication']} is {subscribed.get('access')} but has costs")
     payload = {"$set": {"cost": cost}}
-    OUTPUT.append({row['Publication']: cost})
+    OUTPUT['records'].append({row['Publication']: cost})
+    if row['Publication'] in TITLE:
+        LOGGER.warning(f"{row['Publication']} is repeated")
+        print(f"  To be updated: {row['Publisher']}")
+        print(f"  Already present: {TITLE[row['Publication']]['Publisher']}")
+    else:
+        TITLE[row['Publication']] = row
     if ARG.WRITE:
         try:
             result = DB['dis'].subscription.update_one({'_id': subscribed['_id']}, payload)
             if hasattr(result, 'modified_count') and result.modified_count:
                 COUNT['updated'] += result.modified_count
+                OUTPUT['updates'].append(subscribed)
         except Exception as err:
             terminate_program(err)
     else:
@@ -143,15 +152,21 @@ def process_collection(row):
     except Exception as err:
         terminate_program(err)
     if row['Publisher'] == 'Wiley':
-        srow = {'provider': 'Wiley', 'publisher': 'Wiley'}
+        srow = {'provider': 'Wiley', 'publisher': 'Wiley'} #PLUG
+    elif row['Publisher'] == 'Elsevier':
+        srow = {'provider': 'ScienceDirect', 'publisher': 'Elsevier'}
     elif ARG.PUBLISHER and row['Publisher'] == ARG.PUBLISHER:
         srow = {'provider': ARG.PUBLISHER, 'publisher': ARG.PUBLISHER}
     if not srow:
-        LOGGER.debug(f"Collection publisher {row['Publisher']} not found")
+        msg = f"Collection publisher {row['Publisher']} not found"
+        if msg not in WARNINGS:
+            WARNINGS.append(msg)
+            LOGGER.warning(msg)
+        COUNT['nopublisher'] += 1
         return
     cost = find_cost(row)
     if not cost:
-        COUNT['skipped'] += 1
+        COUNT['nocost'] += 1
         return
     payload = {"type": DIS['sub_cost_map'].get(row['Type'], "Collection"),
                "title": row['Publication'],
@@ -164,42 +179,80 @@ def process_collection(row):
                "access": "Subscription",
                "cost": cost
               }
-    OUTPUT.append(payload)
+    OUTPUT['records'].append(payload)
+    LOGGER.info(f"Inserting {payload['title']} ({payload['provider']}/{payload['publisher']})")
     if ARG.WRITE:
         try:
             match = {'title': payload['title'], 'provider': payload['provider']}
             result = DB['dis'].subscription.update_one(match, {"$set": payload}, upsert=True)
             if hasattr(result, 'upserted_count') and result.upserted_id:
                 COUNT['inserted'] += 1
+                OUTPUT['inserted'].append(payload)
             elif hasattr(result, 'modified_count') and result.modified_count:
                 COUNT['updated'] += result.modified_count
         except Exception as err:
             terminate_program(err)
     else:
-        print(payload)
         COUNT['inserted'] += 1
+        OUTPUT['inserted'].append(payload)
+
+
+def get_selected_sheet():
+    ''' Get the selected sheet
+        Keyword arguments:
+          None
+        Returns:
+          selected_sheet: selected sheet
+    '''
+    tabs = pd.ExcelFile(ARG.FILE).sheet_names
+    if not ARG.SHEET:
+        LOGGER.info(f"Available sheets: {', '.join(tabs)}")
+    if len(tabs) == 1:
+        return None
+    if ARG.SHEET:
+        return ARG.SHEET
+    questions = [inquirer.List('sheet',
+                               message="Which sheet would you like to process?",
+                               choices=tabs)]
+    answers = inquirer.prompt(questions, theme=BlueComposure())
+    return answers['sheet']
+
+
+def reset_costs():
+    ''' Remove records that originated with this program, and remove the "cost" field
+        from others.
+        Keyword arguments:
+          None
+        Returns:
+          None
+    '''
+    try:
+        result = DB['dis'].subscription.update_many({}, {"$unset": {"cost": ""}})
+        if hasattr(result, 'modified_count') and result.modified_count:
+            LOGGER.info(f"Reset {result.modified_count:,} records")
+        result = DB['dis'].subscription.delete_many({"urls": {"$exists": False}})
+        if hasattr(result, 'deleted_count') and result.deleted_count:
+            LOGGER.info(f"Deleted {result.deleted_count:,} records")
+    except Exception as err:
+        terminate_program(err)
 
 
 def processing():
     ''' Processing
     '''
     if '.xls' in ARG.FILE:
-        tabs = pd.ExcelFile(ARG.FILE).sheet_names
-        LOGGER.info(f"Available sheets: {', '.join(tabs)}")
-        if len(tabs) > 1:
-            if ARG.SHEET:
-                selected_tab = ARG.SHEET
-            else:
-                questions = [inquirer.List('sheet',
-                                            message="Which sheet would you like to process?",
-                                            choices=tabs)]
-                answers = inquirer.prompt(questions, theme=BlueComposure())
-                selected_tab = answers['sheet']
+        selected_tab = get_selected_sheet()
+        if selected_tab:
             pdf = pd.read_excel(ARG.FILE, sheet_name=selected_tab, header=0, dtype=str)
         else:
             pdf = pd.read_excel(ARG.FILE, header=0, dtype=str)
     else:
         pdf = pd.read_csv(ARG.FILE, header=0, sep="\t",  dtype=str)
+    # Reset the costs if the --reset and --write flags are set
+    if ARG.RESET and ARG.WRITE:
+        reset_costs()
+    # Find all subscriptions in the database and store them in the SUBSCRIBED dictionary
+    # (keyed by title)
     try:
         rows = DB['dis'].subscription.find({})
     except Exception as err:
@@ -209,33 +262,39 @@ def processing():
         if subscribed.get(row['title']) and row['type'] == subscribed[row['title']]['type']:
             LOGGER.error(f"Duplicate subscription found for {row['title']} {row['publisher']}")
         subscribed[row['title']] = row
+    # Process the cost spreadsheet
     for _, row in tqdm(pdf.iterrows(), total=len(pdf), desc="Processing"):
         if ARG.PUBLISHER and row['Publisher'] != ARG.PUBLISHER:
             continue
+        # If we're missing all three fields, skip the row (it's a footer)
+        if pd.isna(row['Type']) and pd.isna(row['Publication']) and pd.isna(row['Publisher']):
+            continue
+        # We need a type, a publication, or a publisher
+        if pd.isna(row['Type']) or pd.isna(row['Publication']) or pd.isna(row['Publisher']):
+            COUNT['error'] += 1
+            continue
         COUNT['read'] += 1
         LOGGER.debug(json.dumps(row, default=str))
-        if pd.isna(row['Publication']):
-            COUNT['skipped'] += 1
-            continue
-        if row['Publication'] in ['Science', 'Science Signaling']:
-            continue
         if row['Publication'] in subscribed:
-            # The publisher is known, so we can process the row
+            # The publication (title) is known, so we can process the row
             COUNT['matched'] += 1
             process_row(row, subscribed[row['Publication']])
         elif row.get('Type') in DIS['sub_cost_map'].keys():
-            # The publisher is not known, but the type is valid, so we can process the row
-            COUNT['matched'] += 1
+            # The publication is not known, but the type is valid, so we can process the row
             process_collection(row)
-    if OUTPUT:
-        with open("cost_updates.json", 'w', encoding='utf-8') as outfile:
-            outfile.write(json.dumps(OUTPUT, default=str, indent=2))
-    print(f"Licenses read:     {COUNT['read']:,}")
-    print(f"Subscriptions:     {COUNT['subscription']:,}")
-    print(f"Licenses skipped:  {COUNT['skipped']:,}")
-    print(f"Licenses matched:  {COUNT['matched']:,}")
-    print(f"Records inserted:  {COUNT['inserted']:,}")
-    print(f"Records updated:   {COUNT['updated']:,}")
+    # Write the output files
+    for key in ('records', 'updates', 'inserted'):
+        if OUTPUT[key]:
+            with open(f"cost_{key}.json", 'w', encoding='utf-8') as outfile:
+                outfile.write(json.dumps(OUTPUT[key], default=str, indent=2))
+    print(f"Subscriptions:         {COUNT['subscription']:,}")
+    print(f"Records read:         {COUNT['read']:,}")
+    print(f"Records with errors:   {COUNT['error']:,}")
+    print(f"Publisher not found:   {COUNT['nopublisher']:,}")
+    print(f"No cost:               {COUNT['nocost']:,}")
+    print(f"Subscriptions matched: {COUNT['matched']:,}")
+    print(f"Records inserted:      {COUNT['inserted']:,}")
+    print(f"Records updated:       {COUNT['updated']:,}")
 
 # -----------------------------------------------------------------------------
 
@@ -251,8 +310,10 @@ if __name__ == '__main__':
     PARSER.add_argument('--manifold', dest='MANIFOLD', action='store',
                         default='prod', choices=['dev', 'prod'],
                         help='MongoDB manifold (dev, prod)')
+    PARSER.add_argument('--reset', dest='RESET', action='store_true',
+                        default=False, help='Remove existing costs before processing')
     PARSER.add_argument('--write', dest='WRITE', action='store_true',
-                        default=False, help='Write to database/config system')
+                        default=False, help='Write to database')
     PARSER.add_argument('--verbose', dest='VERBOSE', action='store_true',
                         default=False, help='Flag, Chatty')
     PARSER.add_argument('--debug', dest='DEBUG', action='store_true',
