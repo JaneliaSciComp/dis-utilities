@@ -3,11 +3,12 @@
 '''
 
 from math import ceil, pi
-from bokeh.models import Range1d, HoverTool, LinearAxis, ColumnDataSource, NumeralTickFormatter
+from bokeh.models import (BasicTicker, ColorBar, HoverTool, LinearAxis, LinearColorMapper,
+                          ColumnDataSource, NumeralTickFormatter, Range1d)
 from bokeh.embed import components
-from bokeh.palettes import all_palettes, plasma
+from bokeh.palettes import all_palettes, interp_palette, plasma, Turbo256
 from bokeh.plotting import figure
-from bokeh.transform import cumsum
+from bokeh.transform import cumsum, transform
 import pandas as pd
 
 OA_COLORS = {"Bronze": "#CD7F32", "Closed": "red", "Diamond": "lightgray",
@@ -15,6 +16,29 @@ OA_COLORS = {"Bronze": "#CD7F32", "Closed": "red", "Diamond": "lightgray",
 SOURCE_PALETTE = ["mediumblue", "darkorange"]
 SOURCE3_PALETTE = ["mediumblue", "darkorange", "wheat"]
 TYPE_PALETTE = ["mediumblue", "darkorange", "wheat", "darkgray"]
+
+def make_stretched_palette(palette, low_frac=0.16, low_share=0.50, count=256):
+    ''' Build an n-color palette with increased color separation in the lower range.
+        Keyword arguments:
+          palette: palette to stretch
+          low_frac: bottom fraction of data range to stretch (0.2 = lower 20%)
+          low_share: fraction of palette colors allocated to that range (0.5 = 50%)
+          count: number of colors to return
+        Returns:
+          List of colors
+    '''
+    src = list(palette)
+    src_len = len(src)
+    indices = []
+    for i in range(count):
+        t = i / (count - 1)
+        if t <= low_frac:
+            src_t = (t / low_frac) * low_share
+        else:
+            src_t = low_share + ((t-low_frac) / (1-low_frac)) * (1-low_share)
+        indices.append(min(int(src_t * (src_len - 1)), src_len - 1))
+    return [src[i] for i in indices]
+TURBO256_STRETCHED = make_stretched_palette(Turbo256)
 
 # ******************************************************************************
 # * Utility functions                                                          *
@@ -357,3 +381,47 @@ def wedge_chart(data, height=100, width=100, color='green'):
     plt.axis.visible = False
     plt.grid.grid_line_color = None
     return components(plt)
+
+
+def heat_map(data, title, x_field, y_field, value_field, width=950, height=500,
+             value_format="$0,0", palette=None):
+    ''' Create a heat map
+        Keyword arguments:
+          data: dict with lists keyed by x_field, y_field, and value_field
+          title: chart title
+          x_field: key for the X-axis (categorical, e.g. Year)
+          y_field: key for the Y-axis (categorical, e.g. Provider)
+          value_field: key for the cell color value (e.g. Cost)
+          width: figure width in pixels (optional)
+          height: figure height in pixels (optional)
+          value_format: NumeralJS format string for colorbar and tooltip (optional)
+          palette: list of colors to use (optional, defaults to TURBO256_STRETCHED)
+        Returns:
+          Figure components (chartscript, chartdiv)
+    '''
+    if palette is None:
+        palette = TURBO256_STRETCHED
+    x_vals = sorted(set(data[x_field]))
+    y_vals = sorted(set(data[y_field]), key=str.lower)
+    source = ColumnDataSource(data)
+    mapper = LinearColorMapper(palette=palette,
+                               low=min(data[value_field]),
+                               high=max(data[value_field]))
+    p = figure(title=title, x_range=x_vals, y_range=y_vals,
+               width=width, height=max(height, len(y_vals) * 30 + 100),
+               toolbar_location=None, background_fill_color="ghostwhite")
+    p.rect(x=x_field, y=y_field, width=1, height=1, source=source,
+           fill_color=transform(value_field, mapper), line_color=None)
+    color_bar = ColorBar(color_mapper=mapper,
+                         ticker=BasicTicker(desired_num_ticks=8),
+                         formatter=NumeralTickFormatter(format=value_format),
+                         label_standoff=8, border_line_color=None, location=(0, 0))
+    p.add_layout(color_bar, 'right')
+    p.add_tools(HoverTool(tooltips=[
+        (x_field, f"@{x_field}"),
+        (y_field, f"@{y_field}"),
+        (value_field, f"@{value_field}{{{value_format}}}")]))
+    p.xaxis.axis_label = x_field
+    p.yaxis.axis_label = y_field
+    p.xaxis.major_label_orientation = 0.6
+    return components(p)
