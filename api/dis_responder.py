@@ -10,7 +10,7 @@ from io import BytesIO
 import json
 from json import JSONEncoder
 from math import pi
-from operator import attrgetter, itemgetter
+from operator import itemgetter
 import os
 import random
 import re
@@ -35,7 +35,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "108.1.0"
+__version__ = "109.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -49,7 +49,7 @@ CUSTOM_REGEX = {"publishing_year": {"field": "jrc_publishing_date",
 NAV = {"Home": "",
        "DOIs": {f"DOIs by insertion date{'&nbsp;'*10}": "dois_insertpicker",
                 "DOI stats": "dois_source",
-                "DOIs by:": {"month": "dois_month", "year": "dois_year",
+                "DOIs by:": {"month": "dois_time/month", "year": "dois_time/year",
                              "subject": "dois_subjectpicker"},
                 "DOI yearly report": "dois_yearly",
                 "Top cited DOIs": "dois_top_cited",
@@ -58,7 +58,7 @@ NAV = {"Home": "",
                     "DataCite DOI citations": "datacite_citations",
                     "DataCite DOI downloads": "datacite_downloads",
                     "DataCite subjects": "datacite_subject",
-                    "DataCite top publishers": "top_publishers/All/DataCite"},
+                    "DataCite top publishers": "top_entities/publisher/All/DataCite"},
        "Authorship": {"Authors": "orcid_entry",
                       "DOIs by authorship": "dois_author",
                       "DOIs with lab head first/last authors": "doiui_firstlast",
@@ -71,11 +71,13 @@ NAV = {"Home": "",
        "Preprints": {"DOIs by preprint status": "dois_preprint",
                      "DOIs by preprint status by year": "dois_preprint_year",
                      "Preprints with journal publications": "preprint_with_pub",
-                     "Preprints without journal publications": "preprint_no_pub",
-                     "Journal publications without preprints": "pub_no_preprint"},
+                     "Preprints without journal publications": "preprint_relation/preprint_no_pub",
+                     "Journal publications without preprints": "preprint_relation/pub_no_preprint"},
        "Journals": {"DOIs by:": {"publisher": "dois_publisher", "journal": "journals_dois"},
+                    "Heatmaps:": {"publisher": "dois_heatmap/publisher",
+                                  "journal": "dois_heatmap/journal"},
                     "Open access:": {"report": "dois_oa", "details": "dois_oa_details"},
-                    "Top:": {"publishers": "top_publishers", "journals": "top_journals"},
+                    "Top:": {"publishers": "top_entities/publisher", "journals": "top_entities/journal"},
                     f"DOIs missing journals{'&nbsp;'*9}": "dois_nojournal",
                     "Journals referenced": "journals_referenced"},
        "Subscriptions": {"Summary": "subscriptions",
@@ -83,8 +85,9 @@ NAV = {"Home": "",
                          "Repositories": "subscriptions/type/Repository",
                          "Books": "subscriptions/type/Book",
                          "Book series": "subscriptions/type/Book series",
-                         "Monographs": "subscriptions/type/Monograph"},
-       "Tag/affiliation": {"DOIs by:": {"tag": "dois_tag", "acknowledgement": "dois_ack",
+                         "Monographs": "subscriptions/type/Monograph",
+                        },
+       "Tag/affiliation": {"DOIs by:": {"tag": "dois_tag_ack/tag", "acknowledgement": "dois_tag_ack/ack",
                                         "lab": "dois_lab"},
                            f"Top DOI tags by year{'&nbsp;'*22}": "dois_top",
                            "Author affiliations:": {"P&C": "orcid_tag",
@@ -189,16 +192,23 @@ def before_request():
     '''
     if not DB:
         print("Initializing global variables")
-        try:
-            with open('database.json', 'r', encoding='utf-8') as stream:
-                data = json.load(stream)
-            dbconfig = json.loads(json.dumps(data),
-                                  object_hook=lambda dat: SimpleNamespace(**dat))
-        except Exception as err:
+        #try:
+        #    with open('database.json', 'r', encoding='utf-8') as stream:
+        #        data = json.load(stream)
+        #    dbconfig = json.loads(json.dumps(data),
+        #                          object_hook=lambda dat: SimpleNamespace(**dat))
+        #except Exception as err:
+        #    return render_template('warning.html', urlroot=request.url_root,
+        #                           title=render_warning("Config error"), message=err)
+        #dbo = attrgetter("dis.prod.write")(dbconfig)
+        if "DIS_MONGO_URI" not in os.environ:
             return render_template('warning.html', urlroot=request.url_root,
-                                   title=render_warning("Config error"), message=err)
-        dbo = attrgetter("dis.prod.write")(dbconfig)
-        print(f"Connecting to {dbo.name} prod on {dbo.host} as {dbo.user}")
+                                   title=render_warning("Config error"),
+                                   message="Missing environment variable DIS_MONGO_URI")
+        dbo = SimpleNamespace(type="mongo",
+                              uri=os.environ.get(f"DIS_MONGO_URI"),
+                              client=os.environ.get(f"DIS_MONGO_DATABASE", "dis"))
+        print(f"Connecting to {dbo.client} prod")
         try:
             DB['dis'] = JRC.connect_database(dbo)
         except Exception as err:
@@ -434,6 +444,87 @@ def get_custom_payload(ipd, display_value):
         payload['jrc_obtained_from'] = ipd['jrc_obtained_from']
         ptitle += f" from {ipd['jrc_obtained_from']}"
     return payload, ptitle
+
+# ******************************************************************************
+# * Plotting utility functions                                                 *
+# ******************************************************************************
+
+def provider_pie_chart(provider, pyear):
+    ''' Create a pie chart for a provider
+        Keyword arguments:
+          provider: provider name
+          pyear: year
+        Returns:
+          Pie chart components
+    '''
+    data = {}
+    # Pie chart
+    #    payload = [{"$project": {"costArray": {"$objectToArray": "$cost" },
+    #                             "provider": "$provider"}},
+    #                            {"$unwind": "$costArray"},
+    #                            {"$group": {"_id": {"provider": "$provider",
+    #                                                "year": "$costArray.k"},
+    #                                        "totalCost": {"$sum": {"$toDouble": "$costArray.v"}}}},
+    #                            {"$match": {"_id.year": str(pyear)}},
+    #                            {"$sort": {"totalCost": -1}}]
+    payload = [{"$match": {"provider": provider, "cost": {"$exists": True}}},
+    {"$addFields": {"costArray": {"$objectToArray": "$cost"}}},
+    {"$addFields": {"maxYear": {"$max": "$costArray.k"}}},
+    {"$addFields": {"recentCost":
+                    {"$toDouble":
+                     {"$arrayElemAt":
+                      [{"$map":
+                        {"input":
+                         {"$filter":
+                          {"input": "$costArray", "as": "e",
+                           "cond": {"$eq": ["$$e.k", "$maxYear"]}}},
+                         "as": "e", "in": "$$e.v"}}, 0]}}}},
+    {"$group": {"_id": "$type", "totalCost": {"$sum": "$recentCost"},
+                "mostRecentYear": {"$max":"$maxYear"}}},
+    {"$sort": {"totalCost": -1}}]
+    try:
+        rows = DB['dis'].subscription.aggregate(payload)
+    except Exception as err:
+        raise err
+    for row in rows:
+        data[row['_id']] = row['totalCost']
+    if len(data) > 1:
+        colors = DP.get_colors_by_count(len(data))
+        piescript, piediv = DP.pie_chart(data, f'Subscription costs by type for {pyear}',
+                                         'provider', colors=colors,
+                                         width=650, height=450, location="top_right", fmt='{$0,0}')
+        return piescript, piediv
+    else:
+        return None, None
+
+
+def provider_heat_map():
+    ''' Create a heat map for providers
+    '''
+    pipeline = [
+        {"$match": {"cost": {"$exists": True}}},
+        {"$project": {"provider": 1, "costArray": {"$objectToArray": "$cost"}}},
+        {"$unwind": "$costArray"},
+        {"$group": {"_id": {"provider": "$provider", "year": "$costArray.k"},
+                    "totalCost": {"$sum": {"$toDouble": "$costArray.v"}}}},
+        {"$sort": {"_id.year": 1, "_id.provider": 1}}
+    ]
+    try:
+        rows = DB['dis'].subscription.aggregate(pipeline, collation=INSENSITIVE)
+    except Exception as err:
+        raise err
+    data = {'Year': [], 'Provider': [], 'Cost': []}
+    for row in rows:
+        data['Year'].append(row['_id']['year'])
+        data['Provider'].append(row['_id']['provider'])
+        data['Cost'].append(row['totalCost'])
+    if not data['Year']:
+        return render_template('error.html', urlroot=request.url_root,
+                               title='No costs found',
+                               message="No subscription cost data found")
+    chartscript, chartdiv = DP.heat_map(data, 'Subscription costs by provider and year',
+                                        x_field='Year', y_field='Provider', value_field='Cost')
+    return chartscript, chartdiv
 
 # ******************************************************************************
 # * ORCID utility functions                                                    *
@@ -4741,63 +4832,99 @@ def dois_yearly(year=str(datetime.now().year)):
                                          navbar=generate_navbar('DOIs')))
 
 
-@app.route('/dois_year')
-def dois_year():
-    ''' Show publishing years with counts
+@app.route('/dois_time/<string:period>/<string:year>')
+@app.route('/dois_time/<string:period>')
+def dois_time(period, year=None):
+    ''' Show DOIs by year or month
+        Keyword arguments:
+          period: "year" or "month"
+          year: year to filter (month only, defaults to current year)
     '''
-    payload = [{"$group": {"_id": {"year": {"$substrBytes": ["$jrc_publishing_date", 0, 4]},
-                                   "source": "$jrc_obtained_from"
-                                  },
-                           "count": {"$sum": 1}}},
-               {"$sort": {"_id.pdate": -1}}
-              ]
+    if period not in ('year', 'month'):
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Invalid period"),
+                               message="period must be 'year' or 'month'")
+    if period == 'month' and year is None:
+        year = str(datetime.now().year)
+    substr_len = 7 if period == 'month' else 4
+    pipeline = []
+    if year:
+        pipeline.append({"$match": {"jrc_publishing_date": {"$regex": "^" + year}}})
+    pipeline += [
+        {"$group": {"_id": {period: {"$substrBytes": ["$jrc_publishing_date", 0, substr_len]},
+                            "source": "$jrc_obtained_from"},
+                    "count": {"$sum": 1}}},
+        {"$sort": {f"_id.{period}": 1}}
+    ]
     try:
-        rows = DB['dis'].dois.aggregate(payload)
+        rows = DB['dis'].dois.aggregate(pipeline)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get tags from dois collection"),
+                               title=render_warning("Could not get counts from dois collection"),
                                message=error_message(err))
-    html = '<table id="years" class="tablesorter numbers"><thead><tr>' \
-           + '<th>Year</th><th>Crossref</th><th>DataCite</th>' \
+    html = f'<table id="{period}s" class="tablesorter numbers"><thead><tr>' \
+           + f'<th>{period.capitalize()}</th><th>Crossref</th><th>DataCite</th>' \
            + '</tr></thead><tbody>'
-    years = {}
-    for row in rows:
-        if row['_id']['year'] not in years:
-            years[row['_id']['year']] = {}
-        if row['_id']['source'] not in years[row['_id']['year']]:
-            years[row['_id']['year']][row['_id']['source']] = row['count']
-    data = {"years": [], "Crossref": [], "DataCite": []}
     counter = collections.defaultdict(lambda: 0, {})
-    for year in sorted(years, reverse=True):
-        if year < '2006':
-            continue
-        data['years'].insert(0, str(year))
-        onclick = "onclick='nav_post(\"publishing_year\",\"" + year + "\")'"
-        link = f"<a href='#' {onclick}>{year}</a>"
-        html += f"<tr><td>{link}</td>"
-        for source in app.config['SOURCES']:
-            if source in years[year]:
-                data[source].insert(0, years[year][source])
-                onclick = "onclick='nav_post(\"publishing_year\",\"" + year \
-                          + "\",\"" + source + "\")'"
-                link = f"<a href='#' {onclick}>{years[year][source]:,}</a>"
-                counter[source] += years[year][source]
-            else:
-                data[source].insert(0, 0)
-                link = ""
-            html += f"<td>{link}</td>"
-        html += "</tr>"
+    if period == 'year':
+        periods = {}
+        for row in rows:
+            p = row['_id']['year']
+            if p not in periods:
+                periods[p] = {}
+            periods[p][row['_id']['source']] = row['count']
+        data = {'years': [], 'Crossref': [], 'DataCite': []}
+        for yr in sorted(periods, reverse=True):
+            if yr < '2006':
+                continue
+            data['years'].insert(0, str(yr))
+            onclick = "onclick='nav_post(\"publishing_year\",\"" + yr + "\")'"
+            html += f"<tr><td><a href='#' {onclick}>{yr}</a></td>"
+            for source in app.config['SOURCES']:
+                if source in periods[yr]:
+                    data[source].insert(0, periods[yr][source])
+                    onclick = "onclick='nav_post(\"publishing_year\",\"" + yr \
+                              + "\",\"" + source + "\")'"
+                    html += f"<td><a href='#' {onclick}>{periods[yr][source]:,}</a></td>"
+                    counter[source] += periods[yr][source]
+                else:
+                    data[source].insert(0, 0)
+                    html += "<td></td>"
+            html += "</tr>"
+        title = "DOIs published by year"
+        chart_title = "DOIs published by year/source"
+        pulldown = year_pulldown('dois_time/year')
+    else:
+        data = {'months': [f"{mon:02}" for mon in range(1, 13)],
+                'Crossref': [0] * 12, 'DataCite': [0] * 12}
+        for row in rows:
+            data[row['_id']['source']][int(row['_id']['month'][-2:]) - 1] = row['count']
+        for mon in data['months']:
+            mname = date(1900, int(mon), 1).strftime('%B')
+            html += f"<tr><td>{mname}</td>"
+            for source in app.config['SOURCES']:
+                if data[source][int(mon) - 1]:
+                    onclick = "onclick='nav_post(\"publishing_year\",\"" \
+                              + f"{year}-{mon}" + "\",\"" + source + "\")'"
+                    html += f"<td><a href='#' {onclick}>{data[source][int(mon)-1]:,}</a></td>"
+                    counter[source] += data[source][int(mon) - 1]
+                else:
+                    html += "<td></td>"
+            html += "</tr>"
+        title = f"DOIs published by month for {year}"
+        chart_title = title
+        pulldown = year_pulldown('dois_time/month', all_years=False)
     html += "</tbody><tfoot><tr><th>Total</th>"
     for source in app.config['SOURCES']:
         html += f"<th style='text-align: center;'>{counter[source]:,}</th>"
-    html += "</tr></tfoot>"
-    html += '</table>'
-    chartscript, chartdiv = DP.stacked_bar_chart(data, "DOIs published by year/source",
-                                                 xaxis="years", yaxis=app.config['SOURCES'],
+    html += "</tr></tfoot></table><br>" + pulldown
+    xaxis = 'years' if period == 'year' else 'months'
+    chartscript, chartdiv = DP.stacked_bar_chart(data, chart_title, xaxis=xaxis,
+                                                 yaxis=app.config['SOURCES'],
                                                  colors=DP.SOURCE_PALETTE)
     endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
-                                         title="DOIs published by year", html=html,
+                                         title=title, html=html,
                                          chartscript=chartscript, chartdiv=chartdiv,
                                          navbar=generate_navbar('DOIs')))
 
@@ -4858,6 +4985,7 @@ def show_insert_picker():
                                          title="DOI lookup by insertion date", before=before,
                                          start=start, stop=str(date.today()),
                                          after=after, navbar=generate_navbar('DOIs')))
+
 
 @app.route('/doiui/insert/<string:idate>')
 @app.route('/doiui/insert/<string:idate>/<string:source>')
@@ -5026,60 +5154,6 @@ def show_doiui_custom(year='All'):
                                          navbar=generate_navbar('DOIs')))
 
 
-@app.route('/dois_month/<string:year>')
-@app.route('/dois_month')
-def dois_month(year=str(datetime.now().year)):
-    ''' Show DOIs by month
-    '''
-    payload = [{"$match": {"jrc_publishing_date": {"$regex": "^"+ year}}},
-               {"$group": {"_id": {"month": {"$substrBytes": ["$jrc_publishing_date", 0, 7]},
-                                   "obtained": "$jrc_obtained_from"
-                                  },
-                           "count": {"$sum": 1}}},
-               {"$sort": {"_id.month": 1}}
-              ]
-    try:
-        rows = DB['dis'].dois.aggregate(payload)
-    except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get month counts " \
-                                                    + "from dois collection"),
-                               message=error_message(err))
-    data = {'months': [f"{mon:02}" for mon in range(1, 13)], 'Crossref': [0] * 12,
-            'DataCite': [0] * 12}
-    for row in rows:
-        data[row['_id']['obtained']][int(row['_id']['month'][-2:])-1] = row['count']
-    title = f"DOIs published by month for {year}"
-    html = '<table id="years" class="tablesorter numbers"><thead><tr>' \
-           + '<th>Month</th><th>Crossref</th><th>DataCite</th>' \
-           + '</tr></thead><tbody>'
-    counter = collections.defaultdict(lambda: 0, {})
-    for mon in data['months']:
-        mname = date(1900, int(mon), 1).strftime('%B')
-        html += f"<tr><td>{mname}</td>"
-        for source in app.config['SOURCES']:
-            if data[source][int(mon)-1]:
-                onclick = "onclick='nav_post(\"publishing_year\",\"" \
-                          + f"{year}-{mon}" + "\",\"" + source + "\")'"
-                link = f"<a href='#' {onclick}>{data[source][int(mon)-1]:,}</a>"
-                html += f"<td>{link}</td>"
-                counter[source] += data[source][int(mon)-1]
-            else:
-                html += "<td></td>"
-        html += "</tr>"
-    html += "</tbody><tfoot><tr><th>Total</th>"
-    for source in app.config['SOURCES']:
-        html += f"<th style='text-align: center;'>{counter[source]:,}</th>"
-    html += "</tr></tfoot>"
-    html += '</table><br>' + year_pulldown('dois_month', all_years=False)
-    chartscript, chartdiv = DP.stacked_bar_chart(data, title, xaxis="months",
-                                                 yaxis=('Crossref', 'DataCite'),
-                                                 colors=DP.SOURCE_PALETTE)
-    endpoint_access()
-    return make_response(render_template('bokeh.html', urlroot=request.url_root,
-                                         title=title, html=html,
-                                         chartscript=chartscript, chartdiv=chartdiv,
-                                         navbar=generate_navbar('DOIs')))
 
 
 @app.route('/dois_subjectpicker')
@@ -6426,71 +6500,49 @@ def preprint_with_pub():
                                          navbar=generate_navbar('Preprints')))
 
 
-@app.route('/preprint_no_pub')
-def preprint_no_pub():
-    ''' Show preprints with publications
+@app.route('/preprint_relation/<string:relation_type>')
+def show_preprint_relation(relation_type):
+    ''' Show preprints without publications or publications without preprints
+        Keyword arguments:
+          relation_type: "preprint_no_pub" or "pub_no_preprint"
     '''
-    payload = {"subtype": "preprint", "jrc_preprint": {"$exists": 0}}
+    RELATION_CONFIG = {
+        'preprint_no_pub': {'payload': {"subtype": "preprint", "jrc_preprint": {"$exists": 0}},
+                            'title': "Preprints without journal publications"},
+        'pub_no_preprint': {'payload': {"type": "journal-article", "jrc_preprint": {"$exists": 0}},
+                            'title': "Journal publications without preprints"},
+    }
+    if relation_type not in RELATION_CONFIG:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Invalid relation type"),
+                               message=f"relation_type must be one of: {', '.join(RELATION_CONFIG)}")
+    cfg = RELATION_CONFIG[relation_type]
     try:
-        rows = DB['dis'].dois.find(payload).sort([("jrc_publishing_date", -1)])
+        rows = DB['dis'].dois.find(cfg['payload']).sort([("jrc_publishing_date", -1)])
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get preprint data from dois"),
                                message=error_message(err))
     fileoutput = ""
     header = ['Published', 'DOI', 'Title', 'Journal']
-    html = "<table id='preprint_no_pub' class='tablesorter numbers'><thead><tr><th>" \
+    html = f"<table id='{relation_type}' class='tablesorter numbers'><thead><tr><th>" \
            + "</th><th>".join(header) + "</th></tr></thead><tbody>"
     cnt = 0
     for row in rows:
         cnt += 1
         ptitle = DL.get_title(row)
-        if 'jrc_journal' not in row:
-            row['jrc_journal'] = ""
-        fileoutput+= "\t".join([row['jrc_publishing_date'], row['doi'], DL.get_title(row),
-                                row['jrc_journal']]) + "\n"
+        journal = row.get('jrc_journal', '')
+        fileoutput += "\t".join([row['jrc_publishing_date'], row['doi'],
+                                 DL.get_title(row), journal]) + "\n"
         html += f"<tr><td>{row['jrc_publishing_date']}</td>" \
                 + f"<td>{doi_link(row['doi'])}</td><td>{ptitle}</td>" \
-                + f"<td>{row['jrc_journal']}</td></tr>"
+                + f"<td>{journal}</td></tr>"
     html += '</tbody></table>'
-    html = f"Preprints without journal publications: {cnt:,}<br><br>"  \
-           + create_downloadable('preprint_no_pub', header, fileoutput) + html
+    html = f"{cfg['title']}: {cnt:,}<br><br>" \
+           + create_downloadable(relation_type, header, fileoutput) + html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title="Preprints without journal publications", html=html,
-                                         navbar=generate_navbar('Preprints')))
-
-
-@app.route('/pub_no_preprint')
-def pub_no_preprint():
-    ''' Show publications without preprints
-    '''
-    payload = {"type": "journal-article", "jrc_preprint": {"$exists": 0}}
-    try:
-        rows = DB['dis'].dois.find(payload).sort([("jrc_publishing_date", -1)])
-    except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get preprint data from dois"),
-                               message=error_message(err))
-    fileoutput = ""
-    header = ['Published', 'DOI', 'Title', 'Journal']
-    html = "<table id='pub_nopreprint' class='tablesorter numbers'><thead><tr><th>" \
-           + "</th><th>".join(header) + "</th></tr></thead><tbody>"
-    cnt = 0
-    for row in rows:
-        cnt += 1
-        ptitle = DL.get_title(row)
-        fileoutput+= "\t".join([row['jrc_publishing_date'], row['doi'], DL.get_title(row),
-                                row['jrc_journal']]) + "\n"
-        html += f"<tr><td>{row['jrc_publishing_date']}</td>" \
-                + f"<td>{doi_link(row['doi'])}</td><td>{ptitle}</td>" \
-                + f"<td>{row['jrc_journal']}</td></tr>"
-    html += '</tbody></table>'
-    html = f"Journal publications without preprints: {cnt:,}<br><br>"  \
-           + create_downloadable('pub_no_preprint', header, fileoutput) + html
-    endpoint_access()
-    return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title="Journal publications without preprints", html=html,
+                                         title=cfg['title'], html=html,
                                          navbar=generate_navbar('Preprints')))
 
 # ******************************************************************************
@@ -6556,6 +6608,68 @@ def dois_publisher(year='All'):
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
                                          navbar=generate_navbar('DOIs')))
+
+
+@app.route('/dois_heatmap/<string:groupby>/<string:source>/<int:top>')
+@app.route('/dois_heatmap/<string:groupby>/<string:source>')
+@app.route('/dois_heatmap/<string:groupby>')
+def show_dois_heatmap(groupby, source='Crossref', top=10):
+    ''' Show a heatmap of DOI counts by publisher or journal and year
+        Keyword arguments:
+          groupby: "publisher" or "journal"
+          source: jrc_obtained_from value (default: Crossref)
+          top: number of top entries to display (default: 25)
+    '''
+    FIELD_MAP = {'publisher': {'mongo': 'publisher', 'label': 'Publisher'},
+                 'journal':   {'mongo': 'jrc_journal', 'label': 'Journal'}}
+    if groupby not in FIELD_MAP:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Invalid groupby parameter"),
+                               message=f"groupby must be one of: {', '.join(FIELD_MAP)}")
+    mongo_field = FIELD_MAP[groupby]['mongo']
+    label = FIELD_MAP[groupby]['label']
+    errmsg = f"Could not get {groupby} data from dois collection"
+    pipeline = [
+        {"$match": {mongo_field: {"$exists": True},
+                    "jrc_obtained_from": source,
+                    "jrc_publishing_date": {"$exists": True}}},
+        {"$group": {"_id": {groupby: f"${mongo_field}",
+                            "year": {"$substr": ["$jrc_publishing_date", 0, 4]}},
+                    "count": {"$sum": 1}}},
+        {"$sort": {"_id.year": 1}}
+    ]
+    try:
+        rows = DB['dis'].dois.aggregate(pipeline)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning(errmsg),
+                               message=error_message(err))
+    raw = [{'year': r['_id']['year'], groupby: r['_id'][groupby],
+            'count': r['count']} for r in rows]
+    if not raw:
+        return render_template('error.html', urlroot=request.url_root,
+                               title='No data found',
+                               message=f"No {groupby}/year data found for source {source}")
+    totals = {}
+    for r in raw:
+        totals[r[groupby]] = totals.get(r[groupby], 0) + r['count']
+    top_entries = {e for e, _ in sorted(totals.items(), key=lambda x: x[1],
+                                        reverse=True)[:top]}
+    data = {'Year': [], label: [], 'Count': []}
+    for r in raw:
+        if r[groupby] in top_entries:
+            data['Year'].append(r['year'])
+            data[label].append(r[groupby])
+            data['Count'].append(r['count'])
+    chartscript, chartdiv = DP.heat_map(data,
+                                        f'Top {top} {source} {groupby}s by year',
+                                        x_field='Year', y_field=label,
+                                        value_field='Count', value_format='0,0')
+    endpoint_access()
+    return make_response(render_template('bokeh.html', urlroot=request.url_root,
+                                         title=f'{label} heatmap',
+                                         html='', chartscript=chartscript, chartdiv=chartdiv,
+                                         navbar=generate_navbar('Journals')))
 
 
 @app.route('/dois_oa')
@@ -6746,85 +6860,74 @@ def show_journals_dois(year=str(datetime.now().year)):
                                          navbar=generate_navbar('Journals')))
 
 
-@app.route('/top_journals/<string:year>/<int:top>')
-@app.route('/top_journals/<string:year>')
-@app.route('/top_journals')
-def top_journals(year='All', top=10):
-    ''' Show top journals
+@app.route('/top_entities/<string:entity_type>/<string:year>/<string:source>/<int:top>')
+@app.route('/top_entities/<string:entity_type>/<string:year>/<string:source>')
+@app.route('/top_entities/<string:entity_type>/<string:year>')
+@app.route('/top_entities/<string:entity_type>')
+def top_entities(entity_type, year='All', source='crossref', top=10):
+    ''' Show top journals or publishers
+        Keyword arguments:
+          entity_type: "journal" or "publisher"
+          year: year to filter (default: All)
+          source: jrc_obtained_from value for publishers (default: crossref)
+          top: number of top entries to display (default: 10, max: 20)
     '''
-    top = min(top, 20)
-    try:
-        journal = get_top_journals(year, janelia=False)
-    except Exception as err:
+    ENTITY_CONFIG = {
+        'journal':   {'label': 'Journal',   'note': "Note that this does not contain "
+                                                     "Janelia Research Campus (figshare)<br>",
+                      'pie_width': 875,  'pie_height': 550},
+        'publisher': {'label': 'Publisher', 'note': '',
+                      'pie_width': 1100, 'pie_height': 650},
+    }
+    if entity_type not in ENTITY_CONFIG:
         return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get journal data from dois"),
-                               message=error_message(err))
-    if not journal:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get journal data from dois"),
-                               message='No journals were found')
-    html = "Note that this does not contain Janelia Research Campus (figshare)<br>" \
-           + '<table id="journals" class="tablesorter numberlast"><thead><tr>' \
-           + '<th>Journal</th><th>Count</th></tr></thead><tbody>'
-    data = {}
-    for key in sorted(journal, key=journal.get, reverse=True):
-        val = journal[key]
-        if len(data) >= top:
-            continue
-        data[key] = val
-        html += f"<tr><td>{key}</td><td><a href='/journal/{key}/{year}'>{val:,}</a></td></tr>"
-    html += '</tbody></table><br>' + year_pulldown('top_journals')
-    title = "DOIs by journal"
-    if year != 'All':
-        title += f" ({year})"
-    chartscript, chartdiv = DP.pie_chart(data, title, "source", width=875, height=550,
-                                         colors='Category20')
-    title = f"Top {top} DOI journals"
-    if year != 'All':
-        title += f" ({year})"
-    endpoint_access()
-    return make_response(render_template('bokeh.html', urlroot=request.url_root,
-                                         title=title, html=html,
-                                         chartscript=chartscript, chartdiv=chartdiv,
-                                         navbar=generate_navbar('Journals')))
-
-
-@app.route('/top_publishers/<string:year>/<string:source>/<int:top>')
-@app.route('/top_publishers/<string:year>/<string:source>')
-@app.route('/top_publishers/<string:year>')
-@app.route('/top_publishers')
-def top_publishers(year='All', source='crossref', top=10):
-    ''' Show top publishers
-    '''
+                               title=render_warning("Invalid entity type"),
+                               message=f"entity_type must be one of: {', '.join(ENTITY_CONFIG)}")
+    cfg = ENTITY_CONFIG[entity_type]
     top = min(top, 20)
     fsource = 'Crossref' if source.lower() == 'crossref' else 'DataCite'
     try:
-        publisher = get_top_publishers(year, fsource, maxpub=True)
+        if entity_type == 'journal':
+            raw = get_top_journals(year, janelia=False)
+            entities = dict(raw)
+        else:
+            raw = get_top_publishers(year, fsource, maxpub=True)
+            entities = {k: v['count'] for k, v in raw.items()}
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get publisher data from dois"),
+                               title=render_warning(f"Could not get {entity_type} data from dois"),
                                message=error_message(err))
-    if not publisher:
+    if not entities:
         return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get publisher data from dois"),
-                               message='No publishers were found')
-    html = '<table id="journals" class="tablesorter numberlast"><thead><tr>' \
-           + '<th>Publisher</th><th>Count</th></tr></thead><tbody>'
+                               title=render_warning(f"Could not get {entity_type} data from dois"),
+                               message=f"No {entity_type}s were found")
+    html = cfg['note'] + "<table id='journals' class='tablesorter numberlast'><thead><tr>" \
+           + f"<th>{cfg['label']}</th><th>Count</th></tr></thead><tbody>"
     data = {}
-    for key, val in publisher.items():
+    for key in sorted(entities, key=entities.get, reverse=True):
+        val = entities[key]
         if len(data) >= top:
             continue
-        data[key] = val['count']
-        onclick = "onclick='nav_post(\"publisher\",\"" + key + "\")'"
-        link = f"<a href='#' {onclick}>{val['count']:,}</a>"
+        data[key] = val
+        if entity_type == 'journal':
+            link = f"<a href='/journal/{key}/{year}'>{val:,}</a>"
+        else:
+            onclick = "onclick='nav_post(\"publisher\",\"" + key + "\")'"
+            link = f"<a href='#' {onclick}>{val:,}</a>"
         html += f"<tr><td>{key}</td><td>{link}</td></tr>"
-    html += '</tbody></table><br>' + year_pulldown('top_publishers', suffix=f"/{fsource}/{top}")
-    title = f"DOIs by publisher for {fsource}"
+    suffix = f"/{fsource}/{top}" if entity_type == 'publisher' else ''
+    html += '</tbody></table><br>' + year_pulldown(f'top_entities/{entity_type}', suffix=suffix)
+    title = f"DOIs by {entity_type}"
+    if entity_type == 'publisher':
+        title += f" for {fsource}"
     if year != 'All':
         title += f" ({year})"
-    chartscript, chartdiv = DP.pie_chart(data, title, "source", width=1100, height=650,
+    chartscript, chartdiv = DP.pie_chart(data, title, "source",
+                                         width=cfg['pie_width'], height=cfg['pie_height'],
                                          colors='Category20')
-    title = f"Top {top} DOI publishers for {fsource}"
+    title = f"Top {top} DOI {entity_type}s"
+    if entity_type == 'publisher':
+        title += f" for {fsource}"
     if year != 'All':
         title += f" ({year})"
     endpoint_access()
@@ -7015,8 +7118,9 @@ def show_subscription_summary():
             link = f"<a href='/subscription/provider/{provider.get(publisher, '')}'>{pp}</a>"
         else:
             link = ""
+        dtl = f"<a href='/subscriptionlist/{publisher}'>{data['TOTAL']:,}</a>"
         html += f"<tr><td>{publisher}</td><td>{link}</td><td>" \
-            + "</td><td>".join(count) + f"</td><td>{data['TOTAL']:,}</td></tr>"
+            + "</td><td>".join(count) + f"</td><td>{dtl}</td></tr>"
     html += "</tbody><tfoot><tr><td style='text-align:right' colspan=2>TOTAL</td><td>" \
             + "</td><td>".join(f"<a href='/subscriptions/type/{key}'>{val:,}</a>" \
                                for key, val in types.items()) \
@@ -7202,46 +7306,19 @@ def show_subscription_costs(provider=None):
     chartscript, chartdiv = DP.dual_axis_chart(data, title=title,
                                                x_field='Year', bar_field='Cost',
                                                line_field='Count')
-    data = {}
-    # Pie chart
-    #    payload = [{"$project": {"costArray": {"$objectToArray": "$cost" },
-    #                             "provider": "$provider"}},
-    #                            {"$unwind": "$costArray"},
-    #                            {"$group": {"_id": {"provider": "$provider",
-    #                                                "year": "$costArray.k"},
-    #                                        "totalCost": {"$sum": {"$toDouble": "$costArray.v"}}}},
-    #                            {"$match": {"_id.year": str(pyear)}},
-    #                            {"$sort": {"totalCost": -1}}]
-    payload = [{"$match": {"provider": provider, "cost": {"$exists": True}}},
-    {"$addFields": {"costArray": {"$objectToArray": "$cost"}}},
-    {"$addFields": {"maxYear": {"$max": "$costArray.k"}}},
-    {"$addFields": {"recentCost":
-                    {"$toDouble":
-                     {"$arrayElemAt":
-                      [{"$map":
-                        {"input":
-                         {"$filter":
-                          {"input": "$costArray", "as": "e",
-                           "cond": {"$eq": ["$$e.k", "$maxYear"]}}},
-                         "as": "e", "in": "$$e.v"}}, 0]}}}},
-    {"$group": {"_id": "$type", "totalCost": {"$sum": "$recentCost"},
-                "mostRecentYear": {"$max":"$maxYear"}}},
-    {"$sort": {"totalCost": -1}}]
+    chartscript2 = None
     try:
-        rows = DB['dis'].subscription.aggregate(payload)
+        if provider:
+            chartscript2, chartdiv2 = provider_pie_chart(provider, pyear)
+        else:
+            chartscript2, chartdiv2 = provider_heat_map()
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning(errmsg),
                                message=error_message(err))
-    for row in rows:
-        data[row['_id']] = row['totalCost']
-    if provider and len(data) > 1:
-        colors = DP.get_colors_by_count(len(data))
-        piescript, piediv = DP.pie_chart(data, f'Subscription costs by type for {pyear}',
-                                         'provider', colors=colors,
-                                         width=650, height=450, location="top_right", fmt='{$0,0}')
-        chartscript += piescript
-        chartdiv += piediv
+    if chartscript2 is not None:
+        chartscript += chartscript2
+        chartdiv += chartdiv2
     endpoint_access()
     title = f"Subscription costs for {provider}" if provider is not None \
             else f"Subscription costs (2011-{datetime.now().year})"
@@ -7388,7 +7465,10 @@ def process_charges(ptype):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning(errmsg),
                                message=error_message(err))
-    row = list(rows)[0]
+    try:
+        row = list(rows)[0]
+    except Exception:
+        return ""
     html += f"<h4>{ptype}</h4>"
     html += f"Minimum: ${row['minv']:,.2f} ({row['minp']} - {row['mint']})<br>"
     html += f"Maximum: ${row['maxv']:,.2f} ({row['maxp']} - {row['maxt']})<br>"
@@ -7462,10 +7542,13 @@ def show_subscription_providers():
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning(errmsg),
                                message=error_message(err))
-    row = list(rows)[0]
-    html += f"Minimum APC: ${row['minv']:,.2f} ({row['minp']} - {row['mint']})<br>"
-    html += f"Maximum APC: ${row['maxv']:,.2f} ({row['maxp']} - {row['maxt']})<br>"
-    html += f"Average APC: ${row['avg']:,.2f}"
+    try:
+        row = list(rows)[0]
+        html += f"Minimum APC: ${row['minv']:,.2f} ({row['minp']} - {row['mint']})<br>"
+        html += f"Maximum APC: ${row['maxv']:,.2f} ({row['maxp']} - {row['maxt']})<br>"
+        html += f"Average APC: ${row['avg']:,.2f}"
+    except Exception:
+        pass
     title = f"Subscription providers ({cnt:,})"
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
@@ -8272,14 +8355,28 @@ def ror(rorid=None):
 # * UI endpoints (Tag/affiliation)                                             *
 # ******************************************************************************
 
-@app.route('/dois_tag')
-def dois_tag():
-    ''' Show tags with counts
+@app.route('/dois_tag_ack/<string:tagtype>')
+def show_tag_ack(tagtype):
+    ''' Show tags or acknowledgements with counts
+        Keyword arguments:
+          tagtype: "tag" or "ack"
     '''
-    payload = [{"$unwind" : "$jrc_tag"},
-               {"$project": {"_id": 0, "jrc_tag.name": 1, "jrc_obtained_from": 1}},
-               {"$group": {"_id": {"tag": "$jrc_tag.name", "source": "$jrc_obtained_from"},
-                           "count":{"$sum": 1}}},
+    TAG_CONFIG = {
+        'tag': {'mongo': 'jrc_tag', 'nav': 'jrc_tag.name',
+                'label': 'Tag', 'errmsg': 'tags', 'title': 'DOI tags'},
+        'ack': {'mongo': 'jrc_acknowledge', 'nav': 'jrc_acknowledge.name',
+                'label': 'Acknowledgement', 'errmsg': 'acknowledgements',
+                'title': 'DOI acknowledgements'},
+    }
+    if tagtype not in TAG_CONFIG:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Invalid tag type"),
+                               message=f"tagtype must be one of: {', '.join(TAG_CONFIG)}")
+    cfg = TAG_CONFIG[tagtype]
+    payload = [{"$unwind": f"${cfg['mongo']}"},
+               {"$project": {"_id": 0, f"{cfg['mongo']}.name": 1, "jrc_obtained_from": 1}},
+               {"$group": {"_id": {"tag": f"${cfg['mongo']}.name", "source": "$jrc_obtained_from"},
+                           "count": {"$sum": 1}}},
                {"$sort": {"_id.tag": 1}}
               ]
     try:
@@ -8292,11 +8389,11 @@ def dois_tag():
         rows = DB['dis'].dois.aggregate(payload)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get tags from dois collection"),
+                               title=render_warning(f"Could not get {cfg['errmsg']} from dois collection"),
                                message=error_message(err))
-    html = '<table id="types" class="tablesorter numbers"><thead><tr>' \
-           + '<th>Tag</th><th>SupOrg</th><th>Crossref</th><th>DataCite</th>' \
-           + '</tr></thead><tbody>'
+    html = "<table id='types' class='tablesorter numbers'><thead><tr>" \
+           + f"<th>{cfg['label']}</th><th>SupOrg</th><th>Crossref</th><th>DataCite</th>" \
+           + "</tr></thead><tbody>"
     tags = {}
     total = {src: 0 for src in app.config['SOURCES']}
     for row in rows:
@@ -8318,8 +8415,7 @@ def dois_tag():
         html += f"<tr class={rclass}><td>{link}</td><td>{org}</td>"
         for source in app.config['SOURCES']:
             if source in val:
-                onclick = "onclick='nav_post(\"jrc_tag.name\",\"" + tag \
-                          + "\",\"" + source + "\")'"
+                onclick = f"onclick='nav_post(\"{cfg['nav']}\",\"{tag}\",\"{source}\")'"
                 link = f"<a href='#' {onclick}>{val[source]:,}</a>"
                 total[source] += val[source]
             else:
@@ -8335,7 +8431,7 @@ def dois_tag():
     html = cbutton + html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title=f"DOI tags ({len(tags):,})", html=html,
+                                         title=f"{cfg['title']} ({len(tags):,})", html=html,
                                          navbar=generate_navbar('Tag/affiliation')))
 
 
@@ -8399,73 +8495,6 @@ def dois_lab():
                                          navbar=generate_navbar('Tag/affiliation')))
 
 
-@app.route('/dois_ack')
-def dois_ack():
-    ''' Show acknowledgements with counts
-    '''
-    payload = [{"$unwind" : "$jrc_acknowledge"},
-               {"$project": {"_id": 0, "jrc_acknowledge.name": 1, "jrc_obtained_from": 1}},
-               {"$group": {"_id": {"tag": "$jrc_acknowledge.name", "source": "$jrc_obtained_from"},
-                           "count":{"$sum": 1}}},
-               {"$sort": {"_id.tag": 1}}
-              ]
-    try:
-        orgs = DL.get_supervisory_orgs(DB['dis'].suporg)
-    except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get supervisory orgs"),
-                               message=error_message(err))
-    try:
-        rows = DB['dis'].dois.aggregate(payload)
-    except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get acknowledgements from " \
-                                                    + "dois collection"),
-                               message=error_message(err))
-    html = '<table id="types" class="tablesorter numbers"><thead><tr>' \
-           + '<th>Acknowledgement</th><th>SupOrg</th><th>Crossref</th><th>DataCite</th>' \
-           + '</tr></thead><tbody>'
-    tags = {}
-    for row in rows:
-        if row['_id']['tag'] not in tags:
-            tags[row['_id']['tag']] = {}
-        if row['_id']['source'] not in tags[row['_id']['tag']]:
-            tags[row['_id']['tag']][row['_id']['source']] = row['count']
-    counter = collections.defaultdict(lambda: 0, {})
-    for tag, val in tags.items():
-        link = f"<a href='/tag/{escape(tag)}'>{tag}</a>"
-        rclass = 'other'
-        if tag in orgs:
-            if 'active' in orgs[tag]:
-                org = "<span style='color: lime;'>Yes</span>"
-                rclass = 'active'
-            else:
-                org = "<span style='color: yellow;'>Inactive</span>"
-        else:
-            org = "<span style='color: red;'>No</span>"
-        html += f"<tr class={rclass}><td>{link}</td><td>{org}</td>"
-        for source in app.config['SOURCES']:
-            if source in val:
-                onclick = "onclick='nav_post(\"jrc_acknowledge.name\",\"" + tag \
-                          + "\",\"" + source + "\")'"
-                link = f"<a href='#' {onclick}>{val[source]:,}</a>"
-                counter[source] += val[source]
-            else:
-                link = ""
-            html += f"<td>{link}</td>"
-        html += "</tr>"
-    html += "</tbody><tfoot><tr><th>Total</th><th></th>"
-    for source in app.config['SOURCES']:
-        html += f"<th style='text-align: center;'>{counter[source]:,}</th>"
-    html += "</tr></tfoot>"
-    html += '</table>'
-    cbutton = "<button class=\"btn btn-outline-warning\" " \
-              + "onclick=\"$('.other').toggle();\">Filter for active SupOrgs</button>"
-    html = cbutton + html
-    endpoint_access()
-    return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title=f"DOI acknowledgements ({len(tags):,})", html=html,
-                                         navbar=generate_navbar('Tag/affiliation')))
 
 
 @app.route('/dois_janelia_affiliations/<string:aff>')
