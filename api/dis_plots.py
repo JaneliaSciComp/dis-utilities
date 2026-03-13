@@ -2,7 +2,9 @@
     Plot functions for the DIS UI
 '''
 
+import colorsys
 from math import ceil, pi
+from bokeh.colors import named as _bokeh_named
 from bokeh.models import (BasicTicker, ColorBar, HoverTool, LinearAxis, LinearColorMapper,
                           ColumnDataSource, NumeralTickFormatter, Range1d)
 from bokeh.embed import components
@@ -10,6 +12,26 @@ from bokeh.palettes import all_palettes, interp_palette, plasma, Turbo256
 from bokeh.plotting import figure
 from bokeh.transform import cumsum, transform
 import pandas as pd
+
+def _darken_color(color, factor=0.7):
+    ''' Return a darkened version of a CSS named or hex color.
+        Keyword arguments:
+          color: CSS color name or hex string
+          factor: multiplier applied to the HLS lightness (default 0.7)
+        Returns:
+          Hex color string
+    '''
+    if color.startswith('#'):
+        r, g, b = int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)
+    else:
+        c = getattr(_bokeh_named, color.lower().replace(' ', '_'), None)
+        if c is None:
+            return color
+        r, g, b = c.r, c.g, c.b
+    h, lgt, s = colorsys.rgb_to_hls(r / 255, g / 255, b / 255)
+    r2, g2, b2 = colorsys.hls_to_rgb(h, max(0.0, lgt * factor), s)
+    return f'#{int(r2 * 255):02x}{int(g2 * 255):02x}{int(b2 * 255):02x}'
+
 
 OA_COLORS = {"Bronze": "#CD7F32", "Closed": "red", "Diamond": "lightgray",
              "Gold": "#FFD700", "Green": "green", "Hybrid": "cyan"}
@@ -232,23 +254,22 @@ def stacked_bar_chart(data, title, xaxis, yaxis, colors=None, width=None, height
         colors = plasma(len(yaxis))
     tt = tooltip if tooltip else f"$name @{xaxis}: @$name"
     plt = figure(x_range=data[xaxis], title=title,
-                 toolbar_location=None, tools="hover",
-                 tooltips=tt)
+                 toolbar_location=None)
     if width and height:
         plt.width = width
         plt.height = height
     if legend:
-        plt.vbar_stack(yaxis, x=xaxis, width=0.9,
-                       color=colors, source=data,
-                       legend_label=yaxis)
+        bar_renderers = plt.vbar_stack(yaxis, x=xaxis, width=0.9,
+                                       color=colors, source=data,
+                                       legend_label=yaxis)
     else:
-        plt.vbar_stack(yaxis, x=xaxis, width=0.9,
-                       color=colors, source=data)
+        bar_renderers = plt.vbar_stack(yaxis, x=xaxis, width=0.9,
+                                       color=colors, source=data)
+    plt.add_tools(HoverTool(renderers=bar_renderers, tooltips=tt))
     if orient:
         plt.xaxis.major_label_orientation = orient
     if yaxis2:
         # Secondary linear plot
-        plt.add_tools(HoverTool(tooltips=f"$name @{yaxis2}: @$name"))
         plt.yaxis.axis_label = ' + '.join(yaxis)
         ymax = 0
         for y in yaxis:
@@ -260,12 +281,14 @@ def stacked_bar_chart(data, title, xaxis, yaxis, colors=None, width=None, height
         plt.extra_y_ranges = {yaxis2: Range1d(start=0, end=ymax)}
         plt.add_layout(LinearAxis(y_range_name=yaxis2, axis_label=yaxis2), 'right')
         if legend:
-            plt.line(xaxis, yaxis2, color="black", source=data,
-                     line_width=2, legend_label=yaxis2,
-                     y_range_name=yaxis2)
+            line_renderer = plt.line(xaxis, yaxis2, color="black", source=data,
+                                     line_width=2, legend_label=yaxis2,
+                                     y_range_name=yaxis2)
         else:
-            plt.line(xaxis, yaxis2, color="black", source=data,
-                     line_width=2, y_range_name=yaxis2)
+            line_renderer = plt.line(xaxis, yaxis2, color="black", source=data,
+                                     line_width=2, y_range_name=yaxis2)
+        plt.add_tools(HoverTool(renderers=[line_renderer],
+                                tooltips=f"@{xaxis}: @{yaxis2}"))
     if legend:
         plt.legend.location = 'top_left'
     if width and height and legend:
@@ -378,6 +401,87 @@ def wedge_chart(data, height=100, width=100, color='green'):
                       end_angle_units='deg', end_angle=270 - data['shown'] / data['total'] * 360,
                       color=color, direction='clock')
     plt.axis.axis_label = None
+    plt.axis.visible = False
+    plt.grid.grid_line_color = None
+    return components(plt)
+
+
+def venn_diagram(set1_name, set2_name, intersection_name, percent_overlap,
+                 width=600, height=400, colors=None, title=None):
+    ''' Create a two-set Venn diagram
+        Keyword arguments:
+          set1_name: name of the first dataset
+          set2_name: name of the second dataset
+          intersection_name: name of the intersection
+          percent_overlap: percent overlap between the two sets (0-100)
+          width: width of the chart (optional)
+          height: height of the chart (optional)
+          colors: list of two colors for the circles (optional)
+          title: chart title (optional)
+        Returns:
+          Figure components
+    '''
+    if colors is None:
+        colors = SOURCE_PALETTE
+    radius = 1.0
+    # Distance between centers: 2r when 0% overlap, 0 when 100% overlap
+    dist = 2 * radius * (1 - percent_overlap / 100)
+    cx1, cx2 = -dist / 2, dist / 2
+    # X range with padding
+    x_pad = radius * 1.6
+    y_pad = radius * 1.4
+    exclusive = 100 - percent_overlap
+    source = ColumnDataSource(dict(
+        x=[cx1, cx2], y=[0, 0],
+        w=[2 * radius, 2 * radius],
+        h=[2 * radius, 2 * radius],
+        fill_color=colors,
+        line_color=colors,
+        name=[set1_name, set2_name],
+        overlap=[f"{percent_overlap:.1f}%", f"{percent_overlap:.1f}%"],
+        exclusive=[f"{exclusive:.1f}%", f"{exclusive:.1f}%"],
+    ))
+    plt = figure(width=width, height=height,
+                 title=title,
+                 x_range=(cx1 - x_pad, cx2 + x_pad),
+                 y_range=(-y_pad, y_pad),
+                 toolbar_location=None,
+                 background_fill_color="ghostwhite",
+                 outline_line_color=None)
+    plt.add_tools(HoverTool(tooltips=[
+        ("Dataset",     "@name"),
+        ("Overlap",     "@overlap"),
+        ("Exclusive",   "@exclusive"),
+    ]))
+    plt.ellipse(x="x", y="y", width="w", height="h",
+                fill_color="fill_color",
+                fill_alpha=0.35,
+                line_color="line_color",
+                line_width=2,
+                source=source)
+    # Set name labels — positioned toward outer edge of each circle
+    label_offset = radius * 0.55
+    plt.text(x=[cx1 - label_offset, cx2 + label_offset], y=[0, 0],
+             text=[set1_name, set2_name],
+             text_align=["center", "center"],
+             text_baseline="middle",
+             text_font_size="13px",
+             text_font_style="bold",
+             text_color=[_darken_color(c) for c in colors])
+    # Intersection label and percent
+    plt.text(x=[0], y=[0.15],
+             text=[intersection_name],
+             text_align=["center"],
+             text_baseline="middle",
+             text_font_size="11px",
+             text_color=["black"])
+    plt.text(x=[0], y=[-0.2],
+             text=[f"{percent_overlap:.1f}%"],
+             text_align=["center"],
+             text_baseline="middle",
+             text_font_size="13px",
+             text_font_style="bold",
+             text_color=["black"])
     plt.axis.visible = False
     plt.grid.grid_line_color = None
     return components(plt)
