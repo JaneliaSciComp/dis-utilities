@@ -35,7 +35,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "110.0.0"
+__version__ = "111.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -75,7 +75,8 @@ NAV = {"Home": "",
                      "Journal publications without preprints": "preprint_relation/pub_no_preprint"},
        "Journals": {"DOIs by:": {"publisher": "dois_publisher", "journal": "journals_dois"},
                     "Open access:": {"report": "dois_oa", "details": "dois_oa_details"},
-                    "Top:": {"publishers": "top_entities/publisher", "journals": "top_entities/journal"},
+                    "Top:": {"publishers": "top_entities/publisher",
+                             "journals": "top_entities/journal"},
                     "Heatmaps:": {"publisher": "dois_heatmap/publisher",
                                   "journal": "dois_heatmap/journal"},
                     f"DOIs missing journals{'&nbsp;'*9}": "dois_nojournal",
@@ -86,8 +87,10 @@ NAV = {"Home": "",
                          "Books": "subscriptions/type/Book",
                          "Book series": "subscriptions/type/Book series",
                          "Monographs": "subscriptions/type/Monograph",
+                         "APCs": "subscription/apc",
                         },
-       "Tag/affiliation": {"DOIs by:": {"tag": "dois_tag_ack/tag", "acknowledgement": "dois_tag_ack/ack",
+       "Tag/affiliation": {"DOIs by:": {"tag": "dois_tag_ack/tag",
+                                        "acknowledgement": "dois_tag_ack/ack",
                                         "lab": "dois_lab"},
                            f"Top DOI tags by year{'&nbsp;'*22}": "dois_top",
                            "Author affiliations:": {"P&C": "orcid_tag",
@@ -197,8 +200,8 @@ def before_request():
                                    title=render_warning("Config error"),
                                    message="Missing environment variable DIS_MONGO_URI")
         dbo = SimpleNamespace(type="mongo",
-                              uri=os.environ.get(f"DIS_MONGO_URI"),
-                              client=os.environ.get(f"DIS_MONGO_DATABASE", "dis"))
+                              uri=os.environ.get("DIS_MONGO_URI"),
+                              client=os.environ.get("DIS_MONGO_DATABASE", "dis"))
         print(f"Connecting to {dbo.client} prod")
         try:
             DB['dis'] = JRC.connect_database(dbo)
@@ -485,8 +488,7 @@ def provider_pie_chart(provider, pyear):
                                          'provider', colors=colors,
                                          width=650, height=450, location="top_right", fmt='{$0,0}')
         return piescript, piediv
-    else:
-        return None, None
+    return None, None
 
 
 def provider_title_heat_map(provider):
@@ -6565,7 +6567,8 @@ def show_preprint_relation(relation_type):
     if relation_type not in RELATION_CONFIG:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Invalid relation type"),
-                               message=f"relation_type must be one of: {', '.join(RELATION_CONFIG)}")
+                               message="relation_type must be one of: " \
+                                       + f"{', '.join(RELATION_CONFIG)}")
     cfg = RELATION_CONFIG[relation_type]
     try:
         rows = DB['dis'].dois.find(cfg['payload']).sort([("jrc_publishing_date", -1)])
@@ -6713,8 +6716,8 @@ def show_dois_heatmap(groupby, source='Crossref', top=10):
             data['Count'].append(r['count'])
     chartscript, chartdiv = DP.heat_map(data,
                                         f'Top {top} {source} {groupby}s published to by year',
-                                        x_field='Year', y_field=label,
-                                        value_field='Count', value_format='0,0')
+                                        x_field='Year', y_field=label, value_field='Count',
+                                        value_format='0,0', row_totals="ALL")
     endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title=f'{label} heatmap',
@@ -6785,6 +6788,7 @@ def show_open_access():
             + "target='_blank'>OpenAlex</a>"
     tt = [("Year", "@years"), ("Open", "@Open"), ("Closed", "@Closed"), ("Citations", "@Citations")]
     chartscript, chartdiv = DP.stacked_bar_chart(data, 'OpenAlex DOIs', xaxis="years", orient=pi/4,
+                                                 width=900, height=550,
                                                  yaxis=('Closed', 'Open'), yaxis2='Citations',
                                                  colors=['maroon', 'green'], tooltip=tt)
     endpoint_access()
@@ -6835,7 +6839,7 @@ def show_open_access_details(year='All'):
     title = 'DOIs by Open Access status'
     if year != 'All':
         title += f" ({year})"
-    chartscript, chartdiv = DP.pie_chart(data, title, "oa_status", width=500,
+    chartscript, chartdiv = DP.pie_chart(data, title, "oa_status", width=550, height=450,
                                          colors=palette)
     ymsg = f" for {year}" if year != 'All' else ''
     pre = f"<span style='font-size: 18pt; color: lime'>{total_oa/total*100:.1f}%</span>" \
@@ -7158,7 +7162,7 @@ def show_subscription_summary():
         count = []
         for typ in types:
             if typ in data:
-                tcnt = f"<a href='/subscriptionlist/{publisher}/{typ}/publisher'>" \
+                tcnt = f"<a href='/subscriptionlist/{publisher}/publisher/{typ}'>" \
                        + f"{data[typ]:,}</a>"
             else:
                 tcnt = ""
@@ -7224,7 +7228,7 @@ def show_subscription_summary_by_provider(prov):
         count = []
         for typ in types:
             if typ in data:
-                tcnt = f"<a href='/subscriptionlist/{publisher}/{typ}/publisher'>" \
+                tcnt = f"<a href='/subscriptionlist/{publisher}/publisher/{typ}'>" \
                        + f"{data[typ]:,}</a>"
                 cnt += data[typ]
             else:
@@ -7238,6 +7242,9 @@ def show_subscription_summary_by_provider(prov):
                                for key, val in types.items()) \
             + f"</td><td>{cnt:,}</td></tr></tfoot>"
     html += '</table>'
+    html += "<br><a class='btn btn-outline-info btn-med' " \
+            + f"href='/subscriptionlist/{prov}/provider'" \
+            + " role='button'>Show details</a>"
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=f"Subscription summary for provider {prov}",
@@ -7335,14 +7342,12 @@ def show_subscription_costs(provider=None):
     html = "<table id='costs' class='tablesorter numbers'><thead><tr>" \
            + "<th>Year</th><th>Subscriptions</th><th>Cost</th><th>% change</th></tr></thead><tbody>"
     perclist = []
-    pyear = datetime.now().year - 1
     for year, val in perc.items():
         if val['percent'] is not None:
             perclist.append(val['percent'])
             pp = f"{val['percent']:+.2f}%"
         else:
             pp = ""
-        pyear = year
         link = f"<a href='/subscription/year/{year}'>{year}</a>"
         html += f"<tr><td>{link}</td><td>{val['count']}</td><td>${val['cost']:,.2f}</td>" \
                 + f"<td>{pp}</td></tr>"
@@ -7358,7 +7363,7 @@ def show_subscription_costs(provider=None):
     # Bar/line chart
     chartscript, chartdiv = DP.dual_axis_chart(data, title=title,
                                                x_field='Year', bar_field='Cost',
-                                               line_field='Count')
+                                               line_field='Count', bar_trend=True)
     chartscript2 = None
     try:
         if provider:
@@ -7422,9 +7427,11 @@ def show_subscriptions(jtype):
                                          html=html, sub=jtype,
                                          navbar=generate_navbar('Subscriptions')))
 
+
 @app.route('/subscriptionlist/<path:sub>')
-@app.route('/subscriptionlist/<path:sub>/<string:stype>/<string:field>')
-def show_subscriptionlist(sub, stype=None, field='publisher'):
+@app.route('/subscriptionlist/<path:sub>/<string:field>')
+@app.route('/subscriptionlist/<path:sub>/<string:field>/<string:stype>')
+def show_subscriptionlist(sub, field='publisher', stype=None):
     ''' Show subscription list for a title
     '''
     errmsg = "Could not get data from subscription collection"
@@ -7463,9 +7470,19 @@ def show_subscriptionlist(sub, stype=None, field='publisher'):
                                    title=render_warning(errmsg),
                                    message=error_message(err))
     html += "</tr></thead><tbody>"
+    header = ([] if stype else ['Type']) + ['Title', 'Publisher', 'Provider', 'Title ID', 'Access']
+    if field == 'publisher':
+        header.append('Janelia publications')
+    fileoutput = ""
     pubto = 0
     for row in rows:
-        ptype = f"<td>{row['type']}</td>" if not stype else ''
+        if stype:
+            ptype = ''
+        elif field == 'provider':
+            ptype = f"<td><a href='/subscriptionlist/{sub}/provider/{row['type']}'>" \
+                    + f"{row['type']}</a></td>"
+        else:
+            ptype = f"<td>{row['type']}</td>"
         link = f"<a href='/subscription/{str(row['_id'])}'>{row['title']}</a>"
         access = '<span style="color: yellowgreen">YES</span>' \
                   if row['access'] == 'Subscription' \
@@ -7473,21 +7490,30 @@ def show_subscriptionlist(sub, stype=None, field='publisher'):
         html += f"<tr>{ptype}<td>{link}</td><td>{row['publisher']}</td>" \
                 + f"<td>{row['provider']}</td><td>{row['title-id']}</td>" \
                 + f"<td>{access}</td>"
+        file_cells = ([] if stype else [row['type']]) \
+                     + [row['title'], row['publisher'], row['provider'],
+                        row['title-id'], row['access']]
         if field == 'publisher':
             if pubcount.get(row['title']):
                 pubto += 1
             link = f"<a href='/journal/{row['title']}'>{pubcount.get(row['title'])}</a>" \
                    if pubcount.get(row['title']) else ''
             html += f"<td style='text-align: center'>{link}</td>"
+            file_cells.append(str(pubcount.get(row['title'], '')))
+        fileoutput += "\t".join(file_cells) + "\n"
     html += '</tr></tbody></table>'
     title = f"ubscriptions for {field} {sub} ({cnt:,})"
     title = f"{stype} s{title}" if stype else f"S{title}"
+    html = create_downloadable("subscriptions", header, fileoutput) \
+           + "<br><br>" + html
     chartscript = chartdiv = ""
     if pubto:
         perc = (pubto / cnt) * 100 if pubto else 0
-        chartscript, chartdiv = DP.venn_diagram('Subscribed to', 'Published to', 'Subscribed and published',
+        chartscript, chartdiv = DP.venn_diagram('Subscribed to', 'Published to',
+                                                'Subscribed and published',
                                                  perc, colors=['DarkOrange', 'SpringGreen'],
-                                                 title=f'Journals subscribed/published to for {sub}')
+                                                 title='Journals subscribed/published to for ' \
+                                                       + sub)
     endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title=title, html=html,
@@ -7614,6 +7640,64 @@ def show_subscription_providers():
     except Exception:
         pass
     title = f"Subscription providers ({cnt:,})"
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=title, html=html,
+                                         navbar=generate_navbar('Subscriptions')))
+
+
+@app.route('/subscription/apc')
+@app.route('/subscription/apc/<string:provider>')
+def show_subscription_apcs(provider=None):
+    ''' Show APC costs from subscription collection
+    '''
+    errmsg = "Could not get data from subscription collection"
+    query = {"apc": {"$exists": True}}
+    if provider:
+        query["provider"] = provider
+    sortorder = [("provider", 1), ("publisher", 1), ("title", 1)]
+    try:
+        rows = list(DB['dis'].subscription.find(query).sort(sortorder))
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning(errmsg),
+                               message=error_message(err))
+    if not rows:
+        return render_template('warning.html', urlroot=request.url_root,
+                               title=render_warning(errmsg),
+                               message="No APC records were found")
+    years = sorted({yr for row in rows for yr in row['apc']})
+    if provider:
+        header = ['Publisher', 'Journal'] + years
+        table_header = "<th>Publisher</th><th>Journal</th>"
+    else:
+        header = ['Provider', 'Publisher', 'Journal'] + years
+        table_header = "<th>Provider</th><th>Publisher</th><th>Journal</th>"
+    table_header += "".join(f"<th>{yr}</th>" for yr in years)
+    html = "<table id='apcs' class='tablesorter numberlast'><thead><tr>" \
+           + f"{table_header}</tr></thead><tbody>"
+    fileoutput = ""
+    for row in rows:
+        if provider:
+            cells = f"<td>{row['publisher']}</td><td>{row['title']}</td>"
+            file_cells = [row['publisher'], row['title']]
+        else:
+            cells = f"<td>{row['provider']}</td><td>{row['publisher']}</td>" \
+                    + f"<td>{row['title']}</td>"
+            file_cells = [row['provider'], row['publisher'], row['title']]
+        for yr in years:
+            if yr in row['apc']:
+                cells += f"<td>${float(row['apc'][yr]):,.2f}</td>"
+                file_cells.append(f"${float(row['apc'][yr]):,.2f}")
+            else:
+                cells += "<td></td>"
+                file_cells.append("")
+        html += f"<tr>{cells}</tr>"
+        fileoutput += "\t".join(file_cells) + "\n"
+    html += "</tbody></table>"
+    title = f"APC costs for {provider}" if provider else "APC costs"
+    download_name = f"apcs_{provider}" if provider else "apcs"
+    html = create_downloadable(download_name, header, fileoutput) + "<br><br>" + html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
@@ -8450,7 +8534,8 @@ def show_tag_ack(tagtype):
         rows = DB['dis'].dois.aggregate(payload)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning(f"Could not get {cfg['errmsg']} from dois collection"),
+                               title=render_warning(f"Could not get {cfg['errmsg']} " \
+                                                    + f"for {tagtype} from dois collection"),
                                message=error_message(err))
     html = "<table id='types' class='tablesorter numbers'><thead><tr>" \
            + f"<th>{cfg['label']}</th><th>SupOrg</th><th>Crossref</th><th>DataCite</th>" \

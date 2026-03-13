@@ -2,7 +2,7 @@
     This program will correlate a budgeting spreadsheet with the subscription collection
 '''
 
-__version__ = '5.0.0'
+__version__ = '6.0.0'
 
 import argparse
 import collections
@@ -147,16 +147,14 @@ def process_collection(row):
         Returns:
           None
     '''
+    payload = {"$or": [{"publisher": row['Publisher']}, {"provider": row['Provider']}]}
     try:
-        srow = DB['dis'].subscription.find_one({'publisher': row['Publisher']})
+        srow = DB['dis'].subscription.find_one(payload)
     except Exception as err:
         terminate_program(err)
-    if row['Publisher'] == 'Wiley':
-        srow = {'provider': 'Wiley', 'publisher': 'Wiley'} #PLUG
-    elif row['Publisher'] == 'Elsevier':
-        srow = {'provider': 'ScienceDirect', 'publisher': 'Elsevier'}
-    elif ARG.PUBLISHER and row['Publisher'] == ARG.PUBLISHER:
-        srow = {'provider': ARG.PUBLISHER, 'publisher': ARG.PUBLISHER}
+    if row.get('Provider', '') and not srow:
+        LOGGER.warning(f"Collection provider {row['Provider']} not found - setting")
+        srow = {'provider': row['Provider'], 'publisher': row['Publisher']}
     if not srow:
         msg = f"Collection publisher {row['Publisher']} not found"
         if msg not in WARNINGS:
@@ -170,7 +168,7 @@ def process_collection(row):
         return
     payload = {"type": DIS['sub_cost_map'].get(row['Type'], "Collection"),
                "title": row['Publication'],
-               "provider": srow['provider'],
+               "provider": row['Provider'],
                "publisher": srow['publisher'],
                "online-identifier": "-",
                "print-identifier": "-",
@@ -180,7 +178,6 @@ def process_collection(row):
                "cost": cost
               }
     OUTPUT['records'].append(payload)
-    LOGGER.info(f"Inserting {payload['title']} ({payload['provider']}/{payload['publisher']})")
     if ARG.WRITE:
         try:
             match = {'title': payload['title'], 'provider': payload['provider']}
@@ -226,8 +223,11 @@ def reset_costs():
         Returns:
           None
     '''
+    payload = {}
+    if ARG.PUBLISHER:
+        payload['publisher'] = ARG.PUBLISHER
     try:
-        result = DB['dis'].subscription.update_many({}, {"$unset": {"cost": ""}})
+        result = DB['dis'].subscription.update_many(payload, {"$unset": {"cost": ""}})
         if hasattr(result, 'modified_count') and result.modified_count:
             LOGGER.info(f"Reset {result.modified_count:,} records")
         result = DB['dis'].subscription.delete_many({"urls": {"$exists": False}})
@@ -259,9 +259,12 @@ def processing():
         terminate_program(err)
     subscribed = {}
     for row in rows:
-        if subscribed.get(row['title']) and row['type'] == subscribed[row['title']]['type']:
+        if subscribed.get(row['provider'], {}).get(row['title']) \
+           and row['type'] == subscribed[row['provider']][row['title']]['type']:
             LOGGER.error(f"Duplicate subscription found for {row['title']} {row['publisher']}")
-        subscribed[row['title']] = row
+        if row['provider'] not in subscribed:
+            subscribed[row['provider']] = {}
+        subscribed[row['provider']][row['title']] = row
     # Process the cost spreadsheet
     for _, row in tqdm(pdf.iterrows(), total=len(pdf), desc="Processing"):
         if ARG.PUBLISHER and row['Publisher'] != ARG.PUBLISHER:
@@ -269,19 +272,23 @@ def processing():
         # If we're missing all three fields, skip the row (it's a footer)
         if pd.isna(row['Type']) and pd.isna(row['Publication']) and pd.isna(row['Publisher']):
             continue
-        # We need a type, a publication, or a publisher
-        if pd.isna(row['Type']) or pd.isna(row['Publication']) or pd.isna(row['Publisher']):
+        # We need a type, a publication, a provider, and a publisher
+        if pd.isna(row['Type']) or pd.isna(row['Publication']) or pd.isna(row['Provider']) \
+           or pd.isna(row['Publisher']):
             COUNT['error'] += 1
             continue
         COUNT['read'] += 1
         LOGGER.debug(json.dumps(row, default=str))
-        if row['Publication'] in subscribed:
+        if row['Provider'] in subscribed and row['Publication'] in subscribed[row['Provider']]:
             # The publication (title) is known, so we can process the row
             COUNT['matched'] += 1
-            process_row(row, subscribed[row['Publication']])
+            process_row(row, subscribed[row['Provider']][row['Publication']])
         elif row.get('Type') in DIS['sub_cost_map'].keys():
             # The publication is not known, but the type is valid, so we can process the row
             process_collection(row)
+        else:
+            COUNT['not_found'] += 1
+            LOGGER.error(f"Publication {row['Publication']} has invalid type {row['Type']}")
     # Write the output files
     for key in ('records', 'updates', 'inserted'):
         if OUTPUT[key]:

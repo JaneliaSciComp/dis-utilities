@@ -2,7 +2,7 @@
     This program will load publications from a KBART file
 '''
 
-__version__ = '6.0.0'
+__version__ = '7.0.0'
 
 import argparse
 import collections
@@ -25,6 +25,8 @@ SUBSCRIBED = {}
 # Counters
 COUNT = collections.defaultdict(lambda: 0, {})
 PUBTYPE = collections.defaultdict(lambda: 0, {})
+INSERTED = []
+UPDATED = []
 # Globals
 ARG = LOGGER = None
 IGNORE = ['Book Series Volume']
@@ -124,6 +126,7 @@ def add_volume(row, payload):
                 try:
                     dto = parse(row[additional])
                 except ValueError:
+                    print(row)
                     terminate_program(f"Invalid date {row[additional]} for {additional}")
                 formatted = dto.strftime('%Y-%m-%d')
                 row[additional] = formatted
@@ -260,24 +263,35 @@ def insert_record(val):
     if not ARG.WRITE:
         try:
             row = DB['dis'].subscription.find_one({'title': val['title'],
+                                                   'provider': val['provider'],
                                                    'identifier': val['identifier']})
         except Exception as err:
             terminate_program(err)
         if not row:
-            LOGGER.info(f"Inserted {val['title']} ({val['provider']}/{val['publisher']})")
-        COUNT['updated' if row else 'inserted'] += 1
+            #LOGGER.info(f"Inserted {val['title']} ({val['provider']}/{val['publisher']})")
+            INSERTED.append(val)
+            COUNT['inserted'] += 1
+        else:
+            if row['provider'] != val['provider'] or row['publisher'] != val['publisher']:
+                LOGGER.warning(f"Provider/publisher mismatch for {val['title']} " \
+                               + f"({row['provider']} != {val['provider']} | " \
+                               + f"{row['publisher']} != {val['publisher']})")
+            UPDATED.append(val)
+            COUNT['updated'] += 1
         if ARG.DEBUG:
             print(json.dumps(val, indent=2))
         return
     try:
         result = DB['dis'].subscription.update_one(
-            {'title': val['title'], 'identifier': val['identifier']},
+            {'title': val['title'], 'provider': val['provider'], 'identifier': val['identifier']},
             {'$set': val}, upsert=True
         )
         if hasattr(result, 'modified_count') and result.modified_count:
             COUNT['updated'] += result.modified_count
+            UPDATED.append(val)
         if hasattr(result, 'upserted_id') and result.upserted_id:
             COUNT['inserted'] += 1
+            INSERTED.append(val)
     except Exception as err:
         LOGGER.error("Could not upsert record")
         print(json.dumps(val, indent=2))
@@ -322,7 +336,6 @@ def processing():
             pdf = pd.read_excel(ARG.KBART, header=0, dtype=str)
     else:
         pdf = pd.read_csv(ARG.KBART, header=0, sep="\t",  dtype=str)
-    #ARG.CORRELATE = 'HHMICollectionsBudgetPivots_7-31-2025.xlsx'
     if ARG.CORRELATE:
         correlate = pd.read_excel(ARG.CORRELATE, header=0, sheet_name='Libraries Site Licenses',
                                   dtype=str)
@@ -337,15 +350,15 @@ def processing():
         COUNT['read'] += 1
         if not row.get('title_id'):
             row['title_id'] = '-'
-        if row['publication_title'] and row['title_id'] and row['title_url'] \
-           and row['publisher_name']:
+        if row.get('publication_title', '') and row['title_id'] and row.get('title_url', '') \
+           and row.get('publisher_name', ''):
             if 'access_type' in row and row['access_type'] in ['Token']:
                 COUNT['token'] += 1
                 continue
             set_payload(row, payload)
         else:
             COUNT['skipped'] += 1
-            LOGGER.warning(f"Skipping row {row['publication_title']}")
+            LOGGER.warning(f"Skipping row {row['publication_title']} (missing required fields)")
     if payload:
         for val in tqdm(payload.values(), desc="Inserting records"):
             insert_record(val)
@@ -358,6 +371,12 @@ def processing():
     print(f"Correlated:       {COUNT['correlated']:,}")
     print(f"Records inserted: {COUNT['inserted']:,}")
     print(f"Records updated:  {COUNT['updated']:,}")
+    for outfile in ['inserted', 'updated']:
+        with open(f"kbart_{outfile}.json", 'w', encoding='utf-8') as outstream:
+                outstream.write(json.dumps(INSERTED if outfile == "inserted" else UPDATED,
+                                           default=str, indent=2))
+    print(f"Wrote {len(INSERTED):,} inserted records to kbart_inserted.json")
+    print(f"Wrote {len(UPDATED):,} updated records to kbart_updated.json")
 
 # -----------------------------------------------------------------------------
 
