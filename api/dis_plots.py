@@ -4,6 +4,7 @@
 
 import colorsys
 from math import ceil, pi
+import numpy as np
 from bokeh.colors import named as _bokeh_named
 from bokeh.models import (BasicTicker, ColorBar, HoverTool, LinearAxis, LinearColorMapper,
                           ColumnDataSource, NumeralTickFormatter, Range1d)
@@ -313,26 +314,30 @@ def dual_axis_chart(  # pylint: disable=too-many-arguments,too-many-positional-a
     line_format="0,0",
     width=900,
     height=450,
+    bar_trend=False,
+    trend_color="firebrick",
 ):
     """
     Generate Bokeh chart script and div for a dual-axis chart with a
     categorical X-axis, a vertical bar series on the left Y-axis, and
     an optional line series on the right Y-axis.
     Args:
-        data       : dict with list values keyed by x_field, bar_field,
-                     and line_field
-        title      : chart title string
-        x_field    : key for categorical X-axis values
-        bar_field  : key for left Y-axis (vertical bars)
-        line_field : key for right Y-axis (line); omit or pass None to disable
-        bar_label  : legend label for bars  (defaults to bar_field)
-        line_label : legend label for line  (defaults to line_field)
-        bar_color  : hex/CSS color for bars
-        line_color : hex/CSS color for line
-        bar_format : NumeralJS format string for the left Y-axis (default "$0,0")
-        line_format: NumeralJS format string for the right Y-axis (default "0,0")
-        width      : figure width in pixels
-        height     : figure height in pixels
+        data        : dict with list values keyed by x_field, bar_field,
+                      and line_field
+        title       : chart title string
+        x_field     : key for categorical X-axis values
+        bar_field   : key for left Y-axis (vertical bars)
+        line_field  : key for right Y-axis (line); omit or pass None to disable
+        bar_label   : legend label for bars  (defaults to bar_field)
+        line_label  : legend label for line  (defaults to line_field)
+        bar_color   : hex/CSS color for bars
+        line_color  : hex/CSS color for line
+        bar_format  : NumeralJS format string for the left Y-axis (default "$0,0")
+        line_format : NumeralJS format string for the right Y-axis (default "0,0")
+        width       : figure width in pixels
+        height      : figure height in pixels
+        bar_trend   : overlay a linear trend line on the bar data (default False)
+        trend_color : color for the trend line (default "firebrick")
     Returns:
         (chartscript, chartdiv) — Bokeh JS <script> block and HTML <div>
     """
@@ -352,6 +357,14 @@ def dual_axis_chart(  # pylint: disable=too-many-arguments,too-many-positional-a
     # --- Left Y-axis: vertical bars ---
     bars = p.vbar(x=x_field, top=bar_field, source=source, width=0.6,
                   color=bar_color, alpha=0.85, legend_label=bar_label)
+    # --- Bar trend line (optional) ---
+    if bar_trend:
+        indices = np.arange(len(bar_vals))
+        slope, intercept = np.polyfit(indices, bar_vals, 1)
+        trend_vals = (slope * indices + intercept).tolist()
+        trend_source = ColumnDataSource({x_field: x_vals, 'trend': trend_vals})
+        p.line(x=x_field, y='trend', source=trend_source, color=trend_color,
+               line_width=2, line_dash='dashed', legend_label=f"{bar_label} trend")
     # --- Right Y-axis: line (optional) ---
     if line_field:
         line_min = min(line_vals) * 0.85
@@ -407,7 +420,7 @@ def wedge_chart(data, height=100, width=100, color='green'):
 
 
 def venn_diagram(set1_name, set2_name, intersection_name, percent_overlap,
-                 width=600, height=400, colors=None, title=None):
+                 width=600, height=400, colors=None, title=None, match_aspect=False):
     ''' Create a two-set Venn diagram
         Keyword arguments:
           set1_name: name of the first dataset
@@ -418,6 +431,7 @@ def venn_diagram(set1_name, set2_name, intersection_name, percent_overlap,
           height: height of the chart (optional)
           colors: list of two colors for the circles (optional)
           title: chart title (optional)
+          match_aspect: enforce equal x/y scaling to keep circles round (optional)
         Returns:
           Figure components
     '''
@@ -447,7 +461,8 @@ def venn_diagram(set1_name, set2_name, intersection_name, percent_overlap,
                  y_range=(-y_pad, y_pad),
                  toolbar_location=None,
                  background_fill_color="ghostwhite",
-                 outline_line_color=None)
+                 outline_line_color=None,
+                 match_aspect=match_aspect)
     plt.add_tools(HoverTool(tooltips=[
         ("Dataset",     "@name"),
         ("Overlap",     "@overlap"),
@@ -487,8 +502,38 @@ def venn_diagram(set1_name, set2_name, intersection_name, percent_overlap,
     return components(plt)
 
 
+def _totals_font_size(texts, cell_px, max_size=11, min_size=7):
+    ''' Calculate a font size that fits the longest text label within a cell.
+        Keyword arguments:
+          texts: list of formatted string values to display
+          cell_px: estimated cell width in pixels
+          max_size: maximum font size in points (optional)
+          min_size: minimum font size in points (optional)
+        Returns:
+          Font size string (e.g. "10px")
+    '''
+    max_chars = max((len(t) for t in texts), default=1)
+    size = int((cell_px * 0.85) / (max_chars * 0.62))
+    return f"{max(min_size, min(max_size, size))}px"
+
+
+def _format_heatmap_value(val, fmt):
+    ''' Format a numeric value using a NumeralJS-style format string.
+        Keyword arguments:
+          val: numeric value
+          fmt: NumeralJS format string (e.g. "$0,0", "0,0", "0.0%")
+        Returns:
+          Formatted string
+    '''
+    if fmt.startswith('$'):
+        return f"${val:,.0f}"
+    if '%' in fmt:
+        return f"{val:.1%}"
+    return f"{val:,.0f}"
+
+
 def heat_map(data, title, x_field, y_field, value_field, width=950, height=500,
-             value_format="$0,0", palette=None):
+             value_format="$0,0", palette=None, col_totals=False, row_totals=False):
     ''' Create a heat map
         Keyword arguments:
           data: dict with lists keyed by x_field, y_field, and value_field
@@ -500,6 +545,8 @@ def heat_map(data, title, x_field, y_field, value_field, width=950, height=500,
           height: figure height in pixels (optional)
           value_format: NumeralJS format string for colorbar and tooltip (optional)
           palette: list of colors to use (optional, defaults to TURBO256_STRETCHED)
+          col_totals: label string for a totals row summing each column; False disables (optional)
+          row_totals: label string for a totals column summing each row; False disables (optional)
         Returns:
           Figure components (chartscript, chartdiv)
     '''
@@ -507,6 +554,31 @@ def heat_map(data, title, x_field, y_field, value_field, width=950, height=500,
         palette = TURBO256_STRETCHED
     x_vals = sorted(set(data[x_field]))
     y_vals = sorted(set(data[y_field]), key=str.lower)
+    df = pd.DataFrame({x_field: data[x_field], y_field: data[y_field],
+                       value_field: data[value_field]})
+    col_total_source = None
+    if col_totals and isinstance(col_totals, str):
+        col_sums = df.groupby(x_field)[value_field].sum()
+        y_vals = [col_totals] + list(y_vals)
+        col_total_vals = [col_sums.get(x, 0) for x in x_vals]
+        col_total_source = ColumnDataSource({
+            x_field: x_vals,
+            y_field: [col_totals] * len(x_vals),
+            value_field: col_total_vals,
+            'text': [_format_heatmap_value(v, value_format) for v in col_total_vals]
+        })
+    row_total_source = None
+    if row_totals and isinstance(row_totals, str):
+        row_sums = df.groupby(y_field)[value_field].sum()
+        x_vals = list(x_vals) + [row_totals]
+        row_total_vals = [row_sums.get(y, 0) for y in y_vals if y != col_totals]
+        row_total_source = ColumnDataSource({
+            x_field: [row_totals] * len(row_total_vals),
+            y_field: [y for y in y_vals if y != col_totals],
+            value_field: row_total_vals,
+            'text': [_format_heatmap_value(v, value_format) for v in row_total_vals]
+        })
+    cell_px = (width - 100) / len(x_vals)
     source = ColumnDataSource(data)
     mapper = LinearColorMapper(palette=palette,
                                low=min(data[value_field]),
@@ -516,6 +588,14 @@ def heat_map(data, title, x_field, y_field, value_field, width=950, height=500,
                toolbar_location=None, background_fill_color="ghostwhite")
     p.rect(x=x_field, y=y_field, width=1, height=1, source=source,
            fill_color=transform(value_field, mapper), line_color=None)
+    for tot_source in (col_total_source, row_total_source):
+        if tot_source is not None:
+            font_size = _totals_font_size(tot_source.data['text'], cell_px)
+            p.rect(x=x_field, y=y_field, width=1, height=1, source=tot_source,
+                   fill_color="lightgray", line_color="white", line_width=0.5)
+            p.text(x=x_field, y=y_field, text='text', source=tot_source,
+                   text_align='center', text_baseline='middle',
+                   text_font_size=font_size, text_color='black', text_font_style='bold')
     color_bar = ColorBar(color_mapper=mapper,
                          ticker=BasicTicker(desired_num_ticks=8),
                          formatter=NumeralTickFormatter(format=value_format),
