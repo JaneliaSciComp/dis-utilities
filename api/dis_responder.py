@@ -35,7 +35,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "109.0.0"
+__version__ = "110.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -74,10 +74,10 @@ NAV = {"Home": "",
                      "Preprints without journal publications": "preprint_relation/preprint_no_pub",
                      "Journal publications without preprints": "preprint_relation/pub_no_preprint"},
        "Journals": {"DOIs by:": {"publisher": "dois_publisher", "journal": "journals_dois"},
-                    "Heatmaps:": {"publisher": "dois_heatmap/publisher",
-                                  "journal": "dois_heatmap/journal"},
                     "Open access:": {"report": "dois_oa", "details": "dois_oa_details"},
                     "Top:": {"publishers": "top_entities/publisher", "journals": "top_entities/journal"},
+                    "Heatmaps:": {"publisher": "dois_heatmap/publisher",
+                                  "journal": "dois_heatmap/journal"},
                     f"DOIs missing journals{'&nbsp;'*9}": "dois_nojournal",
                     "Journals referenced": "journals_referenced"},
        "Subscriptions": {"Summary": "subscriptions",
@@ -192,15 +192,6 @@ def before_request():
     '''
     if not DB:
         print("Initializing global variables")
-        #try:
-        #    with open('database.json', 'r', encoding='utf-8') as stream:
-        #        data = json.load(stream)
-        #    dbconfig = json.loads(json.dumps(data),
-        #                          object_hook=lambda dat: SimpleNamespace(**dat))
-        #except Exception as err:
-        #    return render_template('warning.html', urlroot=request.url_root,
-        #                           title=render_warning("Config error"), message=err)
-        #dbo = attrgetter("dis.prod.write")(dbconfig)
         if "DIS_MONGO_URI" not in os.environ:
             return render_template('warning.html', urlroot=request.url_root,
                                    title=render_warning("Config error"),
@@ -496,6 +487,38 @@ def provider_pie_chart(provider, pyear):
         return piescript, piediv
     else:
         return None, None
+
+
+def provider_title_heat_map(provider):
+    ''' Create a heat map of title costs by year for a provider
+        Keyword arguments:
+          provider: provider name
+        Returns:
+          Heat map components
+    '''
+    pipeline = [
+        {"$match": {"provider": provider, "cost": {"$exists": True}}},
+        {"$project": {"title": 1, "costArray": {"$objectToArray": "$cost"}}},
+        {"$unwind": "$costArray"},
+        {"$group": {"_id": {"title": "$title", "year": "$costArray.k"},
+                    "totalCost": {"$sum": {"$toDouble": "$costArray.v"}}}},
+        {"$sort": {"_id.year": 1, "_id.title": 1}}
+    ]
+    try:
+        rows = DB['dis'].subscription.aggregate(pipeline, collation=INSENSITIVE)
+    except Exception as err:
+        raise err
+    data = {'Year': [], 'Title': [], 'Cost': []}
+    for row in rows:
+        data['Year'].append(row['_id']['year'])
+        data['Title'].append(row['_id']['title'])
+        data['Cost'].append(row['totalCost'])
+    if not data['Year'] or data['Title'][0] == data['Title'][-1]:
+        return None, None
+    chartscript, chartdiv = DP.heat_map(data,
+                                        f'Subscription costs by title and year for {provider}',
+                                        x_field='Year', y_field='Title', value_field='Cost')
+    return chartscript, chartdiv
 
 
 def provider_heat_map():
@@ -2245,6 +2268,33 @@ def add_subjects(row, html=None):
             else:
                 return f"{', '.join(subjects)}"
     return html
+
+
+def grouped_by_year(data):
+    ''' Group cost data by year
+    Keyword arguments:
+      data: cost data
+    Returns:
+      HTML string
+    '''
+    output = []
+    sorted_years = sorted(data)
+    groups = []
+    start = sorted_years[0]
+    prev_year = sorted_years[0]
+    prev_cost = data[prev_year]
+    for year in sorted_years[1:]:
+        cost = data[year]
+        if cost != prev_cost or int(year) != int(prev_year) + 1:
+            groups.append((start, prev_year, prev_cost))
+            start = year
+        prev_year = year
+        prev_cost = cost
+    groups.append((start, prev_year, prev_cost))
+    for start, end, cost in groups:
+        year_range = start if start == end else f"{start}-{end}"
+        output.append(f"{year_range}: ${cost:,.2f}")
+    return "<br>".join(output)
 
 
 def random_string(strlen=8):
@@ -6662,7 +6712,7 @@ def show_dois_heatmap(groupby, source='Crossref', top=10):
             data[label].append(r[groupby])
             data['Count'].append(r['count'])
     chartscript, chartdiv = DP.heat_map(data,
-                                        f'Top {top} {source} {groupby}s by year',
+                                        f'Top {top} {source} {groupby}s published to by year',
                                         x_field='Year', y_field=label,
                                         value_field='Count', value_format='0,0')
     endpoint_access()
@@ -6733,7 +6783,7 @@ def show_open_access():
     html2 = "<br>Source for citations: " \
             + "<a href='https://api.openalex.org/institutions?search=Janelia' " \
             + "target='_blank'>OpenAlex</a>"
-    tt = [("Year", "@years"), ("Open", "@Open")]
+    tt = [("Year", "@years"), ("Open", "@Open"), ("Closed", "@Closed"), ("Citations", "@Citations")]
     chartscript, chartdiv = DP.stacked_bar_chart(data, 'OpenAlex DOIs', xaxis="years", orient=pi/4,
                                                  yaxis=('Closed', 'Open'), yaxis2='Citations',
                                                  colors=['maroon', 'green'], tooltip=tt)
@@ -7296,8 +7346,11 @@ def show_subscription_costs(provider=None):
         link = f"<a href='/subscription/year/{year}'>{year}</a>"
         html += f"<tr><td>{link}</td><td>{val['count']}</td><td>${val['cost']:,.2f}</td>" \
                 + f"<td>{pp}</td></tr>"
-    html += "</tbody><tfoot><tr><th colspan=3 style='text-align:right'>AVERAGE % change</th>" \
-            + f"<th>{sum(perclist)/len(perclist):+.2f}%</th></tr></tfoot></tbody></table>"
+    if perclist:
+        html += "</tbody><tfoot><tr><th colspan=3 style='text-align:right'>AVERAGE % change</th>" \
+                + f"<th>{sum(perclist)/len(perclist):+.2f}%</th></tr></tfoot></table>"
+    else:
+        html += "</tbody></table>"
     if not provider:
         html += "<br><br><h3>Providers</h3>"
         html += '<br>'.join([f"<a href='/subscription/cost/{pp}'>{pp}</a>" \
@@ -7309,7 +7362,7 @@ def show_subscription_costs(provider=None):
     chartscript2 = None
     try:
         if provider:
-            chartscript2, chartdiv2 = provider_pie_chart(provider, pyear)
+            chartscript2, chartdiv2 = provider_title_heat_map(provider)
         else:
             chartscript2, chartdiv2 = provider_heat_map()
     except Exception as err:
@@ -7410,6 +7463,7 @@ def show_subscriptionlist(sub, stype=None, field='publisher'):
                                    title=render_warning(errmsg),
                                    message=error_message(err))
     html += "</tr></thead><tbody>"
+    pubto = 0
     for row in rows:
         ptype = f"<td>{row['type']}</td>" if not stype else ''
         link = f"<a href='/subscription/{str(row['_id'])}'>{row['title']}</a>"
@@ -7420,16 +7474,26 @@ def show_subscriptionlist(sub, stype=None, field='publisher'):
                 + f"<td>{row['provider']}</td><td>{row['title-id']}</td>" \
                 + f"<td>{access}</td>"
         if field == 'publisher':
+            if pubcount.get(row['title']):
+                pubto += 1
             link = f"<a href='/journal/{row['title']}'>{pubcount.get(row['title'])}</a>" \
                    if pubcount.get(row['title']) else ''
             html += f"<td style='text-align: center'>{link}</td>"
     html += '</tr></tbody></table>'
     title = f"ubscriptions for {field} {sub} ({cnt:,})"
     title = f"{stype} s{title}" if stype else f"S{title}"
+    chartscript = chartdiv = ""
+    if pubto:
+        perc = (pubto / cnt) * 100 if pubto else 0
+        chartscript, chartdiv = DP.venn_diagram('Subscribed to', 'Published to', 'Subscribed and published',
+                                                 perc, colors=['DarkOrange', 'SpringGreen'],
+                                                 title=f'Journals subscribed/published to for {sub}')
     endpoint_access()
-    return make_response(render_template('general.html', urlroot=request.url_root,
+    return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title=title, html=html,
+                                         chartscript=chartscript, chartdiv=chartdiv,
                                          navbar=generate_navbar('Subscriptions')))
+
 
 def process_charges(ptype):
     ''' Process subscription charges
@@ -7590,10 +7654,7 @@ def show_subscription(sid):
     vols = []
     idates = []
     if row.get('apc'):
-        apc_html = "<br>".join(
-            f"{year}: ${value:,.2f}" for year, value in sorted(row['apc'].items())
-        )
-        html += f"<tr><td>APC</td><td>{apc_html}</td></tr>"
+        html += f"<tr><td>APC</td><td>{grouped_by_year(row['apc'])}</td></tr>"
     if row.get('volumes'):
         for vol in row['volumes']:
             txt = []
