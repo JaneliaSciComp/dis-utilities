@@ -35,7 +35,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "111.0.1"
+__version__ = "111.1.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -7648,14 +7648,19 @@ def show_subscription_providers():
 
 @app.route('/subscription/apc')
 @app.route('/subscription/apc/<string:provider>')
-def show_subscription_apcs(provider=None):
+@app.route('/subscription/apc/<string:provider>/<string:publisher>')
+def show_subscription_apcs(provider=None, publisher=None):
     ''' Show APC costs from subscription collection
     '''
     errmsg = "Could not get data from subscription collection"
     query = {"apc": {"$exists": True}}
     if provider:
         query["provider"] = provider
+    if publisher:
+        query["publisher"] = publisher
     sortorder = [("provider", 1), ("publisher", 1), ("title", 1)]
+    provider_list = {}
+    publisher_list = {}
     try:
         rows = list(DB['dis'].subscription.find(query).sort(sortorder))
     except Exception as err:
@@ -7667,7 +7672,10 @@ def show_subscription_apcs(provider=None):
                                title=render_warning(errmsg),
                                message="No APC records were found")
     years = sorted({yr for row in rows for yr in row['apc']})
-    if provider:
+    if publisher:
+        header = ['Journal'] + years
+        table_header = "<th>Journal</th>"
+    elif provider:
         header = ['Publisher', 'Journal'] + years
         table_header = "<th>Publisher</th><th>Journal</th>"
     else:
@@ -7678,12 +7686,18 @@ def show_subscription_apcs(provider=None):
            + f"{table_header}</tr></thead><tbody>"
     fileoutput = ""
     for row in rows:
-        if provider:
-            cells = f"<td>{row['publisher']}</td><td>{row['title']}</td>"
+        tlink = f"<a href='/subscription/{row['_id']}'>{row['title']}</a>"
+        provider_list[row['provider']] = True
+        publisher_list[row['publisher']] = True
+        if publisher:
+            cells = f"<td>{tlink}</td>"
+            file_cells = [row['title']]
+        elif provider:
+            cells = f"<td>{row['publisher']}</td><td>{tlink}</td>"
             file_cells = [row['publisher'], row['title']]
         else:
             cells = f"<td>{row['provider']}</td><td>{row['publisher']}</td>" \
-                    + f"<td>{row['title']}</td>"
+                    + f"<td>{tlink}</td>"
             file_cells = [row['provider'], row['publisher'], row['title']]
         for yr in years:
             if yr in row['apc']:
@@ -7695,7 +7709,20 @@ def show_subscription_apcs(provider=None):
         html += f"<tr>{cells}</tr>"
         fileoutput += "\t".join(file_cells) + "\n"
     html += "</tbody></table>"
+    if not provider:
+        prehtml = "<h3>Providers</h3>"
+        for prv in sorted(provider_list.keys()):
+            prehtml += f"<a href='/subscription/apc/{prv}'>{prv}</a><br>"
+        html = prehtml + "<br><br>" + html
+    elif not publisher:
+        prehtml = "<h3>Publishers</h3>"
+        for pub in sorted(publisher_list.keys()):
+            prehtml += f"<a href='/subscription/apc/{provider}/{pub}'>{pub}</a><br>"
+        html = prehtml + "<br><br>" + html
+    print(provider, publisher)
     title = f"APC costs for {provider}" if provider else "APC costs"
+    if publisher:
+        title = f"{title} / {publisher}"
     download_name = f"apcs_{provider}" if provider else "apcs"
     html = create_downloadable(download_name, header, fileoutput) + "<br><br>" + html
     endpoint_access()
