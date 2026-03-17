@@ -35,7 +35,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "111.0.0"
+__version__ = "111.0.1"
 # Database
 DB = {}
 CVTERM = {}
@@ -7243,7 +7243,7 @@ def show_subscription_summary_by_provider(prov):
             + f"</td><td>{cnt:,}</td></tr></tfoot>"
     html += '</table>'
     html += "<br><a class='btn btn-outline-info btn-med' " \
-            + f"href='/subscriptionlist/{prov}/provider'" \
+            + f"href='/subscriptionlist/provider/{prov}'" \
             + " role='button'>Show details</a>"
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,

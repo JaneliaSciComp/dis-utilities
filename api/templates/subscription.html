@@ -21,16 +21,16 @@ $(document).on('keypress', 'input', function(e) {
     if (!$('#input-titlelist').val()) {
       return;
     }
-    url = "/subscriptionlist/" + $("#input-titlelist").val() + "/"
-          + $("#sub").val() + "/title";
+    url = "/subscriptionlist/" + $("#input-titlelist").val() + "/title/"
+          + $("#sub").val();
     window.location = url;
   }
   function find_by_publisher() {
     if (!$('#input-publist').val()) {
       return;
     }
-    url = "/subscriptionlist/" + $("#input-publist").val() + "/"
-          + $("#sub").val() + "/publisher";
+    url = "/subscriptionlist/" + $("#input-publist").val() + "/publisher/"
+          + $("#sub").val();
     window.location = url;
   }
 </script>
