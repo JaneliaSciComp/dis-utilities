@@ -35,7 +35,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "111.1.0"
+__version__ = "111..0"
 # Database
 DB = {}
 CVTERM = {}
@@ -524,8 +524,29 @@ def provider_title_heat_map(provider):
 
 
 def provider_heat_map():
-    ''' Create a heat map for providers
+    ''' Create a heat map for providers that have data after two years ago
+    Keyword arguments:
+      None
+    Returns:
+      Heat map components
     '''
+    errmsg = "Could not get max year data from subscription collection"
+    two_years_ago = str(datetime.now().year - 2)
+    payload = [{"$match": {"cost": {"$exists": True}}},
+    {"$addFields": {"costYears": {"$objectToArray": "$cost"}}},
+    {"$unwind": "$costYears"},
+    {"$group": {"_id": "$provider", "maxYear": {"$max": "$costYears.k"}}},
+    {"$match": {"maxYear": {"$lte": two_years_ago}}},
+    {"$project": {"_id": 1}}
+    ]
+    try:
+        rows = DB['dis'].subscription.aggregate(payload)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning(errmsg),
+                               message=error_message(err))
+    rows = list(rows)
+    timed_out = [list(prov.values())[0] for prov in rows]
     pipeline = [
         {"$match": {"cost": {"$exists": True}}},
         {"$project": {"provider": 1, "costArray": {"$objectToArray": "$cost"}}},
@@ -540,6 +561,8 @@ def provider_heat_map():
         raise err
     data = {'Year': [], 'Provider': [], 'Cost': []}
     for row in rows:
+        if row['_id']['provider'] in timed_out:
+            continue
         data['Year'].append(row['_id']['year'])
         data['Provider'].append(row['_id']['provider'])
         data['Cost'].append(row['totalCost'])
@@ -6558,18 +6581,18 @@ def show_preprint_relation(relation_type):
         Keyword arguments:
           relation_type: "preprint_no_pub" or "pub_no_preprint"
     '''
-    RELATION_CONFIG = {
+    relation_config = {
         'preprint_no_pub': {'payload': {"subtype": "preprint", "jrc_preprint": {"$exists": 0}},
                             'title': "Preprints without journal publications"},
         'pub_no_preprint': {'payload': {"type": "journal-article", "jrc_preprint": {"$exists": 0}},
                             'title': "Journal publications without preprints"},
     }
-    if relation_type not in RELATION_CONFIG:
+    if relation_type not in relation_config:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Invalid relation type"),
                                message="relation_type must be one of: " \
-                                       + f"{', '.join(RELATION_CONFIG)}")
-    cfg = RELATION_CONFIG[relation_type]
+                                       + f"{', '.join(relation_config)}")
+    cfg = relation_config[relation_type]
     try:
         rows = DB['dis'].dois.find(cfg['payload']).sort([("jrc_publishing_date", -1)])
     except Exception as err:
@@ -6673,15 +6696,41 @@ def show_dois_heatmap(groupby, source='Crossref', top=10):
           source: jrc_obtained_from value (default: Crossref)
           top: number of top entries to display (default: 25)
     '''
-    FIELD_MAP = {'publisher': {'mongo': 'publisher', 'label': 'Publisher'},
+    field_map = {'publisher': {'mongo': 'publisher', 'label': 'Publisher'},
                  'journal':   {'mongo': 'jrc_journal', 'label': 'Journal'}}
-    if groupby not in FIELD_MAP:
+    if groupby not in field_map:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Invalid groupby parameter"),
-                               message=f"groupby must be one of: {', '.join(FIELD_MAP)}")
-    mongo_field = FIELD_MAP[groupby]['mongo']
-    label = FIELD_MAP[groupby]['label']
+                               message=f"groupby must be one of: {', '.join(field_map)}")
+    errmsg = f"Could not get {groupby} data from subscription collection"
+    pubcount = {}
+    html = ''
+    if groupby == 'publisher':
+        pipeline = [{"$match": {"apc": {"$exists": True}}},
+                    {"$group": {"_id": {"publisher": "$publisher", "provider": "$provider"},
+                                "count": {"$sum": 1}}},]
+        try:
+            rows = DB['dis'].subscription.aggregate(pipeline)
+        except Exception as err:
+            return render_template('error.html', urlroot=request.url_root,
+                                   title=render_warning(errmsg),
+                                   message=error_message(err))
+        for row in rows:
+            pubcount[row['_id']['publisher']] = {'count': row['count'],
+                                                 'provider': row['_id']['provider']}
+    else:
+        try:
+            rows = DB['dis'].subscription.find({"apc": {"$exists": True}}, {"title": 1})
+        except Exception as err:
+            return render_template('error.html', urlroot=request.url_root,
+                                   title=render_warning(errmsg),
+                                   message=error_message(err))
+        for row in rows:
+            pubcount[row['title']] = row['_id']
+    mongo_field = field_map[groupby]['mongo']
+    label = field_map[groupby]['label']
     errmsg = f"Could not get {groupby} data from dois collection"
+    source = 'DataCite' if source.lower() == 'datacite' else 'Crossref'
     pipeline = [
         {"$match": {mongo_field: {"$exists": True},
                     "jrc_obtained_from": source,
@@ -6709,19 +6758,42 @@ def show_dois_heatmap(groupby, source='Crossref', top=10):
     top_entries = {e for e, _ in sorted(totals.items(), key=lambda x: x[1],
                                         reverse=True)[:top]}
     data = {'Year': [], label: [], 'Count': []}
+    if groupby == 'publisher':
+        html += '<table id="publishers" class="tablesorter numbers"><thead><tr>' \
+                + '<th>Publisher</th><th>Journal count</th></tr></thead><tbody>'
+    else:
+        html += '<table id="journals" class="tablesorter standard"><thead><tr>' \
+                + '<th>Journal</th></tr></thead><tbody>'
     for r in raw:
         if r[groupby] in top_entries:
             data['Year'].append(r['year'])
             data[label].append(r[groupby])
             data['Count'].append(r['count'])
+            if groupby == 'publisher' and r[groupby] in pubcount:
+                link = f"<a href='/subscription/apc/{pubcount[r[groupby]]['provider']}/" \
+                       + f"{r[groupby]}'>{pubcount[r[groupby]]['count']:,}</a>"
+                html += f"<tr><td>{r[groupby]}</td><td>{link}</td></tr>"
+                del pubcount[r[groupby]]
+            elif groupby == 'journal' and r[groupby] in pubcount:
+                link = f"<a href='/subscription/{pubcount[r[groupby]]}'>{r[groupby]}</a>"
+                html += f"<tr><td>{link}</td></tr>"
+                del pubcount[r[groupby]]
+    html += '</tbody></table>'
+    if "<td>" in html:
+        if groupby == 'publisher':
+            html = f"<br><h3>APCs by publisher</h3>{html}"
+        else:
+            html = f"<br><h3>Journals with APCs</h3>{html}"
+    else:
+        html = ''
     chartscript, chartdiv = DP.heat_map(data,
                                         f'Top {top} {source} {groupby}s published to by year',
                                         x_field='Year', y_field=label, value_field='Count',
                                         value_format='0,0', row_totals="ALL")
     endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
-                                         title=f'{label} heatmap',
-                                         html='', chartscript=chartscript, chartdiv=chartdiv,
+                                         title=f'{source} {label.lower()} heatmap',
+                                         html2=html, chartscript=chartscript, chartdiv=chartdiv,
                                          navbar=generate_navbar('Journals')))
 
 
@@ -6926,18 +6998,18 @@ def top_entities(entity_type, year='All', source='crossref', top=10):
           source: jrc_obtained_from value for publishers (default: crossref)
           top: number of top entries to display (default: 10, max: 20)
     '''
-    ENTITY_CONFIG = {
+    entity_config = {
         'journal':   {'label': 'Journal',   'note': "Note that this does not contain "
                                                      "Janelia Research Campus (figshare)<br>",
                       'pie_width': 875,  'pie_height': 550},
         'publisher': {'label': 'Publisher', 'note': '',
                       'pie_width': 1100, 'pie_height': 650},
     }
-    if entity_type not in ENTITY_CONFIG:
+    if entity_type not in entity_config:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Invalid entity type"),
-                               message=f"entity_type must be one of: {', '.join(ENTITY_CONFIG)}")
-    cfg = ENTITY_CONFIG[entity_type]
+                               message=f"entity_type must be one of: {', '.join(entity_config)}")
+    cfg = entity_config[entity_type]
     top = min(top, 20)
     fsource = 'Crossref' if source.lower() == 'crossref' else 'DataCite'
     try:
@@ -7670,7 +7742,8 @@ def show_subscription_apcs(provider=None, publisher=None):
     if not rows:
         return render_template('warning.html', urlroot=request.url_root,
                                title=render_warning(errmsg),
-                               message="No APC records were found")
+                               message="No APC records were found for " \
+                                       + f"{publisher if publisher else provider}")
     years = sorted({yr for row in rows for yr in row['apc']})
     if publisher:
         header = ['Journal'] + years
@@ -7685,6 +7758,7 @@ def show_subscription_apcs(provider=None, publisher=None):
     html = "<table id='apcs' class='tablesorter numberlast'><thead><tr>" \
            + f"{table_header}</tr></thead><tbody>"
     fileoutput = ""
+    cnt = 0
     for row in rows:
         tlink = f"<a href='/subscription/{row['_id']}'>{row['title']}</a>"
         provider_list[row['provider']] = True
@@ -7708,7 +7782,8 @@ def show_subscription_apcs(provider=None, publisher=None):
                 file_cells.append("")
         html += f"<tr>{cells}</tr>"
         fileoutput += "\t".join(file_cells) + "\n"
-    html += "</tbody></table>"
+        cnt += 1
+    html = f"<h4>{cnt:,} journal{'s' if cnt != 1 else ''}</h4>{html}</tbody></table>"
     if not provider:
         prehtml = "<h3>Providers</h3>"
         for prv in sorted(provider_list.keys()):
@@ -7719,7 +7794,6 @@ def show_subscription_apcs(provider=None, publisher=None):
         for pub in sorted(publisher_list.keys()):
             prehtml += f"<a href='/subscription/apc/{provider}/{pub}'>{pub}</a><br>"
         html = prehtml + "<br><br>" + html
-    print(provider, publisher)
     title = f"APC costs for {provider}" if provider else "APC costs"
     if publisher:
         title = f"{title} / {publisher}"
@@ -8533,18 +8607,18 @@ def show_tag_ack(tagtype):
         Keyword arguments:
           tagtype: "tag" or "ack"
     '''
-    TAG_CONFIG = {
+    tag_config = {
         'tag': {'mongo': 'jrc_tag', 'nav': 'jrc_tag.name',
                 'label': 'Tag', 'errmsg': 'tags', 'title': 'DOI tags'},
         'ack': {'mongo': 'jrc_acknowledge', 'nav': 'jrc_acknowledge.name',
                 'label': 'Acknowledgement', 'errmsg': 'acknowledgements',
                 'title': 'DOI acknowledgements'},
     }
-    if tagtype not in TAG_CONFIG:
+    if tagtype not in tag_config:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Invalid tag type"),
-                               message=f"tagtype must be one of: {', '.join(TAG_CONFIG)}")
-    cfg = TAG_CONFIG[tagtype]
+                               message=f"tagtype must be one of: {', '.join(tag_config)}")
+    cfg = tag_config[tagtype]
     payload = [{"$unwind": f"${cfg['mongo']}"},
                {"$project": {"_id": 0, f"{cfg['mongo']}.name": 1, "jrc_obtained_from": 1}},
                {"$group": {"_id": {"tag": f"${cfg['mongo']}.name", "source": "$jrc_obtained_from"},
