@@ -35,7 +35,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "111..0"
+__version__ = "111.3.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -53,6 +53,7 @@ NAV = {"Home": "",
                              "subject": "dois_subjectpicker"},
                 "DOI yearly report": "dois_yearly",
                 "Top cited DOIs": "dois_top_cited",
+                "DOIs by provider": "dois_provider",
                 "DOIs by license": "dois_license"},
        "DataCite": {"DataCite DOI stats": "datacite_dois",
                     "DataCite DOI citations": "datacite_citations",
@@ -4563,6 +4564,88 @@ def dois_license(year='All'):
                                          navbar=generate_navbar('DOIs')))
 
 
+@app.route('/dois_provider')
+def dois_provider():
+    ''' Show providers for published DOIs
+    '''
+    try:
+        publishers = DB['dis'].dois.distinct("publisher")
+        journals = DB['dis'].dois.distinct("jrc_journal")
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get providers for published DOIs"),
+                               message=error_message(err))
+    payload = {"$or": [{"publisher": {"$in": publishers}},
+                       {"title": {"$in": journals}}]}
+    prov = {}
+    try:
+        rows = DB['dis'].subscription.find(payload)
+        for row in rows:
+            prov[row['provider']] = True
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get DOIs by provider"),
+                               message=error_message(err))
+    html = "<br>".join(
+        f"<a href='/dois_provider/{provider}'>{provider}</a>"
+        for provider in sorted(prov.keys(), key=lambda x: x.lower())
+    )
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="Providers for published DOIs", html=html,
+                                         navbar=generate_navbar('DOIs')))
+
+
+@app.route('/dois_provider/<string:prov>')
+def dois_provider_with_janelia(prov):
+    ''' Show DOIs by provider with Janelia first author
+    '''
+    journals = []
+    publishers = []
+    try:
+        rows = DB['dis'].subscription.find({"provider": prov})
+        for row in rows:
+            journals.append(row['title'])
+            publishers.append(row['publisher'])
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get publishers by provider"),
+                               message=error_message(err))
+    payload = {"$or": [{"publisher": {"$in": publishers}},
+                       {"jrc_journal": {"$in": journals}}],
+               "jrc_first_author": {"$exists": True}}
+    try:
+        rows = DB['dis'].dois.find(payload).sort("jrc_publishing_date", -1)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get DOIs by provider"),
+                               message=error_message(err))
+    html = "<table id='dois' class='tablesorter standard-scroll'><thead><tr>" \
+           + "<th>Published</th><th>DOI</th><th>Publisher</th><th>Journal</th><th>Title</th>" \
+           + "<th>Status</th></tr></thead><tbody>"
+    cnt = 0
+    sheet = []
+    sheet.append("Published\tDOI\tPublisher\tJournal\tTitle\tStatus")
+    for row in rows:
+        stat = row.get('jrc_oa_status', '')
+        sheet.append(f"{row['jrc_publishing_date']}\t{row['doi']}\t{row['publisher']}\t" \
+                     + f"{row['jrc_journal']}\t{DL.get_title(row)}\t{stat}")
+        if stat:
+            stat = f"<span class='oa_{stat}'>{stat.capitalize()}</span>"
+        html += f"<tr><td>{row['jrc_publishing_date']}</td><td>{doi_link(row['doi'])}</td>" \
+                + f"<td>{row['publisher']}</td><td>{row['jrc_journal']}</td>" \
+                + f"<td>{DL.get_title(row)}</td><td>{stat}</td></tr>"
+        cnt += 1
+    html += "</tbody></table>"
+    sheet = create_downloadable(f"{prov}_dois", None, "\n".join(sheet))
+    html = sheet + "<br><br>" + html
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=f"DOIs by provider {prov} with " \
+                                               + f"Janelia first author ({cnt:,})",
+                                         html=html, navbar=generate_navbar('DOIs')))
+
+
 @app.route('/dois_report/<string:year>')
 @app.route('/dois_report')
 def dois_report(year=str(datetime.now().year)):
@@ -7227,7 +7310,7 @@ def show_subscription_summary():
             transform[row['_id']['publisher']] = collections.defaultdict(lambda: 0, {})
         transform[row['_id']['publisher']][row['_id']['type']] = row['count']
         transform[row['_id']['publisher']]['TOTAL'] += row['count']
-    html += "<table id='journals' class='tablesorter numbers'><thead><tr>" \
+    html += "<table id='journals' class='tablesorter numbers-scroll'><thead><tr>" \
             + "<th>Publisher</th><th>Provider</th><th>" + ("</th><th>".join(types)) \
             + "</th><th>TOTAL</th></tr></thead><tbody>"
     for publisher, data in transform.items():
@@ -7755,7 +7838,7 @@ def show_subscription_apcs(provider=None, publisher=None):
         header = ['Provider', 'Publisher', 'Journal'] + years
         table_header = "<th>Provider</th><th>Publisher</th><th>Journal</th>"
     table_header += "".join(f"<th>{yr}</th>" for yr in years)
-    html = "<table id='apcs' class='tablesorter numberlast'><thead><tr>" \
+    html = "<table id='apcs' class='tablesorter numberlast-scroll'><thead><tr>" \
            + f"{table_header}</tr></thead><tbody>"
     fileoutput = ""
     cnt = 0
