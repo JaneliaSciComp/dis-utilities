@@ -72,6 +72,28 @@ table.standard {
   border: 1px solid #058d95;
 }
 
+table.standard-scroll {
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 12pt;
+  line-height: 14px;
+}
+
+.standard-scroll thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #058d95;
+  border: 1px solid #058d95;
+}
+
+.standard-scroll td {
+  text-align: left;
+  background: #334 !important;
+  color: #bbc !important;
+  border: 1px solid #058d95;
+}
+
 table.numbers {
   border-collapse: collapse;
   font-size: 12pt;
@@ -94,6 +116,58 @@ table.numbers {
   border: 1px solid #058d95;
 }
 
+table.numbers-scroll {
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 12pt;
+  line-height: 14px;
+}
+
+.numbers-scroll thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #058d95;
+  border: 1px solid #058d95;
+}
+
+.numbers-scroll td:first-child {
+  text-align: left;
+}
+
+.numbers-scroll td {
+  text-align: center;
+  background: #334 !important;
+  color: #bbc !important;
+  border: 1px solid #058d95;
+}
+
+table.numberlast-scroll {
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 12pt;
+  line-height: 14px;
+}
+
+.numberlast-scroll thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #058d95;
+  border: 1px solid #058d95;
+}
+
+.numberlast-scroll td:last-child {
+  text-align: center;
+}
+
+.numberlast-scroll td {
+  text-align: left;
+  background: #334 !important;
+  color: #bbc !important;
+  border: 1px solid #058d95;
+}
+
 table.numberlast {
   border-collapse: collapse;
   font-size: 12pt;
@@ -111,6 +185,36 @@ table.numberlast {
 
 .numberlast td {
   text-align: left;
+  background: #334 !important;
+  color: #bbc !important;
+  border: 1px solid #058d95;
+}
+
+table.numbercenter-scroll {
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 12pt;
+  line-height: 14px;
+}
+
+.numbercenter-scroll thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #058d95;
+  border: 1px solid #058d95;
+}
+
+.numbercenter-scroll td:first-child {
+  text-align: left;
+}
+
+.numbercenter-scroll td:last-child {
+  text-align: left;
+}
+
+.numbercenter-scroll td {
+  text-align: center;
   background: #334 !important;
   color: #bbc !important;
   border: 1px solid #058d95;
