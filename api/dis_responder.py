@@ -35,7 +35,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "111.3.0"
+__version__ = "112.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -1007,7 +1007,7 @@ def generate_works_table(rows, name=None, show="full", eid=None):
                 print(f"Could not get author details for {row['doi']}")
     if not works:
         return html, []
-    html += "<table id='pubs' class='tablesorter standard'>" \
+    html += "<table id='pubs' class='tablesorter standard-scroll'>" \
             + '<thead><tr><th>Published</th><th>DOI</th><th>Title</th></tr></thead><tbody>'
     for work in sorted(works, key=lambda row: row['date'], reverse=True):
         version = DL.is_version(work['raw'])
@@ -1160,7 +1160,7 @@ def add_orcid_works(data, dois, return_html=True):
         html += f"<hr>The additional {title} from ORCID. Note that titles below may " \
                 + "be self-reported, may not have DOIs available, or may be from the author's " \
                 + "employment outside of Janelia.</br>"
-        html += '<table id="works" class="tablesorter standard"><thead><tr>' \
+        html += '<table id="works" class="tablesorter standard-scroll"><thead><tr>' \
                 + '<th>Published</th><th>DOI</th><th>Title</th>' \
                 + f"</tr></thead><tbody>{inner}</tbody></table>"
     return html if return_html else results
@@ -1174,6 +1174,8 @@ def endpoint_access():
           None
     '''
     endpoint = str(request.url_rule).split('/')[1]
+    if not endpoint:
+        endpoint = str(request.url_rule)
     coll = DB['dis'].api_endpoint
     try:
         row = coll.find_one({"endpoint": endpoint})
@@ -1184,13 +1186,22 @@ def endpoint_access():
     except Exception:
         pass
     endpoint = unquote(request.url.replace(request.url_root, ""))
-    coll = DB['dis'].api_endpoint_details
-    try:
-        row = coll.find_one({"endpoint": endpoint})
-        if row:
-            coll.update_one({"endpoint": endpoint}, {"$inc": {"count": 1}})
+    if endpoint.startswith('?'):
+        return
+    if '/' in endpoint:
+        if endpoint.startswith('10.'):
+            endpoint = 'doiui'
         else:
-            coll.insert_one({"endpoint": endpoint, "count": 1})
+            eroot = endpoint.split('/')[0]
+            parts = endpoint.split('/', 2)
+            first_two = '/'.join(parts[:2])
+            if first_two in app.config['EPT_TWO']:
+                endpoint = first_two
+            if eroot in app.config['EPT_ONE']:
+                endpoint = eroot
+    coll = DB['dis'].api_endpoint_log
+    try:
+        coll.insert_one({"endpoint": endpoint, "timestamp": datetime.now()})
     except Exception:
         pass
 
@@ -1203,7 +1214,7 @@ def generate_user_table(rows):
           HTML for a list of authors with a count
     '''
     count = 0
-    html = '<table id="ops" class="tablesorter standard"><thead><tr>' \
+    html = '<table id="ops" class="tablesorter standard-scroll"><thead><tr>' \
            + '<th>ORCID</th><th>Given name</th><th>Family name</th>' \
            + '<th>Status</th></tr></thead><tbody>'
     for row in rows:
@@ -1831,7 +1842,7 @@ def standard_doi_table(rows, prefix=None):
           oacnt: number of Open Access
     '''
     header = ['Published', 'DOI', 'Journal', 'Title']
-    html = "<table id='dois' class='tablesorter standard'><thead><tr>" \
+    html = "<table id='dois' class='tablesorter standard-scroll'><thead><tr>" \
            + ''.join([f"<th>{itm}</th>" for itm in header]) + "</tr></thead><tbody>"
     fileoutput = ""
     cnt = oacnt = 0
@@ -4334,7 +4345,7 @@ def dois_source(year='All'):
                                title=render_warning("Could not get source data from dois"),
                                message=error_message(err))
     # HTML and charts
-    html = '<table id="types" class="tablesorter numberlast"><thead><tr>' \
+    html = '<table id="types" class="tablesorter numberlast-scroll"><thead><tr>' \
            + '<th>Source</th><th>Type</th><th>Subtype</th><th>Count</th>' \
            + '</tr></thead><tbody>'
     total = 0
@@ -4449,7 +4460,7 @@ def dois_top_cited():
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get top cited DOIs"),
                                message=error_message(err))
-    html = "<table id='top_cited' class='tablesorter standard'><thead><tr>" \
+    html = "<table id='top_cited' class='tablesorter standard-scroll'><thead><tr>" \
            + "<th>Citations</th><th>DOI</th><th>Journal</th><th>Title</th></tr></thead><tbody>"
     for result in results:
         doi = result['doi'].replace(app.config['DOI'], '')
@@ -4515,7 +4526,7 @@ def dois_license(year='All'):
                                title=render_warning("Could not get license data from dois"),
                                message=error_message(err))
     html = year_pulldown('dois_license')
-    html += "<table id='license' class='tablesorter numbers'><thead><tr>" \
+    html += "<table id='license' class='tablesorter numbers-scroll'><thead><tr>" \
             + "<th>Source</th><th>Crossref</th><th>DataCite</th></tr></thead><tbody>"
     cnt = {"Crossref": 0, "DataCite": 0}
     data = {}
@@ -5020,7 +5031,7 @@ def dois_time(period, year=None):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get counts from dois collection"),
                                message=error_message(err))
-    html = f'<table id="{period}s" class="tablesorter numbers"><thead><tr>' \
+    html = f'<table id="{period}s" class="tablesorter numbers-scroll"><thead><tr>' \
            + f'<th>{period.capitalize()}</th><th>Crossref</th><th>DataCite</th>' \
            + '</tr></thead><tbody>'
     counter = collections.defaultdict(lambda: 0, {})
@@ -5102,7 +5113,7 @@ def show_grouped_dois(field, unwind=None):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get DOIs from dois collection"),
                                message=error_message(err))
-    html = "<table id='dois' class='tablesorter numberlast'><thead><tr>" \
+    html = "<table id='dois' class='tablesorter numberlast-scroll'><thead><tr>" \
            + f"<th>{field}</th><th>Count</th></tr></thead><tbody>"
     total = cnt = 0
     data = {}
@@ -5168,7 +5179,7 @@ def show_insert(idate, source='Crossref'):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("DOIs not found"),
                                message=f"No DOIs were inserted on or after {idate}")
-    html = '<table id="dois" class="tablesorter numbers"><thead><tr>' \
+    html = '<table id="dois" class="tablesorter numbers-scroll"><thead><tr>' \
            + '<th>DOI</th><th>Type</th><th>Published</th><th>Publisher</th>' \
            + '<th>Inserted</th><th>Is version of</th><th>Newsletter</th>' \
            + '<th>Tags</th></tr></thead><tbody>'
@@ -5273,7 +5284,7 @@ def show_doiui_custom(year='All'):
                                title=render_warning("DOIs not found"),
                                message=f"No DOIs were found for {ipd['field']}={display_value}")
     header = ['Published', 'DOI', 'Title', 'Newsletter']
-    html = "<table id='dois' class='tablesorter standard'><thead><tr>" \
+    html = "<table id='dois' class='tablesorter standard-scroll'><thead><tr>" \
            + ''.join([f"<th>{itm}</th>" for itm in header]) + "</tr></thead><tbody>"
     works = []
     jorp = newsletter = oacnt =0
@@ -5401,7 +5412,7 @@ def show_doi_subject(subject, partial=None):
     header = ['Published', 'DOI', 'Source', 'Title']
     if partial:
         header.insert(-1, "Subjects")
-    html = "<table id='dois' class='tablesorter standard'><thead><tr>" \
+    html = "<table id='dois' class='tablesorter standard-scroll'><thead><tr>" \
            + ''.join([f"<th>{itm}</th>" for itm in header]) + "</tr></thead><tbody>"
     fileoutput = ""
     cnt = 0
@@ -5570,7 +5581,7 @@ def datacite_subject(subject=None, year='All'):
             title += f" (year={year})"
     else:
         cnt = 0
-        html = "<table id='subjects' class='tablesorter numberlast'><thead><tr>" \
+        html = "<table id='subjects' class='tablesorter numberlast-scroll'><thead><tr>" \
                + "<th>Subject</th><th>Scheme</th><th>Count</th></tr></thead><tbody>"
         for row in rows:
             cnt += 1
@@ -5630,7 +5641,7 @@ def datacite_dois():
             dois[row['_id']['type']][row['_id']['detail']][row['_id']['pub']] = 0
         dois[row['_id']['type']][row['_id']['detail']][row['_id']['pub']] += row['count']
     # Summary
-    inner = '<table id="types" class="tablesorter numberlast"><thead><tr>' \
+    inner = '<table id="types" class="tablesorter numberlast-scroll"><thead><tr>' \
             + '<th>Type</th><th>Count</th>' \
             + '</tr></thead><tbody>'
     for key, val in sorted(types.items(), key=itemgetter(1), reverse=True):
@@ -5640,7 +5651,7 @@ def datacite_dois():
     html = f"<div class='flexrow'><div class='flexcol'>{inner}</div>" \
            + "<div class='flexcol' style='margin-left: 50px'>"
     # Details
-    inner = '<table id="details" class="tablesorter numberlast"><thead><tr>' \
+    inner = '<table id="details" class="tablesorter numberlast-scroll"><thead><tr>' \
             + '<th>Type</th><th>Subtype</th><th>Publisher</th><th>Count</th>' \
             + '</tr></thead><tbody>'
     total = 0
@@ -5711,7 +5722,7 @@ def datacite_citations():
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get data DOIs"),
                                message=error_message(err))
-    html = '<table id="data" class="tablesorter numberlast"><thead><tr>' \
+    html = '<table id="data" class="tablesorter numberlast-scroll"><thead><tr>' \
            + '<th>DOI</th><th>Title</th><th>Citations</th>' \
            + '</tr></thead><tbody>'
     total = 0
@@ -5740,7 +5751,7 @@ def datacite_downloads():
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get data DOIs"),
                                message=error_message(err))
-    html = '<table id="data" class="tablesorter numberlast"><thead><tr>' \
+    html = '<table id="data" class="tablesorter numberlast-scroll"><thead><tr>' \
            + '<th>DOI</th><th>Title</th><th>Downloads</th>' \
            + '</tr></thead><tbody>'
     total = 0
@@ -5788,7 +5799,7 @@ def dois_author(year='All'):
                                    title=render_warning("Could not get authorship " \
                                                         + "from dois collection"),
                                    message=error_message(err))
-    html = '<table id="authors" class="tablesorter numbers"><thead><tr>' \
+    html = '<table id="authors" class="tablesorter numbers-scroll"><thead><tr>' \
            + '<th>Authorship</th><th>Crossref</th><th>DataCite</th>' \
            + '</tr></thead><tbody>'
     data = {}
@@ -5845,13 +5856,13 @@ def dois_top_author(year='All'):
     ''' Show top first and last authors
     '''
     rows = get_top_authors('first', year)
-    first = "<h2>Top first authors</h2><table id='topauthors' class='tablesorter numbers'>" \
+    first = "<h2>Top first authors</h2><table id='topauthors' class='tablesorter numbers-scroll'>" \
             + "<thead></thead><tbody><tr><th>Author</th><th>DOIs</th></tr>"
     for row in rows:
         first += f"<tr><td>{row['_id']}</td><td>{row['count']}</td></tr>"
     first += "</tbody></table>"
     rows = get_top_authors('last', year)
-    last = "<h2>Top last authors</h2><table id='topauthors' class='tablesorter numbers'>" \
+    last = "<h2>Top last authors</h2><table id='topauthors' class='tablesorter numbers-scroll'>" \
            + "<thead></thead><tbody><tr><th>Author</th><th>DOIs</th></tr>"
     for row in rows:
         last += f"<tr><td>{row['_id']}</td><td>{row['count']}</td></tr>"
@@ -5935,7 +5946,7 @@ def doiui_firstlast(year='All', which=None):
                                title=render_warning("Could not get last authors " \
                                                     + "from dois collection"),
                                message=error_message(err))
-    html = "<table id='group' class='tablesorter numbers'><thead></thead><tbody>"
+    html = "<table id='group' class='tablesorter numbers-scroll'><thead></thead><tbody>"
     html += "<tr><td>Lab head first author</td><td>" \
             + f"<a href='/doiui_firstlast/{year}/first'>{cnt['first']:,}</a></td></tr>"
     html += "<tr><td>Lab head last author</td><td>" \
@@ -5994,7 +6005,7 @@ def dois_invalid_auth():
                                                     + "from dois collection"),
                                message=error_message(err))
     title = "DOIs with invalid authors"
-    html = "<table id='invalid_auth' class='tablesorter standard'><thead><tr><th>DOI</th>" \
+    html = "<table id='invalid_auth' class='tablesorter standard-scroll'><thead><tr><th>DOI</th>" \
            + "<th>Name</th></tr></thead><tbody>"
     fam = "<span style='color: red;'>Family:</span> "
     giv = "<span style='color: red;'>Given:</span> "
@@ -6057,7 +6068,7 @@ def dois_no_janelia(year='All'):
     html = "These are journal articles/preprints with no Janelia authors<br>" \
            + year_pulldown('dois_no_janelia')
     if cnt:
-        html += "<table id='nojanelia' class='tablesorter standard'>" \
+        html += "<table id='nojanelia' class='tablesorter standard-scroll'>" \
                 + "<thead><tr><th>DOI</th><th>Publisher</th><th>Title</th><th>Published</th>" \
                 + "</tr></thead><tbody>"
         for row in rows:
@@ -6188,7 +6199,7 @@ def show_org_authors(org_in):
                                message=error_message(err))
     header = ["Given name(s)", "Family name(s)", "Alumni", "ORCID", "Affiliations"]
     content = ""
-    html = "<table id='authors' class='tablesorter standard'><thead><tr><th>" \
+    html = "<table id='authors' class='tablesorter standard-scroll'><thead><tr><th>" \
         + "</th><th>".join(header) + "</th></tr></thead><tbody>"
     cnt = 0
     for row in rows:
@@ -6263,7 +6274,7 @@ def show_organization(org_in, year=str(datetime.now().year), show="full"):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get DOIs"),
                                message=error_message(err))
-    html = '<table id="dois" class="tablesorter standard"><thead><tr>' \
+    html = '<table id="dois" class="tablesorter standard-scroll"><thead><tr>' \
            + '<th>Published</th><th>DOI</th><th>Tags</th><th>Title</th></tr></thead><tbody>'
     dcnt = org_journal_cnt = 0
     content = ""
@@ -6394,7 +6405,7 @@ def org_summary(org='Shared Resources',year='All', which=None):
     title = f"Journal publications for {org}"
     if year != 'All':
         title += f" ({year})"
-    html = "<table id='org' class='tablesorter numbers'><thead><tr><th></th><th>All</th>" \
+    html = "<table id='org' class='tablesorter numbers-scroll'><thead><tr><th></th><th>All</th>" \
            + f"<th>{org}</th></tr></thead><tbody>"
     c1 = f"<a href='/org_summary/all/{year}/first'>{len(finds['first']):,}</a>" \
         if finds['first'] else ""
@@ -6439,7 +6450,7 @@ def org_year(org="Shared Resources"):
             data['Janelia'].append(years['Janelia'][yr])
             data[org].append(0)
     title = f"Journal publications by year for {org} with lab head last author"
-    html = '<table id="years" class="tablesorter numbers"><thead><tr>' \
+    html = '<table id="years" class="tablesorter numbers-scroll"><thead><tr>' \
            + f"<th>Year</th><th>All</th><th>{org}</th>" \
            + '</tr></thead><tbody>'
     total = {'Janelia': 0, org: 0}
@@ -6504,7 +6515,7 @@ def dois_preprint(year='All'):
                                message=error_message(err))
     data, preprint = compute_preprint_data(rows)
     no_relation = get_no_relation()
-    html = '<table id="preprints" class="tablesorter numbers"><thead><tr>' \
+    html = '<table id="preprints" class="tablesorter numbers-scroll"><thead><tr>' \
            + '<th>Status</th><th>Crossref</th><th>DataCite</th>' \
            + '</tr></thead><tbody>'
     html += "<tr><td>Preprints with journal articles</td>" \
@@ -6570,7 +6581,7 @@ def dois_preprint_year():
     for row in rows:
         year = row['jrc_publishing_date'][:4]
         data['Preprint'][data['years'].index(year)] += 1
-    html = '<table id="years" class="tablesorter numbers"><thead><tr>' \
+    html = '<table id="years" class="tablesorter numbers-scroll"><thead><tr>' \
            + '<th>Year</th><th>Journal articles</th><th>Preprints</th></thead><tbody>'
     jrn = pre = 0
     for idx in range(len(data['years'])):
@@ -6607,7 +6618,7 @@ def preprint_with_pub():
     day_pub = {}
     fileoutput = ""
     header = ['Published', 'DOI', 'Title', 'Journal']
-    html = "<table id='preprint_with_pub' class='tablesorter numbers'><thead><tr><th>" \
+    html = "<table id='preprint_with_pub' class='tablesorter numbers-scroll'><thead><tr><th>" \
            + "</th><th>".join(header) + "</th></tr></thead><tbody>"
     for row in rows:
         if len(row['jrc_preprint']) == 1:
@@ -6645,7 +6656,7 @@ def preprint_with_pub():
     avg_days = sum(day_count) / len(day_count) if day_count else 0
     pre = f"Preprints with journal publications: {len(day_count):,}<br>" \
            + f"Average days to publication: {avg_days:,.1f}<br>"
-    pre += "<table id='preprint_with_pub' class='tablesorter numbers'><thead><tr>" \
+    pre += "<table id='preprint_with_pub' class='tablesorter numbers-scroll'><thead><tr>" \
            + "<th>Journal</th><th>Average days to publication</th></tr></thead><tbody>"
     for jour, days in day_pub.items():
         avg_days = sum(days) / len(days) if days else 0
@@ -6684,7 +6695,7 @@ def show_preprint_relation(relation_type):
                                message=error_message(err))
     fileoutput = ""
     header = ['Published', 'DOI', 'Title', 'Journal']
-    html = f"<table id='{relation_type}' class='tablesorter numbers'><thead><tr><th>" \
+    html = f"<table id='{relation_type}' class='tablesorter numbers-scroll'><thead><tr><th>" \
            + "</th><th>".join(header) + "</th></tr></thead><tbody>"
     cnt = 0
     for row in rows:
@@ -6729,7 +6740,7 @@ def dois_publisher(year='All'):
                                title=render_warning("Could not get publishers " \
                                                     + "from dois collection"),
                                message=error_message(err))
-    html = '<table id="types" class="tablesorter numbers"><thead><tr>' \
+    html = '<table id="types" class="tablesorter numbers-scroll"><thead><tr>' \
            + '<th>Publisher</th><th>Crossref</th><th>DataCite</th>' \
            + '</tr></thead><tbody>'
     pubs = {}
@@ -6842,10 +6853,10 @@ def show_dois_heatmap(groupby, source='Crossref', top=10):
                                         reverse=True)[:top]}
     data = {'Year': [], label: [], 'Count': []}
     if groupby == 'publisher':
-        html += '<table id="publishers" class="tablesorter numbers"><thead><tr>' \
+        html += '<table id="publishers" class="tablesorter numbers-scroll"><thead><tr>' \
                 + '<th>Publisher</th><th>Journal count</th></tr></thead><tbody>'
     else:
-        html += '<table id="journals" class="tablesorter standard"><thead><tr>' \
+        html += '<table id="journals" class="tablesorter standard-scroll"><thead><tr>' \
                 + '<th>Journal</th></tr></thead><tbody>'
     for r in raw:
         if r[groupby] in top_entries:
@@ -6973,7 +6984,7 @@ def show_open_access_details(year='All'):
                                title=render_warning('Could not get Open access data'),
                                message=error_message(err))
     total = total_oa = 0
-    html = '<table id="dois" class="tablesorter numberlast" width=500><thead><tr>' \
+    html = '<table id="dois" class="tablesorter numberlast-scroll" width=500><thead><tr>' \
            + '<th>Status</th><th>Description</th><th>Count</th></tr></thead><tbody>'
     data = {}
     palette = []
@@ -7034,7 +7045,7 @@ def show_journals_dois(year=str(datetime.now().year)):
                                title=render_warning(errmsg),
                                message='No journals were found')
     html = f"<h4>Journals found: {len(journal):,}</h4>" \
-           + '<table id="journals" class="tablesorter numbers"><thead><tr>' \
+           + '<table id="journals" class="tablesorter numbers-scroll"><thead><tr>' \
            + '<th>Journal</th><th>Publisher</th><th>Count</th><th>Last published to</th>' \
            + '<th>Subscription</th></tr></thead><tbody>'
     for key in sorted(journal, key=lambda x: journal[x]['count'], reverse=True):
@@ -7110,7 +7121,7 @@ def top_entities(entity_type, year='All', source='crossref', top=10):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning(f"Could not get {entity_type} data from dois"),
                                message=f"No {entity_type}s were found")
-    html = cfg['note'] + "<table id='journals' class='tablesorter numberlast'><thead><tr>" \
+    html = cfg['note'] + "<table id='journals' class='tablesorter numberlast-scroll'><thead><tr>" \
            + f"<th>{cfg['label']}</th><th>Count</th></tr></thead><tbody>"
     data = {}
     for key in sorted(entities, key=entities.get, reverse=True):
@@ -7158,7 +7169,7 @@ def dois_nojournal():
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get journal data from dois"),
                                message=error_message(err))
-    html = '<table id="articles" class="tablesorter standard"><thead><tr>' \
+    html = '<table id="articles" class="tablesorter standard-scroll"><thead><tr>' \
            + '<th>DOI</th><th>Title</th></tr></thead><tbody>'
     cnt = 0
     for row in rows:
@@ -7207,7 +7218,7 @@ def show_journal_ui(jname, year='All'):
         data[row['_id'].capitalize() if row['_id'] else 'Unknown'] = row.get('count', 0)
     if total < cnt:
         data['Unknown'] = data.get('Unknown', 0) + cnt - total
-    top = '<table id="journals" class="tablesorter numbers"><thead><tr>' \
+    top = '<table id="journals" class="tablesorter numbers-scroll"><thead><tr>' \
           + '<th>Open Access status</th><th>Count</th></tr></thead><tbody>'
     for key, val in sorted(data.items(), key=lambda item: item[1], reverse=True):
         stat = DP.OA_COLORS.get(key.capitalize(), 'crimson')
@@ -7375,7 +7386,7 @@ def show_subscription_summary_by_provider(prov):
             transform[row['_id']['publisher']] = collections.defaultdict(lambda: 0, {})
         transform[row['_id']['publisher']][row['_id']['type']] = row['count']
         transform[row['_id']['publisher']]['TOTAL'] += row['count']
-    html = "<table id='journals' class='tablesorter numbers'><thead><tr>" \
+    html = "<table id='journals' class='tablesorter numbers-scroll'><thead><tr>" \
             + "<th>Publisher</th><th>" + ("</th><th>".join(types)) \
             + "</th><th>TOTAL</th></tr></thead><tbody>"
     cnt = 0
@@ -7420,7 +7431,7 @@ def show_subscription_year(year=str(datetime.now().year)):
                                title=render_warning(errmsg),
                                message=error_message(err))
     html = "<br>" + year_pulldown("subscription/year", all_years=False, start_year=2011)
-    html2 = "<table id='costs' class='tablesorter numberlast'><thead><tr>"
+    html2 = "<table id='costs' class='tablesorter numberlast-scroll'><thead><tr>"
     html2 += "<th>Provider</th><th>Publisher</th><th>Title</th><th>Cost</th></tr></thead><tbody>"
     data = {}
     total = 0
@@ -7494,7 +7505,7 @@ def show_subscription_costs(provider=None):
                                message=f"No costs found for provider {provider}")
     title = 'Subscription costs by year'
     # Table
-    html = "<table id='costs' class='tablesorter numbers'><thead><tr>" \
+    html = "<table id='costs' class='tablesorter numbers-scroll'><thead><tr>" \
            + "<th>Year</th><th>Subscriptions</th><th>Cost</th><th>% change</th></tr></thead><tbody>"
     perclist = []
     for year, val in perc.items():
@@ -7557,7 +7568,7 @@ def show_subscriptions(jtype):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning(errmsg),
                                message='No journals were found')
-    html = '<table id="journals" class="tablesorter standard"><thead><tr>' \
+    html = '<table id="journals" class="tablesorter standard-scroll"><thead><tr>' \
            + '<th>Title</th><th>Publisher</th><th>Provider</th></tr></thead><tbody>'
     fileoutput = ""
     jlist = {}
@@ -7606,7 +7617,7 @@ def show_subscriptionlist(sub, field='publisher', stype=None):
                                        + f"<pre>{json.dumps(payload, indent=4)}</pre>")
     if cnt == 1:
         return redirect(f"/subscription/{rows[0]['_id']}")
-    html = "<table id='journals' class='tablesorter standard'><thead><tr>"
+    html = "<table id='journals' class='tablesorter standard-scroll'><thead><tr>"
     if not stype:
         html += "<th>Type</th>"
     html += "<th>Title</th><th>Publisher</th><th>Provider</th><th>Title ID</th>" \
@@ -7746,7 +7757,7 @@ def show_subscription_providers():
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning(errmsg), message=error_message(err))
-    html = "<table id='providers' class='tablesorter standard'><thead><tr>" \
+    html = "<table id='providers' class='tablesorter standard-scroll'><thead><tr>" \
            + "<th>Provider</th><th>Publishers</th><th>Publication count</th>" \
            + "<th>Publication types</th></tr></thead><tbody>"
     centered = "style='text-align: center; vertical-align: middle;'"
@@ -8147,7 +8158,7 @@ def show_hires(startdate, stopdate):
         return render_template('warning.html', urlroot=request.url_root,
                                title=render_warning("Employees not found"),
                                message=f"No employees were hired {startdate} - {stopdate}")
-    html = "<table id='hires' class='tablesorter standard'><thead><tr>" \
+    html = "<table id='hires' class='tablesorter standard-scroll'><thead><tr>" \
            + "<th>Hire Date</th><th>Name</th><th>ORCID</th><th>Affiliations</th>" \
            + "</tr></thead><tbody>"
     for row in rows:
@@ -8219,7 +8230,7 @@ def orcid_entry():
                                message=error_message(err))
     total = cntj + cnta
     data = {}
-    html = '<table id="types" class="tablesorter standard"><tbody>'
+    html = '<table id="types" class="tablesorter standard-scroll"><tbody>'
     html += f"<tr><td>Entries in collection</td><td>{total:,}</td></tr>"
     html += f"<tr><td>Current Janelians</td><td>{cntj:,} ({cntj/total*100:.2f}%)</td></tr>"
     html += "<tr><td>&nbsp;&nbsp;Janelians with ORCID and employee ID</td>" \
@@ -8300,11 +8311,11 @@ def orcid_duplicates():
             rows.append(row)
         if rows:
             if check == 'employeeId':
-                html += f"{check}<table id='duplicates' class='tablesorter standard'><thead><tr>" \
-                        + "<th>Name</th><th>ORCIDs</th></tr></thead><tbody>"
+                html += f"{check}<table id='duplicates' class='tablesorter standard-scroll'>" \
+                        + "<thead><tr><th>Name</th><th>ORCIDs</th></tr></thead><tbody>"
             else:
-                html += f"{check}<table id='duplicates' class='tablesorter standard'><thead><tr>" \
-                        + "<th>Name</th><th>User IDs</th></tr></thead><tbody>"
+                html += f"{check}<table id='duplicates' class='tablesorter standard-scroll'>" \
+                        + "<thead><tr><th>Name</th><th>User IDs</th></tr></thead><tbody>"
             for row in rows:
                 try:
                     recs = DB['dis'].orcid.find({"employeeId": row['_id']})
@@ -8439,8 +8450,9 @@ def orcid_run_bulk_search():
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not find required columns"),
                                message="Could not find required columns: " + ", ".join(arr))
-    html += "<table id='bulk' class='tablesorter numberlast'><thead><tr><th>Given name</th>" \
-            + "<th>Family name</th><th>ORCID/user ID</th><th>Works</th></tr></thead><tbody>"
+    html += "<table id='bulk' class='tablesorter numberlast-scroll'><thead><tr>" \
+            + "<th>Given name</th><th>Family name</th><th>ORCID/user ID</th><th>Works</th></tr>" \
+            + "</thead><tbody>"
     outrow = []
     for _, row in df.iterrows():
         try:
@@ -8538,7 +8550,7 @@ def peoporgsle(full=None):
             continue
         tag[row['_id']] = row['count']
     headers = ["Name", "Code", "Authors", "DOI tags"]
-    html = "<table id='orgs' class='tablesorter numbers'><thead><tr><th>" \
+    html = "<table id='orgs' class='tablesorter numbers-scroll'><thead><tr><th>" \
            + "</th><th>".join(headers) + "</th></tr></thead><tbody>"
     cnt = 0
     for key, val in sorted(orgs.items()):
@@ -8593,7 +8605,7 @@ def people(name=None):
                                                      + f"\"{name}\"</h3>",
                                              navbar=generate_navbar('ORCID')))
     html = "<br><br><h3>Select a name for details:</h3>"
-    html += "<table id='people' class='tablesorter standard'><thead><tr><th>Name</th>" \
+    html += "<table id='people' class='tablesorter standard-scroll'><thead><tr><th>Name</th>" \
             + "<th>Title</th><th>Location</th></tr></thead><tbody>"
     for rec in response:
         pname = f"{rec['nameFirstPreferred']} {rec['nameLastPreferred']}"
@@ -8721,7 +8733,7 @@ def show_tag_ack(tagtype):
                                title=render_warning(f"Could not get {cfg['errmsg']} " \
                                                     + f"for {tagtype} from dois collection"),
                                message=error_message(err))
-    html = "<table id='types' class='tablesorter numbers'><thead><tr>" \
+    html = "<table id='types' class='tablesorter numbers-scroll'><thead><tr>" \
            + f"<th>{cfg['label']}</th><th>SupOrg</th><th>Crossref</th><th>DataCite</th>" \
            + "</tr></thead><tbody>"
     tags = {}
@@ -8787,7 +8799,7 @@ def dois_lab():
     pre = "Reported below are journal articles/preprints for all current labs. " \
           + "DOIs in <span style='color: lime;'>green</span> are for multiple labs.<br>"
     header = ['Lab', 'Published', 'Type', 'DOI','Title']
-    html = '<table id="types" class="tablesorter numbers"><thead><tr><th>' \
+    html = '<table id="types" class="tablesorter numbers-scroll"><thead><tr><th>' \
             + '</th><th>'.join(header) + '</th></tr></thead><tbody>'
     dois = []
     ddois = {}
@@ -8840,7 +8852,7 @@ def dois_janelia_affiliations(aff):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get DOIs for Janelia affiliations"),
                                message=error_message(err))
-    html = '<table id="dois" class="tablesorter standard"><thead><tr>' \
+    html = '<table id="dois" class="tablesorter standard-scroll"><thead><tr>' \
            + '<th>Published</th><th>DOI</th><th>Title</th></tr></thead><tbody>'
     crossref = datacite = 0
     for row in rows:
@@ -8896,7 +8908,7 @@ def janelia_affiliations():
             affiliations[row['_id']] = row['count']
         else:
             affiliations[row['_id']] += row['count']
-    html = '<table id="affiliations" class="tablesorter numbers"><thead><tr>' \
+    html = '<table id="affiliations" class="tablesorter numbers-scroll"><thead><tr>' \
            + '<th>Affiliation</th><th>Author count</th>' \
            + '</tr></thead><tbody>'
     for aff, count in sorted(affiliations.items(), key=lambda item: item[1], reverse=True):
@@ -8943,7 +8955,7 @@ def orcid_tag():
                                message=error_message(err))
     html = "<button class=\"btn btn-outline-warning\" " \
               + "onclick=\"$('.other').toggle();\">Filter for active SupOrgs</button>"
-    html += '<table id="types" class="tablesorter numbers"><thead><tr>' \
+    html += '<table id="types" class="tablesorter numbers-scroll"><thead><tr>' \
             + '<th>Affiliation</th><th>SupOrg</th><th>Authors</th><th>ORCID %</th>' \
             + '</tr></thead><tbody>'
     count = 0
@@ -9067,7 +9079,7 @@ def show_projects(option=None):
         if row['project'] not in proj:
             proj[row['project']] = []
         proj[row['project']].append(row['name'])
-    html = "<table id='projects' class='tablesorter standard'><thead><tr><th>Project</th>" \
+    html = "<table id='projects' class='tablesorter standard-scroll'><thead><tr><th>Project</th>" \
            + "<th>Synonyms</th><th>Supervisory Organization</th></tr></thead><tbody>"
     cnt = 0
     _, suporgs = get_suporgs()
@@ -9241,7 +9253,7 @@ def stats_database():
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get collection stats"),
                                message=error_message(err))
-    html = '<table id="collections" class="tablesorter numbercenter"><thead><tr>' \
+    html = '<table id="collections" class="tablesorter numbercenter-scroll"><thead><tr>' \
            + '<th>Collection</th><th>Documents</th><th>Avg. document size</th><th>Size</th>' \
             + '<th>Free space</th><th>Indices</th></tr></thead><tbody>'
     for coll, val in sorted(collection.items()):
@@ -9310,7 +9322,7 @@ def cvs(cv=None):
             return render_template('error.html', urlroot=request.url_root,
                                    title=render_warning("Could not get cvterms"),
                                    message=error_message(err))
-        html += '<table id="cvterms" class="tablesorter standard"><thead><tr><th>Name</th>' \
+        html += '<table id="cvterms" class="tablesorter standard-scroll"><thead><tr><th>Name</th>' \
                 + '<th>Display name</th><th>Definition</th><th>Format</th></tr></thead><tbody>'
         for row in rows:
             html += f"<tr><td>{row['name']}</td><td>{row['display']}</td>" \
@@ -9338,8 +9350,8 @@ def doi_relationships():
                                title=render_warning("Could not get DOI relationships for Crossref"),
                                message=error_message(err))
     html = "<div class='flexrow'><div class='flexcol'><h3>Crossref</h3>"
-    html += "<table id='crossref' class='tablesorter numbers'><thead><tr><th>Relationship</th>" \
-            + "<th>Count</th></tr></thead><tbody>"
+    html += "<table id='crossref' class='tablesorter numbers-scroll'><thead><tr>" \
+            + "<th>Relationship</th><th>Count</th></tr></thead><tbody>"
     for row in rows:
         onclick = f"onclick='nav_post(\"relation.{row['_id']}\",\"!EXISTS!\")'"
         html += f"<tr><td>{row['_id']}</td><td><a href='#' {onclick}>{row['count']}</a></td></tr>"
@@ -9355,8 +9367,8 @@ def doi_relationships():
                                title=render_warning("Could not get DOI relationships for DataCite"),
                                message=error_message(err))
     html += "<div class='flexcol' style='margin-left: 25px'><h3>DataCite</h3>"
-    html += "<table id='datacite' class='tablesorter numbers'><thead><tr><th>Relationship</th>" \
-            + "<th>Count</th></tr></thead><tbody>"
+    html += "<table id='datacite' class='tablesorter numbers-scroll'><thead><tr>" \
+            + "<th>Relationship</th><th>Count</th></tr></thead><tbody>"
     for row in rows:
         onclick = "onclick='nav_post(\"relatedIdentifiers.relationType\",\"" + row['_id'] + "\")'"
         html += f"<tr><td>{row['_id']}</td><td><a href='#' {onclick}>{row['count']}</a></td></tr>"
@@ -9371,21 +9383,24 @@ def doi_relationships():
 def stats_endpoints():
     ''' Show endpoint stats
     '''
+    payload = [{"$group": {"_id": "$endpoint", "count": {"$sum": 1}}},
+               {"$sort": {"endpoint": 1}}]
     try:
-        rows = DB['dis'].api_endpoint.find().sort("endpoint", 1)
+        rows = DB['dis'].api_endpoint_log.aggregate(payload)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get endpoint stats"),
                                message=error_message(err))
-    html = '<table class="tablesorter numbercenter"><thead><tr><th>Endpoint</th>' \
+    html = '<table class="tablesorter numbercenter-scroll"><thead><tr><th>Endpoint</th>' \
            + '<th>Count</th></tr></thead><tbody>'
     for row in rows:
-        html += f"<tr><td>{row['endpoint']}</td><td>{row['count']}</td></tr>"
+        html += f"<tr><td>{row['_id']}</td><td>{row['count']}</td></tr>"
     html += '</tbody></table>'
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="Endpoint access counts", html=html,
                                          navbar=generate_navbar('System')))
+
 
 @app.route('/ignore')
 @app.route('/ignore/<string:typ>')
@@ -9426,7 +9441,7 @@ def ignore(typ=None):
             if 'reason' in row:
                 reason_present = True
             rows.append(row)
-        html += '<table id="ignores" class="tablesorter standard"><thead><tr><th>Key</th>' \
+        html += '<table id="ignores" class="tablesorter standard-scroll"><thead><tr><th>Key</th>' \
                 + f"{'<th>Reason</th>' if reason_present else ''}</tr></thead><tbody>"
         for row in rows:
             if reason_present:
@@ -9453,7 +9468,7 @@ def dois_pending():
                                title=render_warning("Could not get DOIs " \
                                                     + "from dois_to_process collection"),
                                message=error_message(err))
-    html = '<table id="types" class="tablesorter numbers"><thead><tr>' \
+    html = '<table id="types" class="tablesorter numbers-scroll"><thead><tr>' \
            + '<th>DOI</th><th>Inserted</th><th>Time waiting</th>' \
            + '</tr></thead><tbody>'
     if not cnt:
@@ -9495,7 +9510,7 @@ def show_missing_oa():
                                title=render_warning("Could not get DOIs " \
                                                     + "missing Open Access status"),
                                message=error_message(err))
-    html = '<table id="types" class="tablesorter standard"><thead><tr>' \
+    html = '<table id="types" class="tablesorter standard-scroll"><thead><tr>' \
            + '<th>DOI</th><th>Source</th><th>Publisher</th><th>Journal</th>' \
            + '</tr></thead><tbody>'
     if not cnt:
