@@ -35,7 +35,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "112.0.0"
+__version__ = "112.1.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -1349,6 +1349,12 @@ def add_update_times(row):
     if 'jrc_publishing_date' in row:
         last = str(row['jrc_publishing_date']).split(' ', maxsplit=1)[0]
         date_list.append(f"Published {last}")
+    if row.get('created') and row.get('created').get('date-time'):
+        this = str(row['created']['date-time']).split('T', maxsplit=1)[0]
+        if last:
+            date_list.append(get_separator(last, this))
+        last = this
+        date_list.append(f"{row['jrc_obtained_from']} {this}")
     if 'jrc_inserted' in row:
         this = str(row['jrc_inserted']).split(' ', maxsplit=1)[0]
         if last:
@@ -1365,7 +1371,7 @@ def add_update_times(row):
                 updated = None
             date_list.append(get_separator(last, this))
         last = this
-        date_list.append(f"<span style='color: limegreen;'>Added to newsletter {this}</span>")
+        date_list.append(f"<span style='color: limegreen;'>Newsletter {this}</span>")
     if updated:
         this = updated
         if last:
