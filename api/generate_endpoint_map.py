@@ -13,6 +13,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.patches import FancyBboxPatch, FancyArrowPatch  # noqa: E402
+import matplotlib.patheffects as pe                             # noqa: E402
 
 # ── file paths ─────────────────────────────────────────────────────────────────
 _HERE     = Path(__file__).parent
@@ -304,8 +305,12 @@ def build_nodes_and_map(groups):
 
 # ── edge helpers ───────────────────────────────────────────────────────────────
 
-def resolve_nid(url_prefix, path_to_nid):
-    """Map a URL prefix to the best-matching node ID."""
+def resolve_nid(url_prefix, path_to_nid, unresolved=None):
+    """Map a URL prefix to the best-matching node ID.
+
+    If unresolved is a set, any prefix that cannot be matched is added to it
+    so callers can report gaps in CLASSIFY_RULES or path_to_nid.
+    """
     prefix = url_prefix.rstrip('/')
     if prefix in path_to_nid:
         return path_to_nid[prefix]
@@ -315,6 +320,8 @@ def resolve_nid(url_prefix, path_to_nid):
         if candidate in path_to_nid:
             return path_to_nid[candidate]
         parts.pop()
+    if unresolved is not None:
+        unresolved.add(url_prefix)
     return None
 
 def find_helper_hrefs(filepath):
@@ -360,12 +367,13 @@ def find_helper_hrefs(filepath):
 # but don't actually expose the filter UI — suppress their post edges.
 _POST_CATS = {'chart', 'search', 'detail', 'custom', 'entry'}
 
-def parse_template_edges(groups, path_to_nid, nid_to_cat):
+def parse_template_edges(groups, path_to_nid, nid_to_cat, unresolved=None):
     """
     Parse every template file for JS navigation patterns:
-      - url = "/prefix/"  → window.location nav edge
-      - function nav_post → POST edge to /doiui/custom (filtered by category)
-      - fetch('/route'    → async fetch edge
+      - url = "/prefix/"               → window.location nav edge
+      - window.location[.href] = "/"  → direct location assignment nav edge
+      - function nav_post              → POST edge to /doiui/custom (filtered by category)
+      - fetch('/route'                 → async fetch edge
     Source nodes are the routes that render each template.
     """
     edges = []
@@ -384,12 +392,23 @@ def parse_template_edges(groups, path_to_nid, nid_to_cat):
         # url = "/static/prefix/" near window.location
         for m in re.finditer(r'''url\s*=\s*["'](/[\w/]+)["']''', text):
             prefix = m.group(1)
-            dst = resolve_nid(prefix, path_to_nid)
+            dst = resolve_nid(prefix, path_to_nid, unresolved)
             if dst:
                 for src in src_nodes:
                     if src != dst:
                         edges.append((src, dst, 'nav',
                                       f'window.location → {prefix}'))
+
+        # Direct window.location[.href] = "/hardcoded/path" assignments
+        for m in re.finditer(
+                r'''window\.location(?:\.href)?\s*=\s*["'](/[\w/]+)["']''', text):
+            prefix = m.group(1)
+            dst = resolve_nid(prefix, path_to_nid, unresolved)
+            if dst:
+                for src in src_nodes:
+                    if src != dst:
+                        edges.append((src, dst, 'nav',
+                                      f'window.location.href → {prefix}'))
 
         # nav_post / nav_post_year → POST to /doiui/custom
         # Only emit for pages that actually expose the filter controls
@@ -403,7 +422,7 @@ def parse_template_edges(groups, path_to_nid, nid_to_cat):
         # fetch('/route', {...})
         for m in re.finditer(r"""fetch\(\s*['"]([^'"]+)['"]""", text):
             prefix = m.group(1)
-            dst = resolve_nid(prefix, path_to_nid)
+            dst = resolve_nid(prefix, path_to_nid, unresolved)
             if dst:
                 for src in src_nodes:
                     edges.append((src, dst, 'fetch',
@@ -413,11 +432,12 @@ def parse_template_edges(groups, path_to_nid, nid_to_cat):
 
 # ── Python href edge parser ────────────────────────────────────────────────────
 
-def parse_href_edges(path_to_nid):
+def parse_href_edges(path_to_nid, func_to_nid, unresolved=None):
     """
     Scan each route function body in dis_responder.py for:
       - Direct href= patterns (including f-strings)
       - Calls to helper functions that are known to generate <a href> links
+      - redirect(url_for('view_name')) server-side redirects
     """
     helper_hrefs = find_helper_hrefs(RESPONDER)
     lines = Path(RESPONDER).read_text(encoding='utf-8').splitlines()
@@ -457,7 +477,7 @@ def parse_href_edges(path_to_nid):
                 prefix = raw.split('{')[0].rstrip('/')
                 if not prefix:
                     continue
-                dst = resolve_nid(prefix, path_to_nid)
+                dst = resolve_nid(prefix, path_to_nid, unresolved)
                 if dst and dst != src_nid:
                     edge = (src_nid, dst, 'nav', f'<a href> {prefix}')
                     if edge not in edges:
@@ -467,12 +487,21 @@ def parse_href_edges(path_to_nid):
                 hname = m.group(1)
                 if hname in helper_hrefs:
                     for prefix in helper_hrefs[hname]:
-                        dst = resolve_nid(prefix, path_to_nid)
+                        dst = resolve_nid(prefix, path_to_nid, unresolved)
                         if dst and dst != src_nid:
                             edge = (src_nid, dst, 'nav',
                                     f'<a href> {hname}()')
                             if edge not in edges:
                                 edges.append(edge)
+            # redirect(url_for('view_function')) server-side redirects
+            for m in re.finditer(r"""url_for\(\s*['"](\w+)['"]""", line):
+                view = m.group(1)
+                dst  = func_to_nid.get(view)
+                if dst and dst != src_nid:
+                    edge = (src_nid, dst, 'nav',
+                            f'redirect(url_for({view!r}))')
+                    if edge not in edges:
+                        edges.append(edge)
             i += 1
 
     return edges
@@ -483,10 +512,15 @@ _groups             = parse_route_groups(RESPONDER)
 NODES, _path_to_nid = build_nodes_and_map(_groups)
 
 # nid → category map required by parse_template_edges post-edge filtering
-_nid_to_cat = {nid: cat for nid, _, cat, _, _ in NODES}
+_nid_to_cat  = {nid: cat for nid, _, cat, _, _ in NODES}
+# Flask view-function name → node ID for redirect(url_for(...)) resolution
+_func_to_nid = {g['func_name']: make_node_id(g['paths'])
+                for g in _groups if g['func_name'] and g['paths']}
+# Collect URL prefixes that could not be resolved to any node
+_unresolved: set = set()
 
-_raw_edges = (parse_template_edges(_groups, _path_to_nid, _nid_to_cat)
-            + parse_href_edges(_path_to_nid))
+_raw_edges = (parse_template_edges(_groups, _path_to_nid, _nid_to_cat, _unresolved)
+            + parse_href_edges(_path_to_nid, _func_to_nid, _unresolved))
 
 # Deduplicate edges (keep first occurrence of each src/dst/style triple)
 _seen, EDGES = set(), []
@@ -529,16 +563,16 @@ fig_w = (max_col + 1) * COL_W + 2
 fig_h = (max_row + 8) * ROW_H + 3
 fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 ax.set_xlim(-BOX_W / 2 - 0.3, col_x(max_col + 1) + 0.5)
-ax.set_ylim(row_y(max_row + 8), 1.5)
+ax.set_ylim(row_y(max_row + 8), 2.4)
 ax.axis('off')
 ax.set_facecolor('#F7F9FC')
 fig.patch.set_facecolor('#F7F9FC')
 
 # ── title & subtitle ───────────────────────────────────────────────────────────
-ax.text(mid_col, 1.2,
+ax.text(mid_col, 2.15,
         'DIS Responder — UI Endpoint Navigation Map',
         ha='center', va='center', fontsize=16, fontweight='bold', color='#1A1A2E')
-ax.text(mid_col, 0.7,
+ax.text(mid_col, 1.75,
         'Blue arrows = window.location redirect  |  '
         'Orange dashed = form POST  |  '
         'Red dotted = async fetch()',
@@ -556,8 +590,13 @@ HEADERS = [
     (14, 'Pure API\n(JSON)'),
     (16, 'Async\n(fetch)'),
 ]
+_col_node_count = defaultdict(int)
+for _, _, _, _col, _ in NODES:
+    _col_node_count[_col] += 1
+
 for col, header in HEADERS:
-    ax.text(col_x(col), 0.35, header,
+    count = _col_node_count.get(col, 0)
+    ax.text(col_x(col), 1.25, f'{header}\n({count})',
             ha='center', va='center', fontsize=8.5, fontweight='bold',
             color='#1A1A2E',
             bbox=dict(boxstyle='round,pad=0.3', fc='#DDE8F0',
@@ -566,6 +605,12 @@ for col, header in HEADERS:
 # ── draw nodes ─────────────────────────────────────────────────────────────────
 DARK_CATS = {'entry', 'search', 'detail', 'chart', 'custom',
              'orcid', 'org', 'sub', 'admin'}
+
+# In-degree count: nodes with many incoming edges are highlighted as hubs
+_in_degree = defaultdict(int)
+for _src, _dst, _, _ in EDGES:
+    _in_degree[_dst] += 1
+_HUB_THRESHOLD = 5  # edges needed to be considered a hub
 
 for nid, label, cat, col, row in NODES:
     cx, cy = pos[nid]
@@ -576,10 +621,18 @@ for nid, label, cat, col, row in NODES:
     if cat in ('api', 'async'):
         ec = '#99B8CC' if cat == 'api' else '#FFB3B3'
         lw = 0.8
-    ax.add_patch(FancyBboxPatch(
+    is_hub = _in_degree[nid] >= _HUB_THRESHOLD
+    if is_hub:
+        ec  = '#FFD700'   # gold border marks high-traffic hub nodes
+        lw  = 2.5
+    patch = FancyBboxPatch(
         (cx - BOX_W/2, cy - BOX_H/2), BOX_W, BOX_H,
         boxstyle='round,pad=0.08',
-        facecolor=fc, edgecolor=ec, linewidth=lw, zorder=3))
+        facecolor=fc, edgecolor=ec, linewidth=lw, zorder=3)
+    if is_hub:
+        patch.set_path_effects(
+            [pe.withStroke(linewidth=lw + 2.5, foreground='black')])
+    ax.add_patch(patch)
     ax.text(cx, cy, label,
             ha='center', va='center',
             fontsize=FONT_SZ, color=tc, zorder=4,
@@ -708,3 +761,21 @@ for i, (style, lbl) in enumerate(EDGE_ITEMS):
 out = str(_HERE / 'endpoint_map.pdf')
 plt.savefig(out, format='pdf', bbox_inches='tight', dpi=150)
 print(f"Saved: {out}  ({len(NODES)} nodes, {len(EDGES)} edges)")
+
+# Orphan report — nodes with no edges at all (possible dead routes)
+_connected = {nid for src, dst, _, _ in EDGES for nid in (src, dst)}
+_orphans   = sorted(nid for nid, _, _, _, _ in NODES if nid not in _connected)
+if _orphans:
+    print(f"\nOrphan nodes (no edges — {len(_orphans)}):")
+    for _o in _orphans:
+        print(f"  {_o}")
+
+# Unresolved URL report — URLs that parse_template_edges / parse_href_edges
+# could not map to any node (gaps in CLASSIFY_RULES or path_to_nid)
+if _unresolved:
+    _skip = {'/', ''}   # expected non-routes
+    _report = sorted(_unresolved - _skip)
+    if _report:
+        print(f"\nUnresolved URLs ({len(_report)}) — consider adding CLASSIFY_RULES entries:")
+        for _u in _report:
+            print(f"  {_u}")
