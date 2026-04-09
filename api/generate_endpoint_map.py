@@ -537,6 +537,11 @@ _post_pairs = {(_e[0], _e[1]) for _e in EDGES if _e[2] == 'post'}
 EDGES = [_e for _e in EDGES
          if not (_e[2] == 'nav' and (_e[0], _e[1]) in _post_pairs)]
 
+# Remove orphan nodes (no incoming or outgoing edges) — suppress from diagram
+_connected   = {nid for src, dst, _, _ in EDGES for nid in (src, dst)}
+_orphan_nids = sorted(nid for nid, *_ in NODES if nid not in _connected)
+NODES        = [n for n in NODES if n[0] in _connected]
+
 # ── layout parameters ──────────────────────────────────────────────────────────
 COL_W   = 3.8
 ROW_H   = 1.25
@@ -762,12 +767,10 @@ out = str(_HERE / 'endpoint_map.pdf')
 plt.savefig(out, format='pdf', bbox_inches='tight', dpi=150)
 print(f"Saved: {out}  ({len(NODES)} nodes, {len(EDGES)} edges)")
 
-# Orphan report — nodes with no edges at all (possible dead routes)
-_connected = {nid for src, dst, _, _ in EDGES for nid in (src, dst)}
-_orphans   = sorted(nid for nid, _, _, _, _ in NODES if nid not in _connected)
-if _orphans:
-    print(f"\nOrphan nodes (no edges — {len(_orphans)}):")
-    for _o in _orphans:
+# Orphan report — nodes hidden from diagram because they have no edges
+if _orphan_nids:
+    print(f"\nOrphan nodes hidden from diagram (no edges — {len(_orphan_nids)}):")
+    for _o in _orphan_nids:
         print(f"  {_o}")
 
 # Unresolved URL report — URLs that parse_template_edges / parse_href_edges
