@@ -12,7 +12,7 @@ from collections import defaultdict
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt  # noqa: E402
-from matplotlib.patches import FancyBboxPatch, FancyArrowPatch  # noqa: E402
+from matplotlib.patches import FancyBboxPatch, FancyArrowPatch, Circle  # noqa: E402
 import matplotlib.patheffects as pe                             # noqa: E402
 
 # ── file paths ─────────────────────────────────────────────────────────────────
@@ -33,6 +33,22 @@ COLORS = {
     'admin':  '#555B6E',
     'api':    '#E8F4F8',
     'async':  '#FFE8E8',
+}
+
+# ── MongoDB collection colours ─────────────────────────────────────────────────
+COLL_COLORS = {
+    'dois':             '#E63946',
+    'orcid':            '#2A9D8F',
+    'subscription':     '#E9C46A',
+    'org_group':        '#F4A261',
+    'suporg':           '#457B9D',
+    'project_map':      '#9B2226',
+    'to_ignore':        '#606C38',
+    'api_endpoint':     '#8338EC',
+    'api_endpoint_log': '#3A86FF',
+    'cv':               '#FF006E',
+    'cvterm':           '#FB5607',
+    'dois_to_process':  '#06D6A0',
 }
 
 # ── route classification rules ─────────────────────────────────────────────────
@@ -360,6 +376,101 @@ def find_helper_hrefs(filepath):
         i = j
     return helper_hrefs
 
+# ── MongoDB collection parser ──────────────────────────────────────────────────
+
+def parse_mongo_collections(filepath):
+    """Return {func_name: frozenset[collection_name]} for each @app.route handler.
+
+    Two-pass approach:
+      Pass 1 — scan every module-level function for direct DB['dis'].<name>
+               references and calls to other module-level functions.
+      Pass 2 — compute transitive closure so that collections accessed by
+               called helper functions are attributed to the calling route.
+    Excludes non-collection DB attributes (command, list_collection_names).
+    """
+    _COLL_RE      = re.compile(r"DB\['dis'\](?:\.(\w+)|\['(\w+)'\])")
+    _CALL_RE      = re.compile(r'\b(\w+)\s*\(')
+    _SKIP         = {'command', 'list_collection_names'}
+    # Helpers whose collections should not be attributed to callers
+    # (tracking/instrumentation, not business data access)
+    _EXCLUDE_CALL = {'endpoint_access'}
+
+    lines = Path(filepath).read_text(encoding='utf-8').splitlines()
+    n     = len(lines)
+
+    # ── Pass 1: collect body lines for every module-level def ──────────────────
+    func_bodies: dict = {}   # func_name → [body lines]
+    i = 0
+    while i < n:
+        m = re.match(r'^def\s+(\w+)', lines[i])
+        if not m:
+            i += 1
+            continue
+        fname = m.group(1)
+        body  = []
+        j     = i + 1
+        while j < n:
+            line = lines[j]
+            if not line.strip():
+                j += 1
+                continue
+            if line[0] not in (' ', '\t'):
+                break
+            body.append(line)
+            j += 1
+        func_bodies[fname] = body
+        i = j
+
+    all_names = set(func_bodies)
+
+    # ── Pass 2: direct collections + local call graph per function ─────────────
+    func_direct: dict = {}   # func_name → frozenset[coll]
+    func_calls:  dict = {}   # func_name → frozenset[called_func_name]
+    for fname, body in func_bodies.items():
+        colls, calls = set(), set()
+        for line in body:
+            for m in _COLL_RE.finditer(line):
+                coll = m.group(1) or m.group(2)
+                if coll and coll not in _SKIP:
+                    colls.add(coll)
+            for m in _CALL_RE.finditer(line):
+                called = m.group(1)
+                if called in all_names and called != fname and called not in _EXCLUDE_CALL:
+                    calls.add(called)
+        func_direct[fname] = frozenset(colls)
+        func_calls[fname]  = frozenset(calls)
+
+    # ── Transitive closure (recursive, cycle-safe) ─────────────────────────────
+    _cache: dict = {}
+    def resolve(fname, visiting=None):
+        if fname in _cache:
+            return _cache[fname]
+        if visiting is None:
+            visiting = set()
+        if fname in visiting:
+            return frozenset()
+        visiting.add(fname)
+        colls = set(func_direct.get(fname, frozenset()))
+        for called in func_calls.get(fname, frozenset()):
+            colls |= resolve(called, visiting)
+        result = frozenset(colls)
+        _cache[fname] = result
+        return result
+
+    # ── Identify @app.route handler names ──────────────────────────────────────
+    route_funcs: set = set()
+    for idx, line in enumerate(lines):
+        if re.match(r'\s*@app\.route\(', line):
+            j = idx + 1
+            while j < n and lines[j].strip().startswith('@'):
+                j += 1
+            if j < n:
+                m2 = re.match(r'\s*def\s+(\w+)', lines[j])
+                if m2:
+                    route_funcs.add(m2.group(1))
+
+    return {fname: resolve(fname) for fname in route_funcs if resolve(fname)}
+
 # ── template edge parser ───────────────────────────────────────────────────────
 
 # Categories that meaningfully expose nav_post() filter controls.
@@ -516,6 +627,16 @@ _nid_to_cat  = {nid: cat for nid, _, cat, _, _ in NODES}
 # Flask view-function name → node ID for redirect(url_for(...)) resolution
 _func_to_nid = {g['func_name']: make_node_id(g['paths'])
                 for g in _groups if g['func_name'] and g['paths']}
+# MongoDB collection references per node
+_func_colls  = parse_mongo_collections(RESPONDER)
+_node_nids   = {n[0] for n in NODES}  # populated after build_nodes_and_map
+_nid_to_colls: dict = {}
+for _g in _groups:
+    if _g['func_name'] and _g['paths']:
+        _nid = make_node_id(_g['paths'])
+        if _nid in _node_nids and _g['func_name'] in _func_colls:
+            _nid_to_colls[_nid] = _func_colls[_g['func_name']]
+
 # Collect URL prefixes that could not be resolved to any node
 _unresolved: set = set()
 
@@ -642,6 +763,26 @@ for nid, label, cat, col, row in NODES:
             ha='center', va='center',
             fontsize=FONT_SZ, color=tc, zorder=4,
             multialignment='center')
+    # Collection badge: white rect in lower-left with one dot per collection
+    _colls = sorted(_nid_to_colls.get(nid, set()))
+    if _colls:
+        _DOT_R   = 0.085
+        _DOT_GAP = 0.055
+        _PAD     = 0.07
+        _badge_w = _PAD + len(_colls) * 2*_DOT_R + (len(_colls)-1)*_DOT_GAP + _PAD
+        _badge_h = 2*_DOT_R + 2*_PAD
+        _bx = cx - BOX_W/2 + 0.06
+        _by = cy - BOX_H/2 + 0.05
+        ax.add_patch(FancyBboxPatch(
+            (_bx, _by), _badge_w, _badge_h,
+            boxstyle='round,pad=0.02',
+            facecolor='white', edgecolor='#AAAAAA', linewidth=0.5, zorder=5))
+        for _ci, _coll in enumerate(_colls):
+            _dot_x = _bx + _PAD + _DOT_R + _ci * (2*_DOT_R + _DOT_GAP)
+            _dot_y = _by + _badge_h / 2
+            ax.add_patch(Circle((_dot_x, _dot_y), _DOT_R,
+                                facecolor=COLL_COLORS.get(_coll, '#CCCCCC'),
+                                edgecolor='white', linewidth=0.3, zorder=6))
 
 # ── draw edges ─────────────────────────────────────────────────────────────────
 EDGE_STYLES = {
@@ -761,6 +902,34 @@ for i, (style, lbl) in enumerate(EDGE_ITEMS):
             markersize=9, color=st['color'], zorder=5, linestyle='none')
     ax.text(el_x + LINE_LEN + 0.25, yy, lbl,
             va='center', fontsize=7.5, color='#1A1A2E', zorder=5)
+
+# Collections legend box (only collections used by displayed nodes)
+_displayed_nids = {nid for nid, *_ in NODES}
+_used_colls = sorted({c for nid, colls in _nid_to_colls.items()
+                      if nid in _displayed_nids for c in colls})
+if _used_colls:
+    CLEG_DOT_R  = 0.13
+    CLEG_TXT_X  = 0.45   # offset from left edge of box to text
+    CLEG_BOX_W  = CLEG_DOT_R*2 + CLEG_TXT_X + 1.60 + LEG_PAD
+    cleg_inner_h = 0.5 + len(_used_colls) * ITEM_H
+    cl_left   = el_right + LEG_GAP
+    cl_right  = cl_left + CLEG_BOX_W
+    cl_top    = el_top
+    cl_bottom = cl_top - cleg_inner_h - LEG_PAD
+    ax.add_patch(FancyBboxPatch(
+        (cl_left, cl_bottom), cl_right - cl_left, cl_top - cl_bottom,
+        boxstyle='round,pad=0.1', facecolor='#F0F4F8',
+        edgecolor='#7AABCC', lw=1.8, zorder=4))
+    ax.text((cl_left + cl_right) / 2, cl_top - 0.28, 'Collections:',
+            ha='center', fontsize=8.5, fontweight='bold', color='#1A1A2E', zorder=5)
+    cl_x = cl_left + LEG_PAD
+    for i, coll in enumerate(_used_colls):
+        yy = cl_top - 0.72 - i * ITEM_H
+        ax.add_patch(Circle((cl_x + CLEG_DOT_R, yy), CLEG_DOT_R,
+                            facecolor=COLL_COLORS.get(coll, '#CCCCCC'),
+                            edgecolor='white', linewidth=0.5, zorder=5))
+        ax.text(cl_x + CLEG_TXT_X + CLEG_DOT_R, yy, coll,
+                va='center', fontsize=7.5, color='#1A1A2E', zorder=5)
 
 # ── save ───────────────────────────────────────────────────────────────────────
 out = str(_HERE / 'endpoint_map.pdf')

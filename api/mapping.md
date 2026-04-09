@@ -49,7 +49,7 @@ On success the script prints:
 ```
 Saved: <path>  (N nodes, M edges)
 
-Orphan nodes (no edges — N):   ← only printed if orphans exist
+Orphan nodes hidden from diagram (no edges — N):   ← only printed if orphans exist
   <nid>
   ...
 
@@ -105,6 +105,29 @@ similarly-coloured nodes such as amber chart pages.
 API and async node labels are prefixed with their HTTP method(s),
 e.g. `GET /dois_source` or `GET/POST /doiui/custom`.
 
+### MongoDB collection badges
+
+Nodes that access one or more MongoDB collections display a small **white
+rounded rectangle in the lower-left corner** of the node box. Inside it,
+one filled circle appears per collection, coloured according to
+`COLL_COLORS`. The legend (third box, "Collections:") shows the colour
+key for every collection that appears on at least one displayed node.
+
+Collection detection is **transitive**: if a route function calls a
+module-level helper that accesses a collection, that collection is
+attributed to the route. Pure instrumentation helpers (e.g.
+`endpoint_access`) are excluded from traversal so their internal
+`api_endpoint` / `api_endpoint_log` writes are not attributed to every
+caller — only to the routes that use those collections for actual
+business logic (e.g. `/stats_endpoints`).
+
+### Orphan nodes
+
+Nodes with **no incoming or outgoing edges** are **not drawn** in the
+diagram. They are reported to the console for reference. Orphans are
+typically pure JSON API endpoints or dead UI routes that nothing links
+to yet.
+
 ### Edge (arrow) types
 
 | Style | Meaning |
@@ -133,6 +156,20 @@ current state of the codebase.
 Maps category name → hex colour string. Edit these to change node colours
 throughout the entire diagram.
 
+### `COLL_COLORS` dict
+
+Maps MongoDB collection name → hex colour string. Used for the collection
+badge dots and the "Collections:" legend box. To change a collection's
+colour, edit its entry here. To add a colour for a newly-created
+collection, add a new entry:
+
+```python
+COLL_COLORS['new_collection'] = '#AABBCC'
+```
+
+If a collection is encountered that has no entry in `COLL_COLORS`, its
+dot is drawn in `#CCCCCC` (light grey) as a fallback.
+
 ### `CLASSIFY_RULES` list
 
 Controls which column (and category) each route is assigned to. Each
@@ -153,8 +190,8 @@ are picked up automatically without any changes here.
 
 ### Dynamic parsing pipeline
 
-The script runs four parsing steps at startup to build `NODES` and
-`EDGES`:
+The script runs five parsing steps at startup to build `NODES`, `EDGES`,
+and the MongoDB collection map:
 
 #### 1. `parse_route_groups(filepath)`
 
@@ -184,7 +221,36 @@ Converts route groups into `NODES` 5-tuples `(nid, label, cat, col, row)`:
 Also returns `path_to_nid`: a dict mapping normalised route prefixes to
 node IDs, used for edge resolution.
 
-#### 3. `parse_template_edges(groups, path_to_nid, nid_to_cat, unresolved=None)`
+#### 3. `parse_mongo_collections(filepath)`
+
+Builds `_nid_to_colls`: a dict mapping each node ID to the set of MongoDB
+collections it accesses (directly or transitively through helper calls).
+
+**Two-pass approach:**
+
+*Pass 1* — scans every module-level `def` in `dis_responder.py` and
+records:
+- `func_direct[fname]` — `DB['dis'].<name>` / `DB['dis']['<name>']`
+  references found directly in the function body
+- `func_calls[fname]` — calls to other module-level functions in the
+  same file (used to build the call graph)
+
+*Pass 2* — for each `@app.route` handler, resolves collections
+transitively through `func_calls`, with cycle detection, so that any
+collection accessed by a called helper is attributed to the route.
+
+`_EXCLUDE_CALL` lists helper functions whose collections should **not**
+be propagated to callers. Currently contains `endpoint_access`, which
+writes to `api_endpoint` / `api_endpoint_log` for request tracking —
+these writes happen on every request and would appear on almost every
+node, obscuring meaningful data access patterns. Routes that use these
+collections for actual business logic (e.g. `/stats_endpoints`) still
+show them because they access those collections directly.
+
+Non-collection `DB` attributes (`command`, `list_collection_names`) are
+excluded via `_SKIP`.
+
+#### 4. `parse_template_edges(groups, path_to_nid, nid_to_cat, unresolved=None)`
 
 Scans every `.html` file in `templates/` for:
 
@@ -204,7 +270,7 @@ are suppressed.
 Source nodes are the routes whose `render_template(...)` call names that
 template file.
 
-#### 4. `parse_href_edges(path_to_nid, func_to_nid, unresolved=None)`
+#### 5. `parse_href_edges(path_to_nid, func_to_nid, unresolved=None)`
 
 Scans each route function body in `dis_responder.py` for:
 
@@ -221,7 +287,9 @@ Scans each route function body in `dis_responder.py` for:
 After combining template and href edges:
 
 1. **Deduplication** — one edge per `(src, dst, style)` triple
-2. **Spurious nav removal** — `nav` edges are dropped where a `post` edge
+2. **Orphan filtering** — nodes with no edges at all are removed from
+   `NODES` before rendering; they are still reported to the console
+3. **Spurious nav removal** — `nav` edges are dropped where a `post` edge
    for the same `src → dst` already exists. This cleans up false positives
    caused by `url = "/doiui/custom"` appearing inside the `nav_post()`
    function body in template files.
@@ -230,9 +298,9 @@ After combining template and href edges:
 
 After saving, the script prints two optional reports:
 
-**Orphan nodes** — nodes with no incoming or outgoing edges. These are
-often pure API endpoints (expected) but can also reveal UI pages that
-nothing links to.
+**Orphan nodes hidden from diagram** — nodes with no incoming or outgoing
+edges that were suppressed from the PDF. These are often pure API
+endpoints (expected) but can also reveal UI pages that nothing links to.
 
 **Unresolved URLs** — URL prefixes detected during parsing that could not
 be matched to any node. These indicate gaps in `CLASSIFY_RULES` or
@@ -280,10 +348,12 @@ no manual adjustment needed when routes are added.
 ### Legend
 
 Positioned at `row_y(max_row + 2)`, automatically below the last row of
-nodes. Two side-by-side boxes:
+nodes. Three side-by-side boxes:
 
 - **Node types** — full-width coloured bars
 - **Edge types** — line samples with arrowhead markers
+- **Collections** — coloured dot + collection name (only collections
+  that appear on at least one displayed node are shown)
 
 ---
 
@@ -314,6 +384,30 @@ If the path doesn't match any existing rule, add one line to
   `find_helper_hrefs()`
 
 No manual edge entries are needed for any of the above patterns.
+
+### Adding a colour for a new MongoDB collection
+
+Add an entry to `COLL_COLORS` near the top of the script:
+
+```python
+COLL_COLORS['my_new_collection'] = '#AABBCC'
+```
+
+The collection will appear automatically in the "Collections:" legend box
+on the next run (provided at least one displayed node accesses it).
+
+### Excluding a helper from collection attribution
+
+If a new instrumentation or utility helper accesses MongoDB but its
+collections should not be attributed to every caller, add its name to
+`_EXCLUDE_CALL` inside `parse_mongo_collections`:
+
+```python
+_EXCLUDE_CALL = {'endpoint_access', 'my_new_helper'}
+```
+
+The helper's own collections are still shown on any route that accesses
+those collections directly.
 
 ### Changing a node's colour category
 
@@ -366,3 +460,6 @@ For PNG output, increase `dpi` (e.g. `dpi=300`) for a sharper raster image.
 | Spurious extra edges visible | Helper function body matched a route that calls it indirectly | Inspect `find_helper_hrefs()` output; rename the helper or narrow its `href=` pattern |
 | Two routes produce the same node ID | Both paths reduce to the same string after stripping params and `/` | They will be merged into one node (first occurrence wins); this is expected for near-duplicate routes |
 | Too many hub nodes highlighted | `_HUB_THRESHOLD` is set too low | Increase `_HUB_THRESHOLD` (default 5) |
+| Collection dots appear on wrong nodes | Transitive resolution followed an unintended helper call | Add the helper name to `_EXCLUDE_CALL` in `parse_mongo_collections` |
+| New collection has grey dots | No entry in `COLL_COLORS` for that collection name | Add `COLL_COLORS['collection_name'] = '#RRGGBB'` |
+| Collection badge overlaps node text | Too many collections on one node; badge width exceeds available space | Increase `BOX_W` or reduce `_DOT_R` / `_DOT_GAP` in the badge drawing block |

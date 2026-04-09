@@ -7,7 +7,7 @@
            to DIS MongoDB.
 """
 
-__version__ = '22.2.0'
+__version__ = '22.3.0'
 
 import argparse
 import collections
@@ -57,7 +57,7 @@ MAX_DOI_TRIES = 3
 ARG = CONFIG = DISCONFIG = EXISTING = LOGGER = REST = START_TIME = None
 PROJECT = {}
 SUPORG = {}
-DEFAULT_TAGS = ['Janelia Experimental Technology (jET)', 'Scientific Computing Software']
+DEFAULT_TAGS = ['AI Initiative', 'Janelia Experimental Technology (jET)', 'Scientific Computing Software']
 COUNT = collections.defaultdict(lambda: 0, {})
 
 def terminate_program(msg=None):
