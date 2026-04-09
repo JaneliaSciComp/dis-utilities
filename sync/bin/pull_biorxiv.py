@@ -87,7 +87,7 @@ def get_dois_from_biorxiv():
     LOGGER.info("Getting DOIs from bioRxiv")
     while not done:
         query = f"{start}/{stop}/{offset}"
-        response = JRC.call_biorxiv(query, timeout=25)
+        response = JRC.call_biorxiv(query, timeout=30)
         if 'messages' in response:
             parts += 1
             if 'count' in response['messages'][0]:
@@ -95,6 +95,7 @@ def get_dois_from_biorxiv():
                     done = True
                 else:
                     offset += 100
+                    sleep(2)
             else:
                 done = True
                 continue

@@ -7,7 +7,7 @@
            to DIS MongoDB.
 """
 
-__version__ = '22.1.0'
+__version__ = '22.2.0'
 
 import argparse
 import collections
@@ -922,6 +922,8 @@ def add_first_last_authors(rec):
     except Exception as err:
         terminate_program(f"Could not get first/last authors for {rec['doi']}: {err}")
     for auth in det:
+        if 'jrc_author' not in rec:
+            continue
         if 'employeeId' in auth and 'is_first' in auth and auth['employeeId'] in rec['jrc_author']:
             first.append(auth['employeeId'])
             firstn.append(', '.join([auth['family'], auth['given']]))
