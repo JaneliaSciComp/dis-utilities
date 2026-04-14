@@ -2,15 +2,19 @@
     Email information on newly-added DOIs to authors
 '''
 
+__version__ = '1.0.0'
+
 import argparse
 from datetime import datetime, timedelta
 from operator import attrgetter
+import os
 import sys
 import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation,logging-not-lazy
 
+ARG = DISCONFIG = LOGGER = None
 # Database
 DB = {}
 # DOI-level data
@@ -111,6 +115,24 @@ def valid_author(authid):
     return orc['orcid'] if 'orcid' in orc else True
 
 
+def update_processing(doi):
+    ''' Update the processing status for a DOI
+        Keyword arguments:
+          doi: DOI to update
+        Returns:
+          None
+    '''
+    proc = {'action': 'notify_author',
+            'program': os.path.basename(__file__),
+            'version': __version__,
+            'timestamp': datetime.now().isoformat()}
+    try:
+        DB['dis'].processing.update_one({'type': 'doi', 'key': doi},
+                                        {'$push': {'processes': proc}}, upsert=True)
+    except Exception as err:
+        terminate_program(err)
+
+
 def process_authors(authors, publications, cnt):
     ''' Create and send emails to each author with their resources
         Keyword arguments:
@@ -120,6 +142,7 @@ def process_authors(authors, publications, cnt):
         Returns:
           None
     '''
+    notified = []
     # Individual author emails
     summary = ""
     alumni = []
@@ -142,14 +165,20 @@ def process_authors(authors, publications, cnt):
         text = f'''\
 Hello {resp['nameFirstPreferred']},<br><br>
 Janelia’s Data and Information Services department (DIS) has added your recent
-{text1} to our <a href='https://dis.int.janelia.org'>database</a>.
+{text1} (DOIs listed below) to our database:<br>
+        '''
+        for doi in val['dois']:
+            text += f"<a href='https://dis.int.janelia.org/doiui/{doi}'>{doi}</a><br>"
+            if doi not in notified and ARG.WRITE:
+                notified.append(doi)
+                update_processing(doi)
+        text += '''\
 <br><br>
 To ensure accuracy, review the metadata below and
 <em>let us know if they are incorrect by responding to this email</em>.
 <strong><em>There is no action required from you, unless you see an error</em></strong>.
 <br><br>
-<strong>FYI</strong>:
-<br><br>
+<h3>FYI</h3>
 <strong>Tags</strong>:
 In the DIS publication database, there may be multiple redundant tags for the same lab,
 project team or support team. This is normal, but
@@ -168,7 +197,8 @@ not affiliated with Janelia, please let us know.
                     + "an ORCID for you. We ask that you please create one with " \
                     + "your Janelia affiliation. To create one, please visit " \
                     + "<a href='https://orcid.org/register'>ORCID</a>.<br><br>"
-        text += "Thank you and have a great day,<br><br>Lauren Acquarole<br><br>"
+        text += "Thank you and have a great day,<br><br>Lauren Acquarole<br>Mary Lay<br><br>"
+        text += "<h3>Citations</h3>"
         for res in val['citations']:
             text += f"{res}"
             doi = val['dois'].pop(0)
