@@ -2,7 +2,7 @@
     Email information on newly-added DOIs to authors
 '''
 
-__version__ = '1.0.0'
+__version__ = '1.1.0'
 
 import argparse
 from datetime import datetime, timedelta
@@ -85,6 +85,9 @@ def create_doilists(row):
         return
     names = []
     for auth in row['jrc_author']:
+        author_valid = valid_author(auth)
+        if not author_valid:
+            continue
         try:
             resp = JRC.call_people_by_id(auth)
         except Exception as err:
@@ -92,7 +95,7 @@ def create_doilists(row):
             LOGGER.warning(f"Error calling people by ID: {err}")
             terminate_program(err)
         if not resp or 'employeeId' not in resp or not resp['employeeId']:
-            LOGGER.warning(f"No People information found for {auth}")
+            LOGGER.error(f"No People information found for {auth}")
             continue
         try:
             names.append(' '.join([resp['nameFirstPreferred'], resp['nameLastPreferred']]))
@@ -148,16 +151,16 @@ def process_authors(authors, publications, cnt):
     alumni = []
     for auth, val in authors.items():
         missing_orcid = False
+        author_valid = valid_author(auth)
+        if not author_valid:
+            LOGGER.warning(f"Skipping alumnus {auth}")
+            alumni.append(name)
+            continue
         resp = JRC.call_people_by_id(auth)
         if not resp or 'employeeId' not in resp or not resp['employeeId']:
             LOGGER.warning(f"No People information found for {auth}")
             continue
         name = ' '.join([resp['nameFirstPreferred'], resp['nameLastPreferred']])
-        author_valid = valid_author(auth)
-        if not author_valid:
-            LOGGER.warning(f"Skipping alumnus {name}")
-            alumni.append(name)
-            continue
         email = DISCONFIG['developer'] if ARG.TEST else resp['email']
         subject = "Your recent publication" if len(val['citations']) == 1 \
                   else "Your recent publications"
