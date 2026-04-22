@@ -2,7 +2,7 @@
     Add new employees to the orcid collection from the People system.
 '''
 
-__version__ = '7.0.0'
+__version__ = '7.1.0'
 
 import argparse
 import collections
@@ -239,17 +239,20 @@ def set_alumni(person, orcid):
         terminate_program(err)
 
 
-def email_new(fname):
+def email_new(fname, msg):
     ''' Email the new records
         Keyword arguments:
           fname: filename
+          msg: list of links to new records
         Returns:
           None
     '''
-    text = f"New employees: {COUNT['new']:,}\nPlease see the attached file for the new records."
+    text = f"New employees: {COUNT['new']:,}<br>" \
+           + f"Please see the attached file for the new records.<br><br>" \
+           + "<br>".join(msg)
     subject = "Janelians added to orcid collection from People system"
     email = DIS['developer'] if ARG.TEST else DIS['receivers']
-    JRC.send_email(text, DIS['sender'], email, subject,
+    JRC.send_email(text, DIS['sender'], email, subject, mime='html',
                    attachment=fname)
 
 
@@ -309,7 +312,12 @@ def update_orcid():
             with open(fname, "w", encoding="utf-8") as outfile:
                 outfile.write("[" + ",\n".join(val) + "]")
             if key == 'new' and (ARG.WRITE or ARG.TEST):
-                email_new(fname)
+                msg = []
+                for rec in val:
+                    robj = json.loads(rec)
+                    link = f"https://dis.int.janelia.org/userui/{robj['userIdO365']}"
+                    msg.append(f"<a href='{link}'>{robj['given'][0]} {robj['family'][0]}</a>")
+                email_new(fname, msg)
     print(f"Records from People:    {COUNT['people']:,}")
     print(f"Already active:         {COUNT['already_active']:,}")
     print(f"Skipped (organization): {COUNT['skipped']:,}")
