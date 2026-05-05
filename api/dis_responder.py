@@ -35,7 +35,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "112.1.1"
+__version__ = "112.2.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -3374,16 +3374,9 @@ def get_raw(resource=None, doi=None):
             raise InvalidUsage(str(err), 500) from err
     elif resource == 'figshare':
         try:
-            response = JRC.call_figshare(doi)
-            if response and response[0].get('url'):
-                try:
-                    response2 = requests.get(response[0]['url'], timeout=5)
-                    if response2.status_code == 200:
-                        response = response2.json()
-                except Exception:
-                    pass
-        except Exception as err:
-            raise InvalidUsage(str(err), 500) from err
+            response= DL.get_doi_record(doi, source='figshare')
+        except Exception:
+            pass
     elif resource == 'protocols.io':
         suffix = f"protocols/{doi}"
         try:
@@ -3956,7 +3949,8 @@ def doi_tabs(doi, row, data, authors):
           DOI tabs as HTML
     '''
     content = {}
-    display_key = {'author': 'Author tags', 'citations': 'Citations', 'abstract': 'Abstract',
+    display_key = {'author': 'Author tags', 'citations': 'Citations', 
+                   'files': 'Files', 'abstract': 'Abstract',
                    'ack': 'Acknowledgements', 'subjects': 'Subjects', 'related': 'Related DOIs',
                    'legal': 'Legal information'}
     # Author tags
@@ -3970,6 +3964,18 @@ def doi_tabs(doi, row, data, authors):
         ahtml = get_citation_counts(doi, row)
         if ahtml:
             content['citations'] = ahtml
+    # Files
+    if row and row['jrc_obtained_from'] == 'DataCite' \
+       and ('janelia' in doi or 'figshare' in doi):
+       arec = DL.get_doi_record(doi, source='figshare')
+       if arec.get('files'):
+           files = []
+           for file in arec['files']:
+               if file.get('download_url'):
+                   files.append(f"<a href='{file['download_url']}' " \
+                                + f"target='_blank'>{file['download_url']}</a>")
+           if files:
+               content['files'] = "<br>".join(files)
     # Abstract
     abstract = ahtml = ""
     if 'type' in data and data['type'] == 'grant':
