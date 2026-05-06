@@ -35,7 +35,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "112.2.0"
+__version__ = "112.3.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -477,10 +477,7 @@ def provider_pie_chart(provider, pyear):
     {"$group": {"_id": "$type", "totalCost": {"$sum": "$recentCost"},
                 "mostRecentYear": {"$max":"$maxYear"}}},
     {"$sort": {"totalCost": -1}}]
-    try:
-        rows = DB['dis'].subscription.aggregate(payload)
-    except Exception as err:
-        raise err
+    rows = DB['dis'].subscription.aggregate(payload)
     for row in rows:
         data[row['_id']] = row['totalCost']
     if len(data) > 1:
@@ -507,10 +504,7 @@ def provider_title_heat_map(provider):
                     "totalCost": {"$sum": {"$toDouble": "$costArray.v"}}}},
         {"$sort": {"_id.year": 1, "_id.title": 1}}
     ]
-    try:
-        rows = DB['dis'].subscription.aggregate(pipeline, collation=INSENSITIVE)
-    except Exception as err:
-        raise err
+    rows = DB['dis'].subscription.aggregate(pipeline, collation=INSENSITIVE)
     data = {'Year': [], 'Title': [], 'Cost': []}
     for row in rows:
         data['Year'].append(row['_id']['year'])
@@ -556,10 +550,7 @@ def provider_heat_map():
                     "totalCost": {"$sum": {"$toDouble": "$costArray.v"}}}},
         {"$sort": {"_id.year": 1, "_id.provider": 1}}
     ]
-    try:
-        rows = DB['dis'].subscription.aggregate(pipeline, collation=INSENSITIVE)
-    except Exception as err:
-        raise err
+    rows = DB['dis'].subscription.aggregate(pipeline, collation=INSENSITIVE)
     data = {'Year': [], 'Provider': [], 'Cost': []}
     for row in rows:
         if row['_id']['provider'] in timed_out:
@@ -712,10 +703,7 @@ def get_leads_and_org_members(org):
         leads.append(row['employeeId'])
     # Get Shared Resources employee IDs
     payload = {"group": org}
-    try:
-        row = DB['dis'].org_group.find_one(payload)
-    except Exception as err:
-        raise err
+    row = DB['dis'].org_group.find_one(payload)
     shared = []
     if row:
         for member in row['members']:
@@ -736,18 +724,15 @@ def get_org_authorship(year, leads, shared):
     payload = {"jrc_last_id": {"$in": leads}}
     if year != 'All':
         payload['jrc_publishing_date'] = {"$regex": "^"+ year}
-    try:
-        rows = DB['dis'].dois.find(payload)
-        for row in rows:
-            if DL.is_journal(row) and not DL.is_version(row):
-                finds['janelia'].append(row['jrc_publishing_date'])
-        payload['jrc_tag.name'] = {"$in": shared}
-        rows = DB['dis'].dois.find(payload)
-        for row in rows:
-            if DL.is_journal(row) and not DL.is_version(row):
-                finds['org'].append(row['jrc_publishing_date'])
-    except Exception as err:
-        raise err
+    rows = DB['dis'].dois.find(payload)
+    for row in rows:
+        if DL.is_journal(row) and not DL.is_version(row):
+            finds['janelia'].append(row['jrc_publishing_date'])
+    payload['jrc_tag.name'] = {"$in": shared}
+    rows = DB['dis'].dois.find(payload)
+    for row in rows:
+        if DL.is_journal(row) and not DL.is_version(row):
+            finds['org'].append(row['jrc_publishing_date'])
     return finds
 
 
@@ -1104,12 +1089,9 @@ def get_orcid_from_db(oid, use_eid=False, bare=False, show="full"):
     html += "</table><br>"
     html = add_orcid_controls(orc, html)
     html += "<br>"
-    try:
-        if use_eid:
-            oid = orc['employeeId']
-        rows = get_dois_for_orcid(oid, orc)
-    except Exception as err:
-        raise err
+    if use_eid:
+        oid = orc['employeeId']
+    rows = get_dois_for_orcid(oid, orc)
     eid = orc['employeeId'] if 'employeeId' in orc else None
     tablehtml, dois = generate_works_table(rows, name=None, show=show, eid=eid)
     sad = DL.get_single_author_details(orc, DB['dis'].orcid)
@@ -1274,17 +1256,14 @@ def get_doi(doi):
           source: data source
           data: data from response
     '''
-    try:
-        if DL.is_datacite(doi):
-            resp = JRC.call_datacite(doi)
-            source = 'datacite'
-            data = resp['data']['attributes'] if 'data' in resp else {}
-        else:
-            resp = JRC.call_crossref(doi)
-            source = 'crossref'
-            data = resp['message'] if 'message' in resp else {}
-    except Exception as err:
-        raise err
+    if DL.is_datacite(doi):
+        resp = JRC.call_datacite(doi)
+        source = 'datacite'
+        data = resp['data']['attributes'] if 'data' in resp else {}
+    else:
+        resp = JRC.call_crossref(doi)
+        source = 'crossref'
+        data = resp['message'] if 'message' in resp else {}
     return source, data
 
 
@@ -1297,10 +1276,7 @@ def get_oa_year_counts():
                {'$group': {'_id': {'year': '$year', 'status': '$status'}, 'count': {'$sum': 1}}},
                {'$sort': {'_id.year': 1}}
               ]
-    try:
-        rows = DB['dis'].dois.aggregate(payload)
-    except Exception as err:
-        raise err
+    rows = DB['dis'].dois.aggregate(payload)
     return rows
 
 
@@ -1326,10 +1302,7 @@ def is_ignored(doi):
         Returns:
           True if the DOI is ignored, False otherwise
     '''
-    try:
-        row = DB['dis'].to_ignore.find_one({"type": "doi", "key": doi})
-    except Exception as err:
-        raise err
+    row = DB['dis'].to_ignore.find_one({"type": "doi", "key": doi})
     return row is not None
 
 
@@ -1698,10 +1671,7 @@ def get_no_relation(year=None):
         for pay in payload.values():
             pay["jrc_publishing_date"] = {"$regex": "^"+ year}
     for key, val in payload.items():
-        try:
-            cnt = DB['dis'].dois.count_documents(val)
-        except Exception as err:
-            raise err
+        cnt = DB['dis'].dois.count_documents(val)
         src, typ = key.split('_')
         no_relation[src][typ] = cnt
     return no_relation
@@ -2097,10 +2067,7 @@ def get_subscriptions(stype='Journal'):
         Returns:
           Subscription data
     '''
-    try:
-        rows = DB['dis'].subscription.find({"type": stype})
-    except Exception as err:
-        raise err
+    rows = DB['dis'].subscription.find({"type": stype})
     sub = {}
     for row in rows:
         sub[row['title']] = True
@@ -2126,10 +2093,7 @@ def get_top_journals(year, maxpub=False, janelia=True):
                {"$group": {"_id": "$jrc_journal", "count":{"$sum": 1},
                            "maxpub": {"$max": "$jrc_publishing_date"}}}
                ]
-    try:
-        rows = DB['dis'].dois.aggregate(payload)
-    except Exception as err:
-        raise err
+    rows = DB['dis'].dois.aggregate(payload)
     journal = {}
     for row in rows:
         if maxpub:
@@ -2159,10 +2123,7 @@ def get_top_publishers(year, source, maxpub=False):
                            "maxpub": {"$max": "$jrc_publishing_date"}}},
                {"$sort": {"count": -1}}
               ]
-    try:
-        rows = DB['dis'].dois.aggregate(payload)
-    except Exception as err:
-        raise err
+    rows = DB['dis'].dois.aggregate(payload)
     publisher = {}
     for row in rows:
         if maxpub:
@@ -2185,14 +2146,8 @@ def get_suporgs():
           hqorgs: mapping of HQ suporg name to code
           suporgs: mapping of all suporgs to code and active status
     '''
-    try:
-        hqorgs = DL.get_supervisory_orgs()
-    except Exception as err:
-        raise err
-    try:
-        rows = DB['dis'].suporg.find({})
-    except Exception as err:
-        raise err
+    hqorgs = DL.get_supervisory_orgs()
+    rows = DB['dis'].suporg.find({})
     suporgs = {}
     for row in rows:
         suporgs[row['name']] = {"code": row['code'],
@@ -2211,32 +2166,20 @@ def get_tag_details(tag):
           HTML
     '''
     payload = {"managed": tag}
-    try:
-        mgmt = DB['dis'].orcid.count_documents(payload)
-        if mgmt:
-            mgmt = DB['dis'].orcid.find_one(payload)
-    except Exception as err:
-        raise err
+    mgmt = DB['dis'].orcid.count_documents(payload)
+    if mgmt:
+        mgmt = DB['dis'].orcid.find_one(payload)
     payload = {"affiliations": tag}
-    try:
-        acnt = DB['dis'].orcid.count_documents(payload)
-    except Exception as err:
-        raise err
+    acnt = DB['dis'].orcid.count_documents(payload)
     tagtype = "Affiliation" if acnt else ""
-    try:
-        orgs = DL.get_supervisory_orgs(DB['dis'].suporg)
-    except Exception as err:
-        raise err
+    orgs = DL.get_supervisory_orgs(DB['dis'].suporg)
     payload = [{"$match": {"jrc_tag.name": tag}},
                {"$unwind": "$jrc_tag"},
                {"$match": {"jrc_tag.name": tag}},
                {"$group": {"_id": "$jrc_tag.type", "count": {"$sum": 1}}},
                {"$sort": {"_id": 1}}
               ]
-    try:
-        rows = DB['dis'].dois.aggregate(payload)
-    except Exception as err:
-        raise err
+    rows = DB['dis'].dois.aggregate(payload)
     html = "<table id='tagprops' class='proplist'><thead></thead><tbody>"
     if mgmt:
         html += f"<tr><td>Managed by</td><td>{mgmt['given'][0]} {mgmt['family'][0]}</td></tr>"
@@ -2282,16 +2225,13 @@ def add_subjects(row, html=None):
     '''
     if row['jrc_obtained_from'] == 'DataCite':
     # Subjects (DataCite categories)
-        try:
-            if row and row['jrc_obtained_from'] == 'DataCite' and 'subjects' in row \
-               and row['subjects']:
-                if html:
-                    html += "<h4>DataCite subjects</h4>" \
-                            + f"{', '.join(sub['subject'] for sub in row['subjects'])}"
-                else:
-                    return f"{', '.join(sub['subject'] for sub in row['subjects'])}"
-        except Exception as err:
-            raise err
+        if row and row['jrc_obtained_from'] == 'DataCite' and 'subjects' in row \
+           and row['subjects']:
+            if html:
+                html += "<h4>DataCite subjects</h4>" \
+                        + f"{', '.join(sub['subject'] for sub in row['subjects'])}"
+            else:
+                return f"{', '.join(sub['subject'] for sub in row['subjects'])}"
     elif 'jrc_mesh' in row:
         # MeSH subjects (Crossref)
         subjects = []
@@ -3949,7 +3889,7 @@ def doi_tabs(doi, row, data, authors):
           DOI tabs as HTML
     '''
     content = {}
-    display_key = {'author': 'Author tags', 'citations': 'Citations', 
+    display_key = {'author': 'Author tags', 'citations': 'Citations',
                    'files': 'Files', 'abstract': 'Abstract',
                    'ack': 'Acknowledgements', 'subjects': 'Subjects', 'related': 'Related DOIs',
                    'legal': 'Legal information'}
@@ -3967,15 +3907,15 @@ def doi_tabs(doi, row, data, authors):
     # Files
     if row and row['jrc_obtained_from'] == 'DataCite' \
        and ('janelia' in doi or 'figshare' in doi):
-       arec = DL.get_doi_record(doi, source='figshare')
-       if arec.get('files'):
-           files = []
-           for file in arec['files']:
-               if file.get('download_url'):
-                   files.append(f"<a href='{file['download_url']}' " \
-                                + f"target='_blank'>{file['download_url']}</a>")
-           if files:
-               content['files'] = "<br>".join(files)
+        arec = DL.get_doi_record(doi, source='figshare')
+        if arec.get('files'):
+            files = []
+            for file in arec['files']:
+                if file.get('download_url'):
+                    files.append(f"<a href='{file['download_url']}' " \
+                                 + f"target='_blank'>{file['download_url']}</a>")
+            if files:
+                content['files'] = "<br>".join(files)
     # Abstract
     abstract = ahtml = ""
     if 'type' in data and data['type'] == 'grant':
@@ -4671,9 +4611,11 @@ def dois_provider_with_janelia(prov):
 
 @app.route('/dois_report/<string:year>')
 @app.route('/dois_report')
-def dois_report(year=str(datetime.now().year)):
+def dois_report(year=None):
     ''' Show year in review
     '''
+    if year is None:
+        year = str(datetime.now().year)
     pmap = {"journal-article": "Journal articles", "posted-content": "Posted content",
             "preprints": "Preprints", "proceedings-article": "Proceedings articles",
             "book-chapter": "Book chapters", "datasets": "Datasets",
@@ -4894,9 +4836,11 @@ def dois_report(year=str(datetime.now().year)):
 
 @app.route('/dois_yearly/<string:year>')
 @app.route('/dois_yearly')
-def dois_yearly(year=str(datetime.now().year)):
+def dois_yearly(year=None):
     ''' Show year in review
     '''
+    if year is None:
+        year = str(datetime.now().year)
     pmap = {"journal-article": "Journal articles", "posted-content": "Posted content",
             "preprints": "Preprints", "proceedings-article": "Proceedings articles",
             "book-chapter": "Book chapters", "datasets": "Datasets",
@@ -6241,10 +6185,12 @@ def show_org_authors(org_in):
 @app.route('/org_detail/<string:org_in>/<string:year>/<string:show>')
 @app.route('/org_detail/<string:org_in>/<string:year>')
 @app.route('/org_detail/<string:org_in>')
-def show_organization(org_in, year=str(datetime.now().year), show="full"):
+def show_organization(org_in, year=None, show="full"):
     '''
     Return DOIs for an organization
     '''
+    if year is None:
+        year = str(datetime.now().year)
     ptitle = f"DOIs for {org_in}"
     if year != 'All':
         ptitle += f" in {year}"
@@ -7033,9 +6979,11 @@ def show_open_access_details(year='All'):
 
 @app.route('/journals_dois/<string:year>')
 @app.route('/journals_dois')
-def show_journals_dois(year=str(datetime.now().year)):
+def show_journals_dois(year=None):
     ''' Show journals in a table
     '''
+    if year is None:
+        year = str(datetime.now().year)
     errmsg = "Could not get journal data from subscription collection"
     try:
         rows = DB['dis'].subscription.find({"type": {"$in": ["Journal", "Repository"]}})
@@ -7431,9 +7379,11 @@ def show_subscription_summary_by_provider(prov):
 
 @app.route('/subscription/year')
 @app.route('/subscription/year/<string:year>')
-def show_subscription_year(year=str(datetime.now().year)):
+def show_subscription_year(year=None):
     ''' Show subscription costs for a specific year
     '''
+    if year is None:
+        year = str(datetime.now().year)
     errmsg = "Could not get data from subscription collection"
     sortorder = [("provider", 1), ("publisher", 1), ("title", 1)]
     try:
