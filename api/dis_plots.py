@@ -9,7 +9,7 @@ from bokeh.colors import named as _bokeh_named
 from bokeh.models import (BasicTicker, ColorBar, HoverTool, LinearAxis, LinearColorMapper,
                           ColumnDataSource, NumeralTickFormatter, Range1d)
 from bokeh.embed import components
-from bokeh.palettes import all_palettes, interp_palette, plasma, Turbo256
+from bokeh.palettes import all_palettes, plasma, Turbo256
 from bokeh.plotting import figure
 from bokeh.transform import cumsum, transform
 import pandas as pd
@@ -79,10 +79,7 @@ def _preprint_type_piechart(coll, year):
         match['jrc_publishing_date'] = {"$regex": "^"+ year}
     payload = [{"$match": match},
                {"$group": {"_id": {"institution": "$institution"},"count": {"$sum": 1}}}]
-    try:
-        rows = coll.aggregate(payload)
-    except Exception as err:
-        raise err
+    rows = coll.aggregate(payload)
     data = {}
     for row in rows:
         if not row['_id']['institution']:
@@ -111,15 +108,9 @@ def _preprint_capture_piechart(coll, year):
                "relation.is-preprint-of": {"$exists": 0}}
     if year != 'All':
         payload['jrc_publishing_date'] = {"$regex": "^"+ year}
-    try:
-        data['Fuzzy matching'] = coll.count_documents(payload)
-    except Exception as err:
-        raise err
+    data['Fuzzy matching'] = coll.count_documents(payload)
     del payload['relation.is-preprint-of']
-    try:
-        data['Crossref relation'] = coll.count_documents(payload)
-    except Exception as err:
-        raise err
+    data['Crossref relation'] = coll.count_documents(payload)
     data['Crossref relation'] = data['Crossref relation'] - data['Fuzzy matching']
     if not data['Crossref relation'] and not data['Fuzzy matching']:
         return None, None
@@ -144,21 +135,15 @@ def preprint_pie_charts(data, year, coll):
     chartscript, chartdiv = pie_chart(data, title, "source",
                                       colors=SOURCE_PALETTE, width=600, height=400)
     # Preprint types
-    try:
-        script2, div2 = _preprint_type_piechart(coll, year)
-        if script2:
-            chartscript += script2
-            chartdiv += div2
-    except Exception as err:
-        raise err
+    script2, div2 = _preprint_type_piechart(coll, year)
+    if script2:
+        chartscript += script2
+        chartdiv += div2
     # Preprint capture
-    try:
-        script2, div2 = _preprint_capture_piechart(coll, year)
-        if script2:
-            chartscript += script2
-            chartdiv += div2
-    except Exception as err:
-        raise err
+    script2, div2 = _preprint_capture_piechart(coll, year)
+    if script2:
+        chartscript += script2
+        chartdiv += div2
     return chartscript, chartdiv
 
 def get_colors_by_count(cnt):
@@ -168,16 +153,15 @@ def get_colors_by_count(cnt):
         Returns:
           List of colors
     '''
-    colors = plasma(cnt)
     if cnt == 1:
-        colors = ['green']
-    elif cnt == 2:
-        colors = SOURCE_PALETTE
-    elif cnt <= 10:
-        colors = all_palettes['Category10'][cnt]
-    elif cnt <= 20:
-        colors = all_palettes['Category20'][cnt]
-    return colors
+        return ['green']
+    if cnt == 2:
+        return SOURCE_PALETTE
+    if cnt <= 10:
+        return all_palettes['Category10'][cnt]
+    if cnt <= 20:
+        return all_palettes['Category20'][cnt]
+    return plasma(cnt)
 
 # ******************************************************************************
 # * Basic charts                                                               *
@@ -213,7 +197,6 @@ def pie_chart(data, title, legend, height=300, width=400, location="right",
     pdata['color'] = colors
     tooltips = f"@{legend}: @value{fmt if fmt else ''} (@percentage%)"
     if style == 'bare':
-        print("BARE")
         plt = figure(toolbar_location=None, height=height, width=width, min_border_left=0,
                  min_border_right=0, min_border_top=0, min_border_bottom=0,
                  background_fill_color=None, outline_line_color=None)
@@ -234,7 +217,7 @@ def pie_chart(data, title, legend, height=300, width=400, location="right",
 
 
 def stacked_bar_chart(data, title, xaxis, yaxis, colors=None, width=None, height=None,
-                      orient=None,yaxis2=None, tooltip=None, legend=True):
+                      orient=None, yaxis2=None, tooltip=None, legend=True):
     ''' Create a stacked bar chart
         Keyword arguments:
           data: dictionary of data
@@ -397,7 +380,7 @@ def dual_axis_chart(  # pylint: disable=too-many-arguments,too-many-positional-a
 
 
 def wedge_chart(data, height=100, width=100, color='green'):
-    ''' Create a pie chart
+    ''' Create an annular wedge chart
         Keyword arguments:
           data: dictionary of data
           height: height of the chart (optional)
@@ -550,6 +533,8 @@ def heat_map(data, title, x_field, y_field, value_field, width=950, height=500,
         Returns:
           Figure components (chartscript, chartdiv)
     '''
+    if not len(data[x_field]) == len(data[y_field]) == len(data[value_field]):
+        raise ValueError("heat_map: all data lists must have the same length")
     if palette is None:
         palette = TURBO256_STRETCHED
     x_vals = sorted(set(data[x_field]))
