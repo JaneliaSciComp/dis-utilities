@@ -14,6 +14,9 @@ $(document).on('keypress', 'input', function(e) {
     else if (eid == 'doiname') {
         find_dois();
     }
+    else if (eid == 'doisack') {
+        find_acks();
+    }
     else if (eid == 'doistitle') {
         find_titles();
     }
@@ -58,6 +61,14 @@ $(document).on('keypress', 'input', function(e) {
       return;
     }
     url = "/titlesui/" + $("#doistitle").val();
+    window.location = url;
+  }
+  function find_acks() {
+    if (!$('#doisack').val()) {
+      alert("You must enter acknowledgement text");
+      return;
+    }
+    url = "/acksui/" + $("#doisack").val();
     window.location = url;
   }
   function find_journals() {
@@ -169,6 +180,18 @@ onload="tableInitialize();"
   </div>
   <div class="flexitem">
     <button type="submit" id="doib" class="btn btn-primary btn-md" onclick="find_titles(); return false;" href="#">Look up</button>
+  </div>
+</div>
+<br>
+<div class="flexcontainer">
+  <div class="flexitem">
+  <span class="form-control-lg">Find DOIs by acknowledgement:</span>
+  </div>
+  <div class="flexitem">
+    <input type="text" class="form-control form-control-lg" id="doisack" size=28>
+  </div>
+  <div class="flexitem">
+    <button type="submit" id="doib" class="btn btn-primary btn-md" onclick="find_acks(); return false;" href="#">Look up</button>
   </div>
 </div>
 <br>

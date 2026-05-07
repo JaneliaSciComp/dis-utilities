@@ -35,7 +35,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "112.3.0"
+__version__ = "113.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -43,8 +43,11 @@ PROJECT = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
 # Custom queries
 CUSTOM_REGEX = {"publishing_year": {"field": "jrc_publishing_date",
-                                    "value": "^!REPLACE!"}
-               }
+                                    "value": "^!REPLACE!"}}
+ARTICLE = {"$or": [{"type": "journal-article"}, {"subtype": "preprint"},
+           {"types.resourceTypeGeneral": "Preprint"}]}
+# HTML / CSS styles
+HIGHLIGHT = "style='background-color:#00a450 !important; color:white !important'"
 # Navigation
 NAV = {"Home": "",
        "DOIs": {f"DOIs by insertion date{'&nbsp;'*10}": "dois_insertpicker",
@@ -1757,29 +1760,6 @@ def get_source_data(year):
     return data, hdict
 
 
-def parse_pmc_ack(edata):
-    ''' Parse PMC acknowledgements
-    '''
-    acktext = ""
-    if edata.get('p'):
-        try:
-            if isinstance(edata['p'], str):
-                acktext = edata['p']
-            elif isinstance(edata['p'], dict) and '#text' in edata['p']:
-                acktext = edata['p']['#text']
-            elif isinstance(edata['p'], list):
-                for ackp in edata['p']:
-                    if isinstance(ackp, str):
-                        acktext += ackp
-                    elif isinstance(ackp, dict) and '#text' in ackp:
-                        acktext += ackp['#text']
-        except Exception as err:
-            acktext = "<span style='color:red'>Error parsing acknowledgements: " \
-                      + f"{err}</span><br>" \
-                      + f"<pre>{json.dumps(edata['p'], indent=2)}</pre>"
-    return acktext
-
-
 def s2_citation_count(doi, fmt='plain'):
     ''' Get citation count from Semantic Scholar
         Keyword arguments:
@@ -1805,6 +1785,62 @@ def s2_citation_count(doi, fmt='plain'):
         return cnt
     except Exception:
         return 0
+
+
+def highlight_subtext(text, subtext):
+    ''' Highlight a subtext in a text
+        Keyword arguments:
+          text: text to highlight
+          subtext: subtext to highlight
+        Returns:
+          Highlighted text
+    '''
+    pattern = f"(<[^>]+>)|({re.escape(subtext)})"
+    def replace(m):
+        if m.group(1):  # inside an HTML tag — leave it alone
+            return m.group(1)
+        return f'<span {HIGHLIGHT}>{m.group(2)}</span>'
+    return re.sub(pattern, replace, text, flags=re.IGNORECASE)
+
+
+def standard_ack_table(rows, ack):
+    ''' Create a standard table of DOIs/acknowledgements
+        Keyword arguments:
+          rows: rows from dois collection
+          ack: acknowledgement text to highlight
+        Returns:
+          html: HTML
+          cnt: number of DOIs
+          oacnt: number of Open Access
+    '''
+    header = ['Published', 'DOI', 'Acknowledgements']
+    html = "<table id='dois' class='tablesorter standard-scroll'><thead><tr>" \
+           + ''.join([f"<th>{itm}</th>" for itm in header]) + "</tr></thead><tbody>"
+    fileoutput = ""
+    cnt = oacnt = 0
+    for row in rows:
+        if 'jrc_is_oa' in row and row['jrc_is_oa']:
+            oacnt += 1
+        version = DL.is_version(row)
+        row['published'] = DL.get_publishing_date(row)
+        row['link'] = doi_link(row['doi'])
+        row['jrc_ack2'] = row['jrc_acknowledgements'].replace('\n', '<br>')
+        row['jrc_ack2'] = highlight_subtext(row['jrc_ack2'], ack)
+        cls = []
+        if version:
+            cls.append('ver')
+        html += f"<tr class=\'{' '.join(cls)}\'><td>" \
+            + dloop(row, ['published', 'link', 'jrc_ack2'], "</td><td>") + "</td></tr>"
+        cnt += 1
+        row['jrc_acknowledgements'] = row['jrc_acknowledgements'].replace('\n', ' ')
+        fileoutput += dloop(row, ['published', 'doi', 'jrc_acknowledgements']) + "\n"
+    html += '</tbody></table>'
+    counter = f"<p>Number of DOIs: <span id='totalrows'>{cnt:,}</span></p>"
+    cbutton = "<button id='verbtn' class=\"btn btn-outline-warning\" " \
+              + "onclick=\"toggler('dois', 'ver', 'totalrows');\">" \
+              + "Filter versioned DOIs</button>&nbsp;"
+    html = counter + cbutton + create_downloadable('standard', header, fileoutput) + html
+    return html, cnt, oacnt
 
 
 def standard_doi_table(rows, prefix=None):
@@ -1833,12 +1869,6 @@ def standard_doi_table(rows, prefix=None):
         cls = []
         if version:
             cls.append('ver')
-        # payload["$or"] = [{"type": "journal-article"}, {"types.resourceTypeGeneral": "Preprint"},
-        #                   {"subtype": "preprint"}]
-        if not (('type' in row and row['type'] == 'journal-article') \
-           or ('subtype' in row and row['subtype'] == 'preprint') \
-           or (row.get('types') and row['types'].get('resourceTypeGeneral') == 'Preprint')):
-            cls.append('notjournal')
         html += f"<tr class=\'{' '.join(cls)}\'><td>" \
             + dloop(row, ['published', 'link', 'journal', 'title'], "</td><td>") + "</td></tr>"
         if row['title']:
@@ -3942,33 +3972,8 @@ def doi_tabs(doi, row, data, authors):
         if tags:
             ahtml += "<h4>Acknowledgement tags</h4>" + "<br>".join(tags)
     acktext = ""
-    if 'elife' in doi.lower():
-        edata = DL.get_doi_record(doi, source='elife')
-        if edata and 'acknowledgements' in edata and edata['acknowledgements']:
-            acklist = []
-            for ack in edata['acknowledgements']:
-                acklist.append(ack['text'])
-            if ahtml:
-                ahtml += "<br>"
-            acktext =  ' '.join(acklist)
-    else:
-        if row and row.get('jrc_pmc'):
-            pmcid = row['jrc_pmc']
-        else:
-            ret = DL.convert_pubmed(doi, itype='doi')
-            if ret and ret[0].get('pmcid'):
-                pmcid = ret[0]['pmcid'].replace('PMC', '')
-            else:
-                pmcid = None
-        edata = DL.get_doi_record(pmcid, source='pmc') if pmcid else None
-        if edata and 'OAI-PMH' in edata and 'GetRecord' in edata['OAI-PMH']:
-            try:
-                edata = edata['OAI-PMH']['GetRecord']['record']['metadata']
-                edata = edata['article']['back']['ack']
-            except Exception as err:
-                print(f"Error in doi_tabs for {row['doi']}: {err}")
-                edata = {}
-            acktext = parse_pmc_ack(edata)
+    if row and row.get('jrc_acknowledgements'):
+        acktext = row['jrc_acknowledgements'].replace('\n', '<br>')
     if acktext:
         highlight = ""
         try:
@@ -4243,6 +4248,33 @@ def show_doi_by_type_ui(src, typ, sub, year):
     return make_response(render_template('custom.html', urlroot=request.url_root,
                                          title=f"DOIs for {desc}", html=html, oamsg=oamsg,
                                          chartscript=chartscript, chartdiv=chartdiv,
+                                         navbar=generate_navbar('DOIs')))
+
+
+@app.route('/acksui/<string:ack>')
+def show_doi_by_ack_ui(ack):
+    ''' Show DOIs for a given acknowledgement text
+    '''
+    union = []
+    payload = ARTICLE
+    payload["jrc_acknowledgements"] = {"$regex": ack, "$options" : "i"}
+    try:
+        rows = DB['dis'].dois.find(payload).sort("jrc_publishing_date", -1)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get DOIs from dois collection"),
+                               message=error_message(err))
+    for row in rows:
+        union.append(row)
+    html, _, _ = standard_ack_table(union, ack)
+    if not html:
+        return render_template('warning.html', urlroot=request.url_root,
+                               title=render_warning("Could not find DOIs", 'warning'),
+                               message=f"Could not find any DOIs with acknowledgement {ack}")
+    title = f"DOIs with acknowledgement text <span style='color:#51b447 !important'>{ack}</span>"
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=title, html=html,
                                          navbar=generate_navbar('DOIs')))
 
 
