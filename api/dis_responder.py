@@ -35,7 +35,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "113.0.0"
+__version__ = "113.1.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -3866,7 +3866,7 @@ def get_citation_counts(doi, row, partial=True):
             tblrow.append(f"<td>OpenAlex: <a href='{url}' target='_blank'>{citcnt:,}</a>" \
                           + f"{cbutton}</td>")
         else:
-            tblrow.append(f"<td>OpenAlex: {citcnt:,}{cbutton}</td>")
+            tblrow.append(f"<td>OpenAlex: {citcnt:,}</td>")
     # PubMed
     if 'jrc_pmid' in row and not partial:
         try:
@@ -3974,6 +3974,12 @@ def doi_tabs(doi, row, data, authors):
     acktext = ""
     if row and row.get('jrc_acknowledgements'):
         acktext = row['jrc_acknowledgements'].replace('\n', '<br>')
+    elif row and not row.get('jrc_inserted', False):
+        # If this DOI isn't in our database, look for acknowledgements
+        try:
+            acktext = DL.get_acknowledgements(doi)
+        except Exception:
+            pass
     if acktext:
         highlight = ""
         try:
