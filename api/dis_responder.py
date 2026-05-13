@@ -35,7 +35,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "113.1.0"
+__version__ = "114.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -3616,6 +3616,95 @@ def show_orcidworks(oid):
         result['other_dois'].append(doi)
     return generate_response(result)
 
+# ******************************************************************************
+# * API endpoints (orgs)                                                       *
+# ******************************************************************************
+
+@app.route('/organizations/<string:grp>')
+def show_organizations(grp):
+    '''
+    Return organizations in a group
+    Return organizations in a group
+    ---
+    tags:
+      - Organizations
+    parameters:
+      - in: path
+        name: grp
+        schema:
+          type: string
+        required: true
+        description: Group name
+    responses:
+      200:
+        description: Organization data
+    '''
+    result = initialize_result()
+    data = []
+    try:
+        row = DB['dis'].org_group.find_one({"group": grp})
+    except Exception as err:
+        raise InvalidUsage(str(err), 500) from err
+    if not row:
+        raise InvalidUsage(f"Group {grp} was not found", 404)
+    for member in row['members']:
+        data.append(member)
+    result['organizations'] = data
+    result['rest']['row_count'] = len(data)
+    return generate_response(result)
+
+# ******************************************************************************
+# * API endpoints (orgs)                                                       *
+# ******************************************************************************
+
+@app.route('/acknowledgements')
+def show_all_acknowledgements():
+    '''
+    Return acknowledgements
+    Return acknowledgements (jrc_acknowledgements) from the dois and external_dois collections
+    ---
+    tags:
+      - Acknowledgements
+    parameters:
+      - in: path
+        name: ack
+        schema:
+          type: string
+        required: true
+        description: Acknowledgement search text
+    responses:
+      200:
+        description: Acknowledgements data
+    '''
+    result = initialize_result()
+    data = []
+    payload = {"jrc_acknowledgements": {"$exists": True}}
+    projection = {"_id": 0, "doi": 1, "jrc_publishing_date": 1, "jrc_acknowledgements": 1}
+    try:
+        cnt = DB['dis'].dois.count_documents(payload)
+        if cnt:
+            rows = DB['dis'].dois.find(payload, projection)
+    except Exception as err:
+        raise InvalidUsage(str(err), 500) from err
+    if not cnt:
+        raise InvalidUsage(f"No acknowledgements found", 404)
+    for row in rows:
+        row['doi_type'] = 'internal'
+        data.append(row)
+    rows = []
+    try:
+        cnt = DB['dis'].external_dois.count_documents(payload)
+        if cnt:
+            rows = DB['dis'].external_dois.find(payload, projection)
+    except Exception as err:
+        raise InvalidUsage(str(err), 500) from err
+    for row in rows:
+        row['doi_type'] = 'external'
+        data.append(row)
+    data.sort(key=lambda x: x.get("jrc_publishing_date", ""), reverse=True)
+    result['acknowledgements'] = data
+    result['rest']['row_count'] = len(data)
+    return generate_response(result)
 
 # ******************************************************************************
 # * UI endpoints (general)                                                     *
