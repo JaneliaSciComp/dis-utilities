@@ -35,7 +35,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "114.0.0"
+__version__ = "115.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -52,6 +52,7 @@ HIGHLIGHT = "style='background-color:#00a450 !important; color:white !important'
 NAV = {"Home": "",
        "DOIs": {f"DOIs by insertion date{'&nbsp;'*10}": "dois_insertpicker",
                 "DOI stats": "dois_source",
+                "DOIs by type": "dois_type",
                 "DOIs by:": {"month": "dois_time/month", "year": "dois_time/year",
                              "subject": "dois_subjectpicker"},
                 "DOI yearly report": "dois_yearly",
@@ -3679,17 +3680,30 @@ def show_all_acknowledgements():
     result = initialize_result()
     data = []
     payload = {"jrc_acknowledgements": {"$exists": True}}
-    projection = {"_id": 0, "doi": 1, "jrc_publishing_date": 1, "jrc_acknowledgements": 1}
+    projection = {"_id": 0, "doi": 1, "jrc_publishing_date": 1, "jrc_acknowledgements": 1,
+                  "jrc_journal": 1, "title": 1, "jrc_ack_first_author": 1, "jrc_ack_last_author": 1,
+                  "is_preprint": 1, "jrc_tag": 1}
     try:
         cnt = DB['dis'].dois.count_documents(payload)
-        if cnt:
-            rows = DB['dis'].dois.find(payload, projection)
+        rows = DB['dis'].dois.find(payload, projection)
     except Exception as err:
         raise InvalidUsage(str(err), 500) from err
     if not cnt:
-        raise InvalidUsage(f"No acknowledgements found", 404)
+        raise InvalidUsage("No acknowledgements found", 404)
     for row in rows:
         row['doi_type'] = 'internal'
+        row['is_preprint'] = DL.is_preprint(row)
+        if not DL.is_datacite(row['doi']):
+            row['DOI'] = row['doi']
+        row['title'] = DL.get_title(row)
+        if row.get('jrc_tag'):
+            tags = []
+            for tag in row['jrc_tag']:
+                tags.append(tag['name'])
+            row['jrc_tag'] = tags
+        for field in ['DOI', 'titles']:
+            if field in row:
+                del row[field]
         data.append(row)
     rows = []
     try:
@@ -4027,7 +4041,7 @@ def doi_tabs(doi, row, data, authors):
     if row and row['jrc_obtained_from'] == 'DataCite' \
        and ('janelia' in doi or 'figshare' in doi):
         arec = DL.get_doi_record(doi, source='figshare')
-        if arec.get('files'):
+        if arec and arec.get('files'):
             files = []
             for file in arec['files']:
                 if file.get('download_url'):
@@ -4522,6 +4536,92 @@ def dois_source(year='All'):
                                          title=title, html=html,
                                          chartscript=chartscript, chartdiv=chartdiv,
                                          chartscript2=chartscript2, chartdiv2=chartdiv2,
+                                         navbar=generate_navbar('DOIs')))
+
+
+@app.route('/dois_type/<string:year>')
+@app.route('/dois_type')
+def dois_type(year='All'):
+    ''' Show DOI counts by type as a table and pie chart
+    '''
+    match = {"jrc_obtained_from": "Crossref"}
+    if year != 'All':
+        match["jrc_publishing_date"] = {"$regex": "^" + year}
+    payload = [{"$match": match},
+               {"$group": {"_id": "$type", "count": {"$sum": 1}}}
+              ]
+    try:
+        rows = DB['dis'].dois.aggregate(payload)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get Crossref type data from dois"),
+                               message=error_message(err))
+    type_merge = {"dataset": "Dataset",
+                  "journal-article": "JournalArticle",
+                  "posted-content": "Preprint",
+                  "book": "BookChapter",
+                  "book-chapter": "BookChapter",
+                  "proceedings-article": "ConferenceProceeding",
+                  "other": "Other",
+                  "ComputationalNotebook": "Software",
+                  "DataPaper": "JournalArticle",
+                  "Image": "Audiovisual",
+                  "component": "BiologicalComponent",
+                  "grant": "Grant",
+                  "peer-review": "PeerReview"}
+    data = {}
+    for row in rows:
+        label = row['_id'] if row['_id'] else 'None'
+        label = type_merge.get(label, label)
+        data[label] = data.get(label, 0) + row['count']
+    match["jrc_obtained_from"] = "DataCite"
+    payload = [{"$match": match},
+               {"$group": {"_id": "$types.resourceTypeGeneral", "count": {"$sum": 1}}}
+              ]
+    try:
+        rows = DB['dis'].dois.aggregate(payload)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get DataCite type data from dois"),
+                               message=error_message(err))
+    for row in rows:
+        label = row['_id'] if row['_id'] else 'None'
+        label = type_merge.get(label, label)
+        data[label] = data.get(label, 0) + row['count']
+    proto_match = {"jrc_journal": "protocols.io"}
+    if year != 'All':
+        proto_match["jrc_publishing_date"] = {"$regex": "^" + year}
+    try:
+        proto_cnt = DB['dis'].dois.count_documents(proto_match)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get protocols.io count from dois"),
+                               message=error_message(err))
+    if proto_cnt and 'Preprint' in data:
+        data['Preprint'] -= proto_cnt
+        data['Protocols'] = proto_cnt
+    total = sum(data.values())
+    html = "<span style='color:goldenrod'><i class='fa-solid fa-warning'></i>" \
+           + " This chart is an experimental feature</span>"
+    html += '<table id="types" class="tablesorter numberlast-scroll"><thead><tr>' \
+            + '<th>Type</th><th>Count</th>' \
+            + '</tr></thead><tbody>'
+    for typ, cnt in sorted(data.items(), key=itemgetter(1), reverse=True):
+        html += f"<tr><td>{typ}</td><td>{cnt:,}</td></tr>"
+    html += f"</tbody><tfoot><tr><th>TOTAL</th><th>{total:,}</th>" \
+            + "</tr></tfoot></table><br>"
+    html += year_pulldown('typechart', start_year=2006)
+    title = "DOIs by type"
+    if year != 'All':
+        title += f" ({year})"
+    data = dict(sorted(data.items(), key=itemgetter(1), reverse=True))
+    colors = DP.get_colors_by_count(len(data))
+    chartscript, chartdiv = DP.pie_chart(data, title, "type",
+                                         width=750, height=506, colors=colors)
+    endpoint_access()
+    return make_response(render_template('bokeh.html', urlroot=request.url_root,
+                                         title=title, html=html,
+                                         chartscript=chartscript, chartdiv=chartdiv,
                                          navbar=generate_navbar('DOIs')))
 
 
