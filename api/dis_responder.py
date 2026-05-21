@@ -35,7 +35,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "115.0.0"
+__version__ = "115.1.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -44,8 +44,8 @@ INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
 # Custom queries
 CUSTOM_REGEX = {"publishing_year": {"field": "jrc_publishing_date",
                                     "value": "^!REPLACE!"}}
-ARTICLE = {"$or": [{"type": "journal-article"}, {"subtype": "preprint"},
-           {"types.resourceTypeGeneral": "Preprint"}]}
+JOURNAL_ARTICLE = {"$or": [{"type": "journal-article"}, {"subtype": "preprint"},
+                           {"types.resourceTypeGeneral": "Preprint"}]}
 # HTML / CSS styles
 HIGHLIGHT = "style='background-color:#00a450 !important; color:white !important'"
 # Navigation
@@ -3679,7 +3679,8 @@ def show_all_acknowledgements():
     '''
     result = initialize_result()
     data = []
-    payload = {"jrc_acknowledgements": {"$exists": True}}
+    payload = JOURNAL_ARTICLE
+    payload["jrc_acknowledgements"] = {"$exists": True}
     projection = {"_id": 0, "doi": 1, "jrc_publishing_date": 1, "jrc_acknowledgements": 1,
                   "jrc_journal": 1, "title": 1, "jrc_ack_first_author": 1, "jrc_ack_last_author": 1,
                   "is_preprint": 1, "jrc_tag": 1}
@@ -3706,10 +3707,11 @@ def show_all_acknowledgements():
                 del row[field]
         data.append(row)
     rows = []
+    # External DOIs
     try:
-        cnt = DB['dis'].external_dois.count_documents(payload)
+        cnt = DB['dis'].external_dois.count_documents({})
         if cnt:
-            rows = DB['dis'].external_dois.find(payload, projection)
+            rows = DB['dis'].external_dois.find({}, projection)
     except Exception as err:
         raise InvalidUsage(str(err), 500) from err
     for row in rows:
@@ -4365,7 +4367,7 @@ def show_doi_by_ack_ui(ack):
     ''' Show DOIs for a given acknowledgement text
     '''
     union = []
-    payload = ARTICLE
+    payload = JOURNAL_ARTICLE
     payload["jrc_acknowledgements"] = {"$regex": ack, "$options" : "i"}
     try:
         rows = DB['dis'].dois.find(payload).sort("jrc_publishing_date", -1)
