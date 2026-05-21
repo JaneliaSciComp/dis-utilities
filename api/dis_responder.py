@@ -35,7 +35,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "115.1.0"
+__version__ = "115.1.1"
 # Database
 DB = {}
 CVTERM = {}
@@ -3683,7 +3683,7 @@ def show_all_acknowledgements():
     payload["jrc_acknowledgements"] = {"$exists": True}
     projection = {"_id": 0, "doi": 1, "jrc_publishing_date": 1, "jrc_acknowledgements": 1,
                   "jrc_journal": 1, "title": 1, "jrc_ack_first_author": 1, "jrc_ack_last_author": 1,
-                  "is_preprint": 1, "jrc_tag": 1}
+                  "is_preprint": 1, "jrc_tag": 1, "type": 1, "subtype": 1}
     try:
         cnt = DB['dis'].dois.count_documents(payload)
         rows = DB['dis'].dois.find(payload, projection)
