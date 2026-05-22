@@ -35,7 +35,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "115.1.1"
+__version__ = "115.2.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -98,6 +98,7 @@ NAV = {"Home": "",
                                         "acknowledgement": "dois_tag_ack/ack",
                                         "lab": "dois_lab"},
                            f"Top DOI tags by year{'&nbsp;'*22}": "dois_top",
+                           "Acknowledgement stats": "acknowledgement_stats",
                            "Author affiliations:": {"P&C": "orcid_tag",
                                                     "Janelia": "janelia_affiliations"},
                            "Labs": "labs",
@@ -3655,11 +3656,12 @@ def show_organizations(grp):
     return generate_response(result)
 
 # ******************************************************************************
-# * API endpoints (orgs)                                                       *
+# * API endpoints (ack)                                                       *
 # ******************************************************************************
 
+@app.route('/acknowledgements/<string:which>')
 @app.route('/acknowledgements')
-def show_all_acknowledgements():
+def show_acknowledgements(which="journal"):
     '''
     Return acknowledgements
     Return acknowledgements (jrc_acknowledgements) from the dois and external_dois collections
@@ -3668,18 +3670,18 @@ def show_all_acknowledgements():
       - Acknowledgements
     parameters:
       - in: path
-        name: ack
+        name: which
         schema:
           type: string
         required: true
-        description: Acknowledgement search text
+        description: Which acknowledgements to return (journal, all)
     responses:
       200:
         description: Acknowledgements data
     '''
     result = initialize_result()
     data = []
-    payload = JOURNAL_ARTICLE
+    payload = JOURNAL_ARTICLE if which == "journal" else {}
     payload["jrc_acknowledgements"] = {"$exists": True}
     projection = {"_id": 0, "doi": 1, "jrc_publishing_date": 1, "jrc_acknowledgements": 1,
                   "jrc_journal": 1, "title": 1, "jrc_ack_first_author": 1, "jrc_ack_last_author": 1,
@@ -3708,10 +3710,11 @@ def show_all_acknowledgements():
         data.append(row)
     rows = []
     # External DOIs
+    payload = JOURNAL_ARTICLE if which == "journal" else {}
     try:
-        cnt = DB['dis'].external_dois.count_documents({})
+        cnt = DB['dis'].external_dois.count_documents(payload)
         if cnt:
-            rows = DB['dis'].external_dois.find({}, projection)
+            rows = DB['dis'].external_dois.find(payload, projection)
     except Exception as err:
         raise InvalidUsage(str(err), 500) from err
     for row in rows:
@@ -3721,6 +3724,191 @@ def show_all_acknowledgements():
     result['acknowledgements'] = data
     result['rest']['row_count'] = len(data)
     return generate_response(result)
+
+
+@app.route('/acknowledgement_stats/<int:limit>')
+@app.route('/acknowledgement_stats')
+def show_acknowledgement_stats(limit=10):
+    ''' Show acknowledgement statistics for dois and external_dois collections
+    '''
+    ack_filter = {"jrc_acknowledgements": {"$exists": True}}
+    # Type breakdown - internal DOIs
+    pipeline = [
+        {"$match": ack_filter},
+        {"$group": {
+            "_id": {
+                "$cond": [
+                    {"$ifNull": ["$type", False]},
+                    "$type",
+                    {"$ifNull": ["$types.resourceTypeGeneral", "Unknown"]}
+                ]
+            },
+            "count": {"$sum": 1}
+        }},
+        {"$sort": {"count": -1}}
+    ]
+    try:
+        rows = DB['dis'].dois.aggregate(pipeline)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get acknowledgement type data from dois"),
+                               message=error_message(err))
+    dois_type_data = {}
+    for row in rows:
+        label = row['_id'] if row['_id'] else 'Unknown'
+        dois_type_data[label] = row['count']
+    # Type breakdown - external DOIs
+    pipeline_ext = [
+        {"$match": ack_filter},
+        {"$group": {"_id": "$type", "count": {"$sum": 1}}},
+        {"$sort": {"count": -1}}
+    ]
+    try:
+        rows = DB['dis'].external_dois.aggregate(pipeline_ext)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get acknowledgement type data from external_dois"),
+                               message=error_message(err))
+    ext_type_data = {}
+    for row in rows:
+        label = row['_id'] if row['_id'] else 'Unknown'
+        ext_type_data[label] = row['count']
+    # Collection totals for percentage calculation, broken down by jrc_obtained_from for dois
+    try:
+        dois_all = DB['dis'].dois.count_documents({})
+        ext_all = DB['dis'].external_dois.count_documents({})
+        source_rows = DB['dis'].dois.aggregate([
+            {"$group": {"_id": "$jrc_obtained_from", "count": {"$sum": 1}}}
+        ])
+        source_all = {row['_id']: row['count'] for row in source_rows}
+        source_rows = DB['dis'].dois.aggregate([
+            {"$match": ack_filter},
+            {"$group": {"_id": "$jrc_obtained_from", "count": {"$sum": 1}}}
+        ])
+        source_ack = {row['_id']: row['count'] for row in source_rows}
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get collection totals"),
+                               message=error_message(err))
+    # Year trend
+    year_pipeline = [
+        {"$match": {**ack_filter, "jrc_publishing_date": {"$exists": True}}},
+        {"$group": {"_id": {"$substr": ["$jrc_publishing_date", 0, 4]}, "count": {"$sum": 1}}},
+        {"$sort": {"_id": 1}}
+    ]
+    try:
+        int_years = {row['_id']: row['count']
+                     for row in DB['dis'].dois.aggregate(year_pipeline)}
+        ext_years = {row['_id']: row['count']
+                     for row in DB['dis'].external_dois.aggregate(year_pipeline)}
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get acknowledgement year data"),
+                               message=error_message(err))
+    all_year_keys = sorted(set(int_years) | set(ext_years))
+    year_data = {
+        "years": all_year_keys,
+        "Internal DOIs": [int_years.get(yr, 0) for yr in all_year_keys],
+        "External DOIs": [ext_years.get(yr, 0) for yr in all_year_keys],
+    }
+    # Top journals (internal and external DOIs separately)
+    journal_pipeline = [
+        {"$match": {**ack_filter, "jrc_journal": {"$exists": True}}},
+        {"$group": {"_id": "$jrc_journal", "count": {"$sum": 1}}},
+        {"$sort": {"count": -1}},
+        {"$limit": limit}
+    ]
+    try:
+        int_journals = [(row['_id'], row['count'])
+                        for row in DB['dis'].dois.aggregate(journal_pipeline)]
+        ext_journals = [(row['_id'], row['count'])
+                        for row in DB['dis'].external_dois.aggregate(journal_pipeline)]
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get top journal data"),
+                               message=error_message(err))
+    # Build HTML
+    dois_total = sum(dois_type_data.values())
+    ext_total = sum(ext_type_data.values())
+    dois_pct = dois_total / dois_all * 100 if dois_all else 0
+    ext_pct = ext_total / ext_all * 100 if ext_all else 0
+    all_total = dois_total + ext_total
+    all_all = dois_all + ext_all
+    all_pct = all_total / all_all * 100 if all_all else 0
+    html = "<table id='ack_summary' class='tablesorter standard-scroll'><thead><tr>" \
+           + "<th>Collection</th><th>Count</th><th>Total</th><th>%</th>" \
+           + "</tr></thead><tbody>"
+    html += f"<tr><td><b>Internal DOIs</b></td><td>{dois_total:,}</td><td>{dois_all:,}</td>" \
+            + f"<td>{dois_pct:.1f}%</td></tr>"
+    for source in sorted(source_all):
+        ack_cnt = source_ack.get(source, 0)
+        tot_cnt = source_all[source]
+        pct = ack_cnt / tot_cnt * 100 if tot_cnt else 0
+        html += f"<tr><td>&nbsp;&nbsp;&nbsp;{source}</td><td>{ack_cnt:,}</td>" \
+                + f"<td>{tot_cnt:,}</td><td>{pct:.1f}%</td></tr>"
+    html += f"<tr><td>External DOIs</td><td>{ext_total:,}</td><td>{ext_all:,}</td>" \
+            + f"<td>{ext_pct:.1f}%</td></tr>"
+    html += f"</tbody><tfoot><tr><th>TOTAL</th><th>{all_total:,}</th><th>{all_all:,}</th>" \
+            + f"<th>{all_pct:.1f}%</th></tr></tfoot></table>"
+    html += "<br><h4>Internal DOIs by type</h4>"
+    html += "<table id='dois_types' class='tablesorter numberlast-scroll'><thead><tr>" \
+            + "<th>Type</th><th>Count</th></tr></thead><tbody>"
+    for typ, cnt in sorted(dois_type_data.items(), key=itemgetter(1), reverse=True):
+        html += f"<tr><td>{typ}</td><td>{cnt:,}</td></tr>"
+    html += f"</tbody><tfoot><tr><th>TOTAL</th><th>{dois_total:,}</th></tr></tfoot></table>"
+    html += "<br><h4>External DOIs by type</h4>"
+    html += "<table id='ext_types' class='tablesorter numberlast-scroll'><thead><tr>" \
+            + "<th>Type</th><th>Count</th></tr></thead><tbody>"
+    for typ, cnt in sorted(ext_type_data.items(), key=itemgetter(1), reverse=True):
+        html += f"<tr><td>{typ}</td><td>{cnt:,}</td></tr>"
+    html += f"</tbody><tfoot><tr><th>TOTAL</th><th>{ext_total:,}</th></tr></tfoot></table>"
+    if int_journals:
+        html += f"<br><h4>Top {limit} journals (Internal DOIs)</h4>"
+        html += "<table id='top_journals_int' class='tablesorter numberlast-scroll'>" \
+                + "<thead><tr><th>Journal</th><th>Count</th></tr></thead><tbody>"
+        for journal, cnt in int_journals:
+            html += f"<tr><td>{journal}</td><td>{cnt:,}</td></tr>"
+        html += "</tbody></table>"
+    if ext_journals:
+        html += f"<br><h4>Top {limit} journals (External DOIs)</h4>"
+        html += "<table id='top_journals_ext' class='tablesorter numberlast-scroll'>" \
+                + "<thead><tr><th>Journal</th><th>Count</th></tr></thead><tbody>"
+        for journal, cnt in ext_journals:
+            html += f"<tr><td>{journal}</td><td>{cnt:,}</td></tr>"
+        html += "</tbody></table>"
+    # Charts: two pies side-by-side, bar chart below
+    chartscript = ""
+    pie_divs = ""
+    if dois_type_data:
+        colors = DP.get_colors_by_count(len(dois_type_data))
+        dois_sorted = dict(sorted(dois_type_data.items(), key=itemgetter(1), reverse=True))
+        s, d = DP.pie_chart(dois_sorted, "Internal DOIs by type", "type",
+                            width=500, height=450, colors=colors)
+        chartscript += s
+        pie_divs += f"<div class='flexcol'>{d}</div>"
+    if ext_type_data:
+        colors2 = DP.get_colors_by_count(len(ext_type_data))
+        ext_sorted = dict(sorted(ext_type_data.items(), key=itemgetter(1), reverse=True))
+        s, d = DP.pie_chart(ext_sorted, "External DOIs by type", "type",
+                            width=500, height=450, colors=colors2)
+        chartscript += s
+        pie_divs += f"<div class='flexcol'>{d}</div>"
+    chartdiv = f"<div class='flexrow'>{pie_divs}</div><br>"
+    if all_year_keys:
+        s, d = DP.stacked_bar_chart(year_data, "DOIs with acknowledgements by year",
+                                    xaxis="years",
+                                    yaxis=["Internal DOIs", "External DOIs"],
+                                    colors=DP.SOURCE_PALETTE,
+                                    orient=pi/4, width=1000, height=350)
+        chartscript += s
+        chartdiv += d
+    endpoint_access()
+    return make_response(render_template('bokeh.html', urlroot=request.url_root,
+                                         title="Acknowledgement Statistics",
+                                         html=html, html2="",
+                                         chartscript=chartscript, chartdiv=chartdiv,
+                                         chartscript2="", chartdiv2="",
+                                         navbar=generate_navbar('Tag/affiliation')))
 
 # ******************************************************************************
 # * UI endpoints (general)                                                     *
@@ -8175,7 +8363,7 @@ def show_subscription(sid):
                     + 'class="btn btn-success btn-small"' \
                     + f"onclick=\"{link}\">Access {label}</button></div>"
     try:
-        rows = DB['dis'].dois.find({"jrc_journal": row['title']})
+        rows = DB['dis'].dois.find({"jrc_journal": row['title']}).collation({"locale": "en"}).sort("jrc_publishing_date", -1)
     except Exception as err:
         return render_template('error.html', urlroot=request.url.root,
                                title=render_warning("Could not get DOIs for journal"),
