@@ -538,7 +538,7 @@ def heat_map(data, title, x_field, y_field, value_field, width=950, height=500,
     if palette is None:
         palette = TURBO256_STRETCHED
     x_vals = sorted(set(data[x_field]))
-    y_vals = sorted(set(data[y_field]), key=str.lower)
+    y_vals = sorted(set(data[y_field]), key=str.lower, reverse=True)
     df = pd.DataFrame({x_field: data[x_field], y_field: data[y_field],
                        value_field: data[value_field]})
     col_total_source = None

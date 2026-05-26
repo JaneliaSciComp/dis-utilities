@@ -35,7 +35,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "115.2.0"
+__version__ = "115.3.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -3811,6 +3811,50 @@ def show_acknowledgement_stats(limit=10):
         "Internal DOIs": [int_years.get(yr, 0) for yr in all_year_keys],
         "External DOIs": [ext_years.get(yr, 0) for yr in all_year_keys],
     }
+    # Year × type heat map (internal + external combined)
+    heatmap_pipeline = [
+        {"$match": {**ack_filter, "jrc_publishing_date": {"$exists": True}}},
+        {"$group": {
+            "_id": {
+                "year": {"$substr": ["$jrc_publishing_date", 0, 4]},
+                "type": {
+                    "$cond": [
+                        {"$ifNull": ["$type", False]},
+                        "$type",
+                        {"$ifNull": ["$types.resourceTypeGeneral", "Unknown"]}
+                    ]
+                }
+            },
+            "count": {"$sum": 1}
+        }}
+    ]
+    heatmap_pipeline_ext = [
+        {"$match": {**ack_filter, "jrc_publishing_date": {"$exists": True}}},
+        {"$group": {
+            "_id": {
+                "year": {"$substr": ["$jrc_publishing_date", 0, 4]},
+                "type": {"$ifNull": ["$type", "Unknown"]}
+            },
+            "count": {"$sum": 1}
+        }}
+    ]
+    try:
+        hm_counts = {}
+        for row in DB['dis'].dois.aggregate(heatmap_pipeline):
+            key = (row['_id']['year'], row['_id']['type'])
+            hm_counts[key] = hm_counts.get(key, 0) + row['count']
+        for row in DB['dis'].external_dois.aggregate(heatmap_pipeline_ext):
+            key = (row['_id']['year'], row['_id']['type'])
+            hm_counts[key] = hm_counts.get(key, 0) + row['count']
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get acknowledgement heat map data"),
+                               message=error_message(err))
+    heatmap_data = {"Year": [], "Type": [], "Count": []}
+    for (year, typ), count in hm_counts.items():
+        heatmap_data["Year"].append(year)
+        heatmap_data["Type"].append(typ)
+        heatmap_data["Count"].append(count)
     # Top journals (internal and external DOIs separately)
     journal_pipeline = [
         {"$match": {**ack_filter, "jrc_journal": {"$exists": True}}},
@@ -3832,9 +3876,6 @@ def show_acknowledgement_stats(limit=10):
     ext_total = sum(ext_type_data.values())
     dois_pct = dois_total / dois_all * 100 if dois_all else 0
     ext_pct = ext_total / ext_all * 100 if ext_all else 0
-    all_total = dois_total + ext_total
-    all_all = dois_all + ext_all
-    all_pct = all_total / all_all * 100 if all_all else 0
     html = "<table id='ack_summary' class='tablesorter standard-scroll'><thead><tr>" \
            + "<th>Collection</th><th>Count</th><th>Total</th><th>%</th>" \
            + "</tr></thead><tbody>"
@@ -3848,20 +3889,19 @@ def show_acknowledgement_stats(limit=10):
                 + f"<td>{tot_cnt:,}</td><td>{pct:.1f}%</td></tr>"
     html += f"<tr><td>External DOIs</td><td>{ext_total:,}</td><td>{ext_all:,}</td>" \
             + f"<td>{ext_pct:.1f}%</td></tr>"
-    html += f"</tbody><tfoot><tr><th>TOTAL</th><th>{all_total:,}</th><th>{all_all:,}</th>" \
-            + f"<th>{all_pct:.1f}%</th></tr></tfoot></table>"
+    html += "</tbody></table>"
     html += "<br><h4>Internal DOIs by type</h4>"
     html += "<table id='dois_types' class='tablesorter numberlast-scroll'><thead><tr>" \
             + "<th>Type</th><th>Count</th></tr></thead><tbody>"
     for typ, cnt in sorted(dois_type_data.items(), key=itemgetter(1), reverse=True):
         html += f"<tr><td>{typ}</td><td>{cnt:,}</td></tr>"
-    html += f"</tbody><tfoot><tr><th>TOTAL</th><th>{dois_total:,}</th></tr></tfoot></table>"
+    html += "</tbody></table>"
     html += "<br><h4>External DOIs by type</h4>"
     html += "<table id='ext_types' class='tablesorter numberlast-scroll'><thead><tr>" \
             + "<th>Type</th><th>Count</th></tr></thead><tbody>"
     for typ, cnt in sorted(ext_type_data.items(), key=itemgetter(1), reverse=True):
         html += f"<tr><td>{typ}</td><td>{cnt:,}</td></tr>"
-    html += f"</tbody><tfoot><tr><th>TOTAL</th><th>{ext_total:,}</th></tr></tfoot></table>"
+    html += "</tbody></table>"
     if int_journals:
         html += f"<br><h4>Top {limit} journals (Internal DOIs)</h4>"
         html += "<table id='top_journals_int' class='tablesorter numberlast-scroll'>" \
@@ -3900,6 +3940,12 @@ def show_acknowledgement_stats(limit=10):
                                     yaxis=["Internal DOIs", "External DOIs"],
                                     colors=DP.SOURCE_PALETTE,
                                     orient=pi/4, width=1000, height=350)
+        chartscript += s
+        chartdiv += d
+    if heatmap_data["Count"]:
+        s, d = DP.heat_map(heatmap_data, "DOIs with acknowledgements by year/type",
+                           "Year", "Type", "Count", value_format="0,0",
+                           width=1000, col_totals="Total")
         chartscript += s
         chartdiv += d
     endpoint_access()
