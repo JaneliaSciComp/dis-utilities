@@ -35,7 +35,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "115.3.0"
+__version__ = "115.3.1"
 # Database
 DB = {}
 CVTERM = {}
@@ -3751,7 +3751,8 @@ def show_acknowledgement_stats(limit=10):
         rows = DB['dis'].dois.aggregate(pipeline)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get acknowledgement type data from dois"),
+                               title=render_warning("Could not get acknowledgement type " \
+                                                    + "data from dois"),
                                message=error_message(err))
     dois_type_data = {}
     for row in rows:
@@ -3767,7 +3768,8 @@ def show_acknowledgement_stats(limit=10):
         rows = DB['dis'].external_dois.aggregate(pipeline_ext)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get acknowledgement type data from external_dois"),
+                               title=render_warning("Could not get acknowledgement type data" \
+                                                    + " from external_dois"),
                                message=error_message(err))
     ext_type_data = {}
     for row in rows:
@@ -4427,8 +4429,16 @@ def show_doi_ui(doi):
         recsec += add_jrc_fields(row)
         local = True
     else:
-        recsec = "<h4 style='color:red'><i class='fa-solid fa-warning'></i> " \
-                 + "This DOI is not saved locally in the Janelia database</h4><br>"
+        try:
+            row2 = DB['dis'].external_dois.find_one({"doi": doi})
+        except Exception as err:
+            return inspect_error(err, 'Could not get DOI')
+        if row2:
+            recsec = "<h4 style='color:goldenrod'><i class='fa-solid fa-warning'></i> " \
+                     + "This DOI is saved locally as an external DOI (minimal data saved)</h4><br>"
+        else:
+            recsec = "<h4 style='color:red'><i class='fa-solid fa-warning'></i> " \
+                     + "This DOI is not saved locally in the Janelia database</h4><br>"
         if is_ignored(doi):
             recsec += "<h4 style='color:red'><i class='fa-solid fa-warning'></i> " \
                      + "This DOI is in the ignore list</h4><br>"
