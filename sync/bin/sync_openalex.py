@@ -11,7 +11,7 @@
     jrc_former_status.
 """
 
-__version__ = '3.0.0'
+__version__ = '3.1.0'
 
 import argparse
 import collections
@@ -103,7 +103,12 @@ def get_pmc_license(pmcid):
         Returns:
           License
     """
-    data = DL.get_doi_record(pmcid, source='pmc')
+    try:
+        data = DL.get_doi_record(pmcid, source='pmc')
+    except Exception as err:
+        LOGGER.warning(f"Could not get PMC license for {pmcid}: {err}")
+        COUNT['pmc_error'] += 1
+        return None
     if not data or 'OAI-PMH' not in data or 'GetRecord' not in data['OAI-PMH'] \
        or 'record' not in data['OAI-PMH']['GetRecord'] \
        or 'metadata' not in data['OAI-PMH']['GetRecord']['record'] \
@@ -193,9 +198,11 @@ def update_open_access(row):
     try_pmc = True
     try:
         # Open Access
-        if 'jrc_is_oa' not in row and 'open_access' in data and data['open_access']:
-            payload['jrc_is_oa'] = bool(data['open_access']['is_oa'])
-            payload['jrc_oa_status'] = data['open_access']['oa_status']
+        if 'open_access' in data and data['open_access']:
+            if 'jrc_is_oa' not in row:
+                payload['jrc_is_oa'] = bool(data['open_access']['is_oa'])
+            if 'jrc_oa_status' not in row:
+                payload['jrc_oa_status'] = data['open_access']['oa_status']
         # License
         if ('jrc_license' not in row or not row['jrc_license']) \
            and 'primary_location' in data and data['primary_location'] \
@@ -205,10 +212,10 @@ def update_open_access(row):
                 payload['jrc_license'] = LICENSE[data['primary_location']['license']]
                 LOGGER.info(f"Using license (primary_location) {payload['jrc_license']} " \
                             + f"for {row['doi']}")
+                try_pmc = False
             else:
                 LOGGER.warning(f"Unknown license {data['primary_location']['license']} " \
                                + f"for {row['doi']}")
-            try_pmc = False
         if ('jrc_license' not in payload or payload['jrc_license'] is None) and try_pmc \
            and 'jrc_pmc' in row:
             alt = get_pmc_license(row['jrc_pmc'])
@@ -284,6 +291,8 @@ def show_counts():
     msg = f"DOIs read:      {COUNT['dois']:,}\n"
     if COUNT['notfound']:
         msg += f"DOIs not found: {COUNT['notfound']:,}\n"
+    if COUNT['pmc_error']:
+        msg += f"PMC errors:     {COUNT['pmc_error']:,}\n"
     if COUNT['updated']:
         msg += f"DOIs updated:   {COUNT['updated']:,}\n"
     return msg
@@ -321,6 +330,9 @@ def process_dois():
     if dois:
         for doi in dois:
             data = DL.get_doi_record(doi, coll=DB['dis']['dois'])
+            if data is None:
+                LOGGER.warning(f"{doi} was not found in the database")
+                continue
             rows.append(data)
         cnt = len(rows)
     else:

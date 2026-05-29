@@ -8,6 +8,8 @@ import json
 from operator import attrgetter
 import re
 import sys
+import time
+import requests
 from tqdm import tqdm
 import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
@@ -18,6 +20,8 @@ import doi_common.doi_common as DL
 DB = {}
 # Counters
 COUNT = collections.defaultdict(lambda: 0, {})
+# Global variables
+ARG = LOGGER = None
 
 
 def terminate_program(msg=None):
@@ -32,6 +36,29 @@ def terminate_program(msg=None):
             msg = f"An exception of type {type(msg).__name__} occurred. Arguments:\n{msg.args}"
         LOGGER.critical(msg)
     sys.exit(-1 if msg else 0)
+
+
+def call_with_retry(func, *args, max_tries=3, delay=10, **kwargs):
+    ''' Call a function with exponential-backoff retry on ReadTimeout
+        Keyword arguments:
+          func: callable to invoke
+          max_tries: maximum attempts
+          delay: initial delay in seconds (doubles each retry)
+        Returns:
+          Return value of func
+    '''
+    last_err = None
+    for attempt in range(1, max_tries + 1):
+        try:
+            return func(*args, **kwargs)
+        except requests.exceptions.ReadTimeout as err:
+            last_err = err
+            if attempt < max_tries:
+                wait = delay * (1.5 ** (attempt - 1))
+                LOGGER.warning(f"ReadTimeout calling {func.__name__} "
+                               f"(attempt {attempt}/{max_tries}), retrying in {wait}s")
+                time.sleep(wait)
+    raise last_err
 
 
 def initialize_program():
@@ -79,7 +106,7 @@ def get_dois_from_arxiv():
           List of DOIs
     '''
     offset = 0
-    batch_size = 10
+    batch_size = 100
     done = False
     check = {}
     parts = 0
@@ -88,8 +115,8 @@ def get_dois_from_arxiv():
         post = f"&start={offset}&max_results={batch_size}"
         query = f"all:janelia{post}"
         LOGGER.debug(query)
-        response = JRC.call_arxiv(query)
-        if 'feed' in response and 'entry' in response['feed']:
+        response = call_with_retry(JRC.call_arxiv, query)
+        if response and 'feed' in response and 'entry' in response['feed']:
             entry = response['feed']['entry']
             parts += 1
             LOGGER.debug(f"Part {parts:,} with {len(entry):,} entries")
@@ -137,11 +164,11 @@ def parse_authors(doi, msg, ready, review):
             if auth['janelian']:
                 janelians.append(f"{auth['given']} {auth['family']} ({auth['match']})")
                 if auth['match'] in ("ORCID", "asserted"):
-                    COUNT['asserted'] += 1
                     mode = auth['match']
         if janelians:
             print(f"Janelians found for {doi}: {', '.join(janelians)}")
             if mode:
+                COUNT['asserted'] += 1
                 ready.append(doi)
             else:
                 review.append(doi)
@@ -160,11 +187,13 @@ def run_search():
     ready = []
     review = []
     for doi, item in tqdm(check.items(), desc='DataCite check'):
-        resp = JRC.call_datacite(doi)
+        resp = call_with_retry(JRC.call_datacite, doi)
         if resp and 'data' in resp:
             janelians = parse_authors(doi, resp['data']['attributes'], ready, review)
             if not janelians:
                 COUNT['no_janelians'] += 1
+        else:
+            COUNT['no_datacite'] += 1
     if ready:
         LOGGER.info("Writing DOIs to arxiv_ready.txt")
         with open('arxiv_ready.txt', 'w', encoding='ascii') as outstream:
@@ -178,7 +207,7 @@ def run_search():
     print(f"DOIs read from arXiv:            {COUNT['read']:,}")
     print(f"DOIs already in database:        {COUNT['in_dois']:,}")
     print(f"DOIs in DataCite (asserted):     {COUNT['asserted']:,}")
-    print(f"DOIs not in DataCite:            {COUNT['no_crossref']:,}")
+    print(f"DOIs not in DataCite:            {COUNT['no_datacite']:,}")
     print(f"DOIs with no Janelian authors:   {COUNT['no_janelians']:,}")
     print(f"DOIs ready for processing:       {len(ready):,}")
     print(f"DOIs requiring review:           {len(review):,}")
