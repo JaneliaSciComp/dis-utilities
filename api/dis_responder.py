@@ -35,7 +35,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "115.4.0"
+__version__ = "115.4.1"
 # Database
 DB = {}
 CVTERM = {}
@@ -4312,7 +4312,7 @@ def doi_tabs(doi, row, data, authors):
             tags.append(f"<a href='/tag/{escape(tag['name'])}'>{tag['name']}</a>")
         if tags:
             ahtml += "<h4>Acknowledgement tags</h4>" + "<br>".join(tags)
-    acktext = ""
+    acktext = asrc = ""
     if row and row.get('jrc_acknowledgements'):
         acktext = row['jrc_acknowledgements'].replace('\n', '<br>')
     elif row and not row.get('jrc_inserted', False):
@@ -4331,8 +4331,9 @@ def doi_tabs(doi, row, data, authors):
                 highlight = ""
         except Exception:
             pass
-        ahtml += f"<h4>Acknowledgements</h4><div class='abstract'>{acktext}<br>" \
-                 + f"<span style='font-size:10pt;background-color:#777;color:aqua;'>Source: {asrc}</span></div>"
+        ahtml += f"<h4>Acknowledgements</h4><div class='abstract'>{acktext}"
+        if asrc:
+            ahtml += f"<br><span style='font-size:10pt;background-color:#777;color:aqua;'>Source: {asrc}</span></div>"
         if highlight:
             ahtml += "<br><span style='color:goldenrod'><i class='fa-solid fa-warning'></i>" \
                      + " Acknowledgment highlighting is an experimental feature</span>"
