@@ -35,7 +35,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "115.3.1"
+__version__ = "115.4.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -4318,7 +4318,7 @@ def doi_tabs(doi, row, data, authors):
     elif row and not row.get('jrc_inserted', False):
         # If this DOI isn't in our database, look for acknowledgements
         try:
-            acktext = DL.get_acknowledgements(doi)
+            acktext, asrc = DL.get_acknowledgements(doi)
         except Exception:
             pass
     if acktext:
@@ -4331,7 +4331,8 @@ def doi_tabs(doi, row, data, authors):
                 highlight = ""
         except Exception:
             pass
-        ahtml += f"<h4>Acknowledgements</h4><div class='abstract'>{acktext}</div>"
+        ahtml += f"<h4>Acknowledgements</h4><div class='abstract'>{acktext}<br>" \
+                 + f"<span style='font-size:10pt;background-color:#777;color:aqua;'>Source: {asrc}</span></div>"
         if highlight:
             ahtml += "<br><span style='color:goldenrod'><i class='fa-solid fa-warning'></i>" \
                      + " Acknowledgment highlighting is an experimental feature</span>"
