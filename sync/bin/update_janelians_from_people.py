@@ -94,7 +94,7 @@ def update_preferred_name(idresp, row):
             print(f"Key: {key}   Value: {val}\nidresp:")
             print(json.dumps(idresp, indent=2))
             print("row:")
-            print(json.dumps(idresp, indent=2))
+            print(json.dumps(row, indent=2))
             terminate_program(err)
         dirty = True
     if not dirty:
@@ -111,7 +111,7 @@ def update_preferred_name(idresp, row):
 
 
 def reset_record(row):
-    ''' Reset affiliations, managed teams, and group
+    ''' Reset affiliations and group (managed is reset in update_managed_teams)
         Keyword arguments:
             row: record to reset
         Returns:
@@ -197,6 +197,8 @@ def update_managed_teams(idresp, row):
     lab = ''
     old_affiliations = row['affiliations'] if 'affiliations' in row else []
     old_managed = row['managed'] if 'managed' in row else []
+    # Reset managed so it's rebuilt from scratch; old_managed holds the prior value for comparison
+    row.pop('managed', None)
     for team in idresp['managedTeams']:
         if team['supOrgSubType'] == 'Lab' and team['supOrgName'].endswith(' Lab'):
             # Lab head
@@ -206,7 +208,7 @@ def update_managed_teams(idresp, row):
                 LOGGER.warning(f"Multiple labs found for {idresp['nameFirstPreferred']} " \
                                + idresp['nameLastPreferred'])
             lab = team['supOrgName']
-            if 'group' not in row:
+            if 'group' not in row or row['group'] != lab:
                 dirty = True
             row['group'] = lab
             row['group_code'] = team['supOrgCode']
@@ -262,8 +264,6 @@ def record_updates(idresp, row):
     dirty = False
     # Update preferred name
     pdirty = update_preferred_name(idresp, row)
-    if pdirty:
-        COUNT['name'] += 1
     # Update affiliations
     udirty = update_affiliations(idresp, row)
     # Update workerType
@@ -319,14 +319,15 @@ def postprocessing(audit):
             for row in audit:
                 outfile.write(f"{json.dumps(row, indent=4, default=str)}\n")
         LOGGER.info(f"Wrote {len(audit)} updates to {filename}")
-    if (not COUNT['updated']) or (not (ARG.TEST or ARG.WRITE)):
+    if (not ARG.TEST) and ((not COUNT['updated']) or (not ARG.WRITE)):
         return
     text = f"<pre>The orcid collection has been updated from the People system.\n\n{msg}</pre>"
-    text += "<br><br>Please see the attached file for the new records."
+    if audit:
+        text += "<br><br>Please see the attached file for the new records."
     subject = "Janelians updated from People system"
     email = DIS['developer'] if ARG.TEST else DIS['receivers']
     JRC.send_email(text, DIS['sender'], email, subject,
-                   attachment=filename, mime='html')
+                   attachment=filename if audit else None, mime='html')
 
 
 def update_orcid():
@@ -350,9 +351,7 @@ def update_orcid():
     for row in tqdm(rows, total=cnt, desc="Checking People"):
         if ARG.RESET:
             reset_record(row)
-        # Always reset managed teams
-        if 'managed' in row:
-            del row['managed']
+        # managed is reset inside update_managed_teams after capturing old value
         COUNT['orcid'] += 1
         try:
             idresp = JRC.call_people_by_id(row['employeeId'])
