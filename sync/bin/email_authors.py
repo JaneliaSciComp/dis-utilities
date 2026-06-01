@@ -2,7 +2,7 @@
     Email information on newly-added DOIs to authors
 '''
 
-__version__ = '1.1.0'
+__version__ = '1.2.0'
 
 import argparse
 from datetime import datetime, timedelta
@@ -154,6 +154,8 @@ def process_authors(authors, publications, cnt):
         author_valid = valid_author(auth)
         if not author_valid:
             LOGGER.warning(f"Skipping alumnus {auth}")
+            arec = DL.single_orcid_lookup(auth, DB['dis'].orcid, 'employeeId')
+            name = ' '.join([arec['given'][0], arec['family'][0]])
             alumni.append(name)
             continue
         resp = JRC.call_people_by_id(auth)
