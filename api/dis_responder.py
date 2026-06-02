@@ -35,7 +35,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "115.4.1"
+__version__ = "116.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -2366,6 +2366,7 @@ def dloop(row, keys, sep="\t"):
           Joined values from a dictionary
     '''
     return sep.join([str(row[fld]) for fld in keys])
+
 
 
 def last_thursday():
@@ -8362,8 +8363,11 @@ def show_subscription(sid):
     html = ''
     html += f"<table class='proplist'><tr><td>Publisher</td><td>{row['publisher']}</td></tr>" \
             + f"<tr><td>Type</td><td>{row['type']}</td></tr>" \
-            + f"<tr><td>Access</td><td><span style='color: {color}'>{row['access']}</span>" \
-            + f"</td></tr><tr><td>Provider</td><td>{row['provider']}</td></tr>" \
+            + f"<tr><td>Access</td><td><span style='color: {color}'>{row['access']}</span>"
+    if row.get('oa_status'):
+        html += f"<tr><td>Open Access status</td><td><span class='oa_{row['oa_status']}'" \
+                + f"style='font-weight: bold;'>{row['oa_status'].capitalize()}</span>"
+    html += f"</td></tr><tr><td>Provider</td><td>{row['provider']}</td></tr>" \
             + f"<tr><td>Print ISSN</td><td>{row['print-identifier']}</td></tr>" \
             + f"<tr><td>Online ISSN</td><td>{row['online-identifier']}</td></tr>" \
             + f"<tr><td>Title ID</td><td>{row['title-id']}</td></tr>"
@@ -9670,6 +9674,7 @@ def stats_database():
     ''' Show database stats
     '''
     collection = {}
+    total_free_storage = 0
     try:
         cnames = DB['dis'].list_collection_names()
         for cname in cnames:
@@ -9677,36 +9682,119 @@ def stats_database():
             indices = []
             for key, val in stat['indexSizes'].items():
                 indices.append(f"{key} ({humansize(val, space='mem')})")
-            free = stat['freeStorageSize'] / stat['storageSize'] * 100
+            storage_size = stat.get('storageSize', 0)
+            free_storage = stat.get('freeStorageSize', 0)
+            free_raw = (free_storage / storage_size * 100) if storage_size else 0.0
+            total_free_storage += free_storage
             if 'avgObjSize' not in stat:
                 stat['avgObjSize'] = 0
+            nidx = stat.get('nindexes', len(stat['indexSizes']))
+            total_idx_size = stat.get('totalIndexSize', sum(stat['indexSizes'].values()))
+            data_size = stat.get('size', 0)
+            ratio_raw = data_size / storage_size if storage_size else 0
             collection[cname] = {"docs": f"{stat['count']:,}",
+                                 "docs_raw": stat['count'],
                                  "docsize": humansize(stat['avgObjSize'], space='mem'),
-                                 "size": humansize(stat['storageSize'], space='mem'),
-                                 "free": f"{free:.2f}%",
+                                 "docsize_raw": stat['avgObjSize'],
+                                 "datasize": humansize(data_size, space='mem'),
+                                 "datasize_raw": data_size,
+                                 "storagesize": humansize(storage_size, space='mem'),
+                                 "storagesize_raw": storage_size,
+                                 "ratio": f"{ratio_raw:.2f}x" if storage_size else "N/A",
+                                 "ratio_raw": ratio_raw,
+                                 "free": f"{free_raw:.2f}%",
+                                 "free_raw": free_raw,
+                                 "idxsize": f"{nidx} ({humansize(total_idx_size, space='mem')})",
+                                 "idxsize_raw": total_idx_size,
                                  "idx": ", ".join(indices)
                                 }
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get collection stats"),
                                message=error_message(err))
-    html = '<table id="collections" class="tablesorter numbercenter-scroll"><thead><tr>' \
-           + '<th>Collection</th><th>Documents</th><th>Avg. document size</th><th>Size</th>' \
-            + '<th>Free space</th><th>Indices</th></tr></thead><tbody>'
-    for coll, val in sorted(collection.items()):
-        html += f"<tr><td>{coll}</td><td>" + dloop(val, ['docs', 'docsize', 'size', 'free', 'idx'],
-                                                   "</td><td>") + "</td></tr>"
+    try:
+        dbstat = DB['dis'].command('dbStats')
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get database stats"),
+                               message=error_message(err))
+    db_data = dbstat.get('dataSize', 0)
+    db_storage = dbstat.get('storageSize', 0)
+    db_index = dbstat.get('indexSize', 0)
+    db_ratio = f"{db_data / db_storage:.2f}x" if db_storage else "N/A"
+    frag_used = min(total_free_storage, db_storage)
+    summary_html = (
+        f"<p style='margin-bottom:1rem'>"
+        f"<strong>{dbstat.get('collections', 0)}</strong> collections &nbsp;|&nbsp; "
+        f"<strong>{dbstat.get('objects', 0):,}</strong> documents &nbsp;|&nbsp; "
+        f"<strong>{humansize(db_data, space='mem')}</strong> uncompressed &nbsp;|&nbsp; "
+        f"<strong>{humansize(db_storage, space='mem')}</strong> on-disk"
+        f"</p>"
+    )
+    charts_html = (
+        "<div style='display:flex;gap:2rem;align-items:flex-start;margin-bottom:1.5rem'>"
+        + DP.donut_chart(dbstat.get('fsUsedSize', 0), dbstat.get('fsTotalSize', 0),
+                         title="Filesystem usage", element_id="fsChart")
+        + DP.donut_chart(db_storage, db_storage + db_index,
+                         title="Data vs index storage", element_id="dataIdxChart",
+                         include_cdn=False, labels=['Data', 'Indexes'],
+                         colors=['#2ecc71', '#e74c3c'])
+        + DP.donut_chart(frag_used, db_storage,
+                         title="Storage fragmentation", element_id="fragChart",
+                         include_cdn=False, labels=['Wasted', 'Active'])
+        + "<div style='border:1px solid #555;border-radius:6px;padding:1rem;"
+          "font-size:0.85em;max-width:420px;align-self:center'>"
+          "<p><strong>Filesystem usage</strong> — how full the disk volume is. "
+          "Includes all data on the server, not just MongoDB.</p>"
+          "<p><strong>Data vs index storage</strong> — what fraction of MongoDB's "
+          "footprint is document data versus indexes. A large index share may indicate "
+          "over-indexing.</p>"
+          "<p style='margin-bottom:0'><strong>Storage fragmentation</strong> — wasted space "
+          "(red) from deleted or updated documents not yet reclaimed. A large red slice "
+          "means <code>compact</code> could recover significant disk space.</p>"
+          "</div>"
+        + "</div>")
+
+    html = (summary_html + charts_html
+            + '<table id="collections" class="tablesorter numbercenter-scroll"><thead><tr>'
+            + '<th>Collection</th><th>Documents</th><th>Avg. doc size</th>'
+            + '<th>Uncompressed size</th><th>On-disk size</th><th>Compression ratio</th>'
+            + '<th>Fragmentation</th><th>Indexes</th><th>Index details</th>'
+            + '</tr></thead><tbody>')
+    for cname, val in sorted(collection.items()):
+        empty_badge = (" <span style='color:#e74c3c !important;font-size:0.8em'>[empty]</span>"
+                       if val['docs_raw'] == 0 else "")
+        frag = val['free_raw']
+        frag_color = "#2ecc71" if frag < 5 else ("#f39c12" if frag < 20 else "#e74c3c")
+        ratio_style = "color:#f39c12 !important" if 0 < val['ratio_raw'] < 1.0 else ""
+        html += (
+            f"<tr>"
+            f"<td>{cname}{empty_badge}</td>"
+            f"<td data-sort='{val['docs_raw']}'>{val['docs']}</td>"
+            f"<td data-sort='{val['docsize_raw']}'>{val['docsize']}</td>"
+            f"<td data-sort='{val['datasize_raw']}'>{val['datasize']}</td>"
+            f"<td data-sort='{val['storagesize_raw']}'>{val['storagesize']}</td>"
+            f"<td data-sort='{val['ratio_raw']}' style='{ratio_style}'>{val['ratio']}</td>"
+            f"<td data-sort='{val['free_raw']}' style='color:{frag_color} !important'>{val['free']}</td>"
+            f"<td data-sort='{val['idxsize_raw']}'>{val['idxsize']}</td>"
+            f"<td>{val['idx']}</td>"
+            f"</tr>"
+        )
     html += '</tbody>'
-    stat = DB['dis'].command('dbStats')
-    val = {"objects": f"{stat['objects']:,}",
-              "avgObjSize": humansize(stat['avgObjSize'], space='mem'),
-              "storageSize": humansize(stat['storageSize'], space='mem'),
-              "blank": "",
-              "indexSize": f"{stat['indexes']} indices " \
-                           + f"({humansize(stat['indexSize'], space='mem')})"}
+    footer_val = {"objects": f"{dbstat.get('objects', 0):,}",
+                  "avgObjSize": humansize(dbstat.get('avgObjSize', 0), space='mem'),
+                  "dataSize": humansize(db_data, space='mem'),
+                  "storageSize": humansize(db_storage, space='mem'),
+                  "ratio": db_ratio,
+                  "blank": "",
+                  "indexSize": f"{dbstat.get('indexes', 0)} indices "
+                               + f"({humansize(dbstat.get('indexSize', 0), space='mem')})",
+                  "blank2": ""}
     html += '<tfoot>'
     html += "<tr><th style='text-align:right'>TOTAL</th><th style='text-align:center'>" \
-            + dloop(val, ['objects', 'avgObjSize', 'storageSize', 'blank', 'indexSize'],
+            + dloop(footer_val,
+                    ['objects', 'avgObjSize', 'dataSize', 'storageSize', 'ratio',
+                     'blank', 'indexSize', 'blank2'],
                     "</th><th style='text-align:center'>") + "</th></tr>"
     html += '</tfoot>'
     html += '</table>'

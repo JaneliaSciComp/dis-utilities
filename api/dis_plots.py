@@ -3,6 +3,7 @@
 '''
 
 import colorsys
+import json
 from math import ceil, pi
 import numpy as np
 from bokeh.colors import named as _bokeh_named
@@ -166,6 +167,75 @@ def get_colors_by_count(cnt):
 # ******************************************************************************
 # * Basic charts                                                               *
 # ******************************************************************************
+
+def _fmt_bytes(num):
+    ''' Return a human-readable byte size using SI units (1000-based).
+        Keyword arguments:
+          num: size in bytes
+        Returns:
+          Formatted string
+    '''
+    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+        if abs(num) < 1000.0:
+            return f"{num:.2f}{unit}"
+        num /= 1000.0
+    return f"{num:.2f}PB"
+
+
+def donut_chart(used, total, title="Usage", element_id="donutChart", include_cdn=True,
+                labels=None, colors=None):
+    ''' Return HTML+JS for a Chart.js doughnut chart showing used vs. free.
+        Keyword arguments:
+          used: bytes in the first (left) segment
+          total: total bytes (used + remainder)
+          title: chart title
+          element_id: canvas element id
+          include_cdn: emit Chart.js CDN script and fmtBytes helper (set False
+                       for subsequent charts on the same page)
+          labels: two-element list of segment labels (default ['Used', 'Free'])
+          colors: two-element list of CSS colors (default red/green)
+        Returns:
+          HTML string, or empty string if total is 0
+    '''
+    if not total:
+        return ""
+    if labels is None:
+        labels = ['Used', 'Free']
+    if colors is None:
+        colors = ['#e74c3c', '#2ecc71']
+    free = total - used
+    pct = used / total * 100
+    caption = f"{_fmt_bytes(used)} used of {_fmt_bytes(total)} ({pct:.1f}% full)"
+    cdn = (
+        '<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>\n'
+        "<script>\n"
+        "function fmtBytes(n) {\n"
+        "  const u=['B','KB','MB','GB','TB']; let i=0;\n"
+        "  while(n>=1000&&i<u.length-1){n/=1000;i++;}\n"
+        "  return n.toFixed(2)+' '+u[i]; }\n"
+    ) if include_cdn else "<script>\n"
+    return (
+        f"<div style='width:220px;text-align:center'>"
+        f"<canvas id='{element_id}'></canvas>"
+        f"<small>{caption}</small></div>"
+        + cdn
+        + f"new Chart(document.getElementById('{element_id}'), {{\n"
+        "  type: 'doughnut',\n"
+        f"  data: {{\n"
+        f"    labels: {json.dumps(labels)},\n"
+        f"    datasets: [{{ data: [{used}, {free}],\n"
+        f"                  backgroundColor: {json.dumps(colors)},\n"
+        "                  borderWidth: 1 }]\n"
+        "  },\n"
+        "  options: {\n"
+        "    plugins: {\n"
+        f"      title: {{ display: true, text: '{title}' }},\n"
+        "      legend: { position: 'bottom', labels: { color: '#ddd', font: { weight: 'bold', size: 13 } } },\n"
+        "      tooltip: { callbacks: { label: ctx => fmtBytes(ctx.raw) } }\n"
+        "    }\n"
+        "  }\n"
+        "});\n"
+        "</script>\n")
 
 def pie_chart(data, title, legend, height=300, width=400, location="right",
               colors=None, style=None, fmt=None):
