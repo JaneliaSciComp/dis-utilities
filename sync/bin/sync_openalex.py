@@ -31,6 +31,7 @@ import doi_common.doi_common as DL
 ARG = DISCONFIG = LOGGER = None
 DB = {}
 LICENSE = {}
+JOURNAL = {}
 OUTPUT = []
 COUNT = collections.defaultdict(lambda: 0, {})
 
@@ -73,6 +74,12 @@ def initialize_program():
         terminate_program(err)
     for row in rows:
         LICENSE[row['name']] = row['display']
+    try:
+        rows = DB['dis'].subscription.find({"oa_status": {"$exists": True}})
+    except Exception as err:
+        terminate_program(err)
+    for row in rows:
+        JOURNAL[row['title']] = row['oa_status']
 
 
 def get_dois():
@@ -106,7 +113,7 @@ def get_pmc_license(pmcid):
     try:
         data = DL.get_doi_record(pmcid, source='pmc')
     except Exception as err:
-        LOGGER.warning(f"Could not get PMC license for {pmcid}: {err}")
+        LOGGER.debug(f"Could not get PMC license for {pmcid}: {err}")
         COUNT['pmc_error'] += 1
         return None
     if not data or 'OAI-PMH' not in data or 'GetRecord' not in data['OAI-PMH'] \
@@ -120,7 +127,10 @@ def get_pmc_license(pmcid):
        or 'custom-meta' not in front['article-meta']['custom-meta-group'] \
         or not front['article-meta']['custom-meta-group']['custom-meta']:
         return None
-    for custom_meta in front['article-meta']['custom-meta-group']['custom-meta']:
+    custom_meta_list = front['article-meta']['custom-meta-group']['custom-meta']
+    if isinstance(custom_meta_list, dict):
+        custom_meta_list = [custom_meta_list]
+    for custom_meta in custom_meta_list:
         if custom_meta['meta-name'] == 'license':
             return custom_meta['meta-value'].replace(" ", "-").lower()
     return None
@@ -186,6 +196,12 @@ def update_open_access(row):
     if 'jrc_obtained_from' in row and row['jrc_obtained_from'] == 'DataCite':
         update_datacite_license(row)
     time.sleep(.05)
+    if not row.get('jrc_oa_status') and row.get('jrc_journal') and row['jrc_journal'] in JOURNAL:
+        row['jrc_is_oa'] = True
+        payload['jrc_is_oa'] = True
+        row['jrc_oa_status'] = JOURNAL[row['jrc_journal']]
+        payload['jrc_oa_status'] = JOURNAL[row['jrc_journal']]
+        LOGGER.warning(f"Using journal OA status {row['jrc_oa_status']} for {row['doi']}")
     try:
         data = DL.get_doi_record(row['doi'], source='openalex')
     except Exception as err:
@@ -221,7 +237,7 @@ def update_open_access(row):
             alt = get_pmc_license(row['jrc_pmc'])
             if alt:
                 if alt in LICENSE:
-                    payload['jrc_license'] = alt
+                    payload['jrc_license'] = LICENSE[alt]
                     LOGGER.info(f"Using PMC license for {row['doi']}: {alt}")
                 else:
                     LOGGER.warning(f"Unknown PMC license {alt} for {row['doi']}")
@@ -358,7 +374,12 @@ def process_dois():
     # Open Access status override
     COUNT['dois'] = COUNT["updated"] = COUNT["notfound"] = 0
     if dois:
-        cnt = len(dois)
+        rows = []
+        for doi in dois:
+            data = DL.get_doi_record(doi, coll=DB['dis']['dois'])
+            if data is not None:
+                rows.append(data)
+        cnt = len(rows)
     else:
         rows = []
         payload = {"jrc_is_oa": {"$exists": True}, "jrc_oa_status": "closed",
