@@ -1,9 +1,37 @@
-''' update_janelians_from_people.py
-    Update active Janelians in the MongoDB orcid collection with
-    data (names, affiliation, employee types, teams) from the People system.
-'''
+"""
+Sync active Janelian records in the MongoDB orcid collection with current
+data from the People system.
 
-__version__ = '6.0.1'
+Usage:
+    python update_janelians_from_people.py [--orcid ORCID] [--manifold dev|prod]
+                                           [--alumni] [--reset] [--test] [--write]
+                                           [--verbose] [--debug]
+
+Requires a valid API key in the PEOPLE_API_KEY environment variable.
+
+For each active Janelian in the orcid collection (or a single record when
+--orcid is given), the script fetches the corresponding People record and
+updates the following fields if they have changed:
+
+    - Preferred given/family name ordering
+    - Affiliations (from supOrgName, ccDescr, and managedTeams)
+    - workerType
+    - Managed teams and lab group
+    - hireDate (set once, never overwritten)
+
+If --alumni is set, records with no matching People entry are marked as
+former employees (alumni=True) rather than causing an error.
+
+If --reset is set, affiliations, group, and group_code are cleared before
+updates are applied; useful for rebuilding stale affiliation data.
+
+Changes are written to MongoDB only when --write is supplied. An audit file
+(people_orcid_updates.json) is written for any run that produces updates.
+
+An HTML summary email is sent when --test or --write is supplied.
+"""
+
+__version__ = '6.1.1'
 
 import argparse
 import collections
@@ -90,13 +118,13 @@ def update_preferred_name(idresp, row):
                 if idresp[val] in row[key]:
                     row[key].remove(idresp[val])
                 row[key].insert(0, idresp[val])
+                dirty = True
         except Exception as err:
             print(f"Key: {key}   Value: {val}\nidresp:")
             print(json.dumps(idresp, indent=2))
             print("row:")
             print(json.dumps(row, indent=2))
             terminate_program(err)
-        dirty = True
     if not dirty:
         return dirty
     if sorted(old_given) == sorted(row['given']) and sorted(old_family) == sorted(row['family']):
@@ -183,7 +211,7 @@ def update_affiliations(idresp, row):
     return dirty
 
 
-def update_managed_teams(idresp, row):
+def update_managed_teams(idresp, row):  # pylint: disable=too-many-branches
     ''' Update managed teams
         Keyword arguments:
           idresp: response from People
@@ -218,8 +246,8 @@ def update_managed_teams(idresp, row):
             if team['supOrgName'] not in row['managed'] and team['supOrgSubType']:
                 if team['supOrgSubType'] != 'Lab' or not team['supOrgName'].endswith(' Lab'):
                     row['managed'].append(team['supOrgName'])
-                    LOGGER.debug(f"{row['given'][0]} {row['family'][0]}: {old_affiliations} -> " \
-                                 + f"{row['affiliations']}")
+                    LOGGER.debug(f"{row['given'][0]} {row['family'][0]}: {old_managed} -> " \
+                                 + f"{row['managed']}")
                     if not dirty:
                         COUNT['managed'] += 1
                         dirty = True
@@ -289,7 +317,6 @@ def record_updates(idresp, row):
         except Exception as err:
             LOGGER.error(f"Error updating hire date {idresp['hireDate']} {hdate} for " \
                          + f"{row['given'][0]} {row['family'][0]}: {err}")
-            terminate_program(err)
     if pdirty or udirty or mdirty:
         dirty = True
     return dirty
@@ -312,25 +339,34 @@ def postprocessing(audit):
           + f"  Set to former employee: {COUNT['alumni']:,}\n" \
           + f"Authors written:          {COUNT['written']:,}"
     print(msg)
-    filename = 'people_orcid_updates.json' #PLUG
+    filename = 'people_orcid_updates.json'
+    text = ""
+    alumni = []
     if audit:
-        filename = 'people_orcid_updates.json'
         with open(filename, 'w', encoding='utf-8') as outfile:
             for row in audit:
                 outfile.write(f"{json.dumps(row, indent=4, default=str)}\n")
+                if 'alumni' in row and row['alumni']:
+                    alumni.append("<a href='https://dis.int.janelia.org/userui/" \
+                                  + f"{row.get('userIdO365', '')}'>{row['given'][0]} " \
+                                  + f"{row['family'][0]}</a>")
+        if alumni:
+            text += ("<br><br>The following authors have been set to former employees:"
+                     + f"<br>{'<br>'.join(alumni)}")
         LOGGER.info(f"Wrote {len(audit)} updates to {filename}")
-    if (not ARG.TEST) and ((not COUNT['updated']) or (not ARG.WRITE)):
+    if not (ARG.TEST or (COUNT['updated'] and ARG.WRITE)):
         return
-    text = f"<pre>The orcid collection has been updated from the People system.\n\n{msg}</pre>"
+    text += f"<pre>The orcid collection has been updated from the People system.\n\n{msg}</pre>"
     if audit:
         text += "<br><br>Please see the attached file for the new records."
+    text = JRC.get_run_data(__file__, __version__) + "<br>" + text
     subject = "Janelians updated from People system"
     email = DIS['developer'] if ARG.TEST else DIS['receivers']
     JRC.send_email(text, DIS['sender'], email, subject,
                    attachment=filename if audit else None, mime='html')
 
 
-def update_orcid():
+def update_orcid():  # pylint: disable=too-many-branches
     ''' Sync People to the orcid collection
         Keyword arguments:
           None
@@ -353,12 +389,17 @@ def update_orcid():
             reset_record(row)
         # managed is reset inside update_managed_teams after capturing old value
         COUNT['orcid'] += 1
+        if 'employeeId' not in row:
+            LOGGER.warning(f"No employeeId for {row.get('given', ['?'])[0]} "
+                           f"{row.get('family', ['?'])[0]} — skipping")
+            continue
         try:
             idresp = JRC.call_people_by_id(row['employeeId'])
         except TIMEOUT as err:
             terminate_program(f"Request failed after multiple retries: {err}")
         except Exception as err:
             terminate_program(f"Error calling People by id: {err}")
+        dirty = False
         if not idresp:
             if ARG.ALUMNI:
                 LOGGER.warning(f"No People record for {row}")
