@@ -1,5 +1,27 @@
-""" pull_protocolsio.py
-    Find DOIs from protocols.io that can be added to the dois collection.
+"""
+Query the protocols.io API for Janelia-affiliated protocols and write candidate
+DOIs to local files for downstream ingestion.
+
+Usage:
+    python pull_protocolsio.py [--term TERM] [--manifold dev|prod]
+                               [--test] [--write] [--verbose] [--debug]
+
+Searches protocols.io for public protocols matching --term (default: Janelia),
+pages through results in batches of 50, and checks each DOI against Crossref
+to confirm Janelia authorship via ORCID or affiliation assertion.
+
+Requires a valid API token in the PROTOCOLS_API_TOKEN environment variable.
+
+DOIs already present in the MongoDB dois, external_dois, or to_ignore
+collections are excluded from output.
+
+Output files (written to the current working directory):
+    protocolsio_ready.txt        DOIs with confirmed Janelia authorship, ready for processing.
+    protocolsio_review.txt       DOIs with unconfirmed Janelia authorship; require manual review.
+    protocolsio_alumni.txt       DOIs where only alumni authors were identified.
+    protocolsio_nojanelians.txt  DOIs where no Janelia or alumni authors were found.
+
+An HTML summary email is sent when --test or --write is supplied.
 """
 
 import argparse
@@ -19,13 +41,13 @@ import doi_common.doi_common as DL
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation
 # pylint: disable=too-many-arguments,too-many-positional-arguments
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 # Parms
 ARG = DISCONFIG = LOGGER = None
 # Database
 DB = {}
-IGNORE = {}
+DOI_CACHE = {}  # doi -> source collection name
 # Counters
 COUNT = collections.defaultdict(int)
 
@@ -71,13 +93,29 @@ def initialize_program():
             DB[source] = JRC.connect_database(dbo)
         except Exception as err:
             terminate_program(err)
+    build_doi_cache()
+
+
+def build_doi_cache():
+    ''' Pre-load known DOIs from dois, external_dois, and to_ignore collections
+        Keyword arguments:
+          None
+        Returns:
+          None
+    '''
     try:
-        rows = DB['dis']['to_ignore'].find({"type": "doi"})
+        for rec in DB['dis']['dois'].find({}, {"doi": 1}):
+            if rec.get('doi'):
+                DOI_CACHE[rec['doi'].lower()] = 'dois'
+        for rec in DB['dis']['external_dois'].find({}, {"doi": 1}):
+            if rec.get('doi'):
+                DOI_CACHE[rec['doi'].lower()] = 'external_dois'
+        for rec in DB['dis']['to_ignore'].find({"type": "doi"}, {"key": 1}):
+            if rec.get('key'):
+                DOI_CACHE[rec['key'].lower()] = 'to_ignore'
     except Exception as err:
         terminate_program(err)
-    for row in rows:
-        IGNORE[row['key']] = True
-    LOGGER.info(f"Found {len(IGNORE):,} DOIs to ignore")
+    LOGGER.info(f"Loaded {len(DOI_CACHE):,} known DOIs into cache")
 
 
 def get_dois_from_protocolsio():
@@ -122,20 +160,6 @@ def get_dois_from_protocolsio():
     return check
 
 
-def doi_exists(doi):
-    ''' Check if DOI exists in the database
-        Keyword arguments:
-          doi: DOI to check
-        Returns:
-          True if exists, False otherwise
-    '''
-    try:
-        row = DB['dis']['dois'].find_one({"doi": doi})
-    except Exception as err:
-        terminate_program(err)
-    return bool(row)
-
-
 def parse_authors(doi, msg, ready, review, nojanelians, alumni):
     ''' Parse an author record to see if there are any Janelia authors
         Keyword arguments:
@@ -155,30 +179,32 @@ def parse_authors(doi, msg, ready, review, nojanelians, alumni):
     except Exception as err:
         LOGGER.error(f"Error getting author details for {doi}: {err}")
         return
-    if adet:
-        alum = []
-        janelians = []
-        mode = None
-        for auth in adet:
-            if auth['janelian']:
-                janelians.append(f"{auth['given']} {auth['family']} ({auth['match']})")
-                if auth['match'] in ("ORCID", "asserted"):
-                    mode = auth['match']
-            elif auth['alumni']:
-                alum.append(f"{auth['given']} {auth['family']} ({auth['match']})")
-        if janelians:
-            print(f"Janelians found for {doi}: {', '.join(janelians)}")
-            if mode:
-                ready.append(doi)
-            else:
-                review.append(json.dumps(msg, indent=4, default=str))
-            return
-        if alum:
-            alumni.append(json.dumps(msg, indent=4, default=str))
-            return
-        # DOIs with no Janelia authors are an issue because protocols.io sometimes
-        # has the author's middle name as part of the family name. Why?!
-        nojanelians.append(json.dumps(msg, indent=4, default=str))
+    if not adet:
+        COUNT['no_authors'] += 1
+        return
+    alum = []
+    janelians = []
+    mode = None
+    for auth in adet:
+        if auth['janelian']:
+            janelians.append(f"{auth['given']} {auth['family']} ({auth['match']})")
+            if auth['match'] in ("ORCID", "asserted"):
+                mode = auth['match']
+        elif auth['alumni']:
+            alum.append(f"{auth['given']} {auth['family']} ({auth['match']})")
+    if janelians:
+        print(f"Janelians found for {doi}: {', '.join(janelians)}")
+        if mode:
+            ready.append(doi)
+        else:
+            review.append(json.dumps(msg, indent=4, default=str))
+        return
+    if alum:
+        alumni.append(json.dumps(msg, indent=4, default=str))
+        return
+    # DOIs with no Janelia authors are an issue because protocols.io sometimes
+    # has the author's middle name as part of the family name. Why?!
+    nojanelians.append(json.dumps(msg, indent=4, default=str))
 
 
 def doimsg(item):
@@ -285,30 +311,33 @@ def run_search():
     nojanelians = []
     alumni = []
     for doi in tqdm(check, desc='Crossref check'):
-        if doi in IGNORE:
-            COUNT['ignored'] += 1
-            continue
-        if doi_exists(doi):
-            COUNT['in_dois'] += 1
+        if doi in DOI_CACHE:
+            if DOI_CACHE[doi] == 'dois':
+                COUNT['in_dois'] += 1
+            else:
+                COUNT['ignored'] += 1
             continue
         resp = JRC.call_crossref(doi)
+        sleep(0.25)
         if resp and 'message' in resp:
             parse_authors(doi, resp['message'], ready, review, nojanelians, alumni)
-            sleep(0.25)
         else:
             COUNT['no_crossref'] += 1
     _write_dois('protocolsio_ready.txt', ready)
     _write_dois('protocolsio_review.txt', review)
     _write_dois('protocolsio_alumni.txt', alumni)
     _write_dois('protocolsio_nojanelians.txt', nojanelians)
-    summary = f"DOIs read from protocols.io:   {COUNT['read']:,}\n" \
-              + f"DOIs already in database:      {COUNT['in_dois']:,}\n" \
-              + f"DOIs to ignore:                {COUNT['ignored']:,}\n" \
-              + f"DOIs not in Crossref:          {COUNT['no_crossref']:,}\n" \
-              + f"DOIs with no Janelian authors: {len(nojanelians):,}\n" \
-              + f"DOIs with alumni authors:      {len(alumni):,}\n" \
-              + f"DOIs ready for processing:     {len(ready):,}\n" \
-              + f"DOIs requiring review:         {len(review):,}\n"
+    summary = (
+        f"DOIs read from protocols.io:   {COUNT['read']:,}\n"
+        f"DOIs already in database:      {COUNT['in_dois']:,}\n"
+        f"DOIs to ignore:                {COUNT['ignored']:,}\n"
+        f"DOIs not in Crossref:          {COUNT['no_crossref']:,}\n"
+        f"DOIs with no author data:      {COUNT['no_authors']:,}\n"
+        f"DOIs with no Janelian authors: {len(nojanelians):,}\n"
+        f"DOIs with alumni authors:      {len(alumni):,}\n"
+        f"DOIs ready for processing:     {len(ready):,}\n"
+        f"DOIs requiring review:         {len(review):,}"
+    )
     print(summary)
     if ARG.TEST or ARG.WRITE:
         generate_email(summary, ready, review, nojanelians, alumni)

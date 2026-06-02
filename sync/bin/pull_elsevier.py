@@ -1,8 +1,24 @@
-''' pull_elsevier.py
-    Sync works from Elsevier
-'''
+"""
+Query the Elsevier API for Janelia-affiliated publications and write candidate
+DOIs to a local file for downstream ingestion.
 
-__version__ = '2.0.0'
+Usage:
+    python pull_elsevier.py [--test] [--write] [--verbose] [--debug]
+
+Searches the Elsevier Metadata API for articles with a Janelia affiliation,
+filtering to records on or after the minimum publishing date configured in the
+dis config. Results are paged in batches of 200.
+
+DOIs already present in the MongoDB dois collection, or listed in the
+external_dois or to_ignore collections, are excluded from output.
+
+Output files (written to the current working directory):
+    elsevier_ready.txt   DOIs not yet in the database, ready for processing.
+
+An HTML summary email is sent when --test or --write is supplied.
+"""
+
+__version__ = '2.1.0'
 
 import argparse
 import collections
@@ -11,13 +27,12 @@ import sys
 import traceback
 from tqdm import tqdm
 import jrc_common.jrc_common as JRC
-import doi_common.doi_common as DL
 
-# pylint: disable=broad-exception-caught,broad-exception-raised,logging-fstring-interpolation
+# pylint: disable=broad-exception-caught,logging-fstring-interpolation
 
 # Database
 DB = {}
-IGNORE = {}
+DOI_CACHE = {}  # doi -> source collection name
 # Counters
 COUNT = collections.defaultdict(lambda: 0, {})
 # Global variables
@@ -56,13 +71,29 @@ def initialize_program():
             DB[source] = JRC.connect_database(dbo)
         except Exception as err:
             terminate_program(err)
+    build_doi_cache()
+
+
+def build_doi_cache():
+    ''' Pre-load known DOIs from dois, external_dois, and to_ignore collections
+        Keyword arguments:
+          None
+        Returns:
+          None
+    '''
     try:
-        rows = DB['dis']['to_ignore'].find({"type": "doi"})
+        for rec in DB['dis']['dois'].find({}, {"doi": 1}):
+            if rec.get('doi'):
+                DOI_CACHE[rec['doi'].lower()] = 'dois'
+        for rec in DB['dis']['external_dois'].find({}, {"doi": 1}):
+            if rec.get('doi'):
+                DOI_CACHE[rec['doi'].lower()] = 'external_dois'
+        for rec in DB['dis']['to_ignore'].find({"type": "doi"}, {"key": 1}):
+            if rec.get('key'):
+                DOI_CACHE[rec['key'].lower()] = 'to_ignore'
     except Exception as err:
         terminate_program(err)
-    for row in rows:
-        IGNORE[row['key']] = True
-    LOGGER.info(f"Found {len(IGNORE):,} DOIs to ignore")
+    LOGGER.info(f"Loaded {len(DOI_CACHE):,} known DOIs into cache")
 
 
 def get_janelia_works():
@@ -73,17 +104,19 @@ def get_janelia_works():
           List of works
     '''
     suffix = "metadata/article?query=aff%28janelia%29&httpAccept=application/json&count=200"
-    rows = []
+    rows = set()
     part = 1
     while True:
         try:
             resp = JRC.call_elsevier(suffix)
         except Exception as err:
             terminate_program(err)
+        if 'search-results' not in resp:
+            terminate_program(f"Unexpected Elsevier response: {resp}")
         for row in resp['search-results'].get('entry', []):
             if 'prism:coverDate' in row and 'prism:doi' in row \
                and row['prism:coverDate'] >= DISCONFIG['min_publishing_date']:
-                rows.append(row['prism:doi'].lower())
+                rows.add(row['prism:doi'].lower())
         print(f"Got part {part}: found {len(rows)} works")
         part += 1
         suffix = None
@@ -94,7 +127,7 @@ def get_janelia_works():
         if not suffix:
             break
     LOGGER.debug(f"Found {len(rows)} works")
-    return rows
+    return list(rows)
 
 
 def doiurl(doi):
@@ -138,7 +171,7 @@ def generate_email(summary, to_process):
     if to_process:
         msg += "<br>The following DOIs will be added to the database:<br>"
         for doi in to_process:
-            msg += f"  {doiurl(doi)}<br>"
+            msg += doiurl(doi)
         msg += "<br>"
     if msg:
         msg = JRC.get_run_data(__file__, __version__) + "<br><br>" \
@@ -167,25 +200,23 @@ def processing():
     COUNT['read'] = len(dois)
     to_process = []
     for doi in tqdm(dois, desc="Processing DOIs"):
-        if doi in IGNORE:
-            COUNT['ignored'] += 1
-            continue
-        try:
-            row = DL.get_doi_record(doi, coll=DB['dis']['dois'])
-            if row:
+        if doi in DOI_CACHE:
+            if DOI_CACHE[doi] == 'dois':
                 COUNT['in_dois'] += 1
             else:
-                to_process.append(doi)
-        except Exception as err:
-            print(f"Error getting DOI record for {doi}: {err}")
+                COUNT['ignored'] += 1
+            continue
+        to_process.append(doi)
     if to_process:
         with open('elsevier_ready.txt', 'w', encoding='utf-8') as fileout:
             for doi in to_process:
                 fileout.write(doi + '\n')
-    summary = f"\nDOIs read from Elsevier:   {COUNT['read']:,}\n"
-    summary += f"DOIs already in database:  {COUNT['in_dois']:,}\n"
-    summary += f"DOIs to ignore:            {COUNT['ignored']:,}\n"
-    summary += f"DOIs ready for processing: {len(to_process):,}\n"
+    summary = (
+        f"DOIs read from Elsevier:   {COUNT['read']:,}\n"
+        f"DOIs already in database:  {COUNT['in_dois']:,}\n"
+        f"DOIs to ignore:            {COUNT['ignored']:,}\n"
+        f"DOIs ready for processing: {len(to_process):,}"
+    )
     print(summary)
     if ARG.TEST or ARG.WRITE:
         generate_email(summary, to_process)
