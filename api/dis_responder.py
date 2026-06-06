@@ -21,7 +21,7 @@ from types import SimpleNamespace
 from urllib.parse import unquote
 import dateutil.parser
 import dateutil.tz
-from bokeh.palettes import all_palettes, plasma, turbo
+from bokeh.palettes import all_palettes, plasma
 import bson
 from flask import (Flask, make_response, render_template, request, jsonify, redirect, send_file)
 from flask_cors import CORS
@@ -35,7 +35,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "116.0.0"
+__version__ = "117.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -57,7 +57,6 @@ NAV = {"Home": "",
                              "subject": "dois_subjectpicker"},
                 "DOI yearly report": "dois_yearly",
                 "Top cited DOIs": "dois_top_cited",
-                "DOIs by provider": "dois_provider",
                 "DOIs by license": "dois_license"},
        "DataCite": {"DataCite DOI stats": "datacite_dois",
                     "DataCite DOI citations": "datacite_citations",
@@ -87,12 +86,14 @@ NAV = {"Home": "",
                     f"DOIs missing journals{'&nbsp;'*9}": "dois_nojournal",
                     "Journals referenced": "journals_referenced"},
        "Subscriptions": {"Summary": "subscriptions",
+                         "Provider:": {"Summary": "subscription/provider", "Cost": "subscription/cost",
+                             "APCs": "subscription/apc"},
                          "Journals": "subscriptions/type/Journal",
                          "Repositories": "subscriptions/type/Repository",
                          "Books": "subscriptions/type/Book",
                          "Book series": "subscriptions/type/Book series",
                          "Monographs": "subscriptions/type/Monograph",
-                         "APCs": "subscription/apc",
+                         "Missing costs": "subscription/missingcost",
                         },
        "Tag/affiliation": {"DOIs by:": {"tag": "dois_tag_ack/tag",
                                         "acknowledgement": "dois_tag_ack/ack",
@@ -111,6 +112,7 @@ NAV = {"Home": "",
                    "Ignore lists": "ignore",
                    "DOIs awaiting processing": "dois_pending",
                    "DOIs missing Open Access status": "dois_missing_oa",
+                   "Publications dated before preprint": "preprint_date_errors",
                    "Latest hires": "orcid_datepicker",
                    "Authors with multiple ORCIDs": "orcid_duplicates",
                    "Duplicate authors": "duplicate_authors"
@@ -310,6 +312,34 @@ def render_warning(msg, severity='error', size='lg'):
         icon = 'exclamation-circle'
     return f"<span class='fas fa-{icon} fa-{size}' style='color:{color}'></span>" \
            + f"&nbsp;{msg}"
+
+
+def stat_cards(cards, div_id='stat-cards'):
+    ''' Build a row of stat cards
+        Keyword arguments:
+          cards: list of (label, value) or (label, value, color) tuples; an
+                 optional third element overrides the value's text color
+          div_id: id for the wrapper div (scopes the link color style)
+        Returns:
+          HTML for the card row
+    '''
+    card_style = ("display:inline-block; border:1px solid #2e5c8a; border-radius:6px; "
+                  "padding:12px 20px; margin:0 10px 10px 0; min-width:160px; "
+                  "vertical-align:top; background:#1e3a5f;")
+    label_style = "font-size:0.82em; color:#a8c4e0; margin-bottom:4px;"
+    value_style = "font-size:1.35em; font-weight:bold; color:#fff;"
+    html = f"<style>#{div_id} a {{color:#7eb8e8;}}</style>" \
+           + f"<div id='{div_id}' style='margin-bottom:18px;'>"
+    for card in cards:
+        label, value = card[0], card[1]
+        color = card[2] if len(card) > 2 else None
+        vstyle = value_style.replace('color:#fff;', f'color:{color};') if color else value_style
+        html += (f"<div style='{card_style}'>"
+                 f"<div style='{label_style}'>{label}</div>"
+                 f"<div style='{vstyle}'>{value}</div>"
+                 f"</div>")
+    html += "</div>"
+    return html
 
 # ******************************************************************************
 # * Navigation utility functions                                               *
@@ -1828,7 +1858,7 @@ def standard_ack_table(rows, ack):
         row['link'] = doi_link(row['doi'])
         row['jrc_ack2'] = row['jrc_acknowledgements'].replace('\n', '<br>')
         row['jrc_ack2'] = highlight_subtext(row['jrc_ack2'], ack)
-        cls = []
+        cls = [row.get('doi_type', 'internal')]
         if version:
             cls.append('ver')
         html += f"<tr class=\'{' '.join(cls)}\'><td>" \
@@ -2437,7 +2467,7 @@ def source_limit_pulldown(prefix, source, limit):
     return html
 
 
-def year_pulldown(prefix, all_years=True, suffix = '', start_year=2005):
+def year_pulldown(prefix, all_years=True, suffix = '', start_year=2006):
     ''' Generate a year pulldown
         Keyword arguments:
           prefix: navigation prefix
@@ -4614,7 +4644,7 @@ def show_doi_by_ack_ui(ack):
     ''' Show DOIs for a given acknowledgement text
     '''
     union = []
-    payload = JOURNAL_ARTICLE
+    payload = dict(JOURNAL_ARTICLE)
     payload["jrc_acknowledgements"] = {"$regex": ack, "$options" : "i"}
     try:
         rows = DB['dis'].dois.find(payload).sort("jrc_publishing_date", -1)
@@ -4622,13 +4652,41 @@ def show_doi_by_ack_ui(ack):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get DOIs from dois collection"),
                                message=error_message(err))
+    internal = 0
     for row in rows:
+        row['doi_type'] = 'internal'
         union.append(row)
-    html, _, _ = standard_ack_table(union, ack)
-    if not html:
+        internal += 1
+    # External DOIs
+    external = 0
+    try:
+        rows = DB['dis'].external_dois.find(payload).sort("jrc_publishing_date", -1)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get DOIs from external_dois " \
+                                                    + "collection"),
+                               message=error_message(err))
+    for row in rows:
+        row['doi_type'] = 'external'
+        union.append(row)
+        external += 1
+    union.sort(key=lambda x: x.get("jrc_publishing_date", ""), reverse=True)
+    html, cnt, _ = standard_ack_table(union, ack)
+    if not cnt:
         return render_template('warning.html', urlroot=request.url_root,
                                title=render_warning("Could not find DOIs", 'warning'),
                                message=f"Could not find any DOIs with acknowledgement {ack}")
+    # The DOI count is shown in the card below (with id 'totalrows', which the
+    # "Filter versioned DOIs" toggler updates), so drop the duplicate inline text
+    html = html.replace(f"<p>Number of DOIs: <span id='totalrows'>{cnt:,}</span></p>", "")
+    cards = stat_cards([("DOIs", f"<span id='totalrows'>{cnt:,}</span>"),
+                        ("Internal", f"{internal:,}"),
+                        ("External", f"{external:,}")],
+                       div_id='acks-stats')
+    toggles = "<button class=\"btn btn-outline-info\" " \
+              + "onclick=\"cycle_filter(this, 'dois', 'internal', 'external', " \
+              + "'Internal', 'External');\">Showing Internal &amp; External</button><br><br>"
+    html = cards + toggles + html
     title = f"DOIs with acknowledgement text <span style='color:#51b447 !important'>{ack}</span>"
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
@@ -4664,11 +4722,19 @@ def show_doi_by_title_ui(title):
                                message=error_message(err))
     for row in rows:
         union.append(row)
-    html, _, _ = standard_doi_table(union)
-    if not html:
+    html, cnt, oacnt = standard_doi_table(union)
+    if not cnt:
         return render_template('warning.html', urlroot=request.url_root,
                                title=render_warning("Could not find DOIs", 'warning'),
                                message=f"Could not find any DOIs with title matching {title}")
+    # The DOI count is shown in the card below (with id 'totalrows', which the
+    # "Filter versioned DOIs" toggler updates), so drop the duplicate inline text
+    html = html.replace(f"<p>Number of DOIs: <span id='totalrows'>{cnt:,}</span></p>", "")
+    cards = stat_cards([("DOIs", f"<span id='totalrows'>{cnt:,}</span>"),
+                        ("Open Access", f"{oacnt:,}"),
+                        ("Not Open Access", f"{cnt-oacnt:,}")],
+                       div_id='titles-stats')
+    html = cards + html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=f"DOIs for {title}", html=html,
@@ -4850,6 +4916,13 @@ def dois_type(year='All'):
         data['Preprint'] -= proto_cnt
         data['Protocols'] = proto_cnt
     total = sum(data.values())
+    if not data:
+        html = year_pulldown('typechart', start_year=2006) \
+               + f"<br><br><p>No DOIs were found for {year}.</p>"
+        endpoint_access()
+        return make_response(render_template('general.html', urlroot=request.url_root,
+                                             title="DOIs by type", html=html,
+                                             navbar=generate_navbar('DOIs')))
     html = "<span style='color:goldenrod'><i class='fa-solid fa-warning'></i>" \
            + " This chart is an experimental feature</span>"
     html += '<table id="types" class="tablesorter numberlast-scroll"><thead><tr>' \
@@ -4974,7 +5047,14 @@ def dois_license(year='All'):
         lines[lic][row['_id']['source']] += row['count']
     srt = sorted(data.items(), key=lambda item: item[1], reverse=True)
     data = dict(srt)
-    defcnt = cnt['Crossref'] + cnt['DataCite'] - data['Not found']
+    if not data or not total:
+        html = year_pulldown('dois_license') \
+               + f"<br><br><p>No DOIs were found for {year}.</p>"
+        endpoint_access()
+        return make_response(render_template('general.html', urlroot=request.url_root,
+                                             title="DOIs by license", html=html,
+                                             navbar=generate_navbar('DOIs')))
+    defcnt = cnt['Crossref'] + cnt['DataCite'] - data.get('Not found', 0)
     for lic in sorted(lines.keys()):
         clink = f"<a href='/dois_licenser/Crossref{lines[lic]['orig']}/{year}'>" \
                 + f"{lines[lic]['Crossref']}</a>" if lines[lic]['Crossref'] else '0'
@@ -4987,12 +5067,8 @@ def dois_license(year='All'):
           + "<span style='font-size: 14pt'> of Janelia DOIs have a known license" \
           + f"</span><span style='font-size: 12pt'><br>{defcnt:,}/{total:,}</span><br>"
     html = pre + html
-    if len(data) <= len(all_palettes['TolRainbow']):
-        colors = all_palettes['TolRainbow'][len(data)]
-    else:
-        colors = turbo(len(data))
-    chartscript, chartdiv = DP.pie_chart(data, "DOIs by license", "license", width=700, height=700,
-                                         colors=colors)
+    chartscript, chartdiv = DP.treemap_chart(data, "DOIs by license", width=700, height=700,
+                                             value_format="0,0")
     title = "DOIs by license"
     if year != 'All':
         title += f" ({year})"
@@ -5005,34 +5081,11 @@ def dois_license(year='All'):
 
 @app.route('/dois_provider')
 def dois_provider():
-    ''' Show providers for published DOIs
+    ''' Superseded by the richer /subscription/provider summary table. The
+        per-provider DOI list (/dois_provider/<prov>) is still reachable from
+        the "Janelia publications" card on /subscription/provider/<prov>.
     '''
-    try:
-        publishers = DB['dis'].dois.distinct("publisher")
-        journals = DB['dis'].dois.distinct("jrc_journal")
-    except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get providers for published DOIs"),
-                               message=error_message(err))
-    payload = {"$or": [{"publisher": {"$in": publishers}},
-                       {"title": {"$in": journals}}]}
-    prov = {}
-    try:
-        rows = DB['dis'].subscription.find(payload)
-        for row in rows:
-            prov[row['provider']] = True
-    except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get DOIs by provider"),
-                               message=error_message(err))
-    html = "<br>".join(
-        f"<a href='/dois_provider/{provider}'>{provider}</a>"
-        for provider in sorted(prov.keys(), key=lambda x: x.lower())
-    )
-    endpoint_access()
-    return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title="Providers for published DOIs", html=html,
-                                         navbar=generate_navbar('DOIs')))
+    return redirect('/subscription/provider')
 
 
 @app.route('/dois_provider/<string:prov>')
@@ -5563,9 +5616,8 @@ def show_grouped_dois(field, unwind=None):
     html += "</table>"
     chartscript = chartdiv = ""
     if 1 < cnt <= 256 and data:
-        colors = DP.get_colors_by_count(cnt)
-        chartscript, chartdiv = DP.pie_chart(data, field, "source", width=875, height=600,
-                                             colors=colors)
+        chartscript, chartdiv = DP.treemap_chart(data, field, width=875, height=600,
+                                                 value_format="0,0")
     endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title=f"{field} counts ({cnt:,})", html=html,
@@ -6007,21 +6059,34 @@ def datacite_subject(subject=None, year='All'):
                                title=render_warning("Could not get DOI subjects"),
                                message=error_message(err))
     if subject:
-        html, _, _ = standard_doi_table(rows, prefix=f"datacite_subject/{subject}")
+        html, cnt, _ = standard_doi_table(rows, prefix=f"datacite_subject/{subject}")
+        cards = stat_cards([("Subject", subject), ("DOIs", f"{cnt:,}")],
+                           div_id='dcsubj-stats')
+        html = cards + html
         title = f"DOIs for {subject}"
         if year != 'All':
             title += f" (year={year})"
     else:
         cnt = 0
+        total = 0
+        schemes = set()
         html = "<table id='subjects' class='tablesorter numberlast-scroll'><thead><tr>" \
                + "<th>Subject</th><th>Scheme</th><th>Count</th></tr></thead><tbody>"
         for row in rows:
             cnt += 1
+            total += row['count']
             scheme = row['_id'].get('scheme', '')
+            if scheme:
+                schemes.add(scheme)
             html += f"<tr><td>{row['_id']['subject']}</td><td>{scheme}</td><td>" \
                     + f"<a href='/datacite_subject/{row['_id']['subject']}'>{row['count']}</a>" \
                     + "</td></tr>"
         html += "</tbody></table>"
+        cards = stat_cards([("DOI occurrences", f"{total:,}"),
+                            ("Subjects", f"{cnt:,}"),
+                            ("Schemes", f"{len(schemes):,}")],
+                           div_id='dcsubj-stats')
+        html = cards + html
         title = f"DataCite subjects ({cnt:,})"
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
@@ -6087,10 +6152,12 @@ def datacite_dois():
             + '<th>Type</th><th>Subtype</th><th>Publisher</th><th>Count</th>' \
             + '</tr></thead><tbody>'
     total = 0
+    publishers = set()
     for typ, detail_dict in dois.items():
         for detail, pub_dict in detail_dict.items():
             for pub, cnt in pub_dict.items():
                 total += cnt
+                publishers.add(pub)
                 link = f"/datacite_dois/{typ}/{detail}/{pub}"
                 inner += f"<td>{typ}</td><td>{detail}</td>" \
                          + f"<td>{pub}</td>" \
@@ -6098,6 +6165,10 @@ def datacite_dois():
     inner += "</tbody><tfoot><tr><th colspan='3'>TOTAL</th>" \
              + f"<th style='text-align: center;'>{total:,}</th></tr></tfoot></table>"
     html += f"{inner}</div></div>"
+    cards = stat_cards([("DataCite DOIs", f"{total:,}"),
+                        ("Publishers", f"{len(publishers):,}"),
+                        ("Resource types", f"{len(types):,}")], div_id='dcdois-stats')
+    html = cards + html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="DataCite DOI stats", html=html,
@@ -6158,13 +6229,20 @@ def datacite_citations():
            + '<th>DOI</th><th>Title</th><th>Citations</th>' \
            + '</tr></thead><tbody>'
     total = 0
+    cnt = 0
     for row in rows:
         total += row['citationCount']
+        cnt += 1
         link = doi_link(row['doi'])
         html += f"<td>{link}</td><td>{DL.get_title(row)}</td>" \
                 + f"<td>{row['citationCount']}</td></tr>"
     html += "</tbody><tfoot><tr><th colspan='2'>TOTAL</th>" \
             + f"<th style='text-align: center;'>{total:,}</th></tr></tfoot></table><br>"
+    cards = stat_cards([("DOIs with citations", f"{cnt:,}"),
+                        ("Total citations", f"{total:,}"),
+                        ("Avg. per DOI", f"{total/cnt:,.1f}" if cnt else "0")],
+                       div_id='dccc-stats')
+    html = cards + html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="DataCite DOI citations", html=html,
@@ -6187,13 +6265,20 @@ def datacite_downloads():
            + '<th>DOI</th><th>Title</th><th>Downloads</th>' \
            + '</tr></thead><tbody>'
     total = 0
+    cnt = 0
     for row in rows:
         total += row['downloadCount']
+        cnt += 1
         link = doi_link(row['doi'])
         html += f"<td>{link}</td><td>{DL.get_title(row)}</td>" \
                 + f"<td>{row['downloadCount']}</td></tr>"
     html += "</tbody><tfoot><tr><th colspan='2'>TOTAL</th>" \
             + f"<th style='text-align: center;'>{total:,}</th></tr></tfoot></table><br>"
+    cards = stat_cards([("Total downloads", f"{total:,}"),
+                        ("DOIs with downloads", f"{cnt:,}"),
+                        ("Avg. per DOI", f"{total/cnt:,.1f}" if cnt else "0")],
+                       div_id='dcdl-stats')
+    html = cards + html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="DataCite DOI downloads", html=html,
@@ -6231,7 +6316,12 @@ def dois_author(year='All'):
                                    title=render_warning("Could not get authorship " \
                                                         + "from dois collection"),
                                    message=error_message(err))
-    html = '<table id="authors" class="tablesorter numbers-scroll"><thead><tr>' \
+    html = stat_cards(
+        [("All authors", f"{source['Crossref-all'] + source['DataCite-all']:,}"),
+         ("Any Janelia author", f"{source['Crossref-jrc'] + source['DataCite-jrc']:,}"),
+         ("First and/or last", f"{source['Crossref'] + source['DataCite']:,}")],
+        div_id='author-stats')
+    html += '<table id="authors" class="tablesorter numbers-scroll"><thead><tr>' \
            + '<th>Authorship</th><th>Crossref</th><th>DataCite</th>' \
            + '</tr></thead><tbody>'
     data = {}
@@ -7088,8 +7178,15 @@ def preprint_with_pub():
                 + f"<td>{DL.get_title(row)}</td><td>{row['jrc_journal']}</td></tr>"
     html += '</tbody></table>'
     avg_days = sum(day_count) / len(day_count) if day_count else 0
-    pre = f"Preprints with journal publications: {len(day_count):,}<br>" \
-           + f"Average days to publication: {avg_days:,.1f}<br>"
+    cards = [("Preprints matched", f"{len(day_count):,}"),
+             ("Avg. days to publication", f"{avg_days:,.1f}")]
+    if day_count:
+        fastest = f"{min(day_count):,} days"
+        if min(day_count) < 0:
+            fastest = f"<a href='/preprint_date_errors'>{fastest}</a>"
+        cards.append(("Fastest", fastest))
+        cards.append(("Slowest", f"{max(day_count):,} days"))
+    pre = stat_cards(cards, div_id='preprint-stats')
     pre += "<table id='preprint_with_pub' class='tablesorter numbers-scroll'><thead><tr>" \
            + "<th>Journal</th><th>Average days to publication</th></tr></thead><tbody>"
     for jour, days in day_pub.items():
@@ -7203,7 +7300,11 @@ def dois_publisher(year='All'):
     for source in app.config['SOURCES']:
         html += f"<th style='text-align: center;'>{total[source]:,}</th>"
     html += "</tr></tfoot></table>"
-    html = year_pulldown('dois_publisher') + html
+    cards = [("Total DOIs", f"{sum(total.values()):,}"),
+             ("Publishers", f"{len(pubs):,}")] \
+            + [(f"{src} DOIs", f"{total[src]:,}") for src in app.config['SOURCES']]
+    html = year_pulldown('dois_publisher') \
+           + stat_cards(cards, div_id='pub-stats') + html
     title = "DOIs by publisher"
     if year != 'All':
         title += f" for {year}"
@@ -7480,18 +7581,28 @@ def show_journals_dois(year=None):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning(errmsg),
                                message='No journals were found')
-    html = f"<h4>Journals found: {len(journal):,}</h4>" \
+    tracked = sum(1 for key in journal if key in subscribed)
+    subscribed_cnt = sum(1 for key in journal if key in subscribed
+                         and subscribed[key].get('access') == 'Subscription')
+    free_cnt = tracked - subscribed_cnt
+    cards = [("Journals found", f"{len(journal):,}"),
+             ("Tracked subscriptions", f"{tracked:,}")]
+    if free_cnt:
+        cards.append(("Free to read", f"{free_cnt:,}", "lime"))
+    if subscribed_cnt:
+        cards.append(("Subscribed journals", f"{subscribed_cnt:,}", "yellowgreen"))
+    html = stat_cards(cards, div_id='jdois-stats') \
            + '<table id="journals" class="tablesorter numbers-scroll"><thead><tr>' \
            + '<th>Journal</th><th>Publisher</th><th>Count</th><th>Last published to</th>' \
            + '<th>Subscription</th></tr></thead><tbody>'
     for key in sorted(journal, key=lambda x: journal[x]['count'], reverse=True):
         if key in subscribed:
-            jour = f"<a href='{subscribed[key]['urls'][0]}'>{key}</a>"
             jour = f"<a href='/subscription/{str(subscribed[key]['_id'])}'>{key}</a>"
             publisher = subscribed[key].get('publisher', '')
+            access = subscribed[key].get('access', '')
             sub = '<span style="color: yellowgreen">YES</span>' \
-                  if subscribed[key]['access'] == 'Subscription' \
-                  else f"<span style='color: lime'>{subscribed[key]['access']}</span>"
+                  if access == 'Subscription' \
+                  else f"<span style='color: lime'>{access}</span>"
         else:
             jour = key
             sub = ''
@@ -7639,6 +7750,9 @@ def show_journal_ui(jname, year='All'):
                                title=render_warning("Could not get DOIs for journal"),
                                message=error_message(err))
     html, cnt, _ = standard_doi_table(rows)
+    # The DOI count is shown in the card below (with id 'totalrows', which the
+    # "Filter versioned DOIs" toggler updates), so drop the duplicate inline text
+    html = html.replace(f"<p>Number of DOIs: <span id='totalrows'>{cnt:,}</span></p>", "")
     payload = [{"$match": payload},
                {"$group": {"_id": "$jrc_oa_status", "count": {"$sum": 1}}}]
     try:
@@ -7654,17 +7768,14 @@ def show_journal_ui(jname, year='All'):
         data[row['_id'].capitalize() if row['_id'] else 'Unknown'] = row.get('count', 0)
     if total < cnt:
         data['Unknown'] = data.get('Unknown', 0) + cnt - total
-    top = '<table id="journals" class="tablesorter numbers-scroll"><thead><tr>' \
-          + '<th>Open Access status</th><th>Count</th></tr></thead><tbody>'
+    cards = [("DOIs", f"<span id='totalrows'>{cnt:,}</span>")]
     for key, val in sorted(data.items(), key=lambda item: item[1], reverse=True):
         stat = DP.OA_COLORS.get(key.capitalize(), 'crimson')
-        top += f"<tr><td><span style='color: {stat}'>{key.capitalize()}</span></td>" \
-               + f"<td>{val:,}</td></tr>"
-    top += '</tbody></table>'
+        cards.append((key.capitalize(), f"{val:,}", stat))
     title = f"DOIs for {jname}"
     if year != 'All':
         title += f" ({year})"
-    html = top + html
+    html = stat_cards(cards, div_id='journal-stats') + html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
@@ -7699,9 +7810,10 @@ def journals_referenced(year='All'):
         journals += 1
         refs += row['count']
         fileoutput += f"{row['_id']}\t{row['count']}\n"
-    html = year_pulldown("journals_referenced") + "<br><br>" \
-           + create_downloadable('journals', ['Journal', 'References'], fileoutput) \
-           + f"<br><br>Journals: {journals:,}<br>References: {refs:,}"
+    cards = stat_cards([("Journals", f"{journals:,}"),
+                        ("References", f"{refs:,}")], div_id='jref-stats')
+    html = year_pulldown("journals_referenced") + "<br><br>" + cards \
+           + create_downloadable('journals', ['Journal', 'References'], fileoutput)
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=ptitle, html=html,
@@ -7736,8 +7848,65 @@ def show_subscription_summary():
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning(errmsg),
                                message=error_message(err))
-    html = f"<h4>Found {cnt:,} subscriptions ({oacnt/cnt*100:.2f}% open access) across " \
-           + f"{len(pubcnt):,} publishers and {pcount} providers</h4>"
+    # Most recent subscription cost (across all providers)
+    cost_year = cost_total = None
+    try:
+        cost_rows = list(DB['dis'].subscription.aggregate([
+            {"$match": {"cost": {"$exists": True}}},
+            {"$addFields": {"costArray": {"$objectToArray": "$cost"}}},
+            {"$unwind": "$costArray"},
+            {"$group": {"_id": "$costArray.k",
+                        "total": {"$sum": {"$toDouble": "$costArray.v"}}}},
+            {"$sort": {"_id": -1}},
+            {"$limit": 1}
+        ]))
+        if cost_rows:
+            cost_year = cost_rows[0]['_id']
+            cost_total = cost_rows[0]['total']
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning(errmsg),
+                               message=error_message(err))
+    # APC stats: count of titles, min/max/avg across all APC values
+    apc_stats = None
+    try:
+        apc_rows = list(DB['dis'].subscription.aggregate([
+            {"$match": {"apc": {"$exists": True}}},
+            {"$addFields": {"apcArray": {"$objectToArray": "$apc"}}},
+            {"$unwind": "$apcArray"},
+            {"$group": {"_id": None,
+                        "titles": {"$addToSet": "$_id"},
+                        "maxYear": {"$max": "$apcArray.k"},
+                        "minv": {"$min": {"$toDouble": "$apcArray.v"}},
+                        "maxv": {"$max": {"$toDouble": "$apcArray.v"}},
+                        "avg":  {"$avg": {"$toDouble": "$apcArray.v"}}}},
+            {"$project": {"_id": 0,
+                          "count": {"$size": "$titles"},
+                          "maxYear": 1, "minv": 1, "maxv": 1,
+                          "avg": {"$round": ["$avg", 2]}}}
+        ]))
+        if apc_rows:
+            apc_stats = apc_rows[0]
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning(errmsg),
+                               message=error_message(err))
+    # Stat cards
+    cards = [("Subscriptions", f"{cnt:,}"),
+             ("Open access", f"{oacnt/cnt*100:.2f}%" if cnt else "0%"),
+             ("Publishers", f"{len(pubcnt):,}"),
+             ("Providers", f"{pcount:,}")]
+    if cost_total is not None:
+        cost_link = f"<a href='/subscription/cost'>${cost_total:,.2f}</a>"
+        cards.append((f"Subscription cost ({cost_year})", cost_link))
+    if apc_stats:
+        apc_body = (f"<span style='font-size:0.75em; font-weight:normal;'>"
+                    f"<a href='/subscription/apc'>"
+                    f"${apc_stats['minv']:,.2f} - ${apc_stats['maxv']:,.2f} "
+                    f"(Avg. ${apc_stats['avg']:,.2f})</a></span>")
+        cards.append((f"{apc_stats['count']:,} journals with APCs ({apc_stats['maxYear']})",
+                      apc_body))
+    html = stat_cards(cards, div_id='sub-stats')
     types = {}
     for row in typs:
         types[row['_id']] = int(row['count'])
@@ -7822,22 +7991,107 @@ def show_subscription_summary_by_provider(prov):
             transform[row['_id']['publisher']] = collections.defaultdict(lambda: 0, {})
         transform[row['_id']['publisher']][row['_id']['type']] = row['count']
         transform[row['_id']['publisher']]['TOTAL'] += row['count']
-    html = "<table id='journals' class='tablesorter numbers-scroll'><thead><tr>" \
+    cnt = 0
+    for publisher, data in transform.items():
+        for typ in types:
+            if typ in data:
+                cnt += data[typ]
+    # Open access count
+    try:
+        oa_cnt = DB['dis'].subscription.count_documents({"provider": prov,
+                                                         "access": "Free to read"})
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning(errmsg),
+                               message=error_message(err))
+    # Most recent subscription cost
+    cost_year = cost_total = None
+    try:
+        cost_rows = list(DB['dis'].subscription.aggregate([
+            {"$match": {"provider": prov, "cost": {"$exists": True}}},
+            {"$addFields": {"costArray": {"$objectToArray": "$cost"}}},
+            {"$unwind": "$costArray"},
+            {"$group": {"_id": "$costArray.k",
+                        "total": {"$sum": {"$toDouble": "$costArray.v"}}}},
+            {"$sort": {"_id": -1}},
+            {"$limit": 1}
+        ]))
+        if cost_rows:
+            cost_year = cost_rows[0]['_id']
+            cost_total = cost_rows[0]['total']
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning(errmsg),
+                               message=error_message(err))
+    # APC stats: count of titles, min/max/avg across all APC values
+    apc_stats = None
+    try:
+        apc_rows = list(DB['dis'].subscription.aggregate([
+            {"$match": {"provider": prov, "apc": {"$exists": True}}},
+            {"$addFields": {"apcArray": {"$objectToArray": "$apc"}}},
+            {"$unwind": "$apcArray"},
+            {"$group": {"_id": None,
+                        "titles": {"$addToSet": "$_id"},
+                        "maxYear": {"$max": "$apcArray.k"},
+                        "minv": {"$min": {"$toDouble": "$apcArray.v"}},
+                        "maxv": {"$max": {"$toDouble": "$apcArray.v"}},
+                        "avg":  {"$avg": {"$toDouble": "$apcArray.v"}}}},
+            {"$project": {"_id": 0,
+                          "count": {"$size": "$titles"},
+                          "maxYear": 1, "minv": 1, "maxv": 1,
+                          "avg": {"$round": ["$avg", 2]}}}
+        ]))
+        if apc_rows:
+            apc_stats = apc_rows[0]
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning(errmsg),
+                               message=error_message(err))
+    # Stat cards
+    cards = [("Total titles", f"{cnt:,}"),
+             ("Publishers", f"{len(transform):,}")]
+    if oa_cnt:
+        cards.append(("Open access titles", f"{oa_cnt:,}"))
+    if cost_total is not None:
+        cost_link = f"<a href='/subscription/cost/{prov}'>${cost_total:,.2f}</a>"
+        cards.append((f"Subscription cost ({cost_year})", cost_link))
+    if apc_stats:
+        apc_body = (f"<span style='font-size:0.75em; font-weight:normal;'>"
+                    f"<a href='/subscription/apc/{prov}'>"
+                    f"${apc_stats['minv']:,.2f} - ${apc_stats['maxv']:,.2f} "
+                    f"(Avg. ${apc_stats['avg']:,.2f})</a></span>")
+        cards.append((f"{apc_stats['count']:,} journals with APCs ({apc_stats['maxYear']})",
+                      apc_body))
+    # Janelia first-author publications under this provider's titles/publishers,
+    # linking to the publication-centric /dois_provider/<prov> view.
+    try:
+        sub_titles = DB['dis'].subscription.distinct("title", {"provider": prov})
+        sub_pubs = DB['dis'].subscription.distinct("publisher", {"provider": prov})
+        pub_doi_cnt = DB['dis'].dois.count_documents(
+            {"$or": [{"publisher": {"$in": sub_pubs}},
+                     {"jrc_journal": {"$in": sub_titles}}],
+             "jrc_first_author": {"$exists": True}})
+    except Exception:
+        pub_doi_cnt = 0
+    if pub_doi_cnt:
+        cards.append(("Janelia publications",
+                      f"<a href='/dois_provider/{prov}'>{pub_doi_cnt:,}</a>"))
+    html = stat_cards(cards, div_id='prov-stats')
+    html += "<table id='journals' class='tablesorter numbers-scroll'><thead><tr>" \
             + "<th>Publisher</th><th>" + ("</th><th>".join(types)) \
             + "</th><th>TOTAL</th></tr></thead><tbody>"
-    cnt = 0
     for publisher, data in transform.items():
         count = []
         for typ in types:
             if typ in data:
                 tcnt = f"<a href='/subscriptionlist/{publisher}/publisher/{typ}'>" \
                        + f"{data[typ]:,}</a>"
-                cnt += data[typ]
             else:
                 tcnt = ""
             count.append(tcnt)
         link = f"<a href='/subscriptionlist/{publisher}'>{data['TOTAL']:,}</a>"
-        html += f"<tr><td>{publisher}</td><td>" \
+        pub_link = f"<a href='/subscriptionlist/{publisher}'>{publisher}</a>"
+        html += f"<tr><td>{pub_link}</td><td>" \
             + "</td><td>".join(count) + f"</td><td>{link}</td></tr>"
     html += "</tbody><tfoot><tr><td style='text-align:right' colspan=1>TOTAL</td><td>" \
             + "</td><td>".join(f"<a href='/subscriptions/type/{key}'>{val:,}</a>" \
@@ -7845,7 +8099,7 @@ def show_subscription_summary_by_provider(prov):
             + f"</td><td>{cnt:,}</td></tr></tfoot>"
     html += '</table>'
     html += "<br><a class='btn btn-outline-info btn-med' " \
-            + f"href='/subscriptionlist/provider/{prov}'" \
+            + f"href='/subscriptionlist/{prov}/provider'" \
             + " role='button'>Show details</a>"
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
@@ -7873,25 +8127,85 @@ def show_subscription_year(year=None):
     html2 += "<th>Provider</th><th>Publisher</th><th>Title</th><th>Cost</th></tr></thead><tbody>"
     data = {}
     total = 0
+    sub_cnt = 0
     for row in rows:
         if row['provider'] not in data:
             data[row['provider']] = 0
+        sub_cnt += 1
         total += float(row["cost"][year])
         data[row['provider']] += float(row["cost"][year])
         html2 += f"<tr><td>{row['provider']}</td><td>{row['publisher']}</td>" \
                  + f"<td>{row['title']}</td><td>${float(row['cost'][year]):,.2f}</td></tr>"
     html2 += "</tbody><tfoot><tr><th colspan='3' style='text-align:right'>TOTAL</th>" \
              + f"<th>${total:,.2f}</th></tr></tfoot></table>"
-    colors = DP.get_colors_by_count(len(data))
-    piescript, piediv = DP.pie_chart(data, f'Subscription costs by provider for {year}',
-                                     'provider', colors=colors,
-                                     width=650, height=450, location="top_right", fmt='{$0,0}')
+    if not data:
+        html += f"<br><br><p>No subscription costs were found for {year}.</p>"
+        endpoint_access()
+        return make_response(render_template('general.html', urlroot=request.url_root,
+                                             title=f"Subscription costs by provider for {year}",
+                                             html=html,
+                                             navbar=generate_navbar('Subscriptions')))
+    html += stat_cards([("Providers", f"{len(data):,}"),
+                        ("Subscriptions", f"{sub_cnt:,}"),
+                        ("Total cost", f"${total:,.2f}")], div_id='subyear-stats')
+    barscript, bardiv = DP.hbar_chart(data, f'Subscription costs by provider for {year}',
+                                      value_label='Cost', width=650, height=450)
     endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                         title=f"Subscription costs by provider for {year}",
                                         html=html, html2=html2,
-                                        chartscript2=piescript, chartdiv2=piediv,
+                                        chartscript2=barscript, chartdiv2=bardiv,
                                         navbar=generate_navbar('Subscriptions')))
+
+
+@app.route('/subscription/missingcost')
+@app.route('/subscription/missingcost/<string:year>')
+def show_subscription_missingcost(year=None):
+    ''' Show providers missing costs for a specific year
+    '''
+    if year is None:
+        year = str(datetime.now().year)
+    errmsg = "Could not get data from subscription collection"
+    two_years_ago = str(datetime.now().year - 2)
+    # Providers included in the heatmap: have cost data and max cost year > two_years_ago
+    pipeline = [{"$match": {"cost": {"$exists": True}}},
+                {"$addFields": {"costYears": {"$objectToArray": "$cost"}}},
+                {"$unwind": "$costYears"},
+                {"$group": {"_id": "$provider", "maxYear": {"$max": "$costYears.k"}}},
+                {"$match": {"maxYear": {"$gt": two_years_ago}}}]
+    try:
+        active_providers = {row['_id'] for row in DB['dis'].subscription.aggregate(pipeline)}
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning(errmsg),
+                               message=error_message(err))
+    # Providers that have at least one cost entry for the selected year
+    try:
+        covered = {row for row in DB['dis'].subscription.distinct(
+            "provider", {f"cost.{year}": {"$exists": True}})}
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning(errmsg),
+                               message=error_message(err))
+    missing = sorted(active_providers - covered, key=str.lower)
+    html = "<br>" + year_pulldown("subscription/missingcost", all_years=False, start_year=2011)
+    html += "<br><br>"
+    if not missing:
+        html += f"<p>No providers are missing costs for {year}.</p>"
+        endpoint_access()
+        return make_response(render_template('general.html', urlroot=request.url_root,
+                                             title=f"Providers missing costs for {year}",
+                                             html=html,
+                                             navbar=generate_navbar('Subscriptions')))
+    html += "<ul>"
+    for prov in missing:
+        html += f"<li><a href='/subscription/cost/{prov}'>{prov}</a></li>"
+    html += "</ul>"
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=f"Providers missing costs for {year}",
+                                         html=html,
+                                         navbar=generate_navbar('Subscriptions')))
 
 
 @app.route('/subscription/cost')
@@ -7981,6 +8295,24 @@ def show_subscription_costs(provider=None):
     if chartscript2 is not None:
         chartscript += chartscript2
         chartdiv += chartdiv2
+    # Title list (provider view only)
+    if provider:
+        try:
+            titles = DB['dis'].subscription.find(
+                {"provider": provider, "cost": {"$exists": True}},
+                {"title": 1}
+            ).collation({"locale": "en"}).sort("title", 1)
+            title_rows = list(titles)
+        except Exception as err:
+            return render_template('error.html', urlroot=request.url_root,
+                                   title=render_warning(errmsg),
+                                   message=error_message(err))
+        if title_rows:
+            html += f"<br><h4>Titles ({len(title_rows):,})</h4><ul>"
+            for row in title_rows:
+                sid = row['_id']
+                html += f"<li><a href='/subscription/{sid}'>{row['title']}</a></li>"
+            html += "</ul>"
     endpoint_access()
     title = f"Subscription costs for {provider}" if provider is not None \
             else f"Subscription costs (2011-{datetime.now().year})"
@@ -7996,7 +8328,6 @@ def show_subscriptions(jtype):
     '''
     errmsg = "Could not get data from subscription collection"
     try:
-        cnt = DB['dis'].subscription.count_documents({"type": jtype})
         rows = DB['dis'].subscription.find({"type": jtype})
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
@@ -8011,18 +8342,22 @@ def show_subscriptions(jtype):
     fileoutput = ""
     jlist = {}
     publist = {}
+    provlist = {}
     for row in rows:
         jlist[row['title']] = True
         publist[row['publisher']] = True
-        publist[row['publisher']] = True
+        provlist[row['provider']] = True
         jour = f"<a href='{row['urls'][0]}'>{row['title']}</a>" if row.get('urls') else row['title']
         jour = f"<a href='/subscription/{str(row['_id'])}'>{row['title']}</a>"
         html += f"<tr><td>{jour}</td><td>{row['publisher']}</td>" \
                 + f"<td>{row['provider']}</td></tr>"
         fileoutput += f"{row['title']}\t{row['publisher']}\t{row['provider']}\n"
     html += '</tbody></table>'
-    title = f"{jtype} subscriptions ({cnt:,})"
-    html = create_downloadable(jtype, ['Title', 'Publisher', 'Provider'], fileoutput)
+    title = f"{jtype} subscriptions"
+    html = stat_cards([("Providers", f"{len(provlist):,}"),
+                       ("Publishers", f"{len(publist):,}"),
+                       ("Titles", f"{len(jlist):,}")], div_id='subtype-stats') \
+           + create_downloadable(jtype, ['Title', 'Publisher', 'Provider'], fileoutput)
     titles = '<option>' + '</option><option>'.join(sorted(jlist.keys())) + '</option>'
     pubs = '<option>' + '</option><option>'.join(sorted(publist.keys())) + '</option>'
     endpoint_access()
@@ -8059,7 +8394,7 @@ def show_subscriptionlist(sub, field='publisher', stype=None):
     if not stype:
         html += "<th>Type</th>"
     html += "<th>Title</th><th>Publisher</th><th>Provider</th><th>Title ID</th>" \
-            + '<th>Access</th>'
+            + '<th>Access</th><th>APC</th>'
     pubcount = {}
     if field == 'publisher':
         html += "<th>Janelia publications</th>"
@@ -8074,11 +8409,15 @@ def show_subscriptionlist(sub, field='publisher', stype=None):
                                    title=render_warning(errmsg),
                                    message=error_message(err))
     html += "</tr></thead><tbody>"
-    header = ([] if stype else ['Type']) + ['Title', 'Publisher', 'Provider', 'Title ID', 'Access']
+    header = ([] if stype else ['Type']) \
+             + ['Title', 'Publisher', 'Provider', 'Title ID', 'Access', 'APC']
     if field == 'publisher':
         header.append('Janelia publications')
     fileoutput = ""
     pubto = 0
+    subscribed_cnt = 0
+    free_cnt = 0
+    janelia_pubs = 0
     for row in rows:
         if stype:
             ptype = ''
@@ -8088,27 +8427,49 @@ def show_subscriptionlist(sub, field='publisher', stype=None):
         else:
             ptype = f"<td>{row['type']}</td>"
         link = f"<a href='/subscription/{str(row['_id'])}'>{row['title']}</a>"
+        if row['access'] == 'Subscription':
+            subscribed_cnt += 1
+        else:
+            free_cnt += 1
         access = '<span style="color: yellowgreen">YES</span>' \
                   if row['access'] == 'Subscription' \
                   else f"<span style='color: lime'>{row['access']}</span>"
+        apc_cell = '<td></td>'
+        apc_export = ''
+        if row.get('apc'):
+            apc_year = max(row['apc'])
+            apc_val = float(row['apc'][apc_year])
+            apc_export = f"${apc_val:,.2f} ({apc_year})"
+            apc_link = f"<a href='/subscription/apc/{row['provider']}/{row['publisher']}'>" \
+                       + f"{apc_export}</a>"
+            apc_cell = f"<td data-sort='{apc_val}'>{apc_link}</td>"
         html += f"<tr>{ptype}<td>{link}</td><td>{row['publisher']}</td>" \
                 + f"<td>{row['provider']}</td><td>{row['title-id']}</td>" \
-                + f"<td>{access}</td>"
+                + f"<td>{access}</td>{apc_cell}"
         file_cells = ([] if stype else [row['type']]) \
                      + [row['title'], row['publisher'], row['provider'],
-                        row['title-id'], row['access']]
+                        row['title-id'], row['access'], apc_export]
         if field == 'publisher':
             if pubcount.get(row['title']):
                 pubto += 1
+                janelia_pubs += pubcount[row['title']]
             link = f"<a href='/journal/{row['title']}'>{pubcount.get(row['title'])}</a>" \
                    if pubcount.get(row['title']) else ''
             html += f"<td style='text-align: center'>{link}</td>"
             file_cells.append(str(pubcount.get(row['title'], '')))
         fileoutput += "\t".join(file_cells) + "\n"
     html += '</tr></tbody></table>'
-    title = f"ubscriptions for {field} {sub} ({cnt:,})"
+    title = f"ubscriptions for {field} {sub}"
     title = f"{stype} s{title}" if stype else f"S{title}"
-    html = create_downloadable("subscriptions", header, fileoutput) \
+    cards = [("Journals", f"{cnt:,}")]
+    if free_cnt:
+        cards.append(("Free to read", f"{free_cnt:,}", "lime"))
+    if subscribed_cnt:
+        cards.append(("Subscribed journals", f"{subscribed_cnt:,}", "yellowgreen"))
+    if janelia_pubs:
+        cards.append(("Janelia publications", f"{janelia_pubs:,}"))
+    html = stat_cards(cards, div_id='sublist-stats') \
+           + create_downloadable("subscriptions", header, fileoutput) \
            + "<br><br>" + html
     chartscript = chartdiv = ""
     if pubto:
@@ -8190,27 +8551,34 @@ def show_subscription_providers():
                                                       }}}, "types": 1}},
                {"$sort": {"_id": 1}}]
     cnt = 0
+    pub_total = 0
     try:
         rows = DB['dis'].subscription.aggregate(payload, collation=INSENSITIVE)
+        pubcnt = len(DB['dis'].subscription.distinct("publisher"))
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning(errmsg), message=error_message(err))
-    html = "<table id='providers' class='tablesorter standard-scroll'><thead><tr>" \
-           + "<th>Provider</th><th>Publishers</th><th>Publication count</th>" \
-           + "<th>Publication types</th></tr></thead><tbody>"
+    table = "<table id='providers' class='tablesorter standard-scroll'><thead><tr>" \
+            + "<th>Provider</th><th>Publishers</th><th>Publication count</th>" \
+            + "<th>Publication types</th></tr></thead><tbody>"
     centered = "style='text-align: center; vertical-align: middle;'"
     for row in rows:
         cnt += 1
+        pub_total += row['count']
         types = "<br>".join(f"{typ['type']}: {typ['count']:,}"
                             for typ in sorted(row['types'], key=lambda x: x['count'],
                                               reverse=True))
         link = f"<a href='/subscription/provider/{row['_id']}'>{row['_id']}</a>"
-        html += (
+        table += (
             f"<tr><td style='vertical-align: middle'>{link}</td>"
             f"<td {centered}>{row['distinct_publishers']}</td>"
             f"<td {centered}>{row['count']:,}</td><td>{types}</td></tr>"
         )
-    html += "</tbody></table>"
+    table += "</tbody></table>"
+    html = stat_cards([("Providers", f"{cnt:,}"),
+                       ("Publications", f"{pub_total:,}"),
+                       ("Publishers", f"{pubcnt:,}")], div_id='providers-stats')
+    html += table
     # Subscription charges
     html += "<br><br><h3>Subscription charges</h3>"
     for ptype in ['Journal', 'Collection', 'Database', 'DataService']:
@@ -8238,9 +8606,14 @@ def show_subscription_providers():
                                message=error_message(err))
     try:
         row = list(rows)[0]
-        html += f"Minimum APC: ${row['minv']:,.2f} ({row['minp']} - {row['mint']})<br>"
-        html += f"Maximum APC: ${row['maxv']:,.2f} ({row['maxp']} - {row['maxt']})<br>"
-        html += f"Average APC: ${row['avg']:,.2f}"
+        ctx_style = "font-size:0.7em; font-weight:normal; color:#a8c4e0;"
+        min_val = (f"<a href='/subscription/apc'>${row['minv']:,.2f}</a>"
+                   f"<div style='{ctx_style}'>{row['minp']} - {row['mint']}</div>")
+        max_val = (f"<a href='/subscription/apc'>${row['maxv']:,.2f}</a>"
+                   f"<div style='{ctx_style}'>{row['maxp']} - {row['maxt']}</div>")
+        html += stat_cards([("Minimum APC", min_val),
+                            ("Maximum APC", max_val),
+                            ("Average APC", f"${row['avg']:,.2f}")], div_id='apc-stats')
     except Exception:
         pass
     title = f"Subscription providers ({cnt:,})"
@@ -8266,7 +8639,8 @@ def show_subscription_apcs(provider=None, publisher=None):
     provider_list = {}
     publisher_list = {}
     try:
-        rows = list(DB['dis'].subscription.find(query).sort(sortorder))
+        rows = list(DB['dis'].subscription.find(query).collation(
+            {"locale": "en"}).sort(sortorder))
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning(errmsg),
@@ -8315,10 +8689,12 @@ def show_subscription_apcs(provider=None, publisher=None):
         html += f"<tr>{cells}</tr>"
         fileoutput += "\t".join(file_cells) + "\n"
         cnt += 1
-    html = f"<h4>{cnt:,} journal{'s' if cnt != 1 else ''}</h4>{html}</tbody></table>"
+    download_name = f"apcs_{provider}" if provider else "apcs"
+    html = create_downloadable(download_name, header, fileoutput) \
+           + "<br><br>" + f"{html}</tbody></table>"
     if not provider:
         prehtml = "<h3>Providers</h3>"
-        for prv in sorted(provider_list.keys()):
+        for prv in sorted(provider_list.keys(), key=str.lower):
             prehtml += f"<a href='/subscription/apc/{prv}'>{prv}</a><br>"
         html = prehtml + "<br><br>" + html
     elif not publisher:
@@ -8329,8 +8705,9 @@ def show_subscription_apcs(provider=None, publisher=None):
     title = f"APC costs for {provider}" if provider else "APC costs"
     if publisher:
         title = f"{title} / {publisher}"
-    download_name = f"apcs_{provider}" if provider else "apcs"
-    html = create_downloadable(download_name, header, fileoutput) + "<br><br>" + html
+    html = stat_cards([("Providers", f"{len(provider_list):,}"),
+                       ("Publishers", f"{len(publisher_list):,}"),
+                       ("Journals", f"{cnt:,}")], div_id='apclist-stats') + html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
@@ -9179,6 +9556,7 @@ def show_tag_ack(tagtype):
            + "</tr></thead><tbody>"
     tags = {}
     total = {src: 0 for src in app.config['SOURCES']}
+    active = 0
     for row in rows:
         if row['_id']['tag'] not in tags:
             tags[row['_id']['tag']] = {}
@@ -9191,6 +9569,7 @@ def show_tag_ack(tagtype):
             if 'active' in orgs[tag]:
                 org = "<span style='color: lime;'>Yes</span>"
                 rclass = 'active'
+                active += 1
             else:
                 org = "<span style='color: yellow;'>Inactive</span>"
         else:
@@ -9211,7 +9590,12 @@ def show_tag_ack(tagtype):
     html += "</tr></tfoot></table>"
     cbutton = "<button class=\"btn btn-outline-warning\" " \
               + "onclick=\"$('.other').toggle();\">Filter for active SupOrgs</button>"
-    html = cbutton + html
+    cards = stat_cards([(cfg['label'] + 's', f"{len(tags):,}"),
+                        ("Active SupOrgs", f"{active:,}"),
+                        ("Crossref", f"{total['Crossref']:,}"),
+                        ("DataCite", f"{total['DataCite']:,}")],
+                       div_id='tagack-stats')
+    html = cards + cbutton + html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=f"{cfg['title']} ({len(tags):,})", html=html,
@@ -9523,17 +9907,27 @@ def show_projects(option=None):
     html = "<table id='projects' class='tablesorter standard-scroll'><thead><tr><th>Project</th>" \
            + "<th>Synonyms</th><th>Supervisory Organization</th></tr></thead><tbody>"
     cnt = 0
+    active = 0
+    inactive = 0
+    unknown = 0
     _, suporgs = get_suporgs()
     for key, val in sorted(proj.items()):
         synonyms = []
         for tag in sorted(val):
             synonyms.append(f"<a href='/tag/{escape(tag)}'>{tag}</a>")
         if key in suporgs:
-            status = 'Active' if suporgs[key]['active'] else 'Inactive'
-            color = 'lime' if suporgs[key]['active'] else 'yellow'
+            if suporgs[key]['active']:
+                status = 'Active'
+                color = 'lime'
+                active += 1
+            else:
+                status = 'Inactive'
+                color = 'yellow'
+                inactive += 1
         else:
             status = 'UNKNOWN'
             color = 'red'
+            unknown += 1
         status = f"<span style='color:{color}'>{status}</span>"
         html += f"<tr><td><a href='/tag/{escape(key)}'>{key}</a></td>" \
                 + f"<td>{', '.join(synonyms)}</td><td>{status}</td></tr>"
@@ -9541,6 +9935,13 @@ def show_projects(option=None):
     html += "</tbody></table>"
     if not cnt:
         html = "<p>No projects found</p>"
+    else:
+        cards = stat_cards([("Projects", f"{cnt:,}"),
+                            ("Active", f"{active:,}"),
+                            ("Inactive", f"{inactive:,}"),
+                            ("Unknown", f"{unknown:,}")],
+                           div_id='proj-stats')
+        html = cards + html
     title = "Project mapping"
     if option == 'full':
         title += " (all)"
@@ -10053,6 +10454,74 @@ def show_missing_oa():
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="DOIs missing Open Access status", html=html,
                                          navbar=generate_navbar('System')))
+
+
+@app.route('/preprint_date_errors')
+def preprint_date_errors():
+    ''' Show preprints whose linked journal publication is dated BEFORE the preprint.
+        This is a data-quality flag - it almost always means the publication carries an
+        imprecise (year-only, defaulted to Jan 1) jrc_publishing_date that needs correcting.
+    '''
+    payload = {"subtype": "preprint", "jrc_preprint": {"$exists": 1}}
+    coll = DB['dis'].dois
+    try:
+        rows = coll.find(payload).sort([("jrc_publishing_date", -1)])
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get preprint data from dois"),
+                               message=error_message(err))
+    flagged = []
+    for row in rows:
+        if len(row['jrc_preprint']) == 1:
+            prep = row['jrc_preprint'][0]
+        else:
+            prep = None
+            for pdoi in row['jrc_preprint']:
+                prow = DL.get_doi_record(pdoi, coll=coll)
+                if not prow:
+                    continue
+                if not DL.is_version(prow):
+                    prep = pdoi
+                    break
+            if not prep:
+                prep = row['jrc_preprint'][0]
+        jour = DL.get_doi_record(prep, coll=coll)
+        if not jour or 'jrc_publishing_date' not in jour:
+            continue
+        preprint_date = datetime.strptime(row['jrc_publishing_date'], '%Y-%m-%d')
+        journal_date = datetime.strptime(jour['jrc_publishing_date'], '%Y-%m-%d')
+        days = (journal_date - preprint_date).days
+        if days >= 0:
+            continue
+        flagged.append((days, row, jour))
+    if not flagged:
+        return render_template('warning.html', urlroot=request.url_root,
+                               title=render_warning("No DOIs found", 'info'),
+                               message="No preprints have a linked publication dated before " \
+                                       + "the preprint.")
+    flagged.sort(key=lambda x: x[0])
+    header = ['Preprint', 'Preprint date', 'Publication', 'Publication date', 'Days', 'Journal']
+    fileoutput = ""
+    html = "<table id='preprint_dates' class='tablesorter numbers-scroll'><thead><tr><th>" \
+           + "</th><th>".join(header) + "</th></tr></thead><tbody>"
+    for days, row, jour in flagged:
+        journal = jour.get('jrc_journal') or DL.get_journal(jour)
+        html += f"<tr><td>{doi_link(row['doi'])}</td>" \
+                + f"<td>{row['jrc_publishing_date']}</td>" \
+                + f"<td>{doi_link(jour['doi'])}</td>" \
+                + f"<td>{jour['jrc_publishing_date']}</td>" \
+                + f"<td data-sort='{days}'>{days:,}</td>" \
+                + f"<td>{journal}</td></tr>"
+        fileoutput += "\t".join([row['doi'], row['jrc_publishing_date'], jour['doi'],
+                                 jour['jrc_publishing_date'], str(days), journal]) + "\n"
+    html += '</tbody></table>'
+    cards = stat_cards([("Flagged pairs", f"{len(flagged):,}")], div_id='predate-stats')
+    html = cards + create_downloadable('preprint_date_errors', header, fileoutput) \
+           + "<br><br>" + html
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="Publications dated before their preprint",
+                                         html=html, navbar=generate_navbar('System')))
 
 
 # ******************************************************************************

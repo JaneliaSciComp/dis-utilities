@@ -13,6 +13,26 @@ function toggler(tid, fid, counter) {
   }
 }
 
+// Cycling filter: rotates a table's rows through "A & B" -> "A only" -> "B only".
+// The button label shows the current view. Counts are left untouched.
+function cycle_filter(btn, tid, ca, cb, la, lb) {
+  var state = (parseInt($(btn).attr('data-state') || '0') + 1) % 3;
+  $(btn).attr('data-state', state);
+  if (state === 0) {
+    $('#' + tid + ' .' + ca).show();
+    $('#' + tid + ' .' + cb).show();
+    $(btn).text('Showing ' + la + ' & ' + lb);
+  } else if (state === 1) {
+    $('#' + tid + ' .' + ca).show();
+    $('#' + tid + ' .' + cb).hide();
+    $(btn).text('Showing ' + la + ' only');
+  } else {
+    $('#' + tid + ' .' + ca).hide();
+    $('#' + tid + ' .' + cb).show();
+    $(btn).text('Showing ' + lb + ' only');
+  }
+}
+
 function nav_post(field, value, source="") {
   url = "/doiui/custom";
   payload = '<input type="text" name="field" value="' + field + '" />' +
