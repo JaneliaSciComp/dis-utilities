@@ -154,6 +154,8 @@ def get_colors_by_count(cnt):
         Returns:
           List of colors
     '''
+    if cnt <= 0:
+        return []
     if cnt == 1:
         return ['green']
     if cnt == 2:
@@ -253,6 +255,9 @@ def pie_chart(data, title, legend, height=300, width=400, location="right",
         Returns:
           Figure components
     '''
+    if not data:
+        return components(figure(title=title, toolbar_location=None,
+                                 height=height, width=width))
     if len(data) == 1 and colors is None:
         colors = ["mediumblue"]
     elif len(data) == 2 and colors is None:
@@ -411,7 +416,7 @@ def dual_axis_chart(  # pylint: disable=too-many-arguments,too-many-positional-a
     bars = p.vbar(x=x_field, top=bar_field, source=source, width=0.6,
                   color=bar_color, alpha=0.85, legend_label=bar_label)
     # --- Bar trend line (optional) ---
-    if bar_trend:
+    if bar_trend and len(bar_vals) >= 2:
         indices = np.arange(len(bar_vals))
         slope, intercept = np.polyfit(indices, bar_vals, 1)
         trend_vals = (slope * indices + intercept).tolist()
@@ -663,4 +668,195 @@ def heat_map(data, title, x_field, y_field, value_field, width=950, height=500,
     p.xaxis.axis_label = x_field
     p.yaxis.axis_label = y_field
     p.xaxis.major_label_orientation = 0.6
+    return components(p)
+
+
+def hbar_chart(data, title, value_label="Value", width=650, height=450,  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+               color=None, value_format="$0,0", show_pct=True):
+    ''' Create a horizontal bar chart sorted by value (largest at top).
+        Accommodates many categories in a fixed footprint and makes relative
+        magnitudes easy to compare by bar length.
+        Keyword arguments:
+          data: dictionary of {label: value}
+          title: chart title
+          value_label: label for the value in the hover tooltip
+          width: figure width in pixels (optional)
+          height: figure height in pixels (optional)
+          color: single color, list of colors, or palette name (optional)
+          value_format: NumeralJS format for the axis/tooltip (default "$0,0")
+          show_pct: include percent-of-total in the hover tooltip (default True)
+        Returns:
+          Figure components (chartscript, chartdiv)
+    '''
+    items = sorted(data.items(), key=lambda kv: kv[1], reverse=True)
+    labels = [str(k) for k, _ in items]
+    values = [float(v) for _, v in items]
+    if not values:
+        return components(figure(title=title, width=width, height=height,
+                                 toolbar_location=None,
+                                 background_fill_color="ghostwhite"))
+    total = sum(values) or 1
+    pct = [v / total * 100 for v in values]
+    if color is None:
+        colors = get_colors_by_count(len(labels))
+    elif isinstance(color, str) and color in all_palettes:
+        colors = all_palettes[color][len(labels)]
+    elif isinstance(color, (list, tuple)):
+        colors = list(color)
+    else:
+        colors = [color] * len(labels)
+    source = ColumnDataSource({"label": labels, "value": values,
+                               "pct": pct, "color": colors})
+    # Bokeh places the first categorical factor at the bottom of the y-axis, so
+    # reverse the descending order to put the largest value at the top.
+    p = figure(y_range=list(reversed(labels)), title=title, width=width,
+               height=height, toolbar_location=None,
+               background_fill_color="ghostwhite",
+               x_range=(0, max(values) * 1.05) if values else (0, 1))
+    bars = p.hbar(y="label", right="value", height=0.8, source=source,
+                  fill_color="color", line_color=None, alpha=0.9)
+    p.xaxis.formatter = NumeralTickFormatter(format=value_format)
+    p.ygrid.grid_line_color = None
+    p.yaxis.major_label_text_font_size = "7pt"
+    tooltips = [("", "@label"), (value_label, f"@value{{{value_format}}}")]
+    if show_pct:
+        tooltips.append(("% of total", "@pct{0.0}%"))
+    p.add_tools(HoverTool(renderers=[bars], tooltips=tooltips))
+    return components(p)
+
+
+# ******************************************************************************
+# * Treemap (squarified) — area proportional to value                          *
+# ******************************************************************************
+# Self-contained squarified-treemap layout (Bruls, Huizing & van Wijk), adapted
+# from the MIT-licensed `squarify` package so no extra runtime dependency is
+# needed. Each helper returns/consumes rectangles as {"x", "y", "dx", "dy"}.
+
+def _tm_normalize_sizes(sizes, dx, dy):
+    ''' Scale raw sizes so their total equals the canvas area (dx*dy). '''
+    total_size = sum(sizes)
+    total_area = dx * dy
+    return [s * total_area / total_size for s in sizes]
+
+
+def _tm_layoutrow(sizes, x, y, dy):
+    ''' Lay a group of sizes out as a vertical stack (a row of width `width`). '''
+    width = sum(sizes) / dy
+    rects = []
+    for size in sizes:
+        rects.append({"x": x, "y": y, "dx": width, "dy": size / width})
+        y += size / width
+    return rects
+
+
+def _tm_layoutcol(sizes, x, y, dx):
+    ''' Lay a group of sizes out as a horizontal strip (a column of `height`). '''
+    height = sum(sizes) / dx
+    rects = []
+    for size in sizes:
+        rects.append({"x": x, "y": y, "dx": size / height, "dy": height})
+        x += size / height
+    return rects
+
+
+def _tm_layout(sizes, x, y, dx, dy):
+    ''' Lay sizes along the shorter side of the remaining rectangle. '''
+    return _tm_layoutrow(sizes, x, y, dy) if dx >= dy \
+        else _tm_layoutcol(sizes, x, y, dx)
+
+
+def _tm_leftover(sizes, x, y, dx, dy):
+    ''' Return the (x, y, dx, dy) of the area left after placing `sizes`. '''
+    if dx >= dy:
+        width = sum(sizes) / dy
+        return x + width, y, dx - width, dy
+    height = sum(sizes) / dx
+    return x, y + height, dx, dy - height
+
+
+def _tm_worst_ratio(sizes, x, y, dx, dy):
+    ''' Worst (most elongated) aspect ratio produced by laying out `sizes`. '''
+    return max(max(r["dx"] / r["dy"], r["dy"] / r["dx"])
+               for r in _tm_layout(sizes, x, y, dx, dy))
+
+
+def _tm_squarify(sizes, x, y, dx, dy):
+    ''' Recursively place `sizes` (already normalized, all > 0, descending)
+        into the rectangle at (x, y) of dimensions dx by dy, keeping tiles as
+        square as possible. Returns a list of rectangles in input order.
+    '''
+    sizes = [float(s) for s in sizes]
+    if not sizes:
+        return []
+    if len(sizes) == 1:
+        return _tm_layout(sizes, x, y, dx, dy)
+    i = 1
+    while i < len(sizes) and _tm_worst_ratio(sizes[:i], x, y, dx, dy) \
+            >= _tm_worst_ratio(sizes[:i + 1], x, y, dx, dy):
+        i += 1
+    current, remaining = sizes[:i], sizes[i:]
+    lx, ly, ldx, ldy = _tm_leftover(current, x, y, dx, dy)
+    return _tm_layout(current, x, y, dx, dy) \
+        + _tm_squarify(remaining, lx, ly, ldx, ldy)
+
+
+def treemap_chart(data, title, width=650, height=450, color=None,  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+                  value_format="$0,0", label_min_share=0.03):
+    ''' Create a treemap where each tile's area is proportional to its value.
+        Fits many categories into a fixed footprint and shows each as a share
+        of the whole; small values become small (and unlabeled) tiles.
+        Keyword arguments:
+          data: dictionary of {label: value}
+          title: chart title
+          width: figure width in pixels (optional)
+          height: figure height in pixels (optional)
+          color: list of colors or palette name (optional)
+          value_format: NumeralJS format for the hover tooltip (default "$0,0")
+          label_min_share: only label tiles whose value is at least this
+                           fraction of the total (default 0.03)
+        Returns:
+          Figure components (chartscript, chartdiv)
+    '''
+    items = [(str(k), float(v)) for k, v in
+             sorted(data.items(), key=lambda kv: kv[1], reverse=True) if v > 0]
+    labels = [k for k, _ in items]
+    values = [v for _, v in items]
+    if not values:
+        return components(figure(title=title, width=width, height=height,
+                                 toolbar_location=None,
+                                 background_fill_color="white"))
+    total = sum(values) or 1
+    rects = _tm_squarify(_tm_normalize_sizes(values, width, height),
+                         0, 0, width, height)
+    if color is None:
+        colors = get_colors_by_count(len(labels))
+    elif isinstance(color, str) and color in all_palettes:
+        colors = all_palettes[color][len(labels)]
+    else:
+        colors = list(color)
+    pct = [v / total * 100 for v in values]
+    text = [lab if v / total >= label_min_share else ""
+            for lab, v in zip(labels, values)]
+    source = ColumnDataSource({
+        "left": [r["x"] for r in rects],
+        "right": [r["x"] + r["dx"] for r in rects],
+        "bottom": [r["y"] for r in rects],
+        "top": [r["y"] + r["dy"] for r in rects],
+        "cx": [r["x"] + r["dx"] / 2 for r in rects],
+        "cy": [r["y"] + r["dy"] / 2 for r in rects],
+        "label": labels, "value": values, "pct": pct,
+        "color": colors, "text": text})
+    p = figure(title=title, width=width, height=height, toolbar_location=None,
+               x_range=(0, width), y_range=(0, height),
+               background_fill_color="white")
+    tiles = p.quad(left="left", right="right", top="top", bottom="bottom",
+                   source=source, fill_color="color", line_color="white",
+                   line_width=1)
+    p.text(x="cx", y="cy", text="text", source=source, text_align="center",
+           text_baseline="middle", text_font_size="8pt", text_color="white")
+    p.add_tools(HoverTool(renderers=[tiles], tooltips=[
+        ("", "@label"), ("Value", f"@value{{{value_format}}}"),
+        ("% of total", "@pct{0.0}%")]))
+    p.axis.visible = False
+    p.grid.grid_line_color = None
     return components(p)
