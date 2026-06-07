@@ -15,6 +15,7 @@
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.1/dist/js/bootstrap.min.js" integrity="sha384-VHvPCCyXqtD5DqJeNxl2dtTyhF78xXNXdkwX1CZeRusQfRKp+tA7hAShOK/B/fQ2" crossorigin="anonymous"></script>
   <script src="{{ url_for('static', filename='js/jquery/jquery.tablesorter.js') }}" type="text/JavaScript"></script>
   <script src="{{ url_for('static', filename='js/tablesorter.js') }}" type="text/JavaScript"></script>
+  <script src="{{ url_for('static', filename='js/dis.js') }}" type="text/JavaScript"></script>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}">
 <script src="https://kit.fontawesome.com/9e3257d9a9.js" crossorigin="anonymous"></script>
   {% block script %}
@@ -44,5 +45,21 @@
 
   <div id="content" class="base_content">{% block content %}{% endblock %}</div>
   <br>
+  <script>
+  // Multilevel navbar submenus: click to open, one at a time, reset on close
+  $(function () {
+    $('.dropdown-submenu > a.dropdown-toggle').on('click', function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      var $sibling = $(this).next('.dropdown-menu');
+      $(this).closest('.dropdown-menu').find('.dropdown-menu.show')
+             .not($sibling).removeClass('show');
+      $sibling.toggleClass('show');
+    });
+    $('.dropdown').on('hidden.bs.dropdown', function () {
+      $(this).find('.dropdown-menu.show').removeClass('show');
+    });
+  });
+  </script>
 </body>
 </html>

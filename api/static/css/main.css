@@ -1,3 +1,18 @@
+:root {
+  /* HHMI palette */
+  --hhmi-blue:   #028d96;
+  --hhmi-green1: #00a450;
+  --hhmi-green2: #51b447;
+  --hhmi-green3: #8ac242;
+  /* Data-table accents */
+  --table-accent: #058d95;  /* table headers + cell borders */
+  --cell-bg:      #334;      /* table cell background */
+  --cell-fg:      #bbc;      /* table cell text + body text */
+  /* Page chrome */
+  --page-bg:      #222;
+  --muted-border: #666;
+}
+
 .oa_bronze {color: #CD7F32}
 .oa_closed {color: red}
 .oa_diamond {color: lightgray}
@@ -5,16 +20,20 @@
 .oa_green {color: green}
 .oa_hybrid {color: cyan}
 
-div.abstract {height: 200px;
+div.abstract {max-height: 200px;
               width: 90%;
-              overflow-y: scroll;
-              font: 13pt Times;
-              border: 1px solid #666;
+              overflow-y: auto;
+              font-family: Georgia, 'Times New Roman', serif;
+              font-size: 13pt;
+              line-height: 1.4;
+              border: 1px solid var(--muted-border);
               padding: 8px;
 }
 
 .citation {
-  font: 13pt Times;
+  font-family: Georgia, 'Times New Roman', serif;
+  font-size: 13pt;
+  line-height: 1.4;
 }
 
 .paperdata {
@@ -38,10 +57,83 @@ div.abstract {height: 200px;
   color: black;
   background-color: #89c242;
 }
-table.proplist {
+
+/* ── Data tables ──────────────────────────────────────────────────────
+   The standard / numbers / numberlast / numbercenter families (each with
+   a sticky "-scroll" variant), plus proplist and standardc, share cell,
+   header, and border styling; only text alignment and collapse mode
+   differ. Class names are emitted by dis_responder.py — do not rename. */
+
+table.standard, table.numbers, table.numberlast, table.numbercenter,
+table.standardc, table.proplist {
   border-collapse: collapse;
   font-size: 12pt;
   line-height: 14px;
+}
+
+table.standard-scroll, table.numbers-scroll,
+table.numberlast-scroll, table.numbercenter-scroll {
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 12pt;
+  line-height: 14px;
+}
+
+/* Shared header appearance */
+.standard th, .numbers th, .numberlast th, .numbercenter th, .standardc th,
+.standard-scroll thead th, .numbers-scroll thead th,
+.numberlast-scroll thead th, .numbercenter-scroll thead th {
+  background: var(--table-accent);
+  border: 1px solid var(--table-accent);
+}
+
+/* Sticky headers for the scrollable variants */
+.standard-scroll thead th, .numbers-scroll thead th,
+.numberlast-scroll thead th, .numbercenter-scroll thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.standardc th {
+  white-space: nowrap;
+}
+
+/* Shared cell appearance */
+.standard td, .standard-scroll td,
+.numbers td, .numbers-scroll td,
+.numberlast td, .numberlast-scroll td,
+.numbercenter td, .numbercenter-scroll td,
+.standardc td, .proplist td {
+  background: var(--cell-bg) !important;
+  color: var(--cell-fg) !important;
+  border: 1px solid var(--table-accent);
+}
+
+/* Cell alignment per family (the :first-child / :last-child rules below
+   win on specificity regardless of source order) */
+.standard td, .standard-scroll td,
+.numberlast td, .numberlast-scroll td {
+  text-align: left;
+}
+
+.numbers td, .numbers-scroll td,
+.numbercenter td, .numbercenter-scroll td,
+.standardc td {
+  text-align: center;
+}
+
+.numbers td:first-child, .numbers-scroll td:first-child,
+.numbercenter td:first-child, .numbercenter-scroll td:first-child {
+  text-align: left;
+}
+
+.numberlast td:last-child, .numberlast-scroll td:last-child {
+  text-align: center;
+}
+
+.numbercenter td:last-child, .numbercenter-scroll td:last-child {
+  text-align: left;
 }
 
 .proplist td {
@@ -49,204 +141,54 @@ table.proplist {
   padding: 5px;
   vertical-align: top;
   line-height: 1.2;
-  background: #334 !important;
-  color: #bbc !important;
-  border: 1px solid #058d95;
 }
 
-table.standard {
-  border-collapse: collapse;
-  font-size: 12pt;
-  line-height: 14px;
+/* Footer (totals) rows: emphasized like the header, overriding the cell
+   !important background. Covers both <th> and <td> footer cells. */
+.standard tfoot th, .standard tfoot td,
+.standard-scroll tfoot th, .standard-scroll tfoot td,
+.numbers tfoot th, .numbers tfoot td,
+.numbers-scroll tfoot th, .numbers-scroll tfoot td,
+.numberlast tfoot th, .numberlast tfoot td,
+.numberlast-scroll tfoot th, .numberlast-scroll tfoot td,
+.numbercenter tfoot th, .numbercenter tfoot td,
+.numbercenter-scroll tfoot th, .numbercenter-scroll tfoot td {
+  background: var(--table-accent) !important;
+  color: #fff !important;
+  font-weight: bold;
+  border: 1px solid var(--table-accent);
+}
+/* Keep footer links legible on the teal background */
+.standard tfoot a, .standard-scroll tfoot a,
+.numbers tfoot a, .numbers-scroll tfoot a,
+.numberlast tfoot a, .numberlast-scroll tfoot a,
+.numbercenter tfoot a, .numbercenter-scroll tfoot a {
+  color: #fff;
+  text-decoration: underline;
 }
 
-.standard th {
-  background: #058d95;
-  border: 1px solid #058d95;
+/* User table (#ops): keep the ORCID-link column from collapsing */
+#ops td:first-child {
+  min-width: 170px;
 }
 
-.standard td {
-  text-align: left;
-  background: #334 !important;
-  color: #bbc !important;
-  border: 1px solid #058d95;
+/* Hires table (#hires): keep date and ORCID columns from collapsing */
+#hires td:nth-child(1) {
+  min-width: 100px;
+}
+#hires td:nth-child(3) {
+  min-width: 180px;
 }
 
-table.standard-scroll {
-  border-collapse: separate;
-  border-spacing: 0;
-  font-size: 12pt;
-  line-height: 14px;
-}
-
-.standard-scroll thead th {
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  background: #058d95;
-  border: 1px solid #058d95;
-}
-
-.standard-scroll td {
-  text-align: left;
-  background: #334 !important;
-  color: #bbc !important;
-  border: 1px solid #058d95;
-}
-
-table.numbers {
-  border-collapse: collapse;
-  font-size: 12pt;
-  line-height: 14px;
-}
-
-.numbers th {
-  background: #058d95;
-  border: 1px solid #058d95;
-}
-
-.numbers td:first-child {
-    text-align: left;
-}
-
-.numbers td {
-  text-align: center;
-  background: #334 !important;
-  color: #bbc !important;
-  border: 1px solid #058d95;
-}
-
-table.numbers-scroll {
-  border-collapse: separate;
-  border-spacing: 0;
-  font-size: 12pt;
-  line-height: 14px;
-}
-
-.numbers-scroll thead th {
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  background: #058d95;
-  border: 1px solid #058d95;
-}
-
-.numbers-scroll td:first-child {
-  text-align: left;
-}
-
-.numbers-scroll td {
-  text-align: center;
-  background: #334 !important;
-  color: #bbc !important;
-  border: 1px solid #058d95;
-}
-
-table.numberlast-scroll {
-  border-collapse: separate;
-  border-spacing: 0;
-  font-size: 12pt;
-  line-height: 14px;
-}
-
-.numberlast-scroll thead th {
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  background: #058d95;
-  border: 1px solid #058d95;
-}
-
-.numberlast-scroll td:last-child {
+/* Org authors table (#authors): center Alumni, widen ORCID */
+#authors td:nth-child(3) {
   text-align: center;
 }
-
-.numberlast-scroll td {
-  text-align: left;
-  background: #334 !important;
-  color: #bbc !important;
-  border: 1px solid #058d95;
+#authors td:nth-child(4) {
+  min-width: 170px;
 }
 
-table.numberlast {
-  border-collapse: collapse;
-  font-size: 12pt;
-  line-height: 14px;
-}
-
-.numberlast th {
-  background: #058d95;
-  border: 1px solid #058d95;
-}
-
-.numberlast td:last-child {
-    text-align: center;
-}
-
-.numberlast td {
-  text-align: left;
-  background: #334 !important;
-  color: #bbc !important;
-  border: 1px solid #058d95;
-}
-
-table.numbercenter-scroll {
-  border-collapse: separate;
-  border-spacing: 0;
-  font-size: 12pt;
-  line-height: 14px;
-}
-
-.numbercenter-scroll thead th {
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  background: #058d95;
-  border: 1px solid #058d95;
-}
-
-.numbercenter-scroll td:first-child {
-  text-align: left;
-}
-
-.numbercenter-scroll td:last-child {
-  text-align: left;
-}
-
-.numbercenter-scroll td {
-  text-align: center;
-  background: #334 !important;
-  color: #bbc !important;
-  border: 1px solid #058d95;
-}
-
-table.numbercenter {
-  border-collapse: collapse;
-  font-size: 12pt;
-  line-height: 14px;
-}
-
-.numbercenter th {
-  background: #058d95;
-  border: 1px solid #058d95;
-}
-
-.numbercenter td:first-child {
-    text-align: left;
-}
-
-.numbercenter td:last-child {
-    text-align: left;
-}
-
-.numbercenter td {
-  text-align: center;
-  background: #334 !important;
-  color: #bbc !important;
-  border: 1px solid #058d95;
-}
-
-div.homebox {border: 2px solid #8ac242;
+div.homebox {border: 2px solid var(--hhmi-green3);
              width: 350px;
              height: 200px;
              align: center;
@@ -273,7 +215,7 @@ table.citations {
 
 .citations td {
   padding: 8px;
-  background: #334 !important;
+  background: var(--cell-bg) !important;
   border: 1px solid dodgerblue;
 }
 
@@ -286,32 +228,14 @@ table.borderless {
   padding-right: 10px;
   text-align: left;
   white-space: nowrap;
-  color: #bbc !important;
-}
-
-table.standardc {
-  border-collapse: collapse;
-  font-size: 12pt;
-  line-height: 14px;
-}
-
-.standardc th {white-space: nowrap;
-  background: #058d95;
-  border: 1px solid #058d95;
-}
-
-.standardc td {
-  text-align: center;
-  background: #334 !important;
-  color: #bbc !important;
-  border: 1px solid #058d95;
+  color: var(--cell-fg) !important;
 }
 
 table.property {
   font-size: 12pt;
   line-height: 16px;
-  background: #bbc !important;
-  color: #334 !important;
+  background: var(--cell-fg) !important;
+  color: var(--cell-bg) !important;
 }
 
 .property td {white-space: nowrap;
@@ -368,9 +292,9 @@ table.property {
   flex: 1;
 }
 
-.fas { 
-  color: white; 
-  text-shadow: 1px 1px #333 
+.fas {
+  color: white;
+  text-shadow: 1px 1px #333
 }
 
 h1.dark, h2.dark, h3.dark, h4.dark, h5.dark, h6.dark {
@@ -379,20 +303,20 @@ h1.dark, h2.dark, h3.dark, h4.dark, h5.dark, h6.dark {
 
 h1.green1, h2.green1, h3.green1, h4.green1, h5.green1, h6.green1 {
   font-size: 20pt;
-  color: #00a450;
+  color: var(--hhmi-green1);
 }
 
-div.scroll {height: 200px;
+div.scroll {max-height: 200px;
             width: 90%;
-            overflow: scroll;
-            border: 1px solid #666;
+            overflow: auto;
+            border: 1px solid var(--muted-border);
             padding: 8px;
 }
 
-div.codescroll {height: 180px;
+div.codescroll {max-height: 180px;
                 width: 90%;
-                overflow: scroll;
-                border: 1px solid #666;
+                overflow: auto;
+                border: 1px solid var(--muted-border);
                 font: 14px monospace;
                 color: aqua;
                 padding: 8px;
@@ -406,8 +330,71 @@ div.rounded {border: 1px solid gray;
 }
 
 /* Bootstrap */
-hr {border-color: #666;
+hr {border-color: var(--muted-border);
     border-style: solid;
+}
+
+/* Multilevel dropdown submenus (Bootstrap 4 has no native support) */
+.dropdown-submenu {
+  position: relative;
+}
+.dropdown-submenu > a.dropdown-toggle::after {
+  border-top: 0.3em solid transparent;
+  border-bottom: 0.3em solid transparent;
+  border-left: 0.3em solid;
+  border-right: 0;
+  margin-left: 0.5em;
+  vertical-align: middle;
+}
+/* Desktop (>= lg): submenu flies out to the right */
+@media (min-width: 992px) {
+  .dropdown-submenu > .dropdown-menu {
+    top: 0;
+    left: 100%;
+    margin-top: -0.3rem;
+    margin-left: 0;
+  }
+}
+/* Collapsed / mobile (< lg): submenu stacks inline, indented */
+@media (max-width: 991.98px) {
+  .dropdown-submenu > .dropdown-menu {
+    position: static;
+    float: none;
+    left: auto;
+    top: auto;
+    margin: 0 0 0 1.25rem;
+    border: 0;
+    box-shadow: none;
+    padding-top: 0;
+    padding-bottom: 0;
+  }
+  .dropdown-submenu > a.dropdown-toggle::after {
+    border-left: 0.3em solid transparent;
+    border-right: 0.3em solid transparent;
+    border-top: 0.3em solid;
+    border-bottom: 0;
+  }
+}
+
+/* Navbar color accents (hhmi logo palette) */
+.navbar-dark.bg-dark {
+  border-bottom: 2px solid;
+  border-image: linear-gradient(90deg, var(--hhmi-blue), var(--hhmi-green1), var(--hhmi-green2), var(--hhmi-green3)) 1;
+}
+.navbar-nav > .nav-item > .nav-link:hover {
+  color: var(--hhmi-green1);
+}
+.navbar-nav > .nav-item.active > .nav-link {
+  color: #fff;
+}
+.navbar .dropdown-item:hover,
+.navbar .dropdown-item:focus {
+  background: var(--hhmi-blue);
+  color: #fff;
+}
+.navbar .dropdown-submenu:hover > a.dropdown-toggle {
+  background: var(--hhmi-blue);
+  color: #fff;
 }
 
 .btn-tiny {
@@ -492,43 +479,43 @@ hr {border-color: #666;
 body {
   font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
   font-size: 12pt;
-  background-color: #222;
-  color: #bbc;
+  background-color: var(--page-bg);
+  color: var(--cell-fg);
   margin-left: 10px;
   margin-right: 10px;
 }
 
 input, select {
-  background-color: #222;
-  color: #bbc;
+  background-color: var(--page-bg);
+  color: var(--cell-fg);
 }
 
 h1, h2, h3, h4, h5, h6 {
-  color: #bbc;
+  color: var(--cell-fg);
 }
 
 pre {
-  color: #bbc;
+  color: var(--cell-fg);
 }
 
 .hhmiblue {
-  color: #028d96;
+  color: var(--hhmi-blue);
 }
 
 .hhmigreen1 {
-  color: #00a450;
+  color: var(--hhmi-green1);
 }
 
 .hhmigreen2 {
-  color: #51b447;
+  color: var(--hhmi-green2);
 }
 
 .hhmigreen3 {
-  color: #8ac242;
+  color: var(--hhmi-green3);
 }
 
 /* Input */
-input:focus { background: #222; }
+input:focus { background: var(--page-bg); }
 input:hover { background: #333; }
 
 /* Links */
