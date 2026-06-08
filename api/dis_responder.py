@@ -35,7 +35,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "118.1.0"
+__version__ = "118.2.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -4281,15 +4281,19 @@ def get_citation_counts(doi, row, partial=True):
         Returns:
           Citation counts as HTML
     '''
-    # Citations (DataCite, Dimensions, eLife, OA.Report, OpenAlex, PubMed, S2, Web of Science)
+    # Citations (DataCite, Dimensions, eLife, OA.Report, OpenAlex, PubMed, ScholeXplorer, Web of Science)
     doisec = ""
     tblrow = []
     # DataCite
-    if row['jrc_obtained_from'] == 'DataCite' and 'citationCount' in row \
-        and row['citationCount']:
-        url = f"{app.config['DATACITE']}{doi}"
-        tblrow.append(f"<td>DataCite: <a href='{url}' target='_blank'>" \
-                      + f"{row['citationCount']:,}</a></td>")
+    if row['jrc_obtained_from'] == 'DataCite':
+        if row.get('citationCount', False):
+            url = f"{app.config['DATACITE']}{doi}"
+            tblrow.append(f"<td>DataCite: <a href='{url}' target='_blank'>" \
+                          + f"{row['citationCount']:,}</a></td>")
+        if row.get('jrc_citation_sources', False) and 'scholexplorer' in row['jrc_citation_sources']:
+            url = f"{app.config['SCHOLEXPLORER']}{doi}"
+            tblrow.append(f"<td>ScholeXplorer: <a href='{url}' target='_blank'>" \
+                          + f"{row['jrc_citation_sources']['scholexplorer']:,}</a></td>")
     # Dimensions
     try:
         citcnt, url = DL.get_citation_count(doi)
@@ -6295,10 +6299,10 @@ def datacite_doisd(dtype=None, pub=None, year='All'):
 def datacite_citations():
     ''' Show DataCite DOI citation counts
     '''
-    payload = {"jrc_obtained_from": "DataCite", "citationCount": {"$ne": 0}}
+    payload = {"jrc_obtained_from": "DataCite", "jrc_citation_count": {"$exists": 1}}
     coll = DB['dis'].dois
     try:
-        rows = coll.find(payload).sort("citationCount", -1)
+        rows = coll.find(payload).sort("jrc_citation_count", -1)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get data DOIs"),
@@ -6307,10 +6311,10 @@ def datacite_citations():
     total = 0
     cnt = 0
     for row in rows:
-        total += row['citationCount']
+        total += row['jrc_citation_count']
         cnt += 1
         link = doi_link(row['doi'])
-        trows.append([safe(link), DL.get_title(row), row['citationCount']])
+        trows.append([safe(link), DL.get_title(row), row['jrc_citation_count']])
     html = render_table(['DOI', 'Title', 'Citations'], trows, table_id='data',
                         css='tablesorter numberlast-scroll',
                         footer=[fcell('TOTAL', colspan=2),
