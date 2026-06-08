@@ -35,7 +35,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "117.0.0"
+__version__ = "118.0.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -369,21 +369,28 @@ class _Cell(str):
     __slots__ = ()
 
 
-def cell(value, sort=None, align=None):
-    ''' Build a body <td> with an optional custom sort key and/or alignment.
+def cell(value, sort=None, align=None, style=None):
+    ''' Build a body <td> with an optional custom sort key, alignment, and/or
+        arbitrary inline style.
         Keyword arguments:
           value: cell content (escaped unless wrapped in safe())
           sort: value for tablesorter's data-sort (use the raw number for
                 currency/comma-formatted columns so they sort numerically)
           align: optional text-align (e.g. 'center', 'right')
+          style: optional extra inline CSS (e.g. 'color:#e74c3c !important')
         Returns:
           A fully-rendered <td> cell for use in a render_table() row
     '''
     attrs = ''
     if sort is not None:
         attrs += f' data-sort="{escape(str(sort))}"'
+    styles = []
     if align:
-        attrs += f" style='text-align: {align};'"
+        styles.append(f"text-align: {align}")
+    if style:
+        styles.append(style)
+    if styles:
+        attrs += f" style='{'; '.join(styles)}'"
     return _Cell(f"<td{attrs}>{_render_cell(value)}</td>")
 
 
@@ -1126,22 +1133,19 @@ def generate_works_table(rows, name=None, show="full", eid=None):
                 print(f"Could not get author details for {row['doi']}")
     if not works:
         return html, []
-    html += "<table id='pubs' class='tablesorter standard-scroll'>" \
-            + '<thead><tr><th>Published</th><th>DOI</th><th>Title</th></tr></thead><tbody>'
+    trows = []
+    row_classes = []
     for work in sorted(works, key=lambda row: row['date'], reverse=True):
         version = DL.is_version(work['raw'])
-        cls = []
-        if version:
-            cls.append('ver')
         wrkdoi = work['doi'] if work['doi'] else '&nbsp;'
         if eid and 'jrc_author' in work['raw'] and eid in work['raw']['jrc_author']:
             wrkdoi = f"<i class='fa-solid fa-circle-check' style='color: lime'></i> {wrkdoi}"
         else:
             wrkdoi = f"&nbsp;&nbsp;&nbsp;&nbsp;{wrkdoi}"
-        html += f"<tr class=\'{' '.join(cls)}\'><td>{work['date']}</td>" \
-                + f"<td>{wrkdoi}</td><td>{work['title']}</td></tr>"
-    if dois:
-        html += "</tbody></table>"
+        trows.append([work['date'], safe(wrkdoi), work['title']])
+        row_classes.append('ver' if version else '')
+    html += render_table(['Published', 'DOI', 'Title'], trows, table_id='pubs',
+                         css='tablesorter standard-scroll', row_classes=row_classes)
     if authors:
         html = f"<br>Authors found: {', '.join(sorted(authors.values()))}<br>" \
                + f"This may include non-Janelia authors<br>{html}"
@@ -1985,10 +1989,10 @@ def standard_doi_table(rows, prefix=None):
           oacnt: number of Open Access
     '''
     header = ['Published', 'DOI', 'Journal', 'Title']
-    html = "<table id='dois' class='tablesorter standard-scroll'><thead><tr>" \
-           + ''.join([f"<th>{itm}</th>" for itm in header]) + "</tr></thead><tbody>"
     fileoutput = ""
     cnt = oacnt = 0
+    trows = []
+    row_classes = []
     for row in rows:
         if 'jrc_is_oa' in row and row['jrc_is_oa']:
             oacnt += 1
@@ -1997,16 +2001,14 @@ def standard_doi_table(rows, prefix=None):
         row['link'] = doi_link(row['doi'])
         row['journal'] = DL.get_journal(row, full=False, name_only=True)
         row['title'] = DL.get_title(row)
-        cls = []
-        if version:
-            cls.append('ver')
-        html += f"<tr class=\'{' '.join(cls)}\'><td>" \
-            + dloop(row, ['published', 'link', 'journal', 'title'], "</td><td>") + "</td></tr>"
+        trows.append([row['published'], safe(row['link']), row['journal'], row['title']])
+        row_classes.append('ver' if version else '')
         if row['title']:
             row['title'] = row['title'].replace("\n", " ")
         cnt += 1
         fileoutput += dloop(row, ['published', 'doi', 'journal', 'title']) + "\n"
-    html += '</tbody></table>'
+    html = render_table(header, trows, table_id='dois', css='tablesorter standard-scroll',
+                        row_classes=row_classes)
     counter = f"<p>Number of DOIs: <span id='totalrows'>{cnt:,}</span></p>"
     cbutton = "<button id='verbtn' class=\"btn btn-outline-warning\" " \
               + "onclick=\"toggler('dois', 'ver', 'totalrows');\">" \
@@ -4008,46 +4010,35 @@ def show_acknowledgement_stats(limit=10):
     ext_total = sum(ext_type_data.values())
     dois_pct = dois_total / dois_all * 100 if dois_all else 0
     ext_pct = ext_total / ext_all * 100 if ext_all else 0
-    html = "<table id='ack_summary' class='tablesorter standard-scroll'><thead><tr>" \
-           + "<th>Collection</th><th>Count</th><th>Total</th><th>%</th>" \
-           + "</tr></thead><tbody>"
-    html += f"<tr><td><b>Internal DOIs</b></td><td>{dois_total:,}</td><td>{dois_all:,}</td>" \
-            + f"<td>{dois_pct:.1f}%</td></tr>"
+    trows = [[safe("<b>Internal DOIs</b>"), f"{dois_total:,}", f"{dois_all:,}",
+              f"{dois_pct:.1f}%"]]
     for source in sorted(source_all):
         ack_cnt = source_ack.get(source, 0)
         tot_cnt = source_all[source]
         pct = ack_cnt / tot_cnt * 100 if tot_cnt else 0
-        html += f"<tr><td>&nbsp;&nbsp;&nbsp;{source}</td><td>{ack_cnt:,}</td>" \
-                + f"<td>{tot_cnt:,}</td><td>{pct:.1f}%</td></tr>"
-    html += f"<tr><td>External DOIs</td><td>{ext_total:,}</td><td>{ext_all:,}</td>" \
-            + f"<td>{ext_pct:.1f}%</td></tr>"
-    html += "</tbody></table>"
+        trows.append([safe(f"&nbsp;&nbsp;&nbsp;{escape(source)}"), f"{ack_cnt:,}",
+                      f"{tot_cnt:,}", f"{pct:.1f}%"])
+    trows.append(["External DOIs", f"{ext_total:,}", f"{ext_all:,}", f"{ext_pct:.1f}%"])
+    html = render_table(['Collection', 'Count', 'Total', '%'], trows, table_id='ack_summary',
+                        css='tablesorter standard-scroll')
     html += "<br><h4>Internal DOIs by type</h4>"
-    html += "<table id='dois_types' class='tablesorter numberlast-scroll'><thead><tr>" \
-            + "<th>Type</th><th>Count</th></tr></thead><tbody>"
-    for typ, cnt in sorted(dois_type_data.items(), key=itemgetter(1), reverse=True):
-        html += f"<tr><td>{typ}</td><td>{cnt:,}</td></tr>"
-    html += "</tbody></table>"
+    html += render_table(['Type', 'Count'],
+                         [[typ, f"{cnt:,}"] for typ, cnt
+                          in sorted(dois_type_data.items(), key=itemgetter(1), reverse=True)],
+                         table_id='dois_types', css='tablesorter numberlast-scroll')
     html += "<br><h4>External DOIs by type</h4>"
-    html += "<table id='ext_types' class='tablesorter numberlast-scroll'><thead><tr>" \
-            + "<th>Type</th><th>Count</th></tr></thead><tbody>"
-    for typ, cnt in sorted(ext_type_data.items(), key=itemgetter(1), reverse=True):
-        html += f"<tr><td>{typ}</td><td>{cnt:,}</td></tr>"
-    html += "</tbody></table>"
+    html += render_table(['Type', 'Count'],
+                         [[typ, f"{cnt:,}"] for typ, cnt
+                          in sorted(ext_type_data.items(), key=itemgetter(1), reverse=True)],
+                         table_id='ext_types', css='tablesorter numberlast-scroll')
     if int_journals:
         html += f"<br><h4>Top {limit} journals (Internal DOIs)</h4>"
-        html += "<table id='top_journals_int' class='tablesorter numberlast-scroll'>" \
-                + "<thead><tr><th>Journal</th><th>Count</th></tr></thead><tbody>"
-        for journal, cnt in int_journals:
-            html += f"<tr><td>{journal}</td><td>{cnt:,}</td></tr>"
-        html += "</tbody></table>"
+        html += render_table(['Journal', 'Count'], [[j, f"{c:,}"] for j, c in int_journals],
+                             table_id='top_journals_int', css='tablesorter numberlast-scroll')
     if ext_journals:
         html += f"<br><h4>Top {limit} journals (External DOIs)</h4>"
-        html += "<table id='top_journals_ext' class='tablesorter numberlast-scroll'>" \
-                + "<thead><tr><th>Journal</th><th>Count</th></tr></thead><tbody>"
-        for journal, cnt in ext_journals:
-            html += f"<tr><td>{journal}</td><td>{cnt:,}</td></tr>"
-        html += "</tbody></table>"
+        html += render_table(['Journal', 'Count'], [[j, f"{c:,}"] for j, c in ext_journals],
+                             table_id='top_journals_ext', css='tablesorter numberlast-scroll')
     # Charts: two pies side-by-side, bar chart below
     chartscript = ""
     pie_divs = ""
@@ -6160,18 +6151,18 @@ def datacite_subject(subject=None, year='All'):
         cnt = 0
         total = 0
         schemes = set()
-        html = "<table id='subjects' class='tablesorter numberlast-scroll'><thead><tr>" \
-               + "<th>Subject</th><th>Scheme</th><th>Count</th></tr></thead><tbody>"
+        trows = []
         for row in rows:
             cnt += 1
             total += row['count']
             scheme = row['_id'].get('scheme', '')
             if scheme:
                 schemes.add(scheme)
-            html += f"<tr><td>{row['_id']['subject']}</td><td>{scheme}</td><td>" \
-                    + f"<a href='/datacite_subject/{row['_id']['subject']}'>{row['count']}</a>" \
-                    + "</td></tr>"
-        html += "</tbody></table>"
+            trows.append([row['_id']['subject'], scheme,
+                          safe(f"<a href='/datacite_subject/{row['_id']['subject']}'>"
+                               + f"{row['count']}</a>")])
+        html = render_table(['Subject', 'Subject scheme', 'Count'], trows, table_id='subjects',
+                            css='tablesorter numberlast-scroll')
         cards = stat_cards([("DOI occurrences", f"{total:,}"),
                             ("Subjects", f"{cnt:,}"),
                             ("Schemes", f"{len(schemes):,}")],
@@ -7011,19 +7002,18 @@ def org_summary(org='Shared Resources',year='All', which=None):
     title = f"Journal publications for {org}"
     if year != 'All':
         title += f" ({year})"
-    html = "<table id='org' class='tablesorter numbers-scroll'><thead><tr><th></th><th>All</th>" \
-           + f"<th>{org}</th></tr></thead><tbody>"
     c1 = f"<a href='/org_summary/all/{year}/first'>{len(finds['first']):,}</a>" \
         if finds['first'] else ""
     c2 = f"<a href='/org_summary/{org}/{year}/first'>{len(finds['firstsr']):,}</a>" \
          if finds['firstsr'] else ""
-    html += f"<tr><td>Lab head first author</td><td>{c1}</td><td>{c2}</td></tr>"
+    row1 = ['Lab head first author', safe(c1), safe(c2)]
     c1 = f"<a href='/org_summary/all/{year}/last'>{len(finds['last']):,}</a>" \
          if finds['last'] else ""
     c2 = f"<a href='/org_summary/{org}/{year}/last'>{len(finds['lastsr']):,}</a>" \
          if finds['lastsr'] else ""
-    html += f"<tr><td>Lab head last author</td><td>{c1}</td><td>{c2}</td></tr>"
-    html += "</tbody></table><br>" + year_pulldown(f"org_summary/{org}")
+    row2 = ['Lab head last author', safe(c1), safe(c2)]
+    html = render_table(['', 'All', org], [row1, row2], table_id='org',
+                        css='tablesorter numbers-scroll') + "<br>" + year_pulldown(f"org_summary/{org}")
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
@@ -7121,20 +7111,17 @@ def dois_preprint(year='All'):
                                message=error_message(err))
     data, preprint = compute_preprint_data(rows)
     no_relation = get_no_relation()
-    html = '<table id="preprints" class="tablesorter numbers-scroll"><thead><tr>' \
-           + '<th>Status</th><th>Crossref</th><th>DataCite</th>' \
-           + '</tr></thead><tbody>'
-    html += "<tr><td>Preprints with journal articles</td>" \
-            + f"<td>{preprint['journal-article']:,}</td><td>{preprint['DataCite']}</td></tr>"
-    html += f"<tr><td>Journal articles with preprints</td><td>{preprint['posted-content']:,}</td>" \
-            + "<td>0</td></tr>"
-    html += "<tr><td>Journals without preprints</td>" \
-            f"<td>{no_relation['Crossref']['journal']:,}</td>" \
-            + f"<td>{no_relation['DataCite']['journal']:,}</td></tr>"
-    html += "<tr><td>Preprints without journals</td>" \
-            f"<td>{no_relation['Crossref']['preprint']:,}</td>" \
-            + f"<td>{no_relation['DataCite']['preprint']:,}</td></tr>"
-    html += '</tbody></table><br>' + year_pulldown('dois_preprint')
+    trows = [
+        ['Preprints with journal articles', f"{preprint['journal-article']:,}",
+         f"{preprint['DataCite']}"],
+        ['Journal articles with preprints', f"{preprint['posted-content']:,}", "0"],
+        ['Journals without preprints', f"{no_relation['Crossref']['journal']:,}",
+         f"{no_relation['DataCite']['journal']:,}"],
+        ['Preprints without journals', f"{no_relation['Crossref']['preprint']:,}",
+         f"{no_relation['DataCite']['preprint']:,}"],
+    ]
+    html = render_table(['Status', 'Crossref', 'DataCite'], trows, table_id='preprints',
+                        css='tablesorter numbers-scroll') + "<br>" + year_pulldown('dois_preprint')
     data['No preprint relation'] = source['Crossref'] + source['DataCite']
     try:
         chartscript, chartdiv = DP.preprint_pie_charts(data, year, DB['dis'].dois)
@@ -7225,8 +7212,7 @@ def preprint_with_pub():
     day_pub = {}
     fileoutput = ""
     header = ['Published', 'DOI', 'Title', 'Journal']
-    html = "<table id='preprint_with_pub' class='tablesorter numbers-scroll'><thead><tr><th>" \
-           + "</th><th>".join(header) + "</th></tr></thead><tbody>"
+    trows = []
     for row in rows:
         if len(row['jrc_preprint']) == 1:
             prep = row['jrc_preprint'][0]
@@ -7257,9 +7243,10 @@ def preprint_with_pub():
         day_pub[row['jrc_journal']].append(days)
         fileoutput+= "\t".join([row['jrc_publishing_date'], row['doi'], DL.get_title(row),
                                 row['jrc_journal']]) + "\n"
-        html += f"<tr><td>{row['jrc_publishing_date']}</td><td>{doi_link(row['doi'])}</td>" \
-                + f"<td>{DL.get_title(row)}</td><td>{row['jrc_journal']}</td></tr>"
-    html += '</tbody></table>'
+        trows.append([row['jrc_publishing_date'], safe(doi_link(row['doi'])),
+                      DL.get_title(row), row['jrc_journal']])
+    html = render_table(header, trows, table_id='preprint_with_pub',
+                        css='tablesorter numbers-scroll')
     avg_days = sum(day_count) / len(day_count) if day_count else 0
     cards = [("Preprints matched", f"{len(day_count):,}"),
              ("Avg. days to publication", f"{avg_days:,.1f}")]
@@ -7270,12 +7257,13 @@ def preprint_with_pub():
         cards.append(("Fastest", fastest))
         cards.append(("Slowest", f"{max(day_count):,} days"))
     pre = stat_cards(cards, div_id='preprint-stats')
-    pre += "<table id='preprint_with_pub' class='tablesorter numbers-scroll'><thead><tr>" \
-           + "<th>Journal</th><th>Average days to publication</th></tr></thead><tbody>"
+    ptrows = []
     for jour, days in day_pub.items():
         avg_days = sum(days) / len(days) if days else 0
-        pre += f"<tr><td>{jour}</td><td>{avg_days:,.1f}</td></tr>"
-    pre += '</tbody></table>' + create_downloadable('preprint_with_pub', header, fileoutput)
+        ptrows.append([jour, f"{avg_days:,.1f}"])
+    pre += render_table(['Journal', 'Average days to publication'], ptrows,
+                        table_id='preprint_with_pub', css='tablesorter numbers-scroll') \
+           + create_downloadable('preprint_with_pub', header, fileoutput)
     html = pre + html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
@@ -7309,8 +7297,7 @@ def show_preprint_relation(relation_type):
                                message=error_message(err))
     fileoutput = ""
     header = ['Published', 'DOI', 'Title', 'Journal']
-    html = f"<table id='{relation_type}' class='tablesorter numbers-scroll'><thead><tr><th>" \
-           + "</th><th>".join(header) + "</th></tr></thead><tbody>"
+    trows = []
     cnt = 0
     for row in rows:
         cnt += 1
@@ -7318,10 +7305,8 @@ def show_preprint_relation(relation_type):
         journal = row.get('jrc_journal', '')
         fileoutput += "\t".join([row['jrc_publishing_date'], row['doi'],
                                  DL.get_title(row), journal]) + "\n"
-        html += f"<tr><td>{row['jrc_publishing_date']}</td>" \
-                + f"<td>{doi_link(row['doi'])}</td><td>{ptitle}</td>" \
-                + f"<td>{journal}</td></tr>"
-    html += '</tbody></table>'
+        trows.append([row['jrc_publishing_date'], safe(doi_link(row['doi'])), ptitle, journal])
+    html = render_table(header, trows, table_id=relation_type, css='tablesorter numbers-scroll')
     html = f"{cfg['title']}: {cnt:,}<br><br>" \
            + create_downloadable(relation_type, header, fileoutput) + html
     endpoint_access()
@@ -7467,32 +7452,30 @@ def show_dois_heatmap(groupby, source='Crossref', top=10):
     top_entries = {e for e, _ in sorted(totals.items(), key=lambda x: x[1],
                                         reverse=True)[:top]}
     data = {'Year': [], label: [], 'Count': []}
-    if groupby == 'publisher':
-        html += '<table id="publishers" class="tablesorter numbers-scroll"><thead><tr>' \
-                + '<th>Publisher</th><th>Journal count</th></tr></thead><tbody>'
-    else:
-        html += '<table id="journals" class="tablesorter standard-scroll"><thead><tr>' \
-                + '<th>Journal</th></tr></thead><tbody>'
+    headers = ['Publisher', 'Journal count'] if groupby == 'publisher' else ['Journal']
+    trows = []
     for r in raw:
         if r[groupby] in top_entries:
             data['Year'].append(r['year'])
             data[label].append(r[groupby])
             data['Count'].append(r['count'])
             if groupby == 'publisher' and r[groupby] in pubcount:
+                jcount = pubcount[r[groupby]]['count']
                 link = f"<a href='/subscription/apc/{pubcount[r[groupby]]['provider']}/" \
-                       + f"{r[groupby]}'>{pubcount[r[groupby]]['count']:,}</a>"
-                html += f"<tr><td>{r[groupby]}</td><td>{link}</td></tr>"
+                       + f"{r[groupby]}'>{jcount:,}</a>"
+                trows.append([r[groupby], cell(safe(link), sort=jcount)])
                 del pubcount[r[groupby]]
             elif groupby == 'journal' and r[groupby] in pubcount:
                 link = f"<a href='/subscription/{pubcount[r[groupby]]}'>{r[groupby]}</a>"
-                html += f"<tr><td>{link}</td></tr>"
+                trows.append([safe(link)])
                 del pubcount[r[groupby]]
-    html += '</tbody></table>'
-    if "<td>" in html:
-        if groupby == 'publisher':
-            html = f"<br><h3>APCs by publisher</h3>{html}"
-        else:
-            html = f"<br><h3>Journals with APCs</h3>{html}"
+    if trows:
+        heading = 'APCs by publisher' if groupby == 'publisher' else 'Journals with APCs'
+        html += f"<br><h3>{heading}</h3>" \
+                + render_table(headers, trows,
+                               table_id=('publishers' if groupby == 'publisher' else 'journals'),
+                               css=('tablesorter numbers-scroll' if groupby == 'publisher'
+                                    else 'tablesorter standard-scroll'))
     else:
         html = ''
     chartscript, chartdiv = DP.heat_map(data,
@@ -8467,14 +8450,8 @@ def show_subscriptionlist(sub, field='publisher', stype=None):
                                        + f"<pre>{json.dumps(payload, indent=4)}</pre>")
     if cnt == 1:
         return redirect(f"/subscription/{rows[0]['_id']}")
-    html = "<table id='journals' class='tablesorter standard-scroll'><thead><tr>"
-    if not stype:
-        html += "<th>Type</th>"
-    html += "<th>Title</th><th>Publisher</th><th>Provider</th><th>Title ID</th>" \
-            + '<th>Access</th><th>APC</th>'
     pubcount = {}
     if field == 'publisher':
-        html += "<th>Janelia publications</th>"
         try:
             payload = [{"$match": {"jrc_journal": {"$exists": 1}}},
                        {"$group": {"_id": "$jrc_journal", "count": {"$sum": 1}}}]
@@ -8485,7 +8462,6 @@ def show_subscriptionlist(sub, field='publisher', stype=None):
             return render_template('error.html', urlroot=request.url_root,
                                    title=render_warning(errmsg),
                                    message=error_message(err))
-    html += "</tr></thead><tbody>"
     header = ([] if stype else ['Type']) \
              + ['Title', 'Publisher', 'Provider', 'Title ID', 'Access', 'APC']
     if field == 'publisher':
@@ -8495,14 +8471,15 @@ def show_subscriptionlist(sub, field='publisher', stype=None):
     subscribed_cnt = 0
     free_cnt = 0
     janelia_pubs = 0
+    trows = []
     for row in rows:
-        if stype:
-            ptype = ''
-        elif field == 'provider':
-            ptype = f"<td><a href='/subscriptionlist/{sub}/provider/{row['type']}'>" \
-                    + f"{row['type']}</a></td>"
-        else:
-            ptype = f"<td>{row['type']}</td>"
+        cells = []
+        if not stype:
+            if field == 'provider':
+                cells.append(safe(f"<a href='/subscriptionlist/{sub}/provider/{row['type']}'>"
+                                  + f"{row['type']}</a>"))
+            else:
+                cells.append(row['type'])
         link = f"<a href='/subscription/{str(row['_id'])}'>{row['title']}</a>"
         if row['access'] == 'Subscription':
             subscribed_cnt += 1
@@ -8511,7 +8488,7 @@ def show_subscriptionlist(sub, field='publisher', stype=None):
         access = '<span style="color: yellowgreen">YES</span>' \
                   if row['access'] == 'Subscription' \
                   else f"<span style='color: lime'>{row['access']}</span>"
-        apc_cell = '<td></td>'
+        apc_obj = ''
         apc_export = ''
         if row.get('apc'):
             apc_year = max(row['apc'])
@@ -8519,10 +8496,9 @@ def show_subscriptionlist(sub, field='publisher', stype=None):
             apc_export = f"${apc_val:,.2f} ({apc_year})"
             apc_link = f"<a href='/subscription/apc/{row['provider']}/{row['publisher']}'>" \
                        + f"{apc_export}</a>"
-            apc_cell = f"<td data-sort='{apc_val}'>{apc_link}</td>"
-        html += f"<tr>{ptype}<td>{link}</td><td>{row['publisher']}</td>" \
-                + f"<td>{row['provider']}</td><td>{row['title-id']}</td>" \
-                + f"<td>{access}</td>{apc_cell}"
+            apc_obj = cell(safe(apc_link), sort=apc_val)
+        cells += [safe(link), row['publisher'], row['provider'], row['title-id'],
+                  safe(access), apc_obj]
         file_cells = ([] if stype else [row['type']]) \
                      + [row['title'], row['publisher'], row['provider'],
                         row['title-id'], row['access'], apc_export]
@@ -8530,12 +8506,13 @@ def show_subscriptionlist(sub, field='publisher', stype=None):
             if pubcount.get(row['title']):
                 pubto += 1
                 janelia_pubs += pubcount[row['title']]
-            link = f"<a href='/journal/{row['title']}'>{pubcount.get(row['title'])}</a>" \
-                   if pubcount.get(row['title']) else ''
-            html += f"<td style='text-align: center'>{link}</td>"
+            jlink = f"<a href='/journal/{row['title']}'>{pubcount.get(row['title'])}</a>" \
+                    if pubcount.get(row['title']) else ''
+            cells.append(cell(safe(jlink), align='center'))
             file_cells.append(str(pubcount.get(row['title'], '')))
+        trows.append(cells)
         fileoutput += "\t".join(file_cells) + "\n"
-    html += '</tr></tbody></table>'
+    html = render_table(header, trows, table_id='journals', css='tablesorter standard-scroll')
     title = f"ubscriptions for {field} {sub}"
     title = f"{stype} s{title}" if stype else f"S{title}"
     cards = [("Journals", f"{cnt:,}")]
@@ -8730,45 +8707,40 @@ def show_subscription_apcs(provider=None, publisher=None):
     years = sorted({yr for row in rows for yr in row['apc']})
     if publisher:
         header = ['Journal'] + years
-        table_header = "<th>Journal</th>"
     elif provider:
         header = ['Publisher', 'Journal'] + years
-        table_header = "<th>Publisher</th><th>Journal</th>"
     else:
         header = ['Provider', 'Publisher', 'Journal'] + years
-        table_header = "<th>Provider</th><th>Publisher</th><th>Journal</th>"
-    table_header += "".join(f"<th>{yr}</th>" for yr in years)
-    html = "<table id='apcs' class='tablesorter numberlast-scroll'><thead><tr>" \
-           + f"{table_header}</tr></thead><tbody>"
     fileoutput = ""
+    trows = []
     cnt = 0
     for row in rows:
         tlink = f"<a href='/subscription/{row['_id']}'>{row['title']}</a>"
         provider_list[row['provider']] = True
         publisher_list[row['publisher']] = True
         if publisher:
-            cells = f"<td>{tlink}</td>"
+            cells = [safe(tlink)]
             file_cells = [row['title']]
         elif provider:
-            cells = f"<td>{row['publisher']}</td><td>{tlink}</td>"
+            cells = [row['publisher'], safe(tlink)]
             file_cells = [row['publisher'], row['title']]
         else:
-            cells = f"<td>{row['provider']}</td><td>{row['publisher']}</td>" \
-                    + f"<td>{tlink}</td>"
+            cells = [row['provider'], row['publisher'], safe(tlink)]
             file_cells = [row['provider'], row['publisher'], row['title']]
         for yr in years:
             if yr in row['apc']:
-                cells += f"<td>${float(row['apc'][yr]):,.2f}</td>"
+                cells.append(f"${float(row['apc'][yr]):,.2f}")
                 file_cells.append(f"${float(row['apc'][yr]):,.2f}")
             else:
-                cells += "<td></td>"
+                cells.append("")
                 file_cells.append("")
-        html += f"<tr>{cells}</tr>"
+        trows.append(cells)
         fileoutput += "\t".join(file_cells) + "\n"
         cnt += 1
     download_name = f"apcs_{provider}" if provider else "apcs"
     html = create_downloadable(download_name, header, fileoutput) \
-           + "<br><br>" + f"{html}</tbody></table>"
+           + "<br><br>" + render_table(header, trows, table_id='apcs',
+                                       css='tablesorter numberlast-scroll')
     if not provider:
         prehtml = "<h3>Providers</h3>"
         for prv in sorted(provider_list.keys(), key=str.lower):
@@ -9203,12 +9175,8 @@ def orcid_duplicates():
         for row in rowsobj:
             rows.append(row)
         if rows:
-            if check == 'employeeId':
-                html += f"{check}<table id='duplicates' class='tablesorter standard-scroll'>" \
-                        + "<thead><tr><th>Name</th><th>ORCIDs</th></tr></thead><tbody>"
-            else:
-                html += f"{check}<table id='duplicates' class='tablesorter standard-scroll'>" \
-                        + "<thead><tr><th>Name</th><th>User IDs</th></tr></thead><tbody>"
+            collabel = 'ORCIDs' if check == 'employeeId' else 'User IDs'
+            trows = []
             for row in rows:
                 try:
                     recs = DB['dis'].orcid.find({"employeeId": row['_id']})
@@ -9223,8 +9191,9 @@ def orcid_duplicates():
                     names.append(f"{rec['given'][0]} {rec['family'][0]}")
                     other.append(f"<a href=\"{app.config['ORCID']}{rec['orcid']}\">" \
                                  + f"{rec['orcid']}</a>")
-                html += f"<tr><td>{', '.join(names)}</td><td>{', '.join(other)}</td></tr>"
-            html += '</tbody></table>'
+                trows.append([', '.join(names), safe(', '.join(other))])
+            html += check + render_table(['Name', collabel], trows, table_id='duplicates',
+                                         css='tablesorter standard-scroll')
         if not html:
             html = "<p>No duplicates found</p>"
     endpoint_access()
@@ -9343,9 +9312,7 @@ def orcid_run_bulk_search():
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not find required columns"),
                                message="Could not find required columns: " + ", ".join(arr))
-    html += "<table id='bulk' class='tablesorter numberlast-scroll'><thead><tr>" \
-            + "<th>Given name</th><th>Family name</th><th>ORCID/user ID</th><th>Works</th></tr>" \
-            + "</thead><tbody>"
+    trows = []
     outrow = []
     for _, row in df.iterrows():
         try:
@@ -9369,14 +9336,15 @@ def orcid_run_bulk_search():
             outrow.append(pubs[0])
         else:
             outrow.append("\n".join(pubs))
-        html += f"<tr><td>{row[given]}</td><td>{row[family]}</td><td>{res}</td><td>{cnt}</td></tr>"
+        trows.append([row[given], row[family], safe(res), cnt])
     pre = ""
     if outrow:
         header = ['Given name', 'Family name', 'In database', 'User ID', 'ORCID', 'DOI',
                   'Publication', 'Type', 'Subtype', 'First author', 'Last author', 'Published',
                   'Journal', 'Title', 'Authors']
         pre = create_downloadable('dois', header, "\n".join(outrow)) + "<br><br>"
-    html += "</tbody></table>"
+    html += render_table(['Given name', 'Family name', 'ORCID/user ID', 'Works'], trows,
+                        table_id='bulk', css='tablesorter numberlast-scroll')
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="ORCID bulk search", html=pre+html,
                                          navbar=generate_navbar('Authorship')))
@@ -9848,9 +9816,8 @@ def orcid_tag():
                                message=error_message(err))
     html = "<button class=\"btn btn-outline-warning\" " \
               + "onclick=\"$('.other').toggle();\">Filter for active SupOrgs</button>"
-    html += '<table id="types" class="tablesorter numbers-scroll"><thead><tr>' \
-            + '<th>Affiliation</th><th>SupOrg</th><th>Authors</th><th>ORCID %</th>' \
-            + '</tr></thead><tbody>'
+    trows = []
+    row_classes = []
     count = 0
     for row in rows:
         count += 1
@@ -9875,9 +9842,11 @@ def orcid_tag():
             perc = f"<span style='color: yellow;'>{perc}%</span>"
         else:
             perc = f"<span style='color: red;'>{perc}%</span>"
-        html += f"<tr class={rclass}><td>{link}</td><td>{org}</td><td>{link2}</td>" \
-                + f"<td>{perc}</td></tr>"
-    html += '</tbody></table>'
+        trows.append([safe(link), safe(org), safe(link2), safe(perc)])
+        row_classes.append(rclass)
+    html += render_table(['Affiliation', 'SupOrg', 'Authors', 'ORCID %'], trows,
+                         table_id='types', css='tablesorter numbers-scroll',
+                         row_classes=row_classes)
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=f"Author affiliations ({count:,})", html=html,
@@ -10016,30 +9985,6 @@ def show_projects(option=None):
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
-                                         navbar=generate_navbar('Tag/affiliation')))
-
-
-@app.route('/project/<string:name>')
-def project(name):
-    ''' Show information on a single project
-    '''
-    payload = {"$or": [{"author.name": name},
-                       {"creators.name": name}]}
-    try:
-        rows = DB['dis'].dois.find(payload)
-    except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get projects from " \
-                                                    + "orcid collection"),
-                               message=error_message(err))
-    html, cnt, _ = standard_doi_table(rows)
-    if cnt:
-        html = f"<p>Number of DOIs: {cnt:,}</p>" + html
-    else:
-        html = f"<br>No DOIs found for {name}"
-    endpoint_access()
-    return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title=f"Project: {name}", html=html,
                                          navbar=generate_navbar('Tag/affiliation')))
 
 
@@ -10224,32 +10169,24 @@ def stats_database():
           "</div>"
         + "</div>")
 
-    html = (summary_html + charts_html
-            + '<table id="collections" class="tablesorter numbercenter-scroll"><thead><tr>'
-            + '<th>Collection</th><th>Documents</th><th>Avg. doc size</th>'
-            + '<th>Uncompressed size</th><th>On-disk size</th><th>Compression ratio</th>'
-            + '<th>Fragmentation</th><th>Indexes</th><th>Index details</th>'
-            + '</tr></thead><tbody>')
+    trows = []
     for cname, val in sorted(collection.items()):
         empty_badge = (" <span style='color:#e74c3c !important;font-size:0.8em'>[empty]</span>"
                        if val['docs_raw'] == 0 else "")
         frag = val['free_raw']
         frag_color = "#2ecc71" if frag < 5 else ("#f39c12" if frag < 20 else "#e74c3c")
         ratio_style = "color:#f39c12 !important" if 0 < val['ratio_raw'] < 1.0 else ""
-        html += (
-            f"<tr>"
-            f"<td>{cname}{empty_badge}</td>"
-            f"<td data-sort='{val['docs_raw']}'>{val['docs']}</td>"
-            f"<td data-sort='{val['docsize_raw']}'>{val['docsize']}</td>"
-            f"<td data-sort='{val['datasize_raw']}'>{val['datasize']}</td>"
-            f"<td data-sort='{val['storagesize_raw']}'>{val['storagesize']}</td>"
-            f"<td data-sort='{val['ratio_raw']}' style='{ratio_style}'>{val['ratio']}</td>"
-            f"<td data-sort='{val['free_raw']}' style='color:{frag_color} !important'>{val['free']}</td>"
-            f"<td data-sort='{val['idxsize_raw']}'>{val['idxsize']}</td>"
-            f"<td>{val['idx']}</td>"
-            f"</tr>"
-        )
-    html += '</tbody>'
+        trows.append([
+            safe(f"{cname}{empty_badge}"),
+            cell(val['docs'], sort=val['docs_raw']),
+            cell(val['docsize'], sort=val['docsize_raw']),
+            cell(val['datasize'], sort=val['datasize_raw']),
+            cell(val['storagesize'], sort=val['storagesize_raw']),
+            cell(val['ratio'], sort=val['ratio_raw'], style=ratio_style or None),
+            cell(val['free'], sort=val['free_raw'], style=f"color:{frag_color} !important"),
+            cell(val['idxsize'], sort=val['idxsize_raw']),
+            safe(val['idx']),
+        ])
     footer_val = {"objects": f"{dbstat.get('objects', 0):,}",
                   "avgObjSize": humansize(dbstat.get('avgObjSize', 0), space='mem'),
                   "dataSize": humansize(db_data, space='mem'),
@@ -10259,14 +10196,16 @@ def stats_database():
                   "indexSize": f"{dbstat.get('indexes', 0)} indices "
                                + f"({humansize(dbstat.get('indexSize', 0), space='mem')})",
                   "blank2": ""}
-    html += '<tfoot>'
-    html += "<tr><th style='text-align:right'>TOTAL</th><th style='text-align:center'>" \
-            + dloop(footer_val,
-                    ['objects', 'avgObjSize', 'dataSize', 'storageSize', 'ratio',
-                     'blank', 'indexSize', 'blank2'],
-                    "</th><th style='text-align:center'>") + "</th></tr>"
-    html += '</tfoot>'
-    html += '</table>'
+    footer = [fcell('TOTAL', align='right')] \
+             + [fcell(footer_val[k], align='center') for k in
+                ['objects', 'avgObjSize', 'dataSize', 'storageSize', 'ratio',
+                 'blank', 'indexSize', 'blank2']]
+    html = (summary_html + charts_html
+            + render_table(['Collection', 'Documents', 'Avg. doc size',
+                            'Uncompressed size', 'On-disk size', 'Compression ratio',
+                            'Fragmentation', 'Indexes', 'Index details'], trows,
+                           table_id='collections', css='tablesorter numbercenter-scroll',
+                           footer=footer))
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="Database statistics", html=html,
@@ -10316,12 +10255,11 @@ def cvs(cv=None):
             return render_template('error.html', urlroot=request.url_root,
                                    title=render_warning("Could not get cvterms"),
                                    message=error_message(err))
-        html += '<table id="cvterms" class="tablesorter standard-scroll"><thead><tr><th>Name</th>' \
-                + '<th>Display name</th><th>Definition</th><th>Format</th></tr></thead><tbody>'
+        trows = []
         for row in rows:
-            html += f"<tr><td>{row['name']}</td><td>{row['display']}</td>" \
-                    + f"<td>{row['definition']}</td><td>{row['format']}</td></tr>"
-        html += '</tbody></table>'
+            trows.append([row['name'], row['display'], row['definition'], row['format']])
+        html += render_table(['Name', 'Display name', 'Definition', 'Format'], trows,
+                             table_id='cvterms', css='tablesorter standard-scroll')
     endpoint_access()
     return make_response(render_template('cv.html', urlroot=request.url_root,
                                          title="Controlled vocabularies", html=html,
@@ -10434,15 +10372,15 @@ def ignore(typ=None):
             if 'reason' in row:
                 reason_present = True
             rows.append(row)
-        html += '<table id="ignores" class="tablesorter standard-scroll"><thead><tr><th>Key</th>' \
-                + f"{'<th>Reason</th>' if reason_present else ''}</tr></thead><tbody>"
+        header = ['Key'] + (['Reason'] if reason_present else [])
+        trows = []
         for row in rows:
+            cells = [row['key']]
             if reason_present:
-                reason = f"<td>{row['reason']}</td>" if 'reason' in row else '<td></td>'
-            else:
-                reason = ''
-            html += f"<tr><td>{row['key']}</td>{reason}</tr>"
-        html += '</tbody></table>'
+                cells.append(row.get('reason', ''))
+            trows.append(cells)
+        html += render_table(header, trows, table_id='ignores',
+                             css='tablesorter standard-scroll')
     endpoint_access()
     return make_response(render_template('ignore.html', urlroot=request.url_root,
                                          title=title, html=html,
@@ -10461,15 +10399,13 @@ def dois_pending():
                                title=render_warning("Could not get DOIs " \
                                                     + "from dois_to_process collection"),
                                message=error_message(err))
-    html = '<table id="types" class="tablesorter numbers-scroll"><thead><tr>' \
-           + '<th>DOI</th><th>Inserted</th><th>Time waiting</th>' \
-           + '</tr></thead><tbody>'
     if not cnt:
         return render_template('warning.html', urlroot=request.url_root,
                                title=render_warning("No DOIs found", 'info'),
                                message="No DOIs are awaiting processing. This isn't an error," \
                                        + " it just means that we're all caught up on " \
                                        + "DOI processing.")
+    trows = []
     for row in rows:
         elapsed = datetime. now() - row['inserted']
         if elapsed.days:
@@ -10481,8 +10417,9 @@ def dois_pending():
                     + f"{elapsed.seconds % 60:02}"
         url = f"<a href='{row['url']}' target='_blank'>{row['doi']}</a>" \
               if row.get('url') else doi_link(row['doi'])
-        html += f"<tr><td>{url}</td><td>{row['inserted']}</td><td>{etime}</td>"
-    html += '</tbody></table>'
+        trows.append([safe(url), row['inserted'], etime])
+    html = render_table(['DOI', 'Inserted', 'Time waiting'], trows, table_id='types',
+                        css='tablesorter numbers-scroll')
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="DOIs awaiting processing", html=html,
@@ -10503,20 +10440,18 @@ def show_missing_oa():
                                title=render_warning("Could not get DOIs " \
                                                     + "missing Open Access status"),
                                message=error_message(err))
-    html = '<table id="types" class="tablesorter standard-scroll"><thead><tr>' \
-           + '<th>DOI</th><th>Source</th><th>Publisher</th><th>Journal</th>' \
-           + '</tr></thead><tbody>'
     if not cnt:
         return render_template('warning.html', urlroot=request.url_root,
                                title=render_warning("No DOIs found", 'info'),
                                message="No DOIs are missing Open Access status.")
+    trows = []
     for row in rows:
         doi = row['doi']
         publisher = row.get('publisher', 'Unknown')
         journal = DL.get_journal(row)
-        html += f"<tr><td>{doi_link(doi)}</td><td>{row['jrc_obtained_from']}</td>" \
-            + f"<td>{publisher}</td><td>{journal}</td></tr>"
-    html += '</tbody></table>'
+        trows.append([safe(doi_link(doi)), row['jrc_obtained_from'], publisher, journal])
+    html = render_table(['DOI', 'Source', 'Publisher', 'Journal'], trows, table_id='types',
+                        css='tablesorter standard-scroll')
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="DOIs missing Open Access status", html=html,
@@ -10569,19 +10504,16 @@ def preprint_date_errors():
     flagged.sort(key=lambda x: x[0])
     header = ['Preprint', 'Preprint date', 'Publication', 'Publication date', 'Days', 'Journal']
     fileoutput = ""
-    html = "<table id='preprint_dates' class='tablesorter numbers-scroll'><thead><tr><th>" \
-           + "</th><th>".join(header) + "</th></tr></thead><tbody>"
+    trows = []
     for days, row, jour in flagged:
         journal = jour.get('jrc_journal') or DL.get_journal(jour)
-        html += f"<tr><td>{doi_link(row['doi'])}</td>" \
-                + f"<td>{row['jrc_publishing_date']}</td>" \
-                + f"<td>{doi_link(jour['doi'])}</td>" \
-                + f"<td>{jour['jrc_publishing_date']}</td>" \
-                + f"<td data-sort='{days}'>{days:,}</td>" \
-                + f"<td>{journal}</td></tr>"
+        trows.append([safe(doi_link(row['doi'])), row['jrc_publishing_date'],
+                      safe(doi_link(jour['doi'])), jour['jrc_publishing_date'],
+                      cell(f"{days:,}", sort=days), journal])
         fileoutput += "\t".join([row['doi'], row['jrc_publishing_date'], jour['doi'],
                                  jour['jrc_publishing_date'], str(days), journal]) + "\n"
-    html += '</tbody></table>'
+    html = render_table(header, trows, table_id='preprint_dates',
+                        css='tablesorter numbers-scroll')
     cards = stat_cards([("Flagged pairs", f"{len(flagged):,}")], div_id='predate-stats')
     html = cards + create_downloadable('preprint_date_errors', header, fileoutput) \
            + "<br><br>" + html
@@ -10630,8 +10562,7 @@ def show_labs():
             result['data'].append(row)
         result['rest']['row_count'] = len(result['data'])
         return generate_response(result)
-    html = '<table class="standard"><thead><tr><th>Name</th><th>ORCID</th><th>Group</th>' \
-           + '<th>Affiliations</th></tr></thead><tbody>'
+    trows = []
     count = 0
     for row in rows:
         count += 1
@@ -10652,10 +10583,9 @@ def show_labs():
         except Exception:
             grow = None
         glink = f"<a href='/tag/{row['group']}'>{row['group']}</a>" if grow else row['group']
-        html += f"<tr><td>{name}</td>" \
-                + f"<td style='width: 180px'>{row['orcid'] if 'orcid' in row else ''}</td>" \
-                + f"<td>{glink}</td><td>{', '.join(row['affiliations'])}</td></tr>"
-    html += '</tbody></table>'
+        trows.append([safe(name), cell(row['orcid'] if 'orcid' in row else '', style='width: 180px'),
+                      safe(glink), ', '.join(row['affiliations'])])
+    html = render_table(['Name', 'ORCID', 'Group', 'Affiliations'], trows, css='standard')
     endpoint_access()
     return render_template('general.html', urlroot=request.url_root, title=f"Labs ({count:,})",
                            html=html, navbar=generate_navbar('Tag/affiliation'))
