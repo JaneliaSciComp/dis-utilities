@@ -35,7 +35,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "118.2.0"
+__version__ = "118.3.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -312,6 +312,16 @@ def render_warning(msg, severity='error', size='lg'):
         icon = 'exclamation-circle'
     return f"<span class='fas fa-{icon} fa-{size}' style='color:{color}'></span>" \
            + f"&nbsp;{msg}"
+
+
+# Open Access statuses ordered least → most restrictive, for status-card display
+OA_STATUS_ORDER = ('Diamond', 'Gold', 'Hybrid', 'Green', 'Bronze', 'Closed', 'Unknown')
+
+
+def oa_status_rank(label):
+    ''' Sort key placing OA statuses least→most restrictive (unknowns last) '''
+    label = label.capitalize()
+    return OA_STATUS_ORDER.index(label) if label in OA_STATUS_ORDER else len(OA_STATUS_ORDER)
 
 
 def stat_cards(cards, div_id='stat-cards'):
@@ -5205,12 +5215,15 @@ def dois_provider_with_janelia(prov):
                                message=error_message(err))
     trows = []
     cnt = 0
+    oa_data = {}
     sheet = []
     sheet.append("Published\tDOI\tPublisher\tJournal\tTitle\tStatus")
     for row in rows:
         stat = row.get('jrc_oa_status', '')
         sheet.append(f"{row['jrc_publishing_date']}\t{row['doi']}\t{row['publisher']}\t" \
                      + f"{row['jrc_journal']}\t{DL.get_title(row)}\t{stat}")
+        statlabel = stat.capitalize() if stat else 'Unknown'
+        oa_data[statlabel] = oa_data.get(statlabel, 0) + 1
         if stat:
             stat = safe(f"<span class='oa_{stat}'>{stat.capitalize()}</span>")
         trows.append([row['jrc_publishing_date'], safe(doi_link(row['doi'])),
@@ -5218,8 +5231,12 @@ def dois_provider_with_janelia(prov):
         cnt += 1
     html = render_table(['Published', 'DOI', 'Publisher', 'Journal', 'Title', 'Status'], trows,
                         table_id='dois', css='tablesorter standard-scroll')
+    cardlist = [("DOIs", f"{cnt:,}")]
+    for key in sorted(oa_data, key=oa_status_rank):
+        cardlist.append((key, f"{oa_data[key]:,}", DP.OA_COLORS.get(key, 'crimson')))
+    cards = stat_cards(cardlist, div_id='provider-stats')
     sheet = create_downloadable(f"{prov}_dois", None, "\n".join(sheet))
-    html = sheet + "<br><br>" + html
+    html = cards + sheet + "<br><br>" + html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=f"DOIs by provider {prov} with " \
@@ -5794,7 +5811,7 @@ def show_insert(idate, source='Crossref'):
                         row_classes=row_classes)
     cbutton = "<button class=\"btn btn-outline-warning\" " \
               + "onclick=\"$('.other').toggle();\">Filter for candidate DOIs</button>"
-    html = create_downloadable("jrc_inserted", None, fileoutput) + f" &nbsp;{cbutton}{html}"
+    html = cbutton + f" &nbsp;{create_downloadable('jrc_inserted', None, fileoutput)}{html}"
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=f"DOIs inserted from {source} on or after {idate}",
@@ -6308,6 +6325,7 @@ def datacite_citations():
                                title=render_warning("Could not get data DOIs"),
                                message=error_message(err))
     trows = []
+    row_classes = []
     total = 0
     cnt = 0
     for row in rows:
@@ -6315,15 +6333,19 @@ def datacite_citations():
         cnt += 1
         link = doi_link(row['doi'])
         trows.append([safe(link), DL.get_title(row), row['jrc_citation_count']])
+        row_classes.append('ver' if DL.is_version(row) else '')
     html = render_table(['DOI', 'Title', 'Citations'], trows, table_id='data',
-                        css='tablesorter numberlast-scroll',
+                        css='tablesorter numberlast-scroll', row_classes=row_classes,
                         footer=[fcell('TOTAL', colspan=2),
                                 fcell(f"{total:,}", align='center')]) + "<br>"
-    cards = stat_cards([("DOIs with citations", f"{cnt:,}"),
+    cbutton = "<button id='verbtn' class=\"btn btn-outline-warning\" " \
+              + "onclick=\"toggler('data', 'ver', 'totalrows');\">" \
+              + "Filter versioned DOIs</button>"
+    cards = stat_cards([("DOIs with citations", f"<span id='totalrows'>{cnt:,}</span>"),
                         ("Total citations", f"{total:,}"),
                         ("Avg. per DOI", f"{total/cnt:,.1f}" if cnt else "0")],
                        div_id='dccc-stats')
-    html = cards + html
+    html = cards + cbutton + "<br><br>" + html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="DataCite DOI citations", html=html,
@@ -7836,9 +7858,9 @@ def show_journal_ui(jname, year='All'):
     if total < cnt:
         data['Unknown'] = data.get('Unknown', 0) + cnt - total
     cards = [("DOIs", f"<span id='totalrows'>{cnt:,}</span>")]
-    for key, val in sorted(data.items(), key=lambda item: item[1], reverse=True):
+    for key in sorted(data, key=oa_status_rank):
         stat = DP.OA_COLORS.get(key.capitalize(), 'crimson')
-        cards.append((key.capitalize(), f"{val:,}", stat))
+        cards.append((key.capitalize(), f"{data[key]:,}", stat))
     title = f"DOIs for {jname}"
     if year != 'All':
         title += f" ({year})"

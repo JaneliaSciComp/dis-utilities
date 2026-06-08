@@ -18,13 +18,7 @@ occurs because databases:
 about which metrics best serve their specific needs. Note many of these
 aggregators reference each other as data sources.
 <ul>
-<li><a href="https://webofscience.help.clarivate.com/en-us/Content/all-times-cited-counts.html" target="_blank">Web of Science</a>: Counts citations only from journals, books, and conference
-proceedings indexed in the Web of Science Core Collection (approximately
-21,000+ hand-selected, peer-reviewed sources). Citations are extracted from
-reference lists of indexed publications and linked algorithmically. Does not
-count citations from books, dissertations, patents, or technical reports
-outside their indexed collection. Self-citations and duplicate citations from
-the same source article are excluded.</li>
+<li><a href="https://support.datacite.org/docs/data-citation" target="_blank">DataCite</a>: Uses citation count from DataCite record. This metric severely underreports citations - it is better to find citations on resources such as ScholeXplorer or OpenAlex.</li>
 <li><a href="https://dimensions.freshdesk.com/support/solutions/articles/23000018849-where-are-citations-in-dimensions-coming-from-)" target="_blank">Dimensions</a>: Extracts citations from multiple sources including Crossref,
 PubMed Central, OpenCitations data, and directly from full-text records
 provided by publishers. Coverage extends beyond journal articles to include
@@ -58,6 +52,14 @@ employs machine learning to classify citation types (background, methods,
 results) and identify "highly influential citations." Focuses on semantic
 analysis beyond simple citation counting, though coverage may be more limited
 than comprehensive databases.</li>
+<li><a href="https://scholexplorer.openaire.eu/documentation" target="_blank">ScholeXplorer</a>: Uses AI-powered mining to extract citations from publishers and repositories. This is probably the most comprehensive source for citations for DataCite resources.</li>
+<li><a href="https://webofscience.help.clarivate.com/en-us/Content/all-times-cited-counts.html" target="_blank">Web of Science</a>: Counts citations only from journals, books, and conference
+proceedings indexed in the Web of Science Core Collection (approximately
+21,000+ hand-selected, peer-reviewed sources). Citations are extracted from
+reference lists of indexed publications and linked algorithmically. Does not
+count citations from books, dissertations, patents, or technical reports
+outside their indexed collection. Self-citations and duplicate citations from
+the same source article are excluded.</li>
 </ul></p>
 
 <p>Please do not hesitate to reach out to Data and Information Services at
