@@ -41,7 +41,7 @@ import doi_common.doi_common as DL
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation
 # pylint: disable=too-many-arguments,too-many-positional-arguments
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 # Parms
 ARG = DISCONFIG = LOGGER = None
@@ -251,6 +251,8 @@ def generate_email(summary, ready, review, nojanelians, alumni):
           None
     '''
     msg = ""
+    if not ready and not review and ARG.WRITE:
+        return
     if ready:
         msg += "<br>The following DOIs will be added to the database:<br>"
         for item in ready:
