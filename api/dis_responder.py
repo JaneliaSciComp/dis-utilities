@@ -35,7 +35,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "118.0.0"
+__version__ = "118.1.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -8324,7 +8324,7 @@ def show_subscription_costs(provider=None):
     for year, val in perc.items():
         if val['percent'] is not None:
             perclist.append(val['percent'])
-            pp = f"{val['percent']:+.2f}%"
+            pp = cell(f"{val['percent']:+.2f}%", sort=val['percent'])
         else:
             pp = ""
         link = f"<a href='/subscription/year/{year}'>{year}</a>"
