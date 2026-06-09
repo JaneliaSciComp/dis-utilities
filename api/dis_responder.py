@@ -35,7 +35,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "118.3.0"
+__version__ = "118.4.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -7981,10 +7981,10 @@ def show_subscription_summary():
                                title=render_warning(errmsg),
                                message=error_message(err))
     # Stat cards
-    cards = [("Subscriptions", f"{cnt:,}"),
-             ("Open access", f"{oacnt/cnt*100:.2f}%" if cnt else "0%"),
+    cards = [("Providers", f"{pcount:,}"),
              ("Publishers", f"{len(pubcnt):,}"),
-             ("Providers", f"{pcount:,}")]
+             ("Subscriptions", f"{cnt:,}"),
+             ("Open access", f"{oacnt/cnt*100:.2f}%" if cnt else "0%")]
     if cost_total is not None:
         cost_link = f"<a href='/subscription/cost'>${cost_total:,.2f}</a>"
         cards.append((f"Subscription cost ({cost_year})", cost_link))
