@@ -35,7 +35,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "118.4.0"
+__version__ = "118.5.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -3470,8 +3470,8 @@ def set_jrc_author(doi):
 @app.route('/raw/<string:resource>/<path:doi>')
 def get_raw(resource=None, doi=None):
     ''' JSON metadata for a DOI
-    resource: biorxiv, elife, elsevier, figshare, openalex, protocols.io, pubmed, pmc, springer,
-              zenodo
+    resource: biorxiv, crossref, datacite, elife, elsevier, figshare, openalex, protocols.io,
+              pubmed, pmc, springer, zenodo
     '''
     doi = doi.lstrip('/').rstrip('/').lower()
     result = initialize_result()
@@ -3484,6 +3484,16 @@ def get_raw(resource=None, doi=None):
                     'zenodo'):
         try:
             response = DL.get_doi_record(doi, source=resource, content=content)
+        except Exception as err:
+            raise InvalidUsage(str(err), 500) from err
+    elif resource == 'crossref':
+        try:
+            response = JRC.call_crossref(doi)
+        except Exception as err:
+            raise InvalidUsage(str(err), 500) from err
+    elif resource == 'datacite':
+        try:
+            response = JRC.call_datacite(doi)
         except Exception as err:
             raise InvalidUsage(str(err), 500) from err
     elif resource == 'figshare':
