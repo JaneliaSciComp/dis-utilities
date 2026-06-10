@@ -35,7 +35,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "118.5.0"
+__version__ = "118.6.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -4306,14 +4306,12 @@ def get_citation_counts(doi, row, partial=True):
     tblrow = []
     # DataCite
     if row['jrc_obtained_from'] == 'DataCite':
-        if row.get('citationCount', False):
+        if (row.get('jrc_citation_sources') or {}).get('datacite'):
+            tblrow.append(f"<td>DataCite: {row['jrc_citation_sources']['datacite']:,}</td>")
+        elif row.get('citationCount', False):
             url = f"{app.config['DATACITE']}{doi}"
             tblrow.append(f"<td>DataCite: <a href='{url}' target='_blank'>" \
                           + f"{row['citationCount']:,}</a></td>")
-        if row.get('jrc_citation_sources', False) and 'scholexplorer' in row['jrc_citation_sources']:
-            url = f"{app.config['SCHOLEXPLORER']}{doi}"
-            tblrow.append(f"<td>ScholeXplorer: <a href='{url}' target='_blank'>" \
-                          + f"{row['jrc_citation_sources']['scholexplorer']:,}</a></td>")
     # Dimensions
     try:
         citcnt, url = DL.get_citation_count(doi)
@@ -4353,6 +4351,8 @@ def get_citation_counts(doi, row, partial=True):
                           + f"{cbutton}</td>")
         else:
             tblrow.append(f"<td>OpenAlex: {citcnt:,}</td>")
+    elif (row.get('jrc_citation_sources') or {}).get('openalex'):
+        tblrow.append(f"<td>OpenAlex: {row['jrc_citation_sources']['openalex']:,}</td>")
     # PubMed
     if 'jrc_pmid' in row and not partial:
         try:
@@ -4366,6 +4366,9 @@ def get_citation_counts(doi, row, partial=True):
             cbutton = f"<span style='line-height: 1.3'><br></span>{cbutton}"
             tblrow.append(f"<td>PubMed: <a href='{url}' target='_blank'>{citcnt:,}</a>" \
                           + f"{cbutton}</td>")
+    # ScholeXplorer
+    if (row.get('jrc_citation_sources') or {}).get('scholexplorer'):
+        tblrow.append(f"<td>ScholeXplorer: {row['jrc_citation_sources']['scholexplorer']:,}</td>")
     # Semantic Scholar
     citcnt = s2_citation_count(doi, fmt='html')
     if citcnt:
@@ -4394,6 +4397,27 @@ def get_citation_counts(doi, row, partial=True):
     return doisec
 
 
+def get_figshare_counts(row):
+    ''' Get figshare counts
+        Keyword arguments:
+          row: row from dois collection
+        Returns:
+          Figshare counts as HTML
+    '''
+    figshare = ""
+    tblrow = []
+    if not row.get('jrc_figshare_counts', False):
+        return ""
+    tblrow.append(f"<td>Views: {row['jrc_figshare_counts']['views']:,}</td>")
+    tblrow.append(f"<td>Downloads: {row['jrc_figshare_counts']['downloads']:,}</td>")
+    tblrow.append(f"<td>Shares: {row['jrc_figshare_counts']['shares']:,}</td>")
+    if tblrow:
+        figshare = "<table id='figshare' class='citations'><thead>" \
+                  + f"<tr><th colspan={len(tblrow)}>Figshare counts</th></tr>" \
+                  + "</thead><tbody>" + ''.join(tblrow) + "</tbody></table>"
+    return figshare
+
+
 def doi_tabs(doi, row, data, authors):
     ''' Generate DOI tabs
         Keyword arguments:
@@ -4406,7 +4430,7 @@ def doi_tabs(doi, row, data, authors):
     '''
     content = {}
     display_key = {'author': 'Author tags', 'citations': 'Citations',
-                   'files': 'Files', 'abstract': 'Abstract',
+                   'figshare': 'Figshare', 'abstract': 'Abstract',
                    'ack': 'Acknowledgements', 'subjects': 'Subjects', 'related': 'Related DOIs',
                    'legal': 'Legal information'}
     # Author tags
@@ -4420,18 +4444,27 @@ def doi_tabs(doi, row, data, authors):
         ahtml = get_citation_counts(doi, row)
         if ahtml:
             content['citations'] = ahtml
-    # Files
-    if row and row['jrc_obtained_from'] == 'DataCite' \
-       and ('janelia' in doi or 'figshare' in doi):
-        arec = DL.get_doi_record(doi, source='figshare')
-        if arec and arec.get('files'):
-            files = []
-            for file in arec['files']:
-                if file.get('download_url'):
-                    files.append(f"<a href='{file['download_url']}' " \
-                                 + f"target='_blank'>{file['download_url']}</a>")
-            if files:
-                content['files'] = "<br>".join(files)
+    # Figshare
+    ahtml = ""
+    if row and row['jrc_obtained_from'] == 'DataCite':
+        if row.get('jrc_figshare_counts', False):
+            ahtml = get_figshare_counts(row)
+            print(ahtml)
+            if ahtml:
+                content['figshare'] = ahtml
+        if ('janelia' in doi or 'figshare' in doi):
+            arec = DL.get_doi_record(doi, source='figshare')
+            if arec and arec.get('files'):
+                files = []
+                for file in arec['files']:
+                    if file.get('download_url'):
+                        files.append(f"<a href='{file['download_url']}' " \
+                                     + f"target='_blank'>{file['download_url']}</a>")
+                if files:
+                    if content.get('figshare'):
+                        content['figshare'] += "<br>Files:<br>" + "<br>".join(files)
+                    else:
+                        content['figshare'] = "<br>Files:<br>" + "<br>".join(files)
     # Abstract
     abstract = ahtml = ""
     if 'type' in data and data['type'] == 'grant':
