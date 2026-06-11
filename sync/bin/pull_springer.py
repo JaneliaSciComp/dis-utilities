@@ -22,11 +22,17 @@ to begin the year-by-year sweep from a different year.
 DOIs already present in the MongoDB dois, external_dois, or to_ignore
 collections are excluded from output.
 
+A record is "ready" when at least one author matched by ORCID or by asserted
+Janelia affiliation. Records whose only Janelian match is by name (which may or
+may not be a Janelia author) are held in a "review" bucket for manual triage.
+
 Output files (written to the current working directory):
-    janelia_springer_dois.json      Records confirmed to have Janelia authors.
-    springer_ready.txt              Plain list of the same DOIs, one per line.
+    janelia_springer_dois.json      Ready records (ORCID/asserted-confirmed).
+    springer_ready.txt              Plain list of the ready DOIs, one per line.
+    janelia_springer_review.json    Records with name-only matches to review.
+    springer_review.txt             Plain list of the review DOIs.
     janelia_springer_noauthors.txt  DOIs where no Janelia author could be
-                                    confirmed; these warrant manual review.
+                                    confirmed at all.
 
 An HTML summary email is sent when --test or --write is supplied.
 """
@@ -46,7 +52,7 @@ import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
 
 
-__version__ = '1.0.0'
+__version__ = '1.1.0'
 
 # Global variables
 ARG = DISCONFIG = LOGGER = None
@@ -146,6 +152,12 @@ def fetch_page(query: str, api_key: str, start: int, page_size: int,
             if resp.status_code == 429:
                 wait = min(int(resp.headers.get("Retry-After", 10)), 60)
                 print(f"    Rate limited — waiting {wait}s (retry {attempt + 1}/5)")
+                time.sleep(wait)
+                continue
+            if resp.status_code >= 500:
+                wait = 2 ** attempt
+                print(f"    Server error {resp.status_code} — retrying in {wait}s "
+                      f"(attempt {attempt + 1}/5)")
                 time.sleep(wait)
                 continue
             resp.raise_for_status()
@@ -257,19 +269,23 @@ def search_janelia(api_key: str, start_year: int = JANELIA_START_YEAR) -> list[d
     query = "Janelia"
     current_year = date.today().year
     print(f"Querying Springer Meta API: q={query!r}")
-    total_all = get_total_hits(query, api_key)
-    print(f"Total hits (all years): {total_all:,}")
-    if total_all <= MAX_START:
-        print(f"Under {MAX_START:,} — fetching without date splitting\n")
-        return fetch_window(query, api_key, total_all)
     if ARG.YEAR:
+        # A single explicit year always goes through the year-by-year path so
+        # the date constraint is honored regardless of the total hit count.
         print(f"Searching for year: {ARG.YEAR}")
-    else:
+        return fetch_year(query, api_key, ARG.YEAR)
+    if start_year == JANELIA_START_YEAR:
+        # Full unconstrained sweep: try to grab everything in one window first.
+        total_all = get_total_hits(query, api_key)
+        print(f"Total hits (all years): {total_all:,}")
+        if total_all <= MAX_START:
+            print(f"Under {MAX_START:,} — fetching without date splitting\n")
+            return fetch_window(query, api_key, total_all)
         print(f"Exceeds {MAX_START:,} — iterating year by year "
               f"({start_year}–{current_year})\n")
+    else:
+        print(f"Iterating year by year ({start_year}–{current_year})\n")
     all_records = []
-    if ARG.YEAR:
-        start_year = current_year = ARG.YEAR
     for year in range(start_year, current_year + 1):
         all_records.extend(fetch_year(query, api_key, year))
     return all_records
@@ -326,16 +342,20 @@ def extract_fields(record: dict, crossref_msg: dict, janelians: list) -> dict:
 
     springer_fields = [f for f in record if contains_janelia(record[f])]
     crossref_fields = [f for f in crossref_msg if contains_janelia(crossref_msg[f])]
-    out["janelia_found_in"] = springer_fields + crossref_fields
+    out["janelia_found_in"] = list(dict.fromkeys(springer_fields + crossref_fields))
 
     asserted = [f"{a['given']} {a['family']}" for a in janelians
                 if a['match'] == 'asserted']
     current = [f"{a['given']} {a['family']}" for a in janelians
                if a['match'] == 'ORCID']
+    name_only = [f"{a['given']} {a['family']}" for a in janelians
+                 if a['match'] == 'name']
     if asserted:
         out["janelia_authors_asserted"] = asserted
     if current:
         out["janelia_authors_current"] = current
+    if name_only:
+        out["janelia_authors_unconfirmed"] = name_only
 
     return out
 
@@ -349,6 +369,8 @@ def janelia_authors(doi, msg):
         Returns:
           List of author dicts (janelian=True entries from get_author_details)
     '''
+    if not msg:
+        return []
     if 'doi' not in msg:
         msg['doi'] = doi
     time.sleep(0.2)
@@ -392,19 +414,25 @@ def text_to_html_table(text):
     return "\n".join(html)
 
 
-def generate_email(results, summary):
+def generate_email(ready, review, summary):
     ''' Generate and send an email
         Keyword arguments:
-          results: list of results
+          ready: list of records ready for processing
+          review: list of records requiring manual review
           summary: summary of the results
         Returns:
           None
     '''
     msg = ""
-    if results:
-        msg += "<br>The following DOIs will be added to the database:<br>"
-        for rec in results:
-            msg += f"&nbsp;&nbsp;{doiurl(rec['doi'])}<br>"
+    if ready:
+        msg += "<br>The following DOIs are ready for processing:<br>"
+        for rec in ready:
+            msg += doiurl(rec['doi'])
+        msg += "<br>"
+    if review:
+        msg += "<br>The following DOIs require review:<br>"
+        for rec in review:
+            msg += doiurl(rec['doi'])
         msg += "<br>"
     if msg:
         msg = JRC.get_run_data(__file__, __version__) + "<br><br>" \
@@ -424,9 +452,11 @@ def generate_email(results, summary):
 
 def processing():
     ''' Fetch Springer records, confirm Janelia authorship via Crossref, and
-        write results to janelia_springer_dois.json / springer_ready.txt.
-        DOIs that cannot be confirmed are written to
-        janelia_springer_noauthors.txt for manual review.
+        sort the confirmed records into "ready" and "review" buckets.
+        A record is ready when at least one author matched by ORCID or asserted
+        Janelia affiliation; records whose only Janelian match is by name are
+        held for manual review. DOIs with no Janelian author at all are written
+        to janelia_springer_noauthors.txt.
         Keyword arguments:
           None
         Returns:
@@ -434,7 +464,8 @@ def processing():
     '''
     raw_records = search_janelia(ARG.api_key, ARG.START_YEAR)
     seen: set[str] = set()
-    results = []
+    ready = []
+    review = []
     noauthors = []
     COUNT['total'] = len(raw_records)
     LOGGER.info(f"Retrieved {COUNT['total']} raw records from Springer")
@@ -453,27 +484,42 @@ def processing():
         print(f"  Crossref lookup {idx}/{COUNT['total']}: {doi}", end="\r")
         crossref_msg = get_crossref_record(doi)
         janelians = janelia_authors(doi, crossref_msg)
-        if janelians:
-            results.append(extract_fields(rec, crossref_msg, janelians))
-        else:
+        if not janelians:
             noauthors.append(doi)
+            continue
+        out = extract_fields(rec, crossref_msg, janelians)
+        if any(a['match'] in ('asserted', 'ORCID') for a in janelians):
+            ready.append(out)
+        else:
+            review.append(out)
     summary = f"DOIs read from Springer:        {COUNT['total']:,}\n" \
               + f"Skipped (no DOI):               {COUNT['no_doi']:,}\n" \
               + f"Skipped (duplicate in results): {COUNT['skipped_dup']:,}\n" \
               + f"Skipped (already in MongoDB):   {COUNT['skipped_db']:,}\n" \
-              + f"DOIs ready for processing:      {len(results):,}\n" \
+              + f"DOIs ready for processing:      {len(ready):,}\n" \
+              + f"DOIs requiring review:          {len(review):,}\n" \
               + f"DOIs with no Janelia authors:   {len(noauthors):,}\n"
     print(summary)
-    if results:
+    if ready:
         fname = "janelia_springer_dois.json"
         with open(fname, "w", encoding="utf-8") as fh:
-            json.dump(results, fh, indent=2, ensure_ascii=False)
-        LOGGER.info(f"Results written to {fname}")
+            json.dump(ready, fh, indent=2, ensure_ascii=False)
+        LOGGER.info(f"Ready records written to {fname}")
         fname = "springer_ready.txt"
         with open(fname, "w", encoding="utf-8") as fh:
-            for rec in results:
+            for rec in ready:
                 fh.write(rec['doi'] + "\n")
-        LOGGER.info(f"Results written to {fname}")
+        LOGGER.info(f"Ready DOIs written to {fname}")
+    if review:
+        fname = "janelia_springer_review.json"
+        with open(fname, "w", encoding="utf-8") as fh:
+            json.dump(review, fh, indent=2, ensure_ascii=False)
+        LOGGER.info(f"Review records written to {fname}")
+        fname = "springer_review.txt"
+        with open(fname, "w", encoding="utf-8") as fh:
+            for rec in review:
+                fh.write(rec['doi'] + "\n")
+        LOGGER.info(f"Review DOIs written to {fname}")
     if noauthors:
         fname = "janelia_springer_noauthors.txt"
         with open(fname, "w", encoding="utf-8") as fh:
@@ -481,7 +527,7 @@ def processing():
                 fh.write(doi + "\n")
         LOGGER.info(f"Noauthors written to {fname}")
     if ARG.TEST or ARG.WRITE:
-        generate_email(results, summary)
+        generate_email(ready, review, summary)
 
 # ---------------------------------------------------------------------------
 # Main
@@ -501,7 +547,7 @@ if __name__ == "__main__":
     PARSER.add_argument('--test', dest='TEST', action='store_true',
                         default=False, help='Send email to developer')
     PARSER.add_argument('--write', dest='WRITE', action='store_true',
-                        default=False, help='Write to database')
+                        default=False, help='Send results email to receivers')
     PARSER.add_argument('--verbose', dest='VERBOSE', action='store_true',
                         default=False, help='Flag, Chatty')
     PARSER.add_argument('--debug', dest='DEBUG', action='store_true',
