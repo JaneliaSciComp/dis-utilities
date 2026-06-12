@@ -7,8 +7,8 @@ import json
 from math import ceil, pi
 import numpy as np
 from bokeh.colors import named as _bokeh_named
-from bokeh.models import (BasicTicker, ColorBar, HoverTool, LinearAxis, LinearColorMapper,
-                          ColumnDataSource, NumeralTickFormatter, Range1d)
+from bokeh.models import (BasicTicker, ColorBar, HoverTool, LabelSet, LinearAxis,
+                          LinearColorMapper, ColumnDataSource, NumeralTickFormatter, Range1d)
 from bokeh.embed import components
 from bokeh.palettes import all_palettes, plasma, Turbo256
 from bokeh.plotting import figure
@@ -672,7 +672,7 @@ def heat_map(data, title, x_field, y_field, value_field, width=950, height=500,
 
 
 def hbar_chart(data, title, value_label="Value", width=650, height=450,  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
-               color=None, value_format="$0,0", show_pct=True):
+               color=None, value_format="$0,0", show_pct=True, show_values=False):
     ''' Create a horizontal bar chart sorted by value (largest at top).
         Accommodates many categories in a fixed footprint and makes relative
         magnitudes easy to compare by bar length.
@@ -685,6 +685,7 @@ def hbar_chart(data, title, value_label="Value", width=650, height=450,  # pylin
           color: single color, list of colors, or palette name (optional)
           value_format: NumeralJS format for the axis/tooltip (default "$0,0")
           show_pct: include percent-of-total in the hover tooltip (default True)
+          show_values: print each value at the end of its bar (default False)
         Returns:
           Figure components (chartscript, chartdiv)
     '''
@@ -705,16 +706,24 @@ def hbar_chart(data, title, value_label="Value", width=650, height=450,  # pylin
         colors = list(color)
     else:
         colors = [color] * len(labels)
+    prefix = "$" if value_format.startswith("$") else ""
     source = ColumnDataSource({"label": labels, "value": values,
-                               "pct": pct, "color": colors})
+                               "pct": pct, "color": colors,
+                               "value_text": [f"{prefix}{v:,.0f}" for v in values]})
     # Bokeh places the first categorical factor at the bottom of the y-axis, so
     # reverse the descending order to put the largest value at the top.
+    # Value labels sit past the bar ends, so leave them extra headroom.
+    xmax = max(values) * (1.18 if show_values else 1.05)
     p = figure(y_range=list(reversed(labels)), title=title, width=width,
                height=height, toolbar_location=None,
                background_fill_color="ghostwhite",
-               x_range=(0, max(values) * 1.05) if values else (0, 1))
+               x_range=(0, xmax) if values else (0, 1))
     bars = p.hbar(y="label", right="value", height=0.8, source=source,
                   fill_color="color", line_color=None, alpha=0.9)
+    if show_values:
+        p.add_layout(LabelSet(x="value", y="label", text="value_text", source=source,
+                              x_offset=4, text_baseline="middle", text_font_size="8pt",
+                              text_color="dimgray"))
     p.xaxis.formatter = NumeralTickFormatter(format=value_format)
     p.ygrid.grid_line_color = None
     p.yaxis.major_label_text_font_size = "7pt"

@@ -43,7 +43,11 @@ onload="tableInitialize();"
 
 {% block content %}
 <h2>{{ title }}</h2>
-{{ html | safe }}
+<div class="flexrow">
+  <div style="margin-right: 50px">
+    {{ html | safe }}
+  </div>
+  <div style="margin-top: 60px">
 <form>
 <div class="flexcontainer">
   <div class="flexitem">
@@ -79,4 +83,6 @@ onload="tableInitialize();"
   </div>
 </div>
 </form>
+  </div>
+</div>
 {% endblock %}
