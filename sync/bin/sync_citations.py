@@ -1,8 +1,10 @@
-''' sync_datacite_citations.py
+''' sync_citations.py
 
-    Enrich DataCite DOI citation data in the DIS "dois" MongoDB collection, because
-    DataCite's native citationCount (from DataCite Event Data) severely underreports
-    incoming citations for datasets, software, and preprints.
+    Enrich DOI citation data in the DIS "dois" MongoDB collection for DataCite or
+    Crossref DOIs (--source, default crossref). DataCite's native citationCount
+    (from DataCite Event Data) severely underreports incoming citations for
+    datasets, software, and preprints; the same union-of-sources enrichment is
+    available for Crossref DOIs.
 
     SOURCES
         Incoming citing DOIs are gathered from the citing-DOI sources and deduped
@@ -11,33 +13,43 @@
           - OpenAlex             (works?filter=cites:<id>; parallel, fast)
           - OpenAIRE ScholeXplorer (relation=References/Cites; parallel, fast)
           - DataCite GraphQL     (work.citations; optional via --datacite-graphql,
-                                  slow ~0.8s/DOI - see NOTES)
+                                  slow ~0.8s/DOI - see NOTES; --source datacite only)
         One further source contributes a bare citation count (no citing DOIs), used
         as a floor on the count rather than added to the union:
           - DataCite REST        (citationCount, already on the dois record)
+          - Crossref             (is-referenced-by-count, already on the dois record;
+                                  used when --source crossref)
 
     FIELDS WRITTEN  (with --write, only for DOIs with a non-zero citation count;
     uncited DOIs get no jrc_ fields, per the DB convention)
-        jrc_citation_count    max(DataCite REST citationCount, size of citing-DOI
+        jrc_citation_count    max(native registrar count, size of citing-DOI
                               union). The bare count is kept as a floor because a
                               citing work may expose no DOI, so jrc_citing_dois can
                               be shorter than this count.
         jrc_citing_dois       sorted, lowercased union of identifiable citing DOIs
-                              (only when --citing-dois is given; off by default).
-        jrc_citation_sources  {datacite, openalex, scholexplorer} per-source counts
-                              (datacite = GraphQL count, or the REST count when
-                              GraphQL is disabled/errored; the REST datacite count is
-                              a bare count, not DOIs).
+                              (only when --citing-dois is given; off by default;
+                              --source datacite only).
+        jrc_citation_sources  per-source counts keyed by the registrar (datacite or
+                              crossref) plus openalex and scholexplorer (datacite =
+                              GraphQL count, or the REST count when GraphQL is
+                              disabled/errored; the registrar count is a bare count,
+                              not DOIs).
         jrc_citation_updated  timestamp of this enrichment.
 
-    FIGSHARE FIELDS WRITTEN  (with --write, for figshare DOIs only; these are
+    With --source crossref, only the three fields above (minus jrc_citing_dois)
+    are dealt with: no figshare fields, no DataCite GraphQL.
+
+    FIGSHARE FIELDS WRITTEN  (with --write, for figshare DOIs only, which are
+    DataCite-registered, so --source datacite only; these are
     independent of citations - a figshare DOI may have usage but no citations -
     and the figshare REST/stats API exposes no citation count of its own)
         jrc_figshare_counts   {views, downloads, shares} usage totals from the
                               figshare stats service (stats.figshare.com).
         jrc_figshare_updated  timestamp of the figshare usage fetch.
 
-    OUTPUT FILES  (written to the current directory every run, dry-run included)
+    OUTPUT FILES  (written to the current directory every run, dry-run included;
+    crossref runs use citation_updates_crossref_<manifold>.txt etc. so the two
+    sources never overwrite each other)
         citation_updates_<manifold>.txt   tab-delimited log of DOIs whose count rose.
         citation_records_<manifold>.json  full records (the jrc_ fields above) for
                                           every DOI that has a non-zero count.
@@ -53,21 +65,30 @@
     USAGE
         export OPENALEX_EMAIL=you@janelia.hhmi.org
         # fast nightly pass (OpenAlex + ScholeXplorer), persist + email receivers:
-        python sync_datacite_citations.py --write
+        python sync_citations.py --write
         # quick dry-run over the already-cited subset:
-        python sync_datacite_citations.py --cited
+        python sync_citations.py --cited
+        # Crossref DOIs instead of DataCite:
+        python sync_citations.py --source crossref --write
         # periodic deep pass that also folds in DataCite GraphQL citing DOIs:
-        python sync_datacite_citations.py --write --datacite-graphql
+        python sync_citations.py --write --datacite-graphql
         # single DOI, verbose, no writes:
-        python sync_datacite_citations.py --doi 10.xxxx/yyy --debug
+        python sync_citations.py --doi 10.xxxx/yyy --debug
 
     OPTIONS
+        --source SOURCE      datacite (default) or crossref; selects the
+                             jrc_obtained_from subset of the dois collection
         --doi DOI            process a single DOI (testing)
-        --cited              only DOIs with citationCount > 0 (fast subset)
+        --cited              only DOIs already known to be cited: citationCount > 0
+                             for datacite, jrc_citation_count exists for crossref
+        --notcited           only DOIs with no stored jrc_citation_count (not yet
+                             enriched); mutually exclusive with --cited
         --limit N            cap the number of DOIs processed (0 = no limit)
         --workers N          concurrent OpenAlex/ScholeXplorer workers (default 8)
-        --datacite-graphql   include DataCite GraphQL citing DOIs (off by default)
-        --citing-dois        store the jrc_citing_dois list (off by default)
+        --datacite-graphql   include DataCite GraphQL citing DOIs (off by default;
+                             --source datacite only)
+        --citing-dois        store the jrc_citing_dois list (off by default;
+                             --source datacite only)
         --write              persist to MongoDB (default is a dry run)
         --test               send the summary email to the developer only
         --manifold dev|prod  MongoDB manifold (default prod)
@@ -84,7 +105,7 @@
         (falling back to the native citationCount).
 '''
 
-__version__ = '1.0.0'
+__version__ = '1.1.0'
 
 import argparse
 import collections
@@ -126,6 +147,11 @@ FIGSHARE_CACHE = {}
 FIGSHARE_CACHE_LOCK = threading.Lock()
 # Global variables
 ARG = DISCONFIG = LOGGER = None
+# Per --source registrar: the jrc_obtained_from label selecting the DOI subset,
+# and the native (registrar-provided) bare citation count already on the dois
+# record, used as a floor on the citing-DOI union.
+SOURCES = {'datacite': {'label': 'DataCite', 'count_field': 'citationCount'},
+           'crossref': {'label': 'Crossref', 'count_field': 'is-referenced-by-count'}}
 # External sources
 OPENALEX_WORK = 'https://api.openalex.org/works/doi:'
 OPENALEX_WORKS = 'https://api.openalex.org/works'
@@ -562,15 +588,17 @@ def fetch_doi(row):
     ''' Fetch external citation counts for one DOI (network only - thread-safe,
         no shared state). Run concurrently across DOIs by a thread pool.
         Keyword arguments:
-          row: dois document (needs doi, citationCount, optionally jrc_citation_count)
+          row: dois document (needs doi, the native registrar count field,
+               optionally jrc_citation_count)
         Returns:
           result dict for finalize_doi()
     '''
     doi = row['doi']
-    fid = figshare_article(doi)[0]
+    # Figshare DOIs are DataCite-registered; Crossref runs deal only with citations
+    fid = figshare_article(doi)[0] if ARG.SOURCE == 'datacite' else None
     return {'row': row,
             'doi': doi,
-            'datacite': row.get('citationCount', 0) or 0,
+            'native': row.get(SOURCES[ARG.SOURCE]['count_field'], 0) or 0,
             'existing': row.get('jrc_citation_count'),
             'existing_dois': row.get('jrc_citing_dois') or [],
             'openalex': openalex_citing(doi),
@@ -580,25 +608,26 @@ def fetch_doi(row):
             'figshare': figshare_metrics(doi) if fid else None}
 
 
-def combine_counts(res, graphql):
+def combine_counts(res, graphql, source='datacite'):
     ''' Pure citation-combination logic (no I/O, no shared state) - unit-testable.
         Builds the deduped union of identifiable citing DOIs across the available
-        sources, applies the DataCite REST count as a bare floor, and protects a
+        sources, applies the native registrar count as a bare floor, and protects a
         previously-stored higher count from a transient source error.
         Keyword arguments:
           res: result dict from fetch_doi()
           graphql: whether DataCite GraphQL citing DOIs are in play (ARG.GRAPHQL)
+          source: registrar key for the sources breakdown (datacite or crossref)
         Returns:
           dict with:
             combined   final citation count (max of the floor and the union size)
             previous   count stored on the prior run (0 if none)
             citing     sorted list of unique citing DOIs
-            sources    {datacite, openalex, scholexplorer} per-source counts
+            sources    {<source>, openalex, scholexplorer} per-source counts
             errored    True if any enabled citing-DOI source failed
             preserved  True if a stored higher count was kept despite an error
             oa_n/sx_n/dc_n  per-source counts (None on error/disabled), for reporting
     '''
-    datacite = res['datacite']
+    native = res['native']
     existing = res['existing']
     # Baseline for "increased": the count stored on the previous run (0 if none).
     previous = existing if isinstance(existing, int) else 0
@@ -622,17 +651,17 @@ def combine_counts(res, graphql):
     if errored:
         union.update(filter(None, (normalize_doi(cd) for cd in res['existing_dois'])))
     citing = sorted(union)
-    # DataCite contributes a count but no DOIs, so keep it as a floor
-    combined = max(datacite, len(citing))
+    # The registrar contributes a count but no DOIs, so keep it as a floor
+    combined = max(native, len(citing))
     # Don't let a transient source error regress a previously-stored higher count
     preserved = False
     if errored and isinstance(existing, int) and existing > combined:
         combined = existing
         preserved = True
-    # Per-source counts; datacite is a bare count, openalex/scholexplorer are
-    # identifiable citing-DOI counts (datacite is the GraphQL citing-DOI count,
-    # falling back to the REST citationCount if GraphQL errored)
-    sources = {'datacite': datacite if dc_n is None else dc_n,
+    # Per-source counts; the registrar's is a bare count, openalex/scholexplorer
+    # are identifiable citing-DOI counts (for datacite, the GraphQL citing-DOI
+    # count when available, falling back to the REST citationCount)
+    sources = {source: native if dc_n is None else dc_n,
                'openalex': oa_n, 'scholexplorer': sx_n}
     return {'combined': combined, 'previous': previous, 'citing': citing,
             'sources': sources, 'errored': errored, 'preserved': preserved,
@@ -696,14 +725,14 @@ def finalize_doi(res, monitor=None):
           None
     '''
     doi = res['doi']
-    datacite = res['datacite']
+    native = res['native']
     # Per-source lookup outcome counters (a raw None result means that source errored)
     COUNT['openalex_found' if res['openalex'] is not None else 'openalex_error'] += 1
     COUNT['scholex_found' if res['scholex'] is not None else 'scholex_error'] += 1
     if ARG.GRAPHQL:
         COUNT['datacite_found' if res['datacite_dois'] is not None
               else 'datacite_error'] += 1
-    cc = combine_counts(res, ARG.GRAPHQL)
+    cc = combine_counts(res, ARG.GRAPHQL, ARG.SOURCE)
     combined, previous = cc['combined'], cc['previous']
     oa_n, sx_n, dc_n = cc['oa_n'], cc['sx_n'], cc['dc_n']
     if cc['preserved']:
@@ -729,11 +758,13 @@ def finalize_doi(res, monitor=None):
         fields['jrc_citation_updated'] = datetime.now()
         if combined > previous:
             COUNT['increased'] += 1
-            HITS.append((doi, previous, datacite, combined, oa_n, sx_n, dc_n))
-            dc_disp = dc_n if ARG.GRAPHQL else 'off'
+            HITS.append((doi, previous, native, combined, oa_n, sx_n, dc_n))
+            label = SOURCES[ARG.SOURCE]['label']
+            graphql_disp = ('' if ARG.SOURCE == 'crossref' else
+                            f", DataCite-GraphQL={dc_n if ARG.GRAPHQL else 'off'}")
             hit = (f"{doi}\t{previous} -> {combined} "
-                   + f"(DataCite={datacite}, OpenAlex={oa_n}, ScholeXplorer={sx_n}, "
-                   + f"DataCite-GraphQL={dc_disp})")
+                   + f"({label}={native}, OpenAlex={oa_n}, ScholeXplorer={sx_n}"
+                   + f"{graphql_disp})")
             if monitor:
                 monitor.write(hit + "\n")
                 monitor.flush()
@@ -784,25 +815,35 @@ def generate_email(summary):
         Returns:
           None
     '''
+    label = SOURCES[ARG.SOURCE]['label']
     msg = JRC.get_run_data(__file__, __version__) + "<br><br>" \
         + text_to_html_table(summary) + "<br>"
     if HITS:
-        msg += f"The following {len(HITS):,} DataCite DOI(s) had their citation " \
+        msg += f"The following {len(HITS):,} {label} DOI(s) had their citation " \
                + "count increased:<br>"
-        for doi, previous, datacite, combined, openalex, scholex, dcite in HITS:
+        for doi, previous, native, combined, openalex, scholex, dcite in HITS:
             oas = 'err' if openalex is None else openalex
             sxs = 'err' if scholex is None else scholex
-            dcs = ('err' if dcite is None else dcite) if ARG.GRAPHQL else 'off'
+            if ARG.SOURCE == 'crossref':
+                dcs = ''
+            else:
+                dcs = ", DataCite-GraphQL " \
+                      + (('err' if dcite is None else str(dcite)) if ARG.GRAPHQL else 'off')
             msg += f"&nbsp;&nbsp;{doiurl(doi)}: {previous} &rarr; {combined} " \
-                   + f"(DataCite {datacite}, OpenAlex {oas}, ScholeXplorer {sxs}, " \
-                   + f"DataCite-GraphQL {dcs})<br>"
+                   + f"({label} {native}, OpenAlex {oas}, ScholeXplorer {sxs}" \
+                   + f"{dcs})<br>"
     else:
         msg += "No citation counts were increased.<br>"
     try:
-        email = DISCONFIG['developer'] if ARG.TEST else DISCONFIG['dcreceivers']
+        if ARG.TEST:
+            email = DISCONFIG['developer']
+        elif ARG.SOURCE == 'datacite':
+            email = DISCONFIG['dcreceivers']
+        else:
+            email = DISCONFIG['creceivers']
         LOGGER.info(f"Sending email to {email}")
         JRC.send_email(msg, DISCONFIG['sender'], email,
-                       "DataCite citation enrichment", mime='html')
+                       f"{label} citation enrichment", mime='html')
     except Exception as err:
         print(str(err))
         traceback.print_exc()
@@ -810,24 +851,33 @@ def generate_email(summary):
 
 
 def processing():  # pylint: disable=too-many-locals,too-many-statements
-    ''' Enrich citation counts for DataCite DOIs
+    ''' Enrich citation counts for DataCite or Crossref DOIs (per --source)
         Keyword arguments:
           None
         Returns:
           None
     '''
-    query = {'jrc_obtained_from': 'DataCite'}
+    label = SOURCES[ARG.SOURCE]['label']
+    query = {'jrc_obtained_from': label}
     if ARG.DOI:
         query['doi'] = ARG.DOI.lower()
     elif ARG.CITED:
-        # AND-ed with the DataCite constraint above (don't reassign query, or the
-        # jrc_obtained_from filter is lost and non-DataCite DOIs could be included)
+        # AND-ed with the registrar constraint above (don't reassign query, or the
+        # jrc_obtained_from filter is lost and other DOIs could be included)
         #query['$or'] = [{"citationCount": {'$gt': 0}},
         #                {"jrc_figshare_counts.shares": {"$gt": 0}},
         #                {"jrc_figshare_counts.downloads": {"$gt": 0}}]
-        query['citationCount'] = {'$gt': 0}
+        if ARG.SOURCE == 'crossref':
+            query['jrc_citation_count'] = {'$exists': True}
+        else:
+            query['citationCount'] = {'$gt': 0}
+    elif ARG.NOTCITED:
+        # DOIs not yet enriched (no stored jrc_citation_count); useful for a first
+        # pass over a freshly-loaded source without reprocessing the cited subset
+        query['jrc_citation_count'] = {'$exists': False}
     try:
-        cursor = DB['dis'].dois.find(query, {'doi': 1, 'citationCount': 1,
+        cursor = DB['dis'].dois.find(query, {'doi': 1,
+                                             SOURCES[ARG.SOURCE]['count_field']: 1,
                                              'jrc_citation_count': 1,
                                              'jrc_citing_dois': 1})
         if ARG.LIMIT:
@@ -836,7 +886,7 @@ def processing():  # pylint: disable=too-many-locals,too-many-statements
     except Exception as err:
         terminate_program(err)
     total = len(rows)
-    LOGGER.info(f"Processing {total:,} DataCite DOIs "
+    LOGGER.info(f"Processing {total:,} {label} DOIs "
                 f"({'WRITE' if ARG.WRITE else 'DRY RUN'})")
     interrupted = False
     # Pre-fetch DataCite GraphQL citing DOIs in batches (serialized, low volume)
@@ -849,7 +899,10 @@ def processing():  # pylint: disable=too-many-locals,too-many-statements
         except KeyboardInterrupt:
             interrupted = True
             LOGGER.warning("Interrupted during DataCite prefetch - skipping enrichment")
-    monfile = f"citation_updates_{ARG.MANIFOLD}.txt"
+    # Keep the original (unqualified) filenames for datacite runs; crossref runs
+    # get source-qualified names so the two never overwrite each other.
+    filequal = '' if ARG.SOURCE == 'datacite' else f"{ARG.SOURCE}_"
+    monfile = f"citation_updates_{filequal}{ARG.MANIFOLD}.txt"
     with open(monfile, 'w', encoding='utf-8') as monitor, \
          ThreadPoolExecutor(max_workers=ARG.WORKERS) as pool:
         monitor.write(f"# Citation increases - {datetime.now()} "
@@ -879,18 +932,23 @@ def processing():  # pylint: disable=too-many-locals,too-many-statements
             # queued before an interrupt) so no completed write is silently dropped.
             flush_writes()
     LOGGER.info(f"Citation increases written to {monfile}")
-    recfile = f"citation_records_{ARG.MANIFOLD}.json"
+    recfile = f"citation_records_{filequal}{ARG.MANIFOLD}.json"
     with open(recfile, 'w', encoding='utf-8') as fileout:
         json.dump(RECORDS, fileout, indent=2, default=str)
     LOGGER.info(f"Wrote {len(RECORDS):,} citation records to {recfile}")
     # RECORDS is the union of DOIs that got citation fields and/or figshare fields
     cited = sum(1 for r in RECORDS if 'jrc_citation_count' in r)
     figusage = sum(1 for r in RECORDS if 'jrc_figshare_counts' in r)
-    dc_line = (f"DataCite GraphQL OK (errors):       {COUNT['datacite_found']:,} "
-               f"({COUNT['datacite_error']:,})\n") if ARG.GRAPHQL else \
-              "DataCite GraphQL:                   disabled (use --datacite-graphql)\n"
+    # DataCite GraphQL and figshare usage apply only to --source datacite
+    dc_line = fs_line = ""
+    if ARG.SOURCE == 'datacite':
+        dc_line = (f"DataCite GraphQL OK (errors):       {COUNT['datacite_found']:,} "
+                   f"({COUNT['datacite_error']:,})\n") if ARG.GRAPHQL else \
+                  "DataCite GraphQL:                   disabled (use --datacite-graphql)\n"
+        fs_line = (f"Figshare usage OK (errors):         {COUNT['figshare_found']:,} "
+                   + f"({COUNT['figshare_error']:,})\n")
     summary = (
-        f"DataCite DOIs processed:            {COUNT['read']:,}\n"
+        f"{label} DOIs processed:            {COUNT['read']:,}\n"
         + f"OpenAlex lookups OK (errors):       {COUNT['openalex_found']:,} "
         + f"({COUNT['openalex_error']:,})\n"
         + f"ScholeXplorer lookups OK (errors):  {COUNT['scholex_found']:,} "
@@ -898,10 +956,10 @@ def processing():  # pylint: disable=too-many-locals,too-many-statements
         + dc_line
         + f"Fetch errors (DOIs skipped):        {COUNT['fetch_error']:,}\n"
         + f"Counts preserved (source error):    {COUNT['preserved']:,}\n"
-        + f"Figshare usage OK (errors):         {COUNT['figshare_found']:,} "
-        + f"({COUNT['figshare_error']:,})\n"
+        + fs_line
         + f"DOIs with citation fields:          {cited:,}\n"
-        + f"DOIs with figshare fields:          {figusage:,}\n"
+        + (f"DOIs with figshare fields:          {figusage:,}\n"
+           if ARG.SOURCE == 'datacite' else "")
         + f"Total records written (set):        {len(RECORDS):,}\n"
         + f"DOIs with increased citation count: {COUNT['increased']:,}\n"
         + f"DOIs matched:                       {COUNT['matched']:,}\n"
@@ -917,11 +975,21 @@ def processing():  # pylint: disable=too-many-locals,too-many-statements
 
 if __name__ == '__main__':
     PARSER = argparse.ArgumentParser(
-        description="Enrich DataCite DOI citation counts from OpenAlex and ScholeXplorer")
+        description="Enrich DataCite/Crossref DOI citation counts from OpenAlex "
+                    + "and ScholeXplorer")
+    PARSER.add_argument('--source', dest='SOURCE', action='store', type=str.lower,
+                        default='crossref', choices=['datacite', 'crossref'],
+                        help='DOI registrar source to process (default crossref, '
+                             + 'case-insensitive)')
     PARSER.add_argument('--doi', dest='DOI', action='store', default=None,
                         help='Process a single DOI (for testing)')
     PARSER.add_argument('--cited', dest='CITED', action='store_true', default=False,
-                        help='Only process DOIs that already have a citationCount > 0')
+                        help='Only process DOIs already known to be cited '
+                             + '(datacite: citationCount > 0; crossref: '
+                             + 'jrc_citation_count exists)')
+    PARSER.add_argument('--notcited', dest='NOTCITED', action='store_true', default=False,
+                        help='Only process DOIs with no stored jrc_citation_count '
+                             + '(not yet enriched)')
     PARSER.add_argument('--limit', dest='LIMIT', action='store', type=int, default=0,
                         help='Limit number of DOIs processed (0 = no limit)')
     PARSER.add_argument('--workers', dest='WORKERS', action='store', type=int, default=8,
@@ -948,6 +1016,13 @@ if __name__ == '__main__':
                         default=False, help='Flag, Very chatty')
     ARG = PARSER.parse_args()
     LOGGER = JRC.setup_logging(ARG)
+    if ARG.CITED and ARG.NOTCITED:
+        terminate_program("--cited and --notcited are mutually exclusive")
+    # Crossref runs deal only with jrc_citation_count/_sources/_updated
+    if ARG.SOURCE == 'crossref' and ARG.GRAPHQL:
+        terminate_program("--datacite-graphql applies only to --source datacite")
+    if ARG.SOURCE == 'crossref' and ARG.CITING_DOIS:
+        terminate_program("--citing-dois applies only to --source datacite")
     initialize_program()
     DISCONFIG = JRC.simplenamespace_to_dict(JRC.get_config("dis"))
     processing()
