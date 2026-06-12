@@ -8,7 +8,7 @@ onload="tableInitialize();"
 {% endblock %}
 
 {% block content %}
-  <h2>{{title|safe}}</h2>
+  {% if title %}<h2>{{title|safe}}</h2>{% endif %}
   <div class="flexrow">
     <div class="flexcol">
     {{ html|safe }}

@@ -14,6 +14,7 @@ from operator import itemgetter
 import os
 import random
 import re
+import statistics
 import string
 import sys
 from time import sleep, time
@@ -35,7 +36,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "118.6.0"
+__version__ = "118.7.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -48,18 +49,24 @@ JOURNAL_ARTICLE = {"$or": [{"type": "journal-article"}, {"subtype": "preprint"},
                            {"types.resourceTypeGeneral": "Preprint"}]}
 # HTML / CSS styles
 HIGHLIGHT = "style='background-color:#00a450 !important; color:white !important'"
+# Bold white down-arrow prefixed to download-button labels
+DOWNLOAD_ICON = '<i class="fa-solid fa-arrow-down" ' \
+                + 'style="color:white;-webkit-text-stroke:1px white"></i> '
 # Navigation
 NAV = {"Home": "",
        "DOIs": {"DOIs by insertion date": "dois_insertpicker",
                 "DOI stats": "dois_source",
                 "DOIs by type": "dois_type",
-                "DOIs by": {"month": "dois_time/month", "year": "dois_time/year",
-                            "subject": "dois_subjectpicker"},
+                "DOIs by": {"Month": "dois_time/month", "Year": "dois_time/year",
+                            "Subject": "dois_subjectpicker"},
                 "DOI yearly report": "dois_yearly",
-                "Top cited DOIs": "dois_top_cited",
+                "Citations": {"Top cited DOIs": "dois_top_cited",
+                              "Crossref metrics": "citation_metrics/crossref",
+                              "DataCite metrics": "citation_metrics/datacite",
+                              "Crossref cited DOIs": "citation_list/crossref",
+                              "DataCite cited DOIs": "citation_list/datacite"},
                 "DOIs by license": "dois_license"},
        "DataCite": {"DataCite DOI stats": "datacite_dois",
-                    "DataCite DOI citations": "datacite_citations",
                     "DataCite DOI downloads": "datacite_downloads",
                     "DataCite subjects": "datacite_subject",
                     "DataCite top publishers": "top_entities/publisher/All/DataCite"},
@@ -77,17 +84,18 @@ NAV = {"Home": "",
                      "Preprints with journal publications": "preprint_with_pub",
                      "Preprints without journal publications": "preprint_relation/preprint_no_pub",
                      "Journal publications without preprints": "preprint_relation/pub_no_preprint"},
-       "Journals": {"DOIs by": {"publisher": "dois_publisher", "journal": "journals_dois"},
-                    "Open access": {"report": "dois_oa", "details": "dois_oa_details"},
-                    "Top": {"publishers": "top_entities/publisher",
-                            "journals": "top_entities/journal"},
-                    "Heatmaps": {"publisher": "dois_heatmap/publisher",
-                                 "journal": "dois_heatmap/journal"},
+       "Journals": {"DOIs by": {"Publisher": "dois_publisher", "Journal": "journals_dois"},
+                    "Open access": {"Report": "dois_oa", "Details": "dois_oa_details"},
+                    "Top": {"Publishers": "top_entities/publisher",
+                            "Journals": "top_entities/journal"},
+                    "Heatmaps": {"Publisher": "dois_heatmap/publisher",
+                                 "Journal": "dois_heatmap/journal"},
                     "DOIs missing journals": "dois_nojournal",
                     "Journals referenced": "journals_referenced"},
        "Subscriptions": {"Summary": "subscriptions",
-                         "Provider": {"Summary": "subscription/provider", "Cost": "subscription/cost",
-                             "APCs": "subscription/apc"},
+                         "Provider": {"Summary": "subscription/provider",
+                                      "Cost": "subscription/cost",
+                                      "APCs": "subscription/apc"},
                          "Journals": "subscriptions/type/Journal",
                          "Repositories": "subscriptions/type/Repository",
                          "Books": "subscriptions/type/Book",
@@ -95,9 +103,9 @@ NAV = {"Home": "",
                          "Monographs": "subscriptions/type/Monograph",
                          "Missing costs": "subscription/missingcost",
                         },
-       "Tag/affiliation": {"DOIs by": {"tag": "dois_tag_ack/tag",
-                                       "acknowledgement": "dois_tag_ack/ack",
-                                       "lab": "dois_lab"},
+       "Tag/affiliation": {"DOIs by": {"Tag": "dois_tag_ack/tag",
+                                       "Acknowledgement": "dois_tag_ack/ack",
+                                       "Lab": "dois_lab"},
                            "Top DOI tags by year": "dois_top",
                            "Acknowledgement stats": "acknowledgement_stats",
                            "Author affiliations": {"P&C": "orcid_tag",
@@ -110,12 +118,12 @@ NAV = {"Home": "",
                    "DOI relationships": "doi_relationships",
                    "Endpoints": "stats_endpoints",
                    "Ignore lists": "ignore",
-                   "DOIs awaiting processing": "dois_pending",
-                   "DOIs missing Open Access status": "dois_missing_oa",
-                   "Publications dated before preprint": "preprint_date_errors",
+                   "DOIs awaiting processing": "dois_pending",                   
                    "Latest hires": "orcid_datepicker",
-                   "Authors with multiple ORCIDs": "orcid_duplicates",
-                   "Duplicate authors": "duplicate_authors"
+                   "Error reports": {"DOIs missing Open Access status": "dois_missing_oa",
+                                     "Publications dated before preprint": "preprint_date_errors",
+                                     "Authors with multiple ORCIDs": "orcid_duplicates",
+                                     "Duplicate authors": "duplicate_authors"}
                   },
        "External systems": {"Search HHMI People system": "people",
                             "HHMI Supervisory Organizations": "orgs/full",
@@ -210,6 +218,7 @@ def before_request():
         dbo = SimpleNamespace(type="mongo",
                               uri=os.environ.get("DIS_MONGO_URI"),
                               client=os.environ.get("DIS_MONGO_DATABASE", "dis"))
+        app.config["dis"] = JRC.simplenamespace_to_dict(JRC.get_config("dis"))
         print(f"Connecting to {dbo.client} prod")
         try:
             DB['dis'] = JRC.connect_database(dbo)
@@ -1932,15 +1941,15 @@ def s2_citation_count(doi, fmt='plain'):
         return 0
 
 
-def highlight_subtext(text, subtext):
+def highlight_subtext(text, subtext, is_regex=False):
     ''' Highlight a subtext in a text
         Keyword arguments:
           text: text to highlight
-          subtext: subtext to highlight
+          subtext: subtext to highlight (treated as a regex if is_regex is True)
         Returns:
           Highlighted text
     '''
-    pattern = f"(<[^>]+>)|({re.escape(subtext)})"
+    pattern = f"(<[^>]+>)|({subtext if is_regex else re.escape(subtext)})"
     def replace(m):
         if m.group(1):  # inside an HTML tag — leave it alone
             return m.group(1)
@@ -1948,11 +1957,15 @@ def highlight_subtext(text, subtext):
     return re.sub(pattern, replace, text, flags=re.IGNORECASE)
 
 
-def standard_ack_table(rows, ack):
+def standard_ack_table(rows, ack, is_regex=False, show_count=True):
     ''' Create a standard table of DOIs/acknowledgements
         Keyword arguments:
           rows: rows from dois collection
-          ack: acknowledgement text to highlight
+          ack: acknowledgement text to highlight (treated as a regex if is_regex is True)
+          show_count: if False, emit no built-in counter - for callers that display
+                      the count themselves (e.g. via ack_stat_cards). That caller's
+                      count element must carry id='totalrows' so the version/internal
+                      -external filters still have something to update.
         Returns:
           html: HTML
           cnt: number of DOIs
@@ -1970,7 +1983,7 @@ def standard_ack_table(rows, ack):
         row['published'] = DL.get_publishing_date(row)
         row['link'] = doi_link(row['doi'])
         row['jrc_ack2'] = row['jrc_acknowledgements'].replace('\n', '<br>')
-        row['jrc_ack2'] = highlight_subtext(row['jrc_ack2'], ack)
+        row['jrc_ack2'] = highlight_subtext(row['jrc_ack2'], ack, is_regex=is_regex)
         cls = [row.get('doi_type', 'internal')]
         if version:
             cls.append('ver')
@@ -1980,19 +1993,48 @@ def standard_ack_table(rows, ack):
         row['jrc_acknowledgements'] = row['jrc_acknowledgements'].replace('\n', ' ')
         fileoutput += dloop(row, ['published', 'doi', 'jrc_acknowledgements']) + "\n"
     html += '</tbody></table>'
-    counter = f"<p>Number of DOIs: <span id='totalrows'>{cnt:,}</span></p>"
+    counter = "" if not show_count \
+              else f"<p>Number of DOIs: <span id='totalrows'>{cnt:,}</span></p>"
+    cyclebtn = "<button class=\"btn btn-outline-info\" " \
+               + "onclick=\"cycle_filter(this, 'dois', 'internal', 'external', " \
+               + "'Internal', 'External', 'totalrows');\">" \
+               + "Showing Internal &amp; External</button>&nbsp;"
     cbutton = "<button id='verbtn' class=\"btn btn-outline-warning\" " \
               + "onclick=\"toggler('dois', 'ver', 'totalrows');\">" \
               + "Filter versioned DOIs</button>&nbsp;"
-    html = counter + cbutton + create_downloadable('standard', header, fileoutput) + html
+    html = counter + cyclebtn + cbutton + create_downloadable('standard', header, fileoutput) + html
     return html, cnt, oacnt
 
 
-def standard_doi_table(rows, prefix=None):
+def ack_stat_cards(cnt, internal, external):
+    ''' Build stat cards for an acknowledgement DOI table. The card values
+        carry ids/attributes that the dis.js row filters (toggler/cycle_filter)
+        keep up to date.
+        Keyword arguments:
+          cnt: total number of DOIs
+          internal: number of internal DOIs
+          external: number of external DOIs
+        Returns:
+          HTML to prepend to the table
+    '''
+    return stat_cards([("DOIs", f"<span id='totalrows'>{cnt:,}</span>"),
+                       ("Internal", f"<span data-filter-count='internal'>{internal:,}</span>"),
+                       ("External", f"<span data-filter-count='external'>{external:,}</span>")],
+                      div_id='acks-stats')
+
+
+def standard_doi_table(rows, prefix=None, count_card=False, show_count=True):
     ''' Create a standard table of DOIs
         Keyword arguments:
           rows: rows from dois collection
-          year: prefix for year pulldown
+          prefix: prefix for year pulldown
+          count_card: if True, show the DOI count as a stat card instead of the
+                      "Number of DOIs:" text line (opt-in; the count span keeps
+                      id='totalrows' either way so the version-filter toggler works)
+          show_count: if False, emit no built-in counter at all - for callers that
+                      display the count themselves (e.g. in their own stat card).
+                      That caller's count element must carry id='totalrows' so the
+                      version-filter toggler still has something to update.
         Returns:
           html: HTML
           cnt: number of DOIs
@@ -2019,7 +2061,13 @@ def standard_doi_table(rows, prefix=None):
         fileoutput += dloop(row, ['published', 'doi', 'journal', 'title']) + "\n"
     html = render_table(header, trows, table_id='dois', css='tablesorter standard-scroll',
                         row_classes=row_classes)
-    counter = f"<p>Number of DOIs: <span id='totalrows'>{cnt:,}</span></p>"
+    if not show_count:
+        counter = ''
+    elif count_card:
+        counter = stat_cards([("DOIs", f"<span id='totalrows'>{cnt:,}</span>")],
+                             div_id='dois-stats')
+    else:
+        counter = f"<p>Number of DOIs: <span id='totalrows'>{cnt:,}</span></p>"
     cbutton = "<button id='verbtn' class=\"btn btn-outline-warning\" " \
               + "onclick=\"toggler('dois', 'ver', 'totalrows');\">" \
               + "Filter versioned DOIs</button>&nbsp;"
@@ -2477,7 +2525,7 @@ def create_downloadable(name, header, content, size='btn-med'):
             content = "\t".join(header) + "\n" + content
         text_file.write(content)
     return f'<a class="btn btn-outline-success {size}" href="/download/{fname}" ' \
-                + 'role="button">Download tab-delimited file</a>'
+                + f'role="button">{DOWNLOAD_ICON}Download tab-delimited file</a>'
 
 
 def humansize(num, suffix='B', places=2, space='disk'):
@@ -2578,13 +2626,16 @@ def source_limit_pulldown(prefix, source, limit):
     return html
 
 
-def year_pulldown(prefix, all_years=True, suffix = '', start_year=2006):
+def year_pulldown(prefix, all_years=True, suffix = '', start_year=2006, query=False):
     ''' Generate a year pulldown
         Keyword arguments:
           prefix: navigation prefix
           all_years: if True, include all years
           suffix: suffix to add to the pulldown
           start_year: start year
+          query: if True, link as /<prefix>?year=<year> (and /<prefix> for All)
+                 instead of the path form /<prefix>/<year><suffix>; use when the
+                 path's positional segments are reserved for something else
         Returns:
           Pulldown HTML
     '''
@@ -2597,7 +2648,11 @@ def year_pulldown(prefix, all_years=True, suffix = '', start_year=2006):
            + "data-toggle='dropdown' aria-haspopup='true' aria-expanded='false'>" \
            + "Select publishing year</button><div class='dropdown-menu'>"
     for year in years:
-        html += f"<a class='dropdown-item' href='/{prefix}/{year}{suffix}'>{year}</a>"
+        if query:
+            url = f"/{prefix}" if year == 'All' else f"/{prefix}?year={year}"
+        else:
+            url = f"/{prefix}/{year}{suffix}"
+        html += f"<a class='dropdown-item' href='{url}'>{year}</a>"
     html += "</div></div>"
     return html
 
@@ -4039,26 +4094,36 @@ def show_acknowledgement_stats(limit=10):
         trows.append([safe(f"&nbsp;&nbsp;&nbsp;{escape(source)}"), f"{ack_cnt:,}",
                       f"{tot_cnt:,}", f"{pct:.1f}%"])
     trows.append(["External DOIs", f"{ext_total:,}", f"{ext_all:,}", f"{ext_pct:.1f}%"])
-    html = render_table(['Collection', 'Count', 'Total', '%'], trows, table_id='ack_summary',
-                        css='tablesorter standard-scroll')
-    html += "<br><h4>Internal DOIs by type</h4>"
-    html += render_table(['Type', 'Count'],
-                         [[typ, f"{cnt:,}"] for typ, cnt
-                          in sorted(dois_type_data.items(), key=itemgetter(1), reverse=True)],
-                         table_id='dois_types', css='tablesorter numberlast-scroll')
-    html += "<br><h4>External DOIs by type</h4>"
-    html += render_table(['Type', 'Count'],
-                         [[typ, f"{cnt:,}"] for typ, cnt
-                          in sorted(ext_type_data.items(), key=itemgetter(1), reverse=True)],
-                         table_id='ext_types', css='tablesorter numberlast-scroll')
+    # Tables are laid out in three rows: header + summary, by-type tables,
+    # and top-journal tables (the template's title is left empty for this).
+    summary = render_table(['Collection', 'Count', 'Total', '%'], trows, table_id='ack_summary',
+                           css='tablesorter standard-scroll')
+    html = f"<h2>Acknowledgement statistics</h2>{summary}"
+    int_types = render_table(['Type', 'Count'],
+                             [[typ, f"{cnt:,}"] for typ, cnt
+                              in sorted(dois_type_data.items(), key=itemgetter(1), reverse=True)],
+                             table_id='dois_types', css='tablesorter numberlast-scroll')
+    ext_types = render_table(['Type', 'Count'],
+                             [[typ, f"{cnt:,}"] for typ, cnt
+                              in sorted(ext_type_data.items(), key=itemgetter(1), reverse=True)],
+                             table_id='ext_types', css='tablesorter numberlast-scroll')
+    html += "<div class='flexrow'>" \
+            + "<div class='flexcol' style='margin-right: 30px'>" \
+            + f"<h4>Internal DOIs by type</h4>{int_types}</div>" \
+            + f"<div class='flexcol'><h4>External DOIs by type</h4>{ext_types}</div></div>"
+    jcols = ""
     if int_journals:
-        html += f"<br><h4>Top {limit} journals (Internal DOIs)</h4>"
-        html += render_table(['Journal', 'Count'], [[j, f"{c:,}"] for j, c in int_journals],
-                             table_id='top_journals_int', css='tablesorter numberlast-scroll')
+        jtable = render_table(['Journal', 'Count'], [[j, f"{c:,}"] for j, c in int_journals],
+                              table_id='top_journals_int', css='tablesorter numberlast-scroll')
+        jcols += "<div class='flexcol' style='margin-right: 30px'>" \
+                 + f"<h4>Top {limit} journals (Internal DOIs)</h4>{jtable}</div>"
     if ext_journals:
-        html += f"<br><h4>Top {limit} journals (External DOIs)</h4>"
-        html += render_table(['Journal', 'Count'], [[j, f"{c:,}"] for j, c in ext_journals],
-                             table_id='top_journals_ext', css='tablesorter numberlast-scroll')
+        jtable = render_table(['Journal', 'Count'], [[j, f"{c:,}"] for j, c in ext_journals],
+                              table_id='top_journals_ext', css='tablesorter numberlast-scroll')
+        jcols += "<div class='flexcol'>" \
+                 + f"<h4>Top {limit} journals (External DOIs)</h4>{jtable}</div>"
+    if jcols:
+        html += f"<div class='flexrow'>{jcols}</div>"
     # Charts: two pies side-by-side, bar chart below
     chartscript = ""
     pie_divs = ""
@@ -4093,7 +4158,7 @@ def show_acknowledgement_stats(limit=10):
         chartdiv += d
     endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
-                                         title="Acknowledgement Statistics",
+                                         title="",
                                          html=html, html2="",
                                          chartscript=chartscript, chartdiv=chartdiv,
                                          chartscript2="", chartdiv2="",
@@ -4275,7 +4340,7 @@ def dois_mytags(orcid="0000-0003-3118-1636", year='All'):
                                title=render_warning("Could not find DOIs for my affiliations"),
                                message=error_message(err))
     htmlp = year_pulldown(f"dois/mytags/{orcid}") + "<br>"
-    html, cnt, _ = standard_doi_table(rows)
+    html, cnt, _ = standard_doi_table(rows, count_card=True)
     title = "DOIs for my affiliations"
     if year != 'All':
         title += f" ({year})"
@@ -4301,7 +4366,8 @@ def get_citation_counts(doi, row, partial=True):
         Returns:
           Citation counts as HTML
     '''
-    # Citations (DataCite, Dimensions, eLife, OA.Report, OpenAlex, PubMed, ScholeXplorer, Web of Science)
+    # Citations (DataCite, Dimensions, eLife, OA.Report, OpenAlex, PubMed,
+    # ScholeXplorer, Web of Science)
     doisec = ""
     tblrow = []
     # DataCite
@@ -4344,7 +4410,7 @@ def get_citation_counts(doi, row, partial=True):
     if citcnt:
         cbutton = '<a class="btn btn-outline-success btn-tiny" ' \
                   + f'href="/citations/incoming/openalex/{doi}" ' \
-                  + 'role="button">Download tab-delimited file</a>'
+                  + f'role="button">{DOWNLOAD_ICON}Download tab-delimited file</a>'
         cbutton = f"<span style='line-height: 1.3'><br></span>{cbutton}"
         if url:
             tblrow.append(f"<td>OpenAlex: <a href='{url}' target='_blank'>{citcnt:,}</a>" \
@@ -4361,8 +4427,8 @@ def get_citation_counts(doi, row, partial=True):
             citcnt = 0
         if citcnt:
             cbutton = '<a class="btn btn-outline-success btn-tiny" ' \
-                      + f'href="/citations/incoming/pubmed/{doi}"' \
-                      + 'role="button">Download tab-delimited file</a>'
+                      + f'href="/citations/incoming/pubmed/{doi}" ' \
+                      + f'role="button">{DOWNLOAD_ICON}Download tab-delimited file</a>'
             cbutton = f"<span style='line-height: 1.3'><br></span>{cbutton}"
             tblrow.append(f"<td>PubMed: <a href='{url}' target='_blank'>{citcnt:,}</a>" \
                           + f"{cbutton}</td>")
@@ -4511,7 +4577,8 @@ def doi_tabs(doi, row, data, authors):
             pass
         ahtml += f"<h4>Acknowledgements</h4><div class='abstract'>{acktext}"
         if asrc:
-            ahtml += f"<br><span style='font-size:10pt;background-color:#777;color:aqua;'>Source: {asrc}</span></div>"
+            ahtml += "<br><span style='font-size:10pt;background-color:#777;" \
+                     + f"color:aqua;'>Source: {asrc}</span></div>"
         if highlight:
             ahtml += "<br><span style='color:goldenrod'><i class='fa-solid fa-warning'></i>" \
                      + " Acknowledgment highlighting is an experimental feature</span>"
@@ -4766,20 +4833,25 @@ def show_doi_by_type_ui(src, typ, sub, year):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get DOIs from dois collection"),
                                message=error_message(err))
-    html, cnt, oacnt = standard_doi_table(rows)
-    chartscript, chartdiv = DP.wedge_chart({'shown': oacnt, 'total': cnt}) if oacnt else ['', '']
-    oamsg = f"<span style='font-size: 18pt; color: lightgray'>{oacnt/cnt*100:.1f}%</span>" \
-            + f"<span style='font-size: 12pt'><br>{oacnt:,}/{cnt:,}</span>"
+    prefix = f"doisui_type/{src}/{typ}/{sub}"
+    html, cnt, oacnt = standard_doi_table(rows, prefix=prefix, count_card=True)
     desc = f"{src} {typ}"
     if sub != 'None':
         desc += f"/{sub}"
     if year != 'All':
         desc += f" ({year})"
-    if not html:
-        return render_template('warning.html', urlroot=request.url_root,
-                               title=render_warning("Could not find DOIs", 'warning'),
-                               message="Could not find any DOIs with type/subtype matching " \
-                                       + desc)
+    if not cnt:
+        # No DOIs for this filter - advise but keep the year pulldown so another
+        # year can be chosen (also avoids a divide-by-zero in the OA percentage)
+        html = year_pulldown(prefix) + "<br><br>" \
+               + render_warning(f"No DOIs were found for {desc}", 'warning')
+        return make_response(render_template('custom.html', urlroot=request.url_root,
+                                             title=f"DOIs for {desc}", html=html, oamsg='',
+                                             chartscript='', chartdiv='',
+                                             navbar=generate_navbar('DOIs')))
+    chartscript, chartdiv = DP.wedge_chart({'shown': oacnt, 'total': cnt}) if oacnt else ['', '']
+    oamsg = f"<span style='font-size: 18pt; color: lightgray'>{oacnt/cnt*100:.1f}%</span>" \
+            + f"<span style='font-size: 12pt'><br>{oacnt:,}/{cnt:,}</span>"
     return make_response(render_template('custom.html', urlroot=request.url_root,
                                          title=f"DOIs for {desc}", html=html, oamsg=oamsg,
                                          chartscript=chartscript, chartdiv=chartdiv,
@@ -4818,23 +4890,71 @@ def show_doi_by_ack_ui(ack):
         union.append(row)
         external += 1
     union.sort(key=lambda x: x.get("jrc_publishing_date", ""), reverse=True)
-    html, cnt, _ = standard_ack_table(union, ack)
+    # show_count=False: the count is shown in the card below (with id 'totalrows',
+    # which the version/internal-external filters update)
+    html, cnt, _ = standard_ack_table(union, ack, show_count=False)
     if not cnt:
         return render_template('warning.html', urlroot=request.url_root,
                                title=render_warning("Could not find DOIs", 'warning'),
                                message=f"Could not find any DOIs with acknowledgement {ack}")
-    # The DOI count is shown in the card below (with id 'totalrows', which the
-    # "Filter versioned DOIs" toggler updates), so drop the duplicate inline text
-    html = html.replace(f"<p>Number of DOIs: <span id='totalrows'>{cnt:,}</span></p>", "")
-    cards = stat_cards([("DOIs", f"<span id='totalrows'>{cnt:,}</span>"),
-                        ("Internal", f"{internal:,}"),
-                        ("External", f"{external:,}")],
-                       div_id='acks-stats')
-    toggles = "<button class=\"btn btn-outline-info\" " \
-              + "onclick=\"cycle_filter(this, 'dois', 'internal', 'external', " \
-              + "'Internal', 'External');\">Showing Internal &amp; External</button><br><br>"
-    html = cards + toggles + html
+    html = ack_stat_cards(cnt, internal, external) + html
     title = f"DOIs with acknowledgement text <span style='color:#51b447 !important'>{ack}</span>"
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=title, html=html,
+                                         navbar=generate_navbar('DOIs')))
+
+
+@app.route('/acksregexui/<string:group>')
+def show_doi_by_ack_regex_ui(group):
+    ''' Show DOIs with acknowledgements matching a group's configured regex
+    '''
+    entry = (app.config['dis'].get('ack_search_regex') or {}).get(group)
+    if not entry or not entry.get('regex'):
+        return render_template('warning.html', urlroot=request.url_root,
+                               title=render_warning("No search regex", 'warning'),
+                               message=f"No search regex is configured for {group}")
+    regex = entry['regex']
+    union = []
+    payload = dict(JOURNAL_ARTICLE)
+    payload["jrc_acknowledgements"] = {"$regex": regex, "$options" : "i"}
+    try:
+        rows = DB['dis'].dois.find(payload).sort("jrc_publishing_date", -1)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get DOIs from dois collection"),
+                               message=error_message(err))
+    internal = 0
+    for row in rows:
+        row['doi_type'] = 'internal'
+        union.append(row)
+        internal += 1
+    # External DOIs
+    external = 0
+    try:
+        rows = DB['dis'].external_dois.find(payload).sort("jrc_publishing_date", -1)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get DOIs from external_dois " \
+                                                    + "collection"),
+                               message=error_message(err))
+    for row in rows:
+        row['doi_type'] = 'external'
+        union.append(row)
+        external += 1
+    union.sort(key=lambda x: x.get("jrc_publishing_date", ""), reverse=True)
+    # show_count=False: the count is shown in the card below (with id 'totalrows',
+    # which the version/internal-external filters update)
+    html, cnt, _ = standard_ack_table(union, regex, is_regex=True, show_count=False)
+    if not cnt:
+        return render_template('warning.html', urlroot=request.url_root,
+                               title=render_warning("Could not find DOIs", 'warning'),
+                               message=f"Could not find any DOIs with acknowledgements for {group}")
+    html = ack_stat_cards(cnt, internal, external) + html
+    if entry.get('description'):
+        html = f"<p><i>Acknowledgements matching {entry['description']} " \
+               + "(case-insensitive)</i></p>" + html
+    title = f"DOIs with acknowledgements for <span style='color:#51b447 !important'>{group}</span>"
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
@@ -4869,14 +4989,13 @@ def show_doi_by_title_ui(title):
                                message=error_message(err))
     for row in rows:
         union.append(row)
-    html, cnt, oacnt = standard_doi_table(union)
+    # show_count=False: the count is shown in the card below (with id 'totalrows',
+    # which the "Filter versioned DOIs" toggler updates)
+    html, cnt, oacnt = standard_doi_table(union, show_count=False)
     if not cnt:
         return render_template('warning.html', urlroot=request.url_root,
                                title=render_warning("Could not find DOIs", 'warning'),
                                message=f"Could not find any DOIs with title matching {title}")
-    # The DOI count is shown in the card below (with id 'totalrows', which the
-    # "Filter versioned DOIs" toggler updates), so drop the duplicate inline text
-    html = html.replace(f"<p>Number of DOIs: <span id='totalrows'>{cnt:,}</span></p>", "")
     cards = stat_cards([("DOIs", f"<span id='totalrows'>{cnt:,}</span>"),
                         ("Open Access", f"{oacnt:,}"),
                         ("Not Open Access", f"{cnt-oacnt:,}")],
@@ -4919,7 +5038,7 @@ def dois_source(year='All'):
     title = "DOIs by source"
     if year != 'All':
         title += f" ({year})"
-    chartscript, chartdiv = DP.pie_chart(data, title, "source", width=500,
+    chartscript, chartdiv = DP.pie_chart(data, title, "source", width=450,
                                          colors=DP.SOURCE_PALETTE)
     payload = [{"$group": {"_id": "$jrc_load_source", "count": {"$sum": 1}}},
                {"$sort" : {"count": -1}}
@@ -4939,7 +5058,7 @@ def dois_source(year='All'):
     title = "DOIs by load method"
     if year != 'All':
         title += f" ({year})"
-    script2, div2 = DP.pie_chart(data, title, "source", width=500,
+    script2, div2 = DP.pie_chart(data, title, "source", width=450,
                                  colors=DP.SOURCE_PALETTE)
     chartscript += script2
     chartdiv += div2
@@ -4964,7 +5083,7 @@ def dois_source(year='All'):
     title = "Crossref DOIs with PMIDs"
     if year != 'All':
         title += f" ({year})"
-    chartscript2, chartdiv2 = DP.pie_chart(data, title, "source", width=500,
+    chartscript2, chartdiv2 = DP.pie_chart(data, title, "source", width=450,
                                            colors=DP.SOURCE_PALETTE)
     # DOIs with PMIDs
     data = {}
@@ -4984,7 +5103,7 @@ def dois_source(year='All'):
     title = "Crossref DOIs with full text available"
     if year != 'All':
         title += f" ({year})"
-    script2, div2 = DP.pie_chart(data, title, "source", width=500,
+    script2, div2 = DP.pie_chart(data, title, "source", width=450,
                                  colors=DP.SOURCE_PALETTE)
     chartscript2 += script2
     chartdiv2 += div2
@@ -5137,7 +5256,7 @@ def dois_license_report(source, lic=None, year='All'):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get license data from dois"),
                                message=error_message(err))
-    html, _, _ = standard_doi_table(rows)
+    html, _, _ = standard_doi_table(rows, count_card=True)
     title = f"{source} DOIs for license {lic}"
     if year != 'All':
         title += f" for {year}"
@@ -5956,11 +6075,47 @@ def show_doiui_custom(year='All'):
 
 
 
+# Some DataCite subjectScheme values are inconsistent labels for the same
+# vocabulary (e.g. "fos"/"FOS" and "FOR" are abbreviations). The input pipeline
+# can't be changed, so map every known raw variant to one canonical label and
+# merge them on read. Keys are the exact raw values stored in the dois collection.
+SUBJECT_SCHEME_CANONICAL = {
+    "fos": "Fields of Science and Technology (FOS)",
+    "FOS": "Fields of Science and Technology (FOS)",
+    "Fields of Science and Technology (FOS)": "Fields of Science and Technology (FOS)",
+    "FOR": "ANZSRC Fields of Research",
+    "ANZSRC Fields of Research": "ANZSRC Fields of Research",
+}
+
+
+def canonical_scheme(scheme):
+    ''' Canonical display label for a subjectScheme, merging known variants
+        Keyword arguments:
+          scheme: raw subjectScheme value (may be None/empty)
+        Returns:
+          canonical label (unchanged value when there is no known variant)
+    '''
+    return SUBJECT_SCHEME_CANONICAL.get(scheme, scheme) if scheme else scheme
+
+
+def scheme_variants(canonical):
+    ''' Raw subjectScheme values that map to a canonical label, for querying
+        Keyword arguments:
+          canonical: canonical scheme label
+        Returns:
+          list of raw subjectScheme values (just the label itself when it has
+          no known variants)
+    '''
+    variants = [raw for raw, canon in SUBJECT_SCHEME_CANONICAL.items()
+                if canon == canonical]
+    return variants or [canonical]
+
+
 @app.route('/dois_subjectpicker')
 def show_doi_subjectpicker():
     ''' Show DOI subjects
     '''
-    cnt = {'datacite': 0, 'crossref_mesh': 0}
+    cnt = {'crossref_mesh': 0}
     try:
         payload = [{"$match": {"subjects": {"$exists": True}}},
                    {"$unwind": "$subjects"},
@@ -5970,40 +6125,40 @@ def show_doi_subjectpicker():
                    {"$sort": {"count": -1}}]
         rows = DB['dis'].dois.aggregate(payload)
     except Exception as err:
-        return inspect_error(err, 'Could not get Crossref DOI subjects')
+        return inspect_error(err, 'Could not get DataCite DOI subjects')
     if not rows:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not find subjects", 'warning'),
-                               message="Could not find Crossref DOI subjects")
+                               message="Could not find DataCite DOI subjects")
     subdict = {}
+    scheme_cnt = collections.defaultdict(int)
     for row in rows:
-        if 'scheme' not in row['_id']:
-            row['_id']['scheme'] = "DataCite unspecified"
+        # Canonicalize known label variants; a missing/null scheme groups as
+        # absent/None, so label it "DataCite unspecified"
+        scheme = canonical_scheme(row['_id'].get('scheme')) or "DataCite unspecified"
+        scheme_cnt[scheme] += 1
         if row['_id']['subject'] not in subdict:
-            subdict[row['_id']['subject']] = [{"count": row['count'],
-                                               "schema": row['_id']['scheme']}]
+            subdict[row['_id']['subject']] = [{"count": row['count'], "schema": scheme}]
         else:
-            subdict[row['_id']['subject']].append({"count": row['count'],
-                                                   "schema": row['_id']['scheme']})
-    cnt['datacite'] = len(subdict)
+            subdict[row['_id']['subject']].append({"count": row['count'], "schema": scheme})
     try:
         payload = [{"$match": {"jrc_mesh": {"$exists": 1}}},
                    {"$unwind": "$jrc_mesh"},
                    {"$group": {"_id": "$jrc_mesh.descriptor_name", "count": {"$sum": 1}}}]
         rows = DB['dis'].dois.aggregate(payload)
     except Exception as err:
-        return inspect_error(err, 'Could not get DataCite DOI subjects')
+        return inspect_error(err, 'Could not get MeSH DOI subjects')
     if not rows:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not find subjects", 'warning'),
-                               message="Could not find DataCite DOI subjects")
+                               message="Could not find MeSH DOI subjects")
     for row in rows:
         cnt['crossref_mesh'] += 1
         if row['_id'] not in subdict:
             subdict[row['_id']] = [{"count": row['count'], "schema": "MeSH"}]
         else:
             subdict[row['_id']].append({"count": row['count'], "schema": "MeSH"})
-    sublist = '<option>'
+    options = []
     outlist = ""
     for subj, val in sorted(subdict.items()):
         outlist += f"{subj}\t"
@@ -6011,12 +6166,27 @@ def show_doi_subjectpicker():
         for sch in val:
             schlist.append(f"{sch['schema']}: {sch['count']}")
         outlist += ", ".join(schlist) + "\n"
-        sublist += f"<option value='{subj}'>{subj}</option>"
-    sublist += '</option>'
-    html = f"Found {len(subdict):,} unique subjects<ul class='unstyled'>" \
-           + f"<li>DataCite: {cnt['datacite']:,}</li>" \
-           + f"<li>MeSH (Crossref): {cnt['crossref_mesh']:,}</li></ul>" \
-           + create_downloadable("subjects", ["Subject", "Schemas"], outlist) + "<br><br>"
+        # escape: some MeSH descriptors contain apostrophes/ampersands that would
+        # otherwise break the option's value attribute or render incorrectly
+        esc = escape(subj or "")
+        options.append(f'<option value="{esc}">{esc}</option>')
+    sublist = "".join(options)
+    # Subjects grouped by source: the DataCite subjects[] schemes (like
+    # /datacite_subject) and the separate Crossref MeSH field. A subject can
+    # appear under more than one scheme, so the per-scheme tallies need not sum
+    # to the unique-subject total. MeSH appears in both groups: as a DataCite
+    # subjectScheme and as the Crossref jrc_mesh enrichment - hence the split.
+    scheme_items = "".join(
+        f"<li>{scheme}: {num:,}</li>"
+        for scheme, num in sorted(scheme_cnt.items(), key=itemgetter(1), reverse=True))
+    html = create_downloadable("subjects", ["Subject", "Schemes"], outlist) \
+           + "<br><br>" \
+           + "<span style='font-size:1.15em; font-weight:bold'>" \
+           + f"Found {len(subdict):,} unique subjects</span><br><br>" \
+           + "<b>Crossref subject schemes</b>" \
+           + f"<ul class='unstyled'><li>MeSH: {cnt['crossref_mesh']:,}</li></ul>" \
+           + "<b>DataCite subject schemes</b>" \
+           + f"<ul class='unstyled'>{scheme_items}</ul>"
     endpoint_access()
     return make_response(render_template('subject.html', urlroot=request.url_root,
                                          title="DOI subjects", html=html, subjects=sublist,
@@ -6183,10 +6353,17 @@ def show_doi_pubmed(pmid):
 def datacite_subject(subject=None, year='All'):
     ''' Show DOI subjects
     '''
+    if not subject:
+        # List view: the year comes from a query param (the path year segment is
+        # reserved for the subject-detail view)
+        year = request.args.get('year', 'All')
     if subject:
         payload = {"subjects.subject": subject}
     else:
-        payload = [{"$match": {"subjects": {"$exists": True}}},
+        match = {"subjects": {"$exists": True}}
+        if year != 'All':
+            match["jrc_publishing_date"] = {"$regex": "^" + year}
+        payload = [{"$match": match},
                    {"$unwind": "$subjects"},
                    {"$group": {"_id": {"subject": "$subjects.subject",
                                        "scheme": "$subjects.subjectScheme"},
@@ -6204,10 +6381,19 @@ def datacite_subject(subject=None, year='All'):
                                title=render_warning("Could not get DOI subjects"),
                                message=error_message(err))
     if subject:
-        html, cnt, _ = standard_doi_table(rows, prefix=f"datacite_subject/{subject}")
-        cards = stat_cards([("Subject", subject), ("DOIs", f"{cnt:,}")],
-                           div_id='dcsubj-stats')
-        html = cards + html
+        html, cnt, _ = standard_doi_table(rows, prefix=f"datacite_subject/{subject}",
+                                          show_count=False)
+        if not cnt:
+            msg = f"No DataCite DOIs were found for subject {subject}"
+            if year != 'All':
+                msg += f" in publishing year {year}"
+            html = year_pulldown(f"datacite_subject/{subject}") + "<br><br>" \
+                   + render_warning(msg, 'warning')
+        else:
+            cards = stat_cards([("Subject", subject),
+                                ("DOIs", f"<span id='totalrows'>{cnt:,}</span>")],
+                               div_id='dcsubj-stats')
+            html = cards + html
         title = f"DOIs for {subject}"
         if year != 'All':
             title += f" (year={year})"
@@ -6216,23 +6402,77 @@ def datacite_subject(subject=None, year='All'):
         total = 0
         schemes = set()
         trows = []
+        # Carry the active year into the subject/scheme drill-down links
+        ysuffix = '' if year == 'All' else f"/{year}"
         for row in rows:
             cnt += 1
             total += row['count']
-            scheme = row['_id'].get('scheme', '')
+            subj = row['_id']['subject']
+            scheme = canonical_scheme(row['_id'].get('scheme', ''))
             if scheme:
                 schemes.add(scheme)
-            trows.append([row['_id']['subject'], scheme,
-                          safe(f"<a href='/datacite_subject/{row['_id']['subject']}'>"
+                scheme_cell = safe(f"<a href='/datacite_scheme/{scheme}{ysuffix}'>{scheme}</a>")
+            else:
+                scheme_cell = scheme
+            trows.append([subj, scheme_cell,
+                          safe(f"<a href='/datacite_subject/{subj}{ysuffix}'>"
                                + f"{row['count']}</a>")])
-        html = render_table(['Subject', 'Subject scheme', 'Count'], trows, table_id='subjects',
-                            css='tablesorter numberlast-scroll')
-        cards = stat_cards([("DOI occurrences", f"{total:,}"),
-                            ("Subjects", f"{cnt:,}"),
-                            ("Schemes", f"{len(schemes):,}")],
-                           div_id='dcsubj-stats')
-        html = cards + html
+        pulldown = year_pulldown('datacite_subject', query=True)
+        if not cnt:
+            # No subjects for this filter - advise rather than show an empty table,
+            # but keep the year pulldown so another year can be chosen
+            msg = "No DataCite subjects were found"
+            if year != 'All':
+                msg += f" for publishing year {year}"
+            html = pulldown + "<br><br>" + render_warning(msg, 'warning')
+        else:
+            table = render_table(['Subject', 'Subject scheme', 'Count'], trows,
+                                 table_id='subjects', css='tablesorter numberlast-scroll')
+            cards = stat_cards([("DOI occurrences", f"{total:,}"),
+                                ("Subjects", f"{cnt:,}"),
+                                ("Schemes", f"{len(schemes):,}")],
+                               div_id='dcsubj-stats')
+            html = cards + pulldown + "<br><br>" + table
         title = f"DataCite subjects ({cnt:,})"
+        if year != 'All':
+            title += f" (year={year})"
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=title, html=html,
+                                         navbar=generate_navbar('DOIs')))
+
+
+@app.route('/datacite_scheme/<string:scheme>/<string:year>')
+@app.route('/datacite_scheme/<string:scheme>')
+def datacite_scheme(scheme, year='All'):
+    ''' Show DataCite DOIs whose subjects use a given subject scheme
+    '''
+    # scheme is the canonical label; match every raw variant that maps to it
+    payload = {"subjects.subjectScheme": {"$in": scheme_variants(scheme)}}
+    if year != 'All':
+        payload['jrc_publishing_date'] = {"$regex": "^" + year}
+    try:
+        rows = DB['dis'].dois.find(payload)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get DOI subjects"),
+                               message=error_message(err))
+    html, cnt, _ = standard_doi_table(rows, prefix=f"datacite_scheme/{scheme}",
+                                      show_count=False)
+    if not cnt:
+        msg = f"No DataCite DOIs were found for subject scheme {scheme}"
+        if year != 'All':
+            msg += f" in publishing year {year}"
+        html = year_pulldown(f"datacite_scheme/{scheme}") + "<br><br>" \
+               + render_warning(msg, 'warning')
+    else:
+        cards = stat_cards([("Subject scheme", scheme),
+                            ("DOIs", f"<span id='totalrows'>{cnt:,}</span>")],
+                           div_id='dcscheme-stats')
+        html = cards + html
+    title = f"DataCite DOIs using subject scheme {scheme}"
+    if year != 'All':
+        title += f" (year={year})"
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
@@ -6337,7 +6577,8 @@ def datacite_doisd(dtype=None, pub=None, year='All'):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get data DOIs"),
                                message=error_message(err))
-    html, cnt, oacnt = standard_doi_table(rows, prefix=f"datacite_dois/{dtype}/{pub}")
+    html, cnt, oacnt = standard_doi_table(rows, prefix=f"datacite_dois/{dtype}/{pub}",
+                                          count_card=True)
     title = f"DOIs for {pub} {dtype} ({cnt:,})"
     if year != 'All':
         title += f" (year={year})"
@@ -6357,9 +6598,25 @@ def datacite_doisd(dtype=None, pub=None, year='All'):
 
 @app.route('/datacite_citations')
 def datacite_citations():
-    ''' Show DataCite DOI citation counts
+    ''' Legacy URL: redirect to /citation_list/datacite
     '''
-    payload = {"jrc_obtained_from": "DataCite", "jrc_citation_count": {"$exists": 1}}
+    return redirect('/citation_list/datacite')
+
+
+@app.route('/citation_list/<string:source>')
+@app.route('/citation_list')
+def citation_list(source='datacite'):
+    ''' Show DOI citation counts for one registrar source
+    '''
+    source = source.lower()
+    obtained_from = {"datacite": "DataCite", "crossref": "Crossref"}
+    if source not in obtained_from:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Invalid source"),
+                               message=f"{source} is not a valid source: use " \
+                                       + " or ".join(sorted(obtained_from)))
+    obtained = obtained_from[source]
+    payload = {"jrc_obtained_from": obtained, "jrc_citation_count": {"$exists": 1}}
     coll = DB['dis'].dois
     try:
         rows = coll.find(payload).sort("jrc_citation_count", -1)
@@ -6375,7 +6632,7 @@ def datacite_citations():
         total += row['jrc_citation_count']
         cnt += 1
         link = doi_link(row['doi'])
-        trows.append([safe(link), DL.get_title(row), row['jrc_citation_count']])
+        trows.append([safe(link), DL.get_title(row), f"{row['jrc_citation_count']:,}"])
         row_classes.append('ver' if DL.is_version(row) else '')
     html = render_table(['DOI', 'Title', 'Citations'], trows, table_id='data',
                         css='tablesorter numberlast-scroll', row_classes=row_classes,
@@ -6388,10 +6645,13 @@ def datacite_citations():
                         ("Total citations", f"{total:,}"),
                         ("Avg. per DOI", f"{total/cnt:,.1f}" if cnt else "0")],
                        div_id='dccc-stats')
-    html = cards + cbutton + "<br><br>" + html
+    other = 'crossref' if source == 'datacite' else 'datacite'
+    switch = f"<a href='/citation_list/{other}' class='btn btn-outline-primary btn-sm' " \
+             + f"style='margin-left: 10px'>Switch to {obtained_from[other]}</a>"
+    html = cards + cbutton + switch + "<br><br>" + html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title="DataCite DOI citations", html=html,
+                                         title=f"{obtained} DOI citations", html=html,
                                          navbar=generate_navbar('DOIs')))
 
 
@@ -6427,6 +6687,223 @@ def datacite_downloads():
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="DataCite DOI downloads", html=html,
+                                         navbar=generate_navbar('DOIs')))
+
+
+@app.route('/datacite_metrics')
+def datacite_metrics():
+    ''' Legacy URL: redirect to /citation_metrics/datacite
+    '''
+    return redirect('/citation_metrics/datacite')
+
+
+@app.route('/citation_metrics/<string:source>')
+@app.route('/citation_metrics')
+def citation_metrics(source='datacite'):
+    ''' Show citation totals by source (and figshare usage totals for DataCite)
+    '''
+    source = source.lower()
+    obtained_from = {"datacite": "DataCite", "crossref": "Crossref"}
+    if source not in obtained_from:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Invalid source"),
+                               message=f"{source} is not a valid source: use " \
+                                       + " or ".join(sorted(obtained_from)))
+    obtained = obtained_from[source]
+    coll = DB['dis'].dois
+    source_name = {"datacite": "DataCite", "openalex": "OpenAlex",
+                   "scholexplorer": "ScholeXplorer", "crossref": "Crossref",
+                   "dimensions": "Dimensions"}
+    # Citations by source
+    payload = [{"$match": {"jrc_citation_sources": {"$exists": True},
+                           "jrc_obtained_from": obtained}},
+               {"$project": {"kv": {"$objectToArray": "$jrc_citation_sources"}}},
+               {"$unwind": "$kv"},
+               {"$group": {"_id": "$kv.k", "dois": {"$sum": 1}, "total": {"$sum": "$kv.v"}}},
+               {"$sort": {"total": -1}}]
+    try:
+        rows = list(coll.aggregate(payload))
+        # Per-DOI records drive the unique total, median, freshness, version
+        # exclusion, and per-year breakdown (doi/relation are for DL.is_version)
+        cited_rows = list(coll.find({"jrc_citation_sources": {"$exists": True},
+                                     "jrc_obtained_from": obtained},
+                                    {"doi": 1, "relation": 1, "jrc_citation_count": 1,
+                                     "jrc_citation_updated": 1,
+                                     "jrc_publishing_date": 1}))
+        all_dois = coll.count_documents({"jrc_obtained_from": obtained})
+        year_all = {rec['_id']: rec['dois'] for rec in coll.aggregate(
+            [{"$match": {"jrc_obtained_from": obtained,
+                         "jrc_publishing_date": {"$exists": True}}},
+             {"$group": {"_id": {"$substrBytes": ["$jrc_publishing_date", 0, 4]},
+                         "dois": {"$sum": 1}}}])}
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get citation sources " \
+                                                    + "from dois collection"),
+                               message=error_message(err))
+    cite_dois = len(cited_rows)
+    counts = [row.get('jrc_citation_count', 0) for row in cited_rows]
+    unique_total = sum(counts)
+    updated = [row['jrc_citation_updated'] for row in cited_rows
+               if row.get('jrc_citation_updated')]
+    cite_data = {}
+    trows = []
+    cite_total = 0
+    for row in rows:
+        label = source_name.get(row['_id'], row['_id'].capitalize())
+        cite_data[label] = row['total']
+        cite_total += row['total']
+        trows.append([label, f"{row['dois']:,}", f"{row['total']:,}"])
+    cards = stat_cards([("DOIs with citation sources",
+                         f"<a href='/citation_list/{source}'>{cite_dois:,}</a>"),
+                        ("% DOIs cited", f"{cite_dois/all_dois*100:,.1f}%" if all_dois else "0%"),
+                        ("Total citations", f"{cite_total:,}"),
+                        ("Total unique citations", f"{unique_total:,}"),
+                        ("Avg. per DOI", f"{unique_total/cite_dois:,.1f}" if cite_dois else "0"),
+                        ("Median per DOI",
+                         f"{statistics.median(counts):,.1f}" if counts else "0")],
+                       div_id='dcm-cite-stats')
+    note_style = "font-size:0.85em; color:#a8c4e0;"
+    notes = ''
+    if updated:
+        newest, oldest = max(updated), min(updated)
+        line = f"Citation data last updated {newest:%Y-%m-%d}"
+        if oldest.date() != newest.date():
+            line += f" (oldest record: {oldest:%Y-%m-%d})"
+        notes += f"<div style='{note_style}'>{line}</div>"
+    # Versioned DOIs (.v1/.v2/...) are separate dois records, so a citing work
+    # can be counted once per version it cites; show totals without versions.
+    # Applies to both registrars (Crossref has versioned preprints too).
+    nonver = [row for row in cited_rows if not DL.is_version(row)]
+    if 0 < len(nonver) < cite_dois:
+        nv_total = sum(row.get('jrc_citation_count', 0) for row in nonver)
+        notes += f"<div style='{note_style}'>Versioned DOIs are counted " \
+                 + f"separately; excluding the {cite_dois - len(nonver):,} versioned " \
+                 + f"DOIs leaves {len(nonver):,} cited DOIs with {nv_total:,} unique " \
+                 + f"citations (avg. {nv_total/len(nonver):,.1f})</div>"
+    if notes:
+        notes = f"<div style='margin:-8px 0 16px 0'>{notes}</div>"
+    other = 'crossref' if source == 'datacite' else 'datacite'
+    switch = f"<a href='/citation_metrics/{other}' class='btn btn-outline-primary btn-sm' " \
+             + f"style='margin-bottom: 12px'>Switch to {obtained_from[other]} metrics</a>"
+    chtml = "<h4>Citations by source</h4>"
+    chtml += render_table(['Source', 'DOIs', 'Citations'], trows, table_id='sources',
+                          css='tablesorter numberlast-scroll',
+                          footer=[fcell('TOTAL', colspan=2),
+                                  fcell(f"{cite_total:,}", align='center')])
+    chtml += f"<div style='{note_style} max-width:460px'>A citing work found by more " \
+             + "than one source counts once per source here; &quot;Total unique " \
+             + "citations&quot; is the deduplicated figure.</div><br>"
+    # Citations by publishing year
+    year_cited = {}
+    for row in cited_rows:
+        year = (row.get('jrc_publishing_date') or '')[:4]
+        if year.isdigit():
+            rec = year_cited.setdefault(year, {'dois': 0, 'citations': 0})
+            rec['dois'] += 1
+            rec['citations'] += row.get('jrc_citation_count', 0)
+    by_year = {}
+    ytrows = []
+    ydata = {'Year': [], 'Citations': [], 'Cited': []}
+    for year in sorted(yr for yr in set(year_all) | set(year_cited) if yr.isdigit()):
+        alln = year_all.get(year, 0)
+        cited = year_cited.get(year, {'dois': 0, 'citations': 0})
+        pct = cited['dois'] / alln if alln else 0
+        by_year[year] = {'dois': alln, 'cited_dois': cited['dois'],
+                         'unique_citations': cited['citations']}
+        ytrows.append([year, f"{alln:,}", f"{cited['dois']:,}", f"{pct*100:.1f}%",
+                       f"{cited['citations']:,}"])
+        ydata['Year'].append(year)
+        ydata['Citations'].append(cited['citations'])
+        ydata['Cited'].append(pct)
+    yhtml = "<h4>Citations by publishing year</h4>"
+    yhtml += render_table(['Year', 'DOIs', 'Cited DOIs', '% cited', 'Unique citations'],
+                          ytrows, table_id='years', css='tablesorter numberlast-scroll')
+    # figshare usage (figshare DOIs are DataCite-registered, so DataCite only)
+    fig_data = {}
+    fcards = fhtml = ''
+    if source == 'datacite':
+        payload = [{"$match": {"jrc_figshare_counts": {"$exists": True}}},
+                   {"$project": {"kv": {"$objectToArray": "$jrc_figshare_counts"}}},
+                   {"$unwind": "$kv"},
+                   {"$group": {"_id": "$kv.k", "dois": {"$sum": 1}, "total": {"$sum": "$kv.v"}}},
+                   {"$sort": {"total": -1}}]
+        try:
+            rows = list(coll.aggregate(payload))
+            fig_dois = coll.count_documents({"jrc_figshare_counts": {"$exists": True}})
+        except Exception as err:
+            return render_template('error.html', urlroot=request.url_root,
+                                   title=render_warning("Could not get figshare counts " \
+                                                        + "from dois collection"),
+                                   message=error_message(err))
+        trows = []
+        for row in rows:
+            label = row['_id'].capitalize()
+            fig_data[label] = row['total']
+            trows.append([label, f"{row['dois']:,}", f"{row['total']:,}"])
+        fcards = stat_cards([("DOIs with figshare usage", f"{fig_dois:,}")],
+                            div_id='dcm-fig-stats')
+        fhtml = "<h4>figshare usage</h4>"
+        fhtml += render_table(['Metric', 'DOIs', 'Count'], trows, table_id='figshare',
+                              css='tablesorter numberlast-scroll')
+    if request.args.get('fmt') == 'json':
+        result = initialize_result()
+        result['data'] = {"source": obtained,
+                          "dois": all_dois,
+                          "cited_dois": cite_dois,
+                          "pct_cited": round(cite_dois/all_dois*100, 2) if all_dois else 0,
+                          "citations_by_source": cite_data,
+                          "total_citations": cite_total,
+                          "unique_citations": unique_total,
+                          "avg_per_doi": round(unique_total/cite_dois, 2) if cite_dois else 0,
+                          "median_per_doi": statistics.median(counts) if counts else 0,
+                          "last_updated": max(updated).isoformat() if updated else None,
+                          "by_year": by_year,
+                          "figshare": fig_data}
+        result['rest']['source'] = 'mongo'
+        # data is a single stats object, not a row list; report the number of
+        # cited DOIs the stats summarize rather than the dict's key count
+        result['rest']['row_count'] = cite_dois
+        return generate_response(result)
+    chartscript = cite_div = fig_div = year_div = ''
+    if cite_data:
+        colors = DP.get_colors_by_count(len(cite_data))
+        script, cite_div = DP.pie_chart(cite_data, "Citations by source", "source",
+                                        width=500, colors=colors)
+        chartscript += script
+    if ydata['Year']:
+        script, year_div = DP.dual_axis_chart(ydata, title="Citations by publishing year",
+                                              x_field='Year', bar_field='Citations',
+                                              line_field='Cited', line_label='% cited',
+                                              bar_format="0,0", line_format="0%",
+                                              width=650, height=400)
+        chartscript += script
+    if fig_data:
+        script, fig_div = DP.hbar_chart(fig_data, "figshare usage",
+                                        value_label="Count", width=500, height=300,
+                                        value_format="0,0", show_values=True)
+        chartscript += script
+    # Cards (with freshness/version notes) on their own full-width rows, then
+    # each table paired with its chart in a flex row so the chart lines up
+    # with the table, not the cards
+    html = switch + cards + notes \
+           + "<div class='flexrow' style='margin-bottom: 40px'><div class='flexcol'>" + chtml \
+           + "</div>" \
+           + "<div class='flexcol' style='margin: 10px 0 0 20px'>" + cite_div + "</div></div>" \
+           + "<div class='flexrow' style='margin-bottom: 40px'><div class='flexcol'>" + yhtml \
+           + "</div>" \
+           + "<div class='flexcol' style='margin: 10px 0 0 20px'>" + year_div + "</div></div>"
+    if fhtml:
+        html += fcards \
+                + "<div class='flexrow'><div class='flexcol'>" + fhtml + "</div>" \
+                + "<div class='flexcol' style='margin: 10px 0 0 20px'>" + fig_div + "</div></div>"
+    title = f"{obtained} citation/figshare metrics" if source == 'datacite' \
+            else f"{obtained} citation metrics"
+    endpoint_access()
+    return make_response(render_template('bokeh.html', urlroot=request.url_root,
+                                         title=title, html=html,
+                                         chartscript=chartscript, chartdiv='',
+                                         chartscript2='', chartdiv2='',
                                          navbar=generate_navbar('DOIs')))
 
 # ******************************************************************************
@@ -6824,7 +7301,7 @@ def dois_coauthors():
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get works by co-authors"),
                                message=error_message(err))
-    html, cnt, _ = standard_doi_table(rows)
+    html, cnt, _ = standard_doi_table(rows, count_card=True)
     title = f"Works co-authored by {orc[0]['given'][0]} {orc[0]['family'][0]} " \
             + f"and {orc[1]['given'][0]} {orc[1]['family'][0]}"
     if not cnt:
@@ -7082,7 +7559,8 @@ def org_summary(org='Shared Resources',year='All', which=None):
          if finds['lastsr'] else ""
     row2 = ['Lab head last author', safe(c1), safe(c2)]
     html = render_table(['', 'All', org], [row1, row2], table_id='org',
-                        css='tablesorter numbers-scroll') + "<br>" + year_pulldown(f"org_summary/{org}")
+                        css='tablesorter numbers-scroll') \
+           + "<br>" + year_pulldown(f"org_summary/{org}")
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
@@ -7881,10 +8359,9 @@ def show_journal_ui(jname, year='All'):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get DOIs for journal"),
                                message=error_message(err))
-    html, cnt, _ = standard_doi_table(rows)
-    # The DOI count is shown in the card below (with id 'totalrows', which the
-    # "Filter versioned DOIs" toggler updates), so drop the duplicate inline text
-    html = html.replace(f"<p>Number of DOIs: <span id='totalrows'>{cnt:,}</span></p>", "")
+    # show_count=False: the count is shown in the card below (with id 'totalrows',
+    # which the "Filter versioned DOIs" toggler updates)
+    html, cnt, _ = standard_doi_table(rows, show_count=False)
     payload = [{"$match": payload},
                {"$group": {"_id": "$jrc_oa_status", "count": {"$sum": 1}}}]
     try:
@@ -8312,8 +8789,8 @@ def show_subscription_missingcost(year=None):
                                message=error_message(err))
     # Providers that have at least one cost entry for the selected year
     try:
-        covered = {row for row in DB['dis'].subscription.distinct(
-            "provider", {f"cost.{year}": {"$exists": True}})}
+        covered = set(DB['dis'].subscription.distinct(
+            "provider", {f"cost.{year}": {"$exists": True}}))
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning(errmsg),
@@ -8920,7 +9397,9 @@ def show_subscription(sid):
                     + 'class="btn btn-success btn-small"' \
                     + f"onclick=\"{link}\">Access {label}</button></div>"
     try:
-        rows = DB['dis'].dois.find({"jrc_journal": row['title']}).collation({"locale": "en"}).sort("jrc_publishing_date", -1)
+        rows = DB['dis'].dois.find({"jrc_journal": row['title']}) \
+                   .collation({"locale": "en"}) \
+                   .sort("jrc_publishing_date", -1)
     except Exception as err:
         return render_template('error.html', urlroot=request.url.root,
                                title=render_warning("Could not get DOIs for journal"),
@@ -10098,7 +10577,7 @@ def orcid_affiliation(aff, year='All'):
                                                     + "in dois collection"),
                                message=error_message(err))
     htmlp += "<hr>" + year_pulldown(f"tag/{aff}")
-    html, cnt, _ = standard_doi_table(rows)
+    html, cnt, _ = standard_doi_table(rows, count_card=True)
     if cnt:
         html = htmlp + html
     else:
@@ -10132,7 +10611,7 @@ def tag_nohead(aff, year='All'):
                                title=render_warning("Could not find tags " \
                                                     + "in dois collection"),
                                message=error_message(err))
-    html, cnt, oacnt = standard_doi_table(rows, prefix=f"tagnh/{aff}")
+    html, cnt, oacnt = standard_doi_table(rows, prefix=f"tagnh/{aff}", count_card=True)
     chartscript, chartdiv = DP.wedge_chart({'shown': oacnt, 'total': cnt}) if oacnt else ['', '']
     if cnt:
         oamsg = f"<span style='font-size: 18pt; color: lightgray'>{oacnt/cnt*100:.1f}%</span>" \
@@ -10652,7 +11131,8 @@ def show_labs():
         except Exception:
             grow = None
         glink = f"<a href='/tag/{row['group']}'>{row['group']}</a>" if grow else row['group']
-        trows.append([safe(name), cell(row['orcid'] if 'orcid' in row else '', style='width: 180px'),
+        trows.append([safe(name),
+                      cell(row['orcid'] if 'orcid' in row else '', style='width: 180px'),
                       safe(glink), ', '.join(row['affiliations'])])
     html = render_table(['Name', 'ORCID', 'Group', 'Affiliations'], trows, css='standard')
     endpoint_access()

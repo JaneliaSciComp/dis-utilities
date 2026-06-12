@@ -31,37 +31,77 @@ function nav_post_year(field, value, year = "All") {
   form.submit();
 }
 
-// Toggle a set of rows (class fid) in table tid, updating the visible-row counter
-// and the toggle button's label.
-function toggler(tid, fid, counter) {
-  $('.' + fid).toggle();
-  const total = $('#' + tid + ' >tbody >tr:visible').length;
-  $('#' + counter).text(total);
-  if ($('#' + tid + ' >tbody >tr').is(":hidden")) {
-    $('#' + fid + 'btn').text('Show versioned DOIs');
-  } else {
-    $('#' + fid + 'btn').text('Filter versioned DOIs');
+// Shared row-filter state: table id -> Set of CSS classes to hide. A row is
+// hidden if it carries any class in the set, so multiple filter buttons
+// (e.g. the versioned-DOI toggle and the internal/external cycle) compose
+// correctly on the same table.
+const rowFilters = {};
+
+function hiddenClasses(tid) {
+  if (!rowFilters[tid]) {
+    rowFilters[tid] = new Set();
   }
+  return rowFilters[tid];
+}
+
+// Recompute row visibility in table tid from its hide set, then refresh the
+// visible-row counter (span id counter, if given) and any per-class counters
+// the page provides as elements with data-filter-count="<row class>".
+function applyRowFilters(tid, counter) {
+  const hidden = hiddenClasses(tid);
+  const classCounts = {};
+  let visible = 0;
+  $('#' + tid + ' > tbody > tr').each(function () {
+    const classes = (this.className || '').split(/\s+/).filter(Boolean);
+    const show = !classes.some(cls => hidden.has(cls));
+    $(this).toggle(show);
+    if (show) {
+      visible += 1;
+      classes.forEach(cls => { classCounts[cls] = (classCounts[cls] || 0) + 1; });
+    }
+  });
+  if (counter) {
+    $('#' + counter).text(visible.toLocaleString());
+  }
+  $('[data-filter-count]').each(function () {
+    const cls = $(this).attr('data-filter-count');
+    $(this).text((classCounts[cls] || 0).toLocaleString());
+  });
+}
+
+// Toggle a set of rows (class fid) in table tid, updating the visible-row
+// counter and the toggle button's label (button id fid + 'btn', if present).
+function toggler(tid, fid, counter) {
+  const hidden = hiddenClasses(tid);
+  if (hidden.has(fid)) {
+    hidden.delete(fid);
+    $('#' + fid + 'btn').text('Filter versioned DOIs');
+  } else {
+    hidden.add(fid);
+    $('#' + fid + 'btn').text('Show versioned DOIs');
+  }
+  applyRowFilters(tid, counter);
 }
 
 // Cycling filter: rotates a table's rows through "A & B" -> "A only" -> "B only".
-// The button label shows the current view. Counts are left untouched.
-function cycle_filter(btn, tid, ca, cb, la, lb) {
+// The button label shows the current view. Composes with toggler() via the
+// shared hide set, and keeps the counter span (if given) up to date.
+function cycle_filter(btn, tid, ca, cb, la, lb, counter) {
   const state = (parseInt($(btn).attr('data-state') || '0') + 1) % 3;
   $(btn).attr('data-state', state);
-  if (state === 0) {
-    $('#' + tid + ' .' + ca).show();
-    $('#' + tid + ' .' + cb).show();
-    $(btn).text('Showing ' + la + ' & ' + lb);
-  } else if (state === 1) {
-    $('#' + tid + ' .' + ca).show();
-    $('#' + tid + ' .' + cb).hide();
+  const hidden = hiddenClasses(tid);
+  hidden.delete(ca);
+  hidden.delete(cb);
+  if (state === 1) {
+    hidden.add(cb);
     $(btn).text('Showing ' + la + ' only');
-  } else {
-    $('#' + tid + ' .' + ca).hide();
-    $('#' + tid + ' .' + cb).show();
+  } else if (state === 2) {
+    hidden.add(ca);
     $(btn).text('Showing ' + lb + ' only');
+  } else {
+    $(btn).text('Showing ' + la + ' & ' + lb);
   }
+  applyRowFilters(tid, counter);
 }
 
 // Copy text to the clipboard.
