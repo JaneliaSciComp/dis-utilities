@@ -1,0 +1,18 @@
+{"min_publishing_date": "2006-04-01",
+ "em_dataset_ignore": ["flywire_fafb"],
+ "publisher_diamond": ["aRxiv", "Dryad", "Dryad Digital Repository", "Figshare", "figshare", "Zenodo"],
+ "publisher_gold": ["eLife", "Janelia Research Campus", "The Royal Society", "Taylor & Francis"],
+ "team_projects": ["Advanced Imaging Center", "CellMap", "Cryo Electron Microscopy", "CryoEM & Electron Microscopy", "Descending Interneuron Intersection", "FIB-SEM Technology", "GENIE Data Analysis", "Integrative Imaging Technologies", "Molecular Genomics", "Project Pipeline Support", "Project Technical Resources", "Tool Translation Team", "Viral Tools"],
+ "default_tags": ["AI Initiative", "Janelia Experimental Technology (jET)", "Scientific Computing Software"],
+ "sub_cost_map": {"Journal - Collection": "Collection", "Journal - Individual": "Journal", "Journal - Contract Package": "Collection", "Ebook Collection": "Collection", "Book - Collection": "Collection", "Database": "Database", "DataService": "DataService", "Website": "Website"},
+ "sub_type_map": {"Book Series": "Book series", "Book Series Volume": "Book series", "Handbook Series": "Book series"},
+ "valid_types": ["Book", "Book series", "Database", "DataService", "Journal", "Monograph", "Repository"],
+ "ack_search_regex": {"Visiting Scientist Program": {"regex": "Visiting Scientists? Program", "description": "\"Visiting Scientist Program\" or \"Visiting Scientists Program\""}},
+ "developer": "svirskasr@hhmi.org",
+ "datacite": "laym@hhmi.org",
+ "creceivers": ["acquarolel@hhmi.org", "svirskasr@hhmi.org"],
+ "dcreceivers": ["laym@hhmi.org", "svirskasr@hhmi.org"],
+ "librarian": "acquarolel@hhmi.org",
+ "receivers": ["acquarolel@hhmi.org", "laym@hhmi.org", "oapolicy@hhmi.org", "svirskasr@hhmi.org"],
+ "sender": "datainfo@janelia.hhmi.org"
+}

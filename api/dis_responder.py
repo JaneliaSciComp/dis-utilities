@@ -36,7 +36,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "118.7.0"
+__version__ = "118.8.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -204,6 +204,16 @@ app.config["STARTDT"] = datetime.now()
 app.config["LAST_TRANSACTION"] = time()
 
 
+def _load_config_ns(name):
+    """Load config as SimpleNamespace (replaces JRC.get_config)"""
+    config_path = os.path.join('/config', f'{name}.json')
+    if not os.path.exists(config_path):
+        config_path = os.path.join('config', f'{name}.json')
+    with open(config_path) as f:
+        data = json.load(f)
+    return json.loads(json.dumps(data), object_hook=lambda d: SimpleNamespace(**d))
+
+
 @app.before_request
 def before_request():
     ''' Set transaction start time and increment counters.
@@ -218,7 +228,8 @@ def before_request():
         dbo = SimpleNamespace(type="mongo",
                               uri=os.environ.get("DIS_MONGO_URI"),
                               client=os.environ.get("DIS_MONGO_DATABASE", "dis"))
-        app.config["dis"] = JRC.simplenamespace_to_dict(JRC.get_config("dis"))
+        app.config["dis"] = JRC.simplenamespace_to_dict(_load_config_ns("dis"))
+        print(app.config["dis"])
         print(f"Connecting to {dbo.client} prod")
         try:
             DB['dis'] = JRC.connect_database(dbo)
