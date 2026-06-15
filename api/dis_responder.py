@@ -36,7 +36,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "118.8.0"
+__version__ = "118.9.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -56,20 +56,17 @@ DOWNLOAD_ICON = '<i class="fa-solid fa-arrow-down" ' \
 NAV = {"Home": "",
        "DOIs": {"DOIs by insertion date": "dois_insertpicker",
                 "DOI stats": "dois_source",
-                "DOIs by type": "dois_type",
                 "DOIs by": {"Month": "dois_time/month", "Year": "dois_time/year",
-                            "Subject": "dois_subjectpicker"},
+                            "License": "dois_license", "Subject": "dois_subjectpicker",
+                            "Type": "dois_type"},
                 "DOI yearly report": "dois_yearly",
-                "Citations": {"Top cited DOIs": "dois_top_cited",
-                              "Crossref metrics": "citation_metrics/crossref",
+                "Citations": {"Crossref metrics": "citation_metrics/crossref",
                               "DataCite metrics": "citation_metrics/datacite",
                               "Crossref cited DOIs": "citation_list/crossref",
-                              "DataCite cited DOIs": "citation_list/datacite"},
-                "DOIs by license": "dois_license"},
+                              "DataCite cited DOIs": "citation_list/datacite"}},
        "DataCite": {"DataCite DOI stats": "datacite_dois",
                     "DataCite DOI downloads": "datacite_downloads",
-                    "DataCite subjects": "datacite_subject",
-                    "DataCite top publishers": "top_entities/publisher/All/DataCite"},
+                    "DataCite subjects": "datacite_subject"},
        "Authorship": {"Authors": "orcid_entry",
                       "DOIs by authorship": "dois_author",
                       "DOIs with lab head first/last authors": "doiui_firstlast",
@@ -86,8 +83,10 @@ NAV = {"Home": "",
                      "Journal publications without preprints": "preprint_relation/pub_no_preprint"},
        "Journals": {"DOIs by": {"Publisher": "dois_publisher", "Journal": "journals_dois"},
                     "Open access": {"Report": "dois_oa", "Details": "dois_oa_details"},
-                    "Top": {"Publishers": "top_entities/publisher",
-                            "Journals": "top_entities/journal"},
+                    "Top": {"Crossref": {"Publishers": "top_entities/publisher",
+                                         "Journals": "top_entities/journal"},
+                            "DataCite": {"Publishers": "top_entities/publisher/All/DataCite",
+                                         "Journals": "top_entities/journal/All/DataCite"}},
                     "Heatmaps": {"Publisher": "dois_heatmap/publisher",
                                  "Journal": "dois_heatmap/journal"},
                     "DOIs missing journals": "dois_nojournal",
@@ -480,6 +479,32 @@ def render_table(headers, rows, table_id=None, css="tablesorter standard-scroll"
 # * Navigation utility functions                                               *
 # ******************************************************************************
 
+def generate_navbar_items(items):
+    ''' Recursively render dropdown menu items to any nesting depth. A string
+        value is a leaf link; a dict value is a nested submenu (rendered with
+        the .dropdown-submenu CSS/JS, which support arbitrary depth).
+        Keyword arguments:
+          items: dict of label -> link string or nested dict
+        Returns:
+          HTML string of dropdown items
+    '''
+    html = ""
+    for itm, val in items.items():
+        if itm == 'divider':
+            html += "<div class='dropdown-divider'></div>"
+            continue
+        if isinstance(val, dict):
+            html += "<div class='dropdown-submenu'>"
+            html += f"<a class='dropdown-item dropdown-toggle' href='#'>{itm}</a>"
+            html += "<div class='dropdown-menu'>"
+            html += generate_navbar_items(val)
+            html += "</div></div>"
+            continue
+        link = f"/{val}" if val else ('/' + itm.replace(" ", "_")).lower()
+        html += f"<a class='dropdown-item' href='{link}'>{itm}</a>"
+    return html
+
+
 def generate_navbar(active):
     ''' Generate the web navigation bar
         Keyword arguments:
@@ -500,22 +525,7 @@ def generate_navbar(active):
                    + 'aria-labelledby="navbarDropdown">'
         if subhead:
             nav += drop + menuhead
-            for itm, val in subhead.items():
-                if itm == 'divider':
-                    nav += "<div class='dropdown-divider'></div>"
-                    continue
-                if isinstance(val, dict):
-                    # Real multilevel submenu (see .dropdown-submenu CSS/JS)
-                    nav += "<div class='dropdown-submenu'>"
-                    nav += f"<a class='dropdown-item dropdown-toggle' href='#'>{itm}</a>"
-                    nav += "<div class='dropdown-menu'>"
-                    for itm2, val2 in val.items():
-                        link = f"/{val2}" if val2 else ('/' + itm2.replace(" ", "_")).lower()
-                        nav += f"<a class='dropdown-item' href='{link}'>{itm2}</a>"
-                    nav += "</div></div>"
-                    continue
-                link = f"/{val}" if val else ('/' + itm.replace(" ", "_")).lower()
-                nav += f"<a class='dropdown-item' href='{link}'>{itm}</a>"
+            nav += generate_navbar_items(subhead)
             nav += '</div></li>'
         else:
             nav += basic
@@ -2306,7 +2316,7 @@ def get_subscriptions(stype='Journal'):
     return sub
 
 
-def get_top_journals(year, maxpub=False, janelia=True):
+def get_top_journals(year, maxpub=False, janelia=True, source=None):
     ''' Get top journals
         Keyword arguments:
           year: year to get data for
@@ -2321,6 +2331,8 @@ def get_top_journals(year, maxpub=False, janelia=True):
                           {"jrc_journal": {"$ne": "Janelia Research Campus (non-publication)"}}]}
     if year != 'All':
         match["jrc_publishing_date"] = {"$regex": "^"+ year}
+    if source:
+        match["jrc_obtained_from"] = source
     payload = [{"$match": match},
                {"$group": {"_id": "$jrc_journal", "count":{"$sum": 1},
                            "maxpub": {"$max": "$jrc_publishing_date"}}}
@@ -5221,34 +5233,6 @@ def dois_type(year='All'):
                                          navbar=generate_navbar('DOIs')))
 
 
-@app.route('/dois_top_cited')
-def dois_top_cited():
-    ''' Show top cited DOIs
-    '''
-    try:
-        olink = f"{app.config['OPENALEX']}works?sort=cited_by_count:desc" \
-                + "&filter=authorships.institutions.lineage:i195573530" \
-                + f"&mailto={app.config['EMAIL']}"
-        resp = requests.get(olink, timeout=5)
-        results = resp.json()['results']
-    except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get top cited DOIs"),
-                               message=error_message(err))
-    trows = []
-    for result in results:
-        doi = result['doi'].replace(app.config['DOI'], '')
-        row = DL.get_doi_record(doi, coll=DB['dis'].dois)
-        trows.append([f"{result['cited_by_count']:,}", safe(doi_link(doi)),
-                      DL.get_journal(row, full=False, name_only=True), DL.get_title(row)])
-    html = render_table(['Citations', 'DOI', 'Journal', 'Title'], trows,
-                        table_id='top_cited', css='tablesorter standard-scroll')
-    endpoint_access()
-    return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title="Top cited DOIs", html=html,
-                                         navbar=generate_navbar('DOIs')))
-
-
 @app.route('/dois_licenser/<string:source>/<string:lic>/<string:year>')
 @app.route('/dois_licenser/<string:source>/<string:lic>')
 @app.route('/dois_licenser/<string:source>')
@@ -6627,7 +6611,11 @@ def citation_list(source='datacite'):
                                message=f"{source} is not a valid source: use " \
                                        + " or ".join(sorted(obtained_from)))
     obtained = obtained_from[source]
+    # Year comes from a query param (the path segment is reserved for the source)
+    year = request.args.get('year', 'All')
     payload = {"jrc_obtained_from": obtained, "jrc_citation_count": {"$exists": 1}}
+    if year != 'All':
+        payload["jrc_publishing_date"] = {"$regex": "^" + year}
     coll = DB['dis'].dois
     try:
         rows = coll.find(payload).sort("jrc_citation_count", -1)
@@ -6645,24 +6633,41 @@ def citation_list(source='datacite'):
         link = doi_link(row['doi'])
         trows.append([safe(link), DL.get_title(row), f"{row['jrc_citation_count']:,}"])
         row_classes.append('ver' if DL.is_version(row) else '')
+    pulldown = year_pulldown(f"citation_list/{source}", query=True)
+    other = 'crossref' if source == 'datacite' else 'datacite'
+    ysuffix = '' if year == 'All' else f"?year={year}"
+    switch = f"<a href='/citation_list/{other}{ysuffix}' class='btn btn-outline-primary btn-sm' " \
+             + f"style='margin-left: 10px'>Switch to {obtained_from[other]}</a>"
+    title = f"{obtained} DOI citations"
+    if year != 'All':
+        title += f" (year={year})"
+    if not cnt:
+        # No DOIs for this filter - advise but keep the year pulldown so another
+        # year can be chosen
+        msg = f"No {obtained} DOIs with citations were found"
+        if year != 'All':
+            msg += f" for publishing year {year}"
+        html = pulldown + switch + "<br><br>" + render_warning(msg, 'warning')
+        endpoint_access()
+        return make_response(render_template('general.html', urlroot=request.url_root,
+                                             title=title, html=html,
+                                             navbar=generate_navbar('DOIs')))
     html = render_table(['DOI', 'Title', 'Citations'], trows, table_id='data',
                         css='tablesorter numberlast-scroll', row_classes=row_classes,
                         footer=[fcell('TOTAL', colspan=2),
                                 fcell(f"{total:,}", align='center')]) + "<br>"
     cbutton = "<button id='verbtn' class=\"btn btn-outline-warning\" " \
+              + "style='margin-left: 10px' " \
               + "onclick=\"toggler('data', 'ver', 'totalrows');\">" \
               + "Filter versioned DOIs</button>"
     cards = stat_cards([("DOIs with citations", f"<span id='totalrows'>{cnt:,}</span>"),
                         ("Total citations", f"{total:,}"),
                         ("Avg. per DOI", f"{total/cnt:,.1f}" if cnt else "0")],
                        div_id='dccc-stats')
-    other = 'crossref' if source == 'datacite' else 'datacite'
-    switch = f"<a href='/citation_list/{other}' class='btn btn-outline-primary btn-sm' " \
-             + f"style='margin-left: 10px'>Switch to {obtained_from[other]}</a>"
-    html = cards + cbutton + switch + "<br><br>" + html
+    html = cards + pulldown + cbutton + switch + "<br><br>" + html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title=f"{obtained} DOI citations", html=html,
+                                         title=title, html=html,
                                          navbar=generate_navbar('DOIs')))
 
 
@@ -7926,8 +7931,8 @@ def dois_publisher(year='All'):
     cards = [("Total DOIs", f"{sum(total.values()):,}"),
              ("Publishers", f"{len(pubs):,}")] \
             + [(f"{src} DOIs", f"{total[src]:,}") for src in app.config['SOURCES']]
-    html = year_pulldown('dois_publisher') \
-           + stat_cards(cards, div_id='pub-stats') + html
+    html = stat_cards(cards, div_id='pub-stats') \
+           + year_pulldown('dois_publisher') + html
     title = "DOIs by publisher"
     if year != 'All':
         title += f" for {year}"
@@ -8212,8 +8217,7 @@ def show_journals_dois(year=None):
         cards.append(("Free to read", f"{free_cnt:,}", "lime"))
     if subscribed_cnt:
         cards.append(("Subscribed journals", f"{subscribed_cnt:,}", "yellowgreen"))
-    html = stat_cards(cards, div_id='jdois-stats') \
-           + '<table id="journals" class="tablesorter numbers-scroll"><thead><tr>' \
+    html = '<table id="journals" class="tablesorter numbers-scroll"><thead><tr>' \
            + '<th>Journal</th><th>Publisher</th><th>Count</th><th>Last published to</th>' \
            + '<th>Subscription</th></tr></thead><tbody>'
     for key in sorted(journal, key=lambda x: journal[x]['count'], reverse=True):
@@ -8241,6 +8245,7 @@ def show_journals_dois(year=None):
         title += f" ({year})"
     html = "Note: not all subscriptions are currently tracked - " \
            + "Subscription tracking is a work in process<br>" \
+           + stat_cards(cards, div_id='jdois-stats') \
            + year_pulldown('journals_dois') + html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
@@ -8276,7 +8281,7 @@ def top_entities(entity_type, year='All', source='crossref', top=10):
     fsource = 'Crossref' if source.lower() == 'crossref' else 'DataCite'
     try:
         if entity_type == 'journal':
-            raw = get_top_journals(year, janelia=False)
+            raw = get_top_journals(year, janelia=False, source=fsource)
             entities = dict(raw)
         else:
             raw = get_top_publishers(year, fsource, maxpub=True)
@@ -8314,8 +8319,7 @@ def top_entities(entity_type, year='All', source='crossref', top=10):
                                          width=cfg['pie_width'], height=cfg['pie_height'],
                                          colors='Category20')
     title = f"Top {top} DOI {entity_type}s"
-    if entity_type == 'publisher':
-        title += f" for {fsource}"
+    title += f" for {fsource}"
     if year != 'All':
         title += f" ({year})"
     endpoint_access()
@@ -10251,10 +10255,13 @@ def dois_lab():
         link = doi_link(doi[3], 'lime') if doi[3] in multi else doi_link(doi[3])
         trows.append([doi[0], doi[1], doi[2], safe(link), doi[4]])
     html = render_table(header, trows, table_id='types', css='tablesorter numbers-scroll')
-    html = pre + create_downloadable('dois', header, fileoutput) + html
+    cards = [("DOIs", f"{len(ddois):,}"),
+             ("Labs", f"{len({doi[0] for doi in dois}):,}")]
+    html = stat_cards(cards, div_id='lab-stats') + pre \
+           + create_downloadable('dois', header, fileoutput) + html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title=f"DOIs by lab ({len(ddois):,})", html=html,
+                                         title="DOIs by lab", html=html,
                                          navbar=generate_navbar('Tag/affiliation')))
 
 
