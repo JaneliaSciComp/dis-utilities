@@ -36,7 +36,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "119.6.0"
+__version__ = "119.7.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -71,7 +71,9 @@ NAV = {"Home": "",
        "DataCite": {"DataCite DOI stats": "datacite_dois",
                     "DataCite DOI downloads": "datacite_downloads",
                     "figshare": {"figshare metrics": "figshare",
-                                 "figshare title groups": "figshare_groups"}},
+                                 "figshare title groups": "figshare_groups"},
+                    "Zenodo": {"Zenodo metrics": "zenodo_stats",
+                               "Zenodo deposits": "zenodo_groups"}},
        "Authorship": {"Authors": "orcid_entry",
                       "DOIs by authorship": "dois_author",
                       "DOIs with lab head first/last authors": "doiui_firstlast",
@@ -7384,6 +7386,455 @@ def figshare_groups(year='All'):  # pylint: disable=too-many-locals,too-many-bra
                                          chartscript2='', chartdiv2='',
                                          navbar=generate_navbar('DataCite')))
 
+
+# Zenodo DOIs are DataCite-registered with publisher "Zenodo" and a
+# 10.5281/zenodo.<id> prefix. Per-record usage (views/downloads) is stored in
+# jrc_zenodo_counts by the citation sync; the deposits page sums it across a
+# concept's versions, and /zenodo_stats aggregates it site-wide.
+ZENODO_PUBLISHERS = ["Zenodo"]
+
+
+def zenodo_match(year='All'):
+    ''' Build the dois query that selects Zenodo DOIs. A Zenodo DOI is
+        DataCite-registered and is identified by publisher "Zenodo" or, as a
+        belt-and-suspenders fallback, a 10.5281/zenodo. DOI (some carry a
+        non-Zenodo publisher string). Optionally limited to a publishing year.
+        Keyword arguments:
+          year: 4-digit publishing year, or 'All'
+        Returns:
+          a MongoDB filter dict
+    '''
+    match = {"jrc_obtained_from": "DataCite",
+             "$or": [{"publisher": {"$in": ZENODO_PUBLISHERS}},
+                     {"doi": {"$regex": r"zenodo\.", "$options": "i"}}]}
+    if year != 'All':
+        match["jrc_publishing_date"] = {"$regex": "^" + year}
+    return match
+
+
+def zenodo_concept_doi(row):
+    ''' Return a Zenodo record's concept (parent) DOI - the identifier every
+        version of a deposit shares. A version record points at it via a
+        relatedIdentifier with relationType "IsVersionOf"; a concept record (or
+        an unversioned deposit) has no such link and groups under its own DOI.
+        Keyword arguments:
+          row: DOI record (needs doi and, optionally, relatedIdentifiers)
+        Returns:
+          The lower-cased concept DOI string
+    '''
+    for rel in row.get('relatedIdentifiers') or []:
+        if (rel.get('relatedIdentifierType') == 'DOI'
+                and rel.get('relationType') == 'IsVersionOf'):
+            cand = (rel.get('relatedIdentifier') or '').strip().lower()
+            if cand:
+                return cand
+    return (row.get('doi') or '').strip().lower()
+
+
+def zenodo_concept_groups(records):
+    ''' Group Zenodo records by concept DOI, summing usage and citations across
+        the concept's versions.
+        Keyword arguments:
+          records: list of dicts with doi/title/views/downloads/citations/concept
+        Returns:
+          List of group dicts (concept, label, count, views, downloads, citations)
+          sorted by descending DOI count then citations. The label is the most
+          common member title (versions of one deposit usually share a title).
+    '''
+    buckets = collections.defaultdict(list)
+    for rec in records:
+        buckets[rec['concept']].append(rec)
+    groups = []
+    for concept, recs in buckets.items():
+        casings = collections.Counter(r['title'] for r in recs if r['title'])
+        label = casings.most_common(1)[0][0] if casings else concept
+        groups.append({'concept': concept, 'label': label, 'count': len(recs),
+                       'views': sum(r['views'] for r in recs),
+                       'downloads': sum(r['downloads'] for r in recs),
+                       'citations': sum(r['citations'] for r in recs)})
+    groups.sort(key=lambda g: (-g['count'], -g['citations']))
+    return groups
+
+
+@app.route('/zenodo_groups/<string:year>')
+@app.route('/zenodo_groups')
+def zenodo_groups(year='All'):  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
+    ''' Show Zenodo deposits, each collapsing all versions of one software
+        release or dataset under their shared concept (parent) DOI (see
+        zenodo_concept_doi). No usage metrics are stored for Zenodo, so deposits
+        are ranked by citation count and by version count.
+    '''
+    coll = DB['dis'].dois
+    proj = {"doi": 1, "titles": 1, "jrc_citation_count": 1, "relatedIdentifiers": 1,
+            "jrc_zenodo_counts": 1}
+    try:
+        docs = list(coll.find(zenodo_match(year), proj))
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get Zenodo DOIs"),
+                               message=error_message(err))
+    records = []
+    for row in docs:
+        zc = row.get('jrc_zenodo_counts') or {}
+        records.append({'doi': row['doi'],
+                        'title': strip_html_tags(DL.get_title(row)),
+                        'views': zc.get('views', 0),
+                        'downloads': zc.get('downloads', 0),
+                        'citations': row.get('jrc_citation_count', 0) or 0,
+                        'concept': zenodo_concept_doi(row)})
+    total = len(records)
+    if not total:
+        msg = "No Zenodo DOIs were found"
+        if year != 'All':
+            msg += f" for publishing year {year}"
+        html = year_pulldown('zenodo_groups') + "<br><br>" \
+               + render_warning(msg, 'warning')
+        endpoint_access()
+        return make_response(render_template('general.html', urlroot=request.url_root,
+                                             title="Zenodo deposits", html=html,
+                                             navbar=generate_navbar('DataCite')))
+    base = '/zenodo_groups' if year == 'All' else f"/zenodo_groups/{year}"
+    # Drill-down: ?concept=<doi> lists the member (version) DOIs of one group
+    concept = request.args.get('concept')
+    if concept:
+        members = [r for r in records if r['concept'] == concept.lower()]
+        members.sort(key=itemgetter('downloads', 'citations'), reverse=True)
+        if request.args.get('fmt') == 'json':
+            result = initialize_result()
+            result['data'] = {"concept": concept, "dois": len(members),
+                              "members": members}
+            result['rest']['source'] = 'mongo'
+            result['rest']['row_count'] = len(members)
+            return generate_response(result)
+        back = f"<a href='{base}' class='btn btn-outline-primary btn-sm'>" \
+               + "&larr; all deposits</a>"
+        if not members:
+            html = back + "<br><br>" \
+                   + render_warning(f"No Zenodo DOIs match the deposit "
+                                    f"\"{escape(concept)}\"", 'warning')
+            endpoint_access()
+            return make_response(render_template('general.html', urlroot=request.url_root,
+                                                 title=f"Zenodo deposit: {concept}", html=html,
+                                                 navbar=generate_navbar('DataCite')))
+        casings = collections.Counter(r['title'] for r in members if r['title'])
+        dtitle = f"Zenodo deposit: {casings.most_common(1)[0][0] if casings else concept}"
+        mrows = []
+        tviews = tdl = tcit = 0
+        for rec in members:
+            tviews += rec['views']
+            tdl += rec['downloads']
+            tcit += rec['citations']
+            mrows.append([safe(doi_link(rec['doi'])), rec['title'], f"{rec['views']:,}",
+                          f"{rec['downloads']:,}", f"{rec['citations']:,}"])
+        mtable = render_table(['Version DOI', 'Title', 'Views', 'Downloads', 'Citations'],
+                              mrows, table_id='zen-members',
+                              css='tablesorter numberlast-scroll',
+                              footer=[fcell('TOTAL', colspan=2),
+                                      fcell(f"{tviews:,}", align='center'),
+                                      fcell(f"{tdl:,}", align='center'),
+                                      fcell(f"{tcit:,}", align='center')])
+        mcards = stat_cards([("Versions", f"{len(members):,}"),
+                             ("Total views", f"{tviews:,}"),
+                             ("Total downloads", f"{tdl:,}"),
+                             ("Total citations", f"{tcit:,}")], div_id='zenm-stats')
+        html = back + "<br><br>" + mcards + mtable
+        endpoint_access()
+        return make_response(render_template('general.html', urlroot=request.url_root,
+                                             title=dtitle, html=html,
+                                             navbar=generate_navbar('DataCite')))
+    groups = zenodo_concept_groups(records)
+    multi = [g for g in groups if g['count'] > 1]
+    grouped_dois = sum(g['count'] for g in multi)
+    largest = max(groups, key=lambda g: g['count'])
+    top_n = 20
+
+    def group_table(ordered, table_id):
+        ''' Render a deposits table; the label links to the deposit's versions '''
+        rows = []
+        for grp in ordered[:top_n]:
+            label = f"<a href='{base}?concept={quote(grp['concept'])}'>" \
+                    + f"{escape(grp['label'])}</a>"
+            rows.append([safe(label), f"{grp['count']:,}", f"{grp['views']:,}",
+                         f"{grp['downloads']:,}", f"{grp['citations']:,}"])
+        foot = None
+        if len(groups) > top_n:
+            rest = ordered[top_n:]
+            foot = [fcell(f"+ {len(rest):,} more deposits"),
+                    fcell(f"{sum(g['count'] for g in rest):,}", align='center'),
+                    fcell(f"{sum(g['views'] for g in rest):,}", align='center'),
+                    fcell(f"{sum(g['downloads'] for g in rest):,}", align='center'),
+                    fcell(f"{sum(g['citations'] for g in rest):,}", align='center')]
+        return render_table(['Deposit', 'Versions', 'Views', 'Downloads', 'Citations'],
+                            rows, table_id=table_id,
+                            css='tablesorter numberlast-scroll', footer=foot)
+
+    by_dl = sorted(groups, key=lambda g: (-g['downloads'], -g['count']))
+    by_cnt = groups  # already sorted by DOI count
+    by_cit = sorted(groups, key=lambda g: (-g['citations'], -g['count']))
+    if request.args.get('fmt') == 'json':
+        result = initialize_result()
+        result['data'] = {"dois": total, "groups": len(groups),
+                          "multi_doi_groups": len(multi), "grouped_dois": grouped_dois,
+                          "largest_group": {"concept": largest['concept'],
+                                            "label": largest['label'],
+                                            "count": largest['count']},
+                          "concept_groups": [{k: g[k] for k in
+                                              ('concept', 'label', 'count', 'views',
+                                               'downloads', 'citations')}
+                                             for g in groups]}
+        result['rest']['source'] = 'mongo'
+        result['rest']['row_count'] = len(groups)
+        return generate_response(result)
+    cards = stat_cards(
+        [("Zenodo DOIs", f"{total:,}"),
+         ("Deposits", f"{len(groups):,}"),
+         ("Multi-version deposits", f"{len(multi):,}"),
+         ("DOIs in multi-version deposits",
+          f"{grouped_dois:,} ({grouped_dois/total*100:,.1f}%)"),
+         (f"Largest deposit ({escape(largest['label'])})", f"{largest['count']:,}")],
+        div_id='zeng-stats')
+    cards += stat_cards([("Total views", f"{sum(g['views'] for g in groups):,}"),
+                         ("Total downloads", f"{sum(g['downloads'] for g in groups):,}")],
+                        div_id='zeng-stats2')
+    gnote = "<div style='font-size:0.85em; color:#a8c4e0; max-width:620px; " \
+            + "margin:-8px 0 16px 0'>Each deposit collapses every version of one " \
+            + "Zenodo software release or dataset under the shared concept DOI that " \
+            + "links them (the target of each version's <i>IsVersionOf</i> relation); " \
+            + "unversioned deposits stand alone. Views, downloads, and citations are " \
+            + "summed across a deposit's versions. Each label links to the deposit's " \
+            + "version DOIs.</div>"
+    dlhtml = "<h4>Deposits by downloads (top 20)</h4>" \
+             + group_table(by_dl, 'zen-grp-dl')
+    cnthtml = "<h4>Deposits by version count (top 20)</h4>" \
+              + group_table(by_cnt, 'zen-grp-cnt')
+    cithtml = "<h4>Deposits by citations (top 20)</h4>" \
+              + group_table(by_cit, 'zen-grp-cit')
+
+    def chart_data(ordered, value_key):
+        ''' Build {label: value} for a chart, shortening long labels with a middle
+            ellipsis; a uniqueness guard stops two labels colliding and silently
+            dropping a bar. '''
+        data = {}
+        for grp in ordered[:15]:
+            value = grp[value_key]
+            if value_key in ('downloads', 'citations') and not value:
+                continue
+            label = grp['label']
+            label = label if len(label) <= 41 else label[:24] + '…' + label[-16:]
+            while label in data:
+                label += ' '
+            data[label] = value
+        return data
+    grp_dl_data = chart_data(by_dl, 'downloads')
+    grp_cnt_data = chart_data(by_cnt, 'count')
+    grp_cit_data = chart_data(by_cit, 'citations')
+    chartscript = dl_div = cnt_div = cit_div = ''
+    if grp_dl_data:
+        script, dl_div = DP.hbar_chart(grp_dl_data, "Top deposits by downloads",
+                                       value_label="Downloads", width=620, height=420,
+                                       value_format="0,0", show_values=True)
+        chartscript += script
+    if grp_cnt_data:
+        script, cnt_div = DP.hbar_chart(grp_cnt_data, "Top deposits by version count",
+                                        value_label="Versions", width=620, height=420,
+                                        value_format="0,0", show_values=True)
+        chartscript += script
+    if grp_cit_data:
+        script, cit_div = DP.hbar_chart(grp_cit_data, "Top deposits by citations",
+                                        value_label="Citations", width=620, height=420,
+                                        value_format="0,0", show_values=True)
+        chartscript += script
+
+    def flexrow(table_html, chart_div):
+        ''' Pair a table and its chart side by side '''
+        return "<div class='flexrow' style='margin-bottom: 40px'><div class='flexcol'>" \
+               + table_html + "</div><div class='flexcol' style='margin: 10px 0 0 20px'>" \
+               + chart_div + "</div></div>"
+    title = "Zenodo deposits"
+    if year != 'All':
+        title += f" (year={year})"
+    html = year_pulldown('zenodo_groups') + "<br><br>" + cards + gnote \
+           + flexrow(dlhtml, dl_div) + flexrow(cnthtml, cnt_div) + flexrow(cithtml, cit_div)
+    endpoint_access()
+    return make_response(render_template('bokeh.html', urlroot=request.url_root,
+                                         title=title, html=html,
+                                         chartscript=chartscript, chartdiv='',
+                                         chartscript2='', chartdiv2='',
+                                         navbar=generate_navbar('DataCite')))
+
+
+@app.route('/zenodo_stats/<string:year>')
+@app.route('/zenodo_stats')
+def zenodo_stats(year='All'):  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
+    ''' Show Zenodo deposit, usage, and citation metrics.
+        Zenodo DOIs are DataCite-registered (see zenodo_match). Per-record usage
+        (views/downloads) comes from jrc_zenodo_counts; citation totals/sources
+        come from the citation sync. Resource type comes from DataCite metadata.
+    '''
+    coll = DB['dis'].dois
+    proj = {"doi": 1, "types": 1, "jrc_publishing_date": 1, "jrc_zenodo_counts": 1,
+            "jrc_citation_count": 1, "jrc_citation_sources": 1}
+    try:
+        docs = list(coll.find(zenodo_match(year), proj))
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get Zenodo DOIs"),
+                               message=error_message(err))
+    source_name = {"datacite": "DataCite", "openalex": "OpenAlex",
+                   "scholexplorer": "ScholeXplorer", "crossref": "Crossref"}
+    total = len(docs)
+    usage = {'Views': 0, 'Downloads': 0}
+    uniq = {'Unique views': 0, 'Unique downloads': 0}
+    usage_dois = cited_dois = cite_total = 0
+    counts = []
+    by_type = collections.defaultdict(int)
+    cite_src = collections.defaultdict(int)
+    by_year = {}
+    for row in docs:
+        rtype = (row.get('types') or {}).get('resourceTypeGeneral') or 'Unknown'
+        by_type[rtype] += 1
+        zc = row.get('jrc_zenodo_counts') or {}
+        views = zc.get('views', 0)
+        downloads = zc.get('downloads', 0)
+        if zc:
+            usage_dois += 1
+            usage['Views'] += views
+            usage['Downloads'] += downloads
+            uniq['Unique views'] += zc.get('unique_views', 0)
+            uniq['Unique downloads'] += zc.get('unique_downloads', 0)
+        ccount = row.get('jrc_citation_count', 0) or 0
+        if ccount:
+            cited_dois += 1
+            cite_total += ccount
+            counts.append(ccount)
+        for src, val in (row.get('jrc_citation_sources') or {}).items():
+            cite_src[source_name.get(src, src.capitalize())] += val
+        yname = (row.get('jrc_publishing_date') or '')[:4]
+        if yname.isdigit():
+            rec = by_year.setdefault(yname, {'dois': 0, 'views': 0,
+                                             'downloads': 0, 'citations': 0})
+            rec['dois'] += 1
+            rec['views'] += views
+            rec['downloads'] += downloads
+            rec['citations'] += ccount
+    if not total:
+        msg = "No Zenodo DOIs were found"
+        if year != 'All':
+            msg += f" for publishing year {year}"
+        html = year_pulldown('zenodo_stats') + "<br><br>" + render_warning(msg, 'warning')
+        endpoint_access()
+        return make_response(render_template('general.html', urlroot=request.url_root,
+                                             title="Zenodo metrics", html=html,
+                                             navbar=generate_navbar('DataCite')))
+    # ----- headline stat cards -----
+    conv = usage['Downloads'] / usage['Views'] if usage['Views'] else 0
+    cards = stat_cards([("Zenodo DOIs", f"{total:,}"),
+                        ("DOIs with usage data",
+                         f"{usage_dois:,} ({usage_dois/total*100:,.1f}%)"),
+                        ("Total views", f"{usage['Views']:,}"),
+                        ("Total downloads", f"{usage['Downloads']:,}")],
+                       div_id='zen-stats')
+    cards += stat_cards([("Downloads / view", f"{conv*100:,.1f}%"),
+                         ("DOIs cited", f"{cited_dois:,} ({cited_dois/total*100:,.1f}%)"),
+                         ("Total citations", f"{cite_total:,}")],
+                        div_id='zen-stats2')
+    intro = "<div style='font-size:0.85em; color:#a8c4e0; max-width:620px; " \
+            + "margin:-8px 0 16px 0'>Usage is the sum of per-record views/downloads " \
+            + "across all versions. See <a href='/zenodo_groups'>Zenodo deposits</a> " \
+            + "for the same DOIs collapsed by concept (version series).</div>"
+    # ----- usage totals -----
+    uhtml = "<h4>Usage totals</h4>"
+    uhtml += render_table(['Metric', 'Count'],
+                          [[k, f"{v:,}"] for k, v in
+                           list(usage.items()) + list(uniq.items())],
+                          table_id='zen-usage', css='tablesorter numberlast-scroll')
+    # ----- deposits & usage by publishing year -----
+    ydata = {'Year': [], 'DOIs': [], 'Downloads': []}
+    ytrows = []
+    for yname in sorted(by_year):
+        rec = by_year[yname]
+        ytrows.append([yname, f"{rec['dois']:,}", f"{rec['views']:,}",
+                       f"{rec['downloads']:,}", f"{rec['citations']:,}"])
+        ydata['Year'].append(yname)
+        ydata['DOIs'].append(rec['dois'])
+        ydata['Downloads'].append(rec['downloads'])
+    yhtml = "<h4>Deposits &amp; usage by publishing year</h4>"
+    yhtml += render_table(['Year', 'DOIs', 'Views', 'Downloads', 'Citations'],
+                          ytrows, table_id='zen-years', css='tablesorter numberlast-scroll')
+    # ----- resource type breakdown -----
+    type_data = dict(by_type)
+    thtml = "<h4>DOIs by resource type</h4>"
+    thtml += render_table(['Resource type', 'DOIs'],
+                          [[k, f"{v:,}"] for k, v in
+                           sorted(by_type.items(), key=itemgetter(1), reverse=True)],
+                          table_id='zen-types', css='tablesorter numberlast-scroll')
+    # ----- citation sources (which source surfaces Zenodo citations) -----
+    src_data = dict(cite_src)
+    shtml = ''
+    if cite_src:
+        shtml = "<h4>Citations by source</h4>"
+        shtml += render_table(['Source', 'Citations'],
+                              [[k, f"{v:,}"] for k, v in
+                               sorted(cite_src.items(), key=itemgetter(1), reverse=True)],
+                              table_id='zen-sources', css='tablesorter numberlast-scroll')
+        shtml += "<div style='font-size:0.85em; color:#a8c4e0; max-width:460px'>" \
+                 + "A citing work found by more than one source is counted once " \
+                 + "per source here.</div>"
+    if request.args.get('fmt') == 'json':
+        result = initialize_result()
+        result['data'] = {"dois": total, "usage_dois": usage_dois,
+                          "usage": {**usage, **uniq},
+                          "downloads_per_view": round(conv, 4),
+                          "cited_dois": cited_dois, "total_citations": cite_total,
+                          "median_citations": statistics.median(counts) if counts else 0,
+                          "by_type": type_data, "citations_by_source": src_data,
+                          "by_year": by_year}
+        result['rest']['source'] = 'mongo'
+        result['rest']['row_count'] = total
+        return generate_response(result)
+    # ----- charts -----
+    chartscript = ''
+    usage_div = year_div = type_div = src_div = ''
+    if usage['Views'] or usage['Downloads']:
+        script, usage_div = DP.pie_chart(usage, "Usage totals", "metric", width=500,
+                                         fmt="{0,0}")
+        chartscript += script
+    if ydata['Year']:
+        script, year_div = DP.dual_axis_chart(
+            ydata, title="Deposits & downloads by year", x_field='Year',
+            bar_field='DOIs', line_field='Downloads', bar_label='DOIs deposited',
+            line_label='Downloads', bar_color='darkorange', bar_format="0,0",
+            line_format="0,0", width=650, height=400)
+        chartscript += script
+    script, type_div = DP.hbar_chart(type_data, "DOIs by resource type",
+                                     value_label="DOIs", width=500, height=320,
+                                     value_format="0,0", show_values=True)
+    chartscript += script
+    if src_data:
+        colors = DP.get_colors_by_count(len(src_data))
+        script, src_div = DP.pie_chart(src_data, "Citations by source", "source",
+                                       width=500, colors=colors, fmt="{0,0}")
+        chartscript += script
+    def flexrow(table_html, chart_div):
+        ''' Pair a table and its chart side by side '''
+        return "<div class='flexrow' style='margin-bottom: 40px'><div class='flexcol'>" \
+               + table_html + "</div><div class='flexcol' style='margin: 10px 0 0 20px'>" \
+               + chart_div + "</div></div>"
+    title = "Zenodo metrics"
+    if year != 'All':
+        title += f" (year={year})"
+    html = year_pulldown('zenodo_stats') + "<br><br>" + cards + intro \
+           + flexrow(uhtml, usage_div) + flexrow(yhtml, year_div) \
+           + flexrow(thtml, type_div)
+    if shtml:
+        html += flexrow(shtml, src_div)
+    endpoint_access()
+    return make_response(render_template('bokeh.html', urlroot=request.url_root,
+                                         title=title, html=html,
+                                         chartscript=chartscript, chartdiv='',
+                                         chartscript2='', chartdiv2='',
+                                         navbar=generate_navbar('DataCite')))
+
 # ******************************************************************************
 # * UI endpoints (Authorship)                                                  *
 # ******************************************************************************
@@ -10841,11 +11292,19 @@ def orcid_tag():
                                title=render_warning("Could not get affiliations " \
                                                     + "from orcid collection"),
                                message=error_message(err))
-    html = "<button class=\"btn btn-outline-warning\" " \
-              + "onclick=\"$('.other').toggle();\">Filter for active SupOrgs</button>"
+    try:
+        total_authors = DB['dis'].orcid.count_documents({"affiliations": {"$ne": None}})
+        total_orcid = DB['dis'].orcid.count_documents({"affiliations": {"$ne": None},
+                                                       "orcid": {"$ne": None}})
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get author counts " \
+                                                    + "from orcid collection"),
+                               message=error_message(err))
     trows = []
     row_classes = []
     count = 0
+    active = 0
     for row in rows:
         count += 1
         link = f"<a href='/tag/{escape(row['_id'])}'>{row['_id']}</a>"
@@ -10856,6 +11315,7 @@ def orcid_tag():
                 if 'active' in orgs[row['_id']]:
                     org = "<span style='color: lime;'>Yes</span>"
                     rclass = 'active'
+                    active += 1
                 else:
                     org = "<span style='color: yellow;'>Inactive</span>"
             else:
@@ -10871,12 +11331,22 @@ def orcid_tag():
             perc = f"<span style='color: red;'>{perc}%</span>"
         trows.append([safe(link), safe(org), safe(link2), safe(perc)])
         row_classes.append(rclass)
+    oa_perc = f"{total_orcid/total_authors*100:.2f}%" if total_authors else "0.00%"
+    cards = stat_cards([("Affiliations", f"{count:,}"),
+                        ("Active SupOrgs", f"{active:,}"),
+                        ("Authors", f"{total_authors:,}"),
+                        ("Authors with ORCID", f"{total_orcid:,}"),
+                        ("Overall ORCID %", oa_perc)],
+                       div_id='orcid-tag-stats')
+    html = cards \
+           + "<button class=\"btn btn-outline-warning\" " \
+           + "onclick=\"$('.other').toggle();\">Filter for active SupOrgs</button>"
     html += render_table(['Affiliation', 'SupOrg', 'Authors', 'ORCID %'], trows,
                          table_id='types', css='tablesorter numbers-scroll',
                          row_classes=row_classes)
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title=f"Author affiliations ({count:,})", html=html,
+                                         title="Author affiliations", html=html,
                                          navbar=generate_navbar('Tag/affiliation')))
 
 
