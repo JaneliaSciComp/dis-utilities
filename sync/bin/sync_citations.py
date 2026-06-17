@@ -47,12 +47,22 @@
                               figshare stats service (stats.figshare.com).
         jrc_figshare_updated  timestamp of the figshare usage fetch.
 
+    ZENODO FIELDS WRITTEN  (with --write, for Zenodo DOIs only, which are
+    DataCite-registered, so --source datacite only; like figshare these are
+    independent of citations - a Zenodo DOI may have usage but no citations)
+        jrc_zenodo_counts     {views, unique_views, downloads, unique_downloads}
+                              per-record usage from the Zenodo record API. The
+                              all-versions version_* counters are NOT stored
+                              (unreliable); deposit totals are summed across the
+                              concept's versions downstream.
+        jrc_zenodo_updated    timestamp of the Zenodo usage fetch.
+
     OUTPUT FILES  (written to the current directory every run, dry-run included;
-    crossref runs use citation_updates_crossref_<manifold>.txt etc. so the two
-    sources never overwrite each other)
-        citation_updates_<manifold>.txt   tab-delimited log of DOIs whose count rose.
-        citation_records_<manifold>.json  full records (the jrc_ fields above) for
-                                          every DOI that has a non-zero count.
+    crossref/zenodo runs use citation_updates_crossref.txt / _zenodo etc. so they
+    never overwrite the datacite output)
+        citation_updates.txt   tab-delimited log of DOIs whose count rose.
+        citation_records.json  full records (the jrc_ fields above) for every
+                               DOI that has a non-zero count.
 
     EMAIL
         An HTML summary is sent when --test (developer only) or --write (receivers)
@@ -78,11 +88,16 @@
     OPTIONS
         --source SOURCE      datacite (default) or crossref; selects the
                              jrc_obtained_from subset of the dois collection
+        --zenodo             restrict to Zenodo DOIs only (implies --source
+                             datacite); --cited/--notcited then key on
+                             jrc_zenodo_counts (usage) instead of citation counts
         --doi DOI            process a single DOI (testing)
         --cited              only DOIs already known to be cited: citationCount > 0
                              for datacite, jrc_citation_count exists for crossref
+                             (with --zenodo: jrc_zenodo_counts exists)
         --notcited           only DOIs with no stored jrc_citation_count (not yet
-                             enriched); mutually exclusive with --cited
+                             enriched; with --zenodo: no stored jrc_zenodo_counts);
+                             mutually exclusive with --cited
         --limit N            cap the number of DOIs processed (0 = no limit)
         --workers N          concurrent OpenAlex/ScholeXplorer workers (default 8)
         --datacite-graphql   include DataCite GraphQL citing DOIs (off by default;
@@ -105,7 +120,7 @@
         (falling back to the native citationCount).
 '''
 
-__version__ = '1.1.0'
+__version__ = '1.4.0'
 
 import argparse
 import collections
@@ -171,6 +186,19 @@ FIGSHARE_DOI_PATTERNS = (
     (re.compile(r'10\.25378/janelia\.(\d+)', re.IGNORECASE), 'janelia'),
     (re.compile(r'10\.6084/m9\.figshare\.(\d+)', re.IGNORECASE), ''),
 )
+# Zenodo usage metrics: the record API returns a per-record `stats` object in one
+# request. A Zenodo DOI embeds its numeric record ID (10.5281/zenodo.<id>). The
+# all-versions version_* counters are unreliable (sometimes lower than the
+# record's own), so only the per-record counters are stored; deposit totals are
+# summed across versions downstream. ZENODO_API_KEY (if set in the environment)
+# raises the rate limit; public records also read without it.
+ZENODO_RECORDS = 'https://zenodo.org/api/records/'
+ZENODO_COUNTERS = ('views', 'unique_views', 'downloads', 'unique_downloads')
+ZENODO_DOI_RE = re.compile(r'zenodo\.(\d+)', re.IGNORECASE)
+# Zenodo DOIs are DataCite-registered: publisher "Zenodo", or (belt-and-suspenders)
+# a 10.5281/zenodo. DOI - some carry a non-Zenodo publisher string. --zenodo filters
+# the dois query to this subset (and reinterprets --cited/--notcited on usage).
+ZENODO_PUBLISHERS = ["Zenodo"]
 DATACITE_QUERY = '''query($id: ID!, $after: String) {
   work(id: $id) {
     citations(first: 100, after: $after) {
@@ -248,7 +276,7 @@ def initialize_program():
             terminate_program(err)
 
 
-def get_with_retry(url, params, timeout, tries=3, json_body=None):
+def get_with_retry(url, params, timeout, tries=3, json_body=None, headers=None):
     ''' HTTP request with retry/backoff on transient failures (429, 5xx, exceptions)
         Keyword arguments:
           url: URL
@@ -256,6 +284,7 @@ def get_with_retry(url, params, timeout, tries=3, json_body=None):
           timeout: per-request timeout in seconds
           tries: maximum attempts
           json_body: if given, POST this JSON body instead of issuing a GET
+          headers: optional request headers (e.g. an Authorization bearer)
         Returns:
           requests Response (possibly a non-2xx), or None if every attempt raised
     '''
@@ -264,9 +293,10 @@ def get_with_retry(url, params, timeout, tries=3, json_body=None):
         try:
             if json_body is not None:
                 resp = http_session().post(url, params=params, json=json_body,
-                                           timeout=timeout)
+                                           timeout=timeout, headers=headers)
             else:
-                resp = http_session().get(url, params=params, timeout=timeout)
+                resp = http_session().get(url, params=params, timeout=timeout,
+                                          headers=headers)
         except Exception:
             resp = None
         if resp is not None and resp.status_code not in (429, 500, 502, 503, 504):
@@ -456,6 +486,56 @@ def figshare_metrics(doi):
     return counts
 
 
+def zenodo_record_id(doi):
+    ''' Return the numeric Zenodo record ID embedded in a Zenodo DOI
+        (10.5281/zenodo.<id>), which doubles as the "is this a Zenodo DOI" test.
+        Keyword arguments:
+          doi: DOI string
+        Returns:
+          the record ID string, or None if this is not a Zenodo DOI
+    '''
+    if doi:
+        match = ZENODO_DOI_RE.search(doi)
+        if match:
+            return match.group(1)
+    return None
+
+
+def zenodo_metrics(doi):
+    ''' Get Zenodo usage metrics (views/downloads, plus unique) for a Zenodo DOI.
+        Zenodo's record API exposes a per-record `stats` object (it carries no
+        citation count of its own). The all-versions version_* counters are
+        ignored as unreliable; deposit totals are summed across versions
+        downstream. ZENODO_API_KEY raises the rate limit when set.
+        Keyword arguments:
+          doi: DOI string
+        Returns:
+          {'views', 'unique_views', 'downloads', 'unique_downloads'} for a Zenodo
+          DOI, or None if this is not a Zenodo DOI or the request failed / carried
+          no usable stats (a partial result is discarded so a stored count is
+          never silently incomplete)
+    '''
+    rid = zenodo_record_id(doi)
+    if not rid:
+        return None
+    api_key = os.environ.get('ZENODO_API_KEY')
+    headers = {'Authorization': f"Bearer {api_key}"} if api_key else None
+    resp = get_with_retry(f"{ZENODO_RECORDS}{rid}", None, 20, headers=headers)
+    if resp is None or resp.status_code != 200:
+        if ARG.DEBUG:
+            tqdm.write(f"Zenodo stats error for {doi}: "
+                       + (f"HTTP {resp.status_code}" if resp is not None
+                          else "no response"))
+        return None
+    try:
+        stats = (resp.json() or {}).get('stats') or {}
+    except Exception:
+        return None
+    if not stats:
+        return None
+    return {counter: int(stats.get(counter, 0) or 0) for counter in ZENODO_COUNTERS}
+
+
 def datacite_graphql_post(json_body):
     ''' Issue a DataCite GraphQL POST, serialized and rate-limited across threads.
         DataCite GraphQL bans bursty/concurrent access, so only one request runs
@@ -594,8 +674,10 @@ def fetch_doi(row):
           result dict for finalize_doi()
     '''
     doi = row['doi']
-    # Figshare DOIs are DataCite-registered; Crossref runs deal only with citations
+    # Figshare/Zenodo DOIs are DataCite-registered; Crossref runs deal only with
+    # citations, so their usage fetches are skipped there.
     fid = figshare_article(doi)[0] if ARG.SOURCE == 'datacite' else None
+    zid = zenodo_record_id(doi) if ARG.SOURCE == 'datacite' else None
     return {'row': row,
             'doi': doi,
             'native': row.get(SOURCES[ARG.SOURCE]['count_field'], 0) or 0,
@@ -605,7 +687,9 @@ def fetch_doi(row):
             'scholex': scholix_citing(doi),
             'datacite_dois': DATACITE_CITING.get(doi),
             'is_figshare': bool(fid),
-            'figshare': figshare_metrics(doi) if fid else None}
+            'figshare': figshare_metrics(doi) if fid else None,
+            'is_zenodo': bool(zid),
+            'zenodo': zenodo_metrics(doi) if zid else None}
 
 
 def combine_counts(res, graphql, source='datacite'):
@@ -739,14 +823,23 @@ def finalize_doi(res, monitor=None):
         COUNT['preserved'] += 1
     # Figshare usage metrics (views/downloads/shares) are independent of citations:
     # a figshare DOI may have usage but no citations, and is still recorded/stored.
-    figshare_fields = {}
+    usage_fields = {}
     if res['is_figshare']:
         if res['figshare'] is None:
             COUNT['figshare_error'] += 1
         else:
             COUNT['figshare_found'] += 1
-            figshare_fields['jrc_figshare_counts'] = res['figshare']
-            figshare_fields['jrc_figshare_updated'] = datetime.now()
+            usage_fields['jrc_figshare_counts'] = res['figshare']
+            usage_fields['jrc_figshare_updated'] = datetime.now()
+    # Zenodo usage metrics (views/downloads + unique) are likewise independent of
+    # citations: a Zenodo DOI may have usage but no citations, and is still stored.
+    if res['is_zenodo']:
+        if res['zenodo'] is None:
+            COUNT['zenodo_error'] += 1
+        else:
+            COUNT['zenodo_found'] += 1
+            usage_fields['jrc_zenodo_counts'] = res['zenodo']
+            usage_fields['jrc_zenodo_updated'] = datetime.now()
     # Citation jrc_ fields exist only when there is usable data, so uncited DOIs
     # get no citation fields (but a figshare DOI may still get figshare fields).
     fields = {}
@@ -770,8 +863,9 @@ def finalize_doi(res, monitor=None):
                 monitor.flush()
             if ARG.DEBUG:
                 tqdm.write(hit)
-    # Persist citation and figshare fields together; nothing to do if both empty
-    fields.update(figshare_fields)
+    # Persist citation and usage (figshare/Zenodo) fields together; nothing to do
+    # if all are empty
+    fields.update(usage_fields)
     if not fields:
         return
     RECORDS.append({'doi': doi, **fields})
@@ -859,22 +953,30 @@ def processing():  # pylint: disable=too-many-locals,too-many-statements
     '''
     label = SOURCES[ARG.SOURCE]['label']
     query = {'jrc_obtained_from': label}
+    if ARG.ZENODO:
+        # Narrow the DataCite subset to Zenodo DOIs (AND-ed with jrc_obtained_from)
+        query['$or'] = [{'publisher': {'$in': ZENODO_PUBLISHERS}},
+                        {'doi': {'$regex': r'zenodo\.', '$options': 'i'}}]
     if ARG.DOI:
         query['doi'] = ARG.DOI.lower()
     elif ARG.CITED:
         # AND-ed with the registrar constraint above (don't reassign query, or the
-        # jrc_obtained_from filter is lost and other DOIs could be included)
-        #query['$or'] = [{"citationCount": {'$gt': 0}},
-        #                {"jrc_figshare_counts.shares": {"$gt": 0}},
-        #                {"jrc_figshare_counts.downloads": {"$gt": 0}}]
-        if ARG.SOURCE == 'crossref':
+        # jrc_obtained_from filter is lost and other DOIs could be included).
+        # In --zenodo mode "cited" means "already has usage data" (jrc_zenodo_counts).
+        if ARG.ZENODO:
+            query['jrc_zenodo_counts'] = {'$exists': True}
+        elif ARG.SOURCE == 'crossref':
             query['jrc_citation_count'] = {'$exists': True}
         else:
             query['citationCount'] = {'$gt': 0}
     elif ARG.NOTCITED:
-        # DOIs not yet enriched (no stored jrc_citation_count); useful for a first
-        # pass over a freshly-loaded source without reprocessing the cited subset
-        query['jrc_citation_count'] = {'$exists': False}
+        # DOIs not yet enriched; useful for a first pass / filling gaps without
+        # reprocessing the done subset. --zenodo keys this on jrc_zenodo_counts
+        # (e.g. to retry deposits that a transient Zenodo error missed).
+        if ARG.ZENODO:
+            query['jrc_zenodo_counts'] = {'$exists': False}
+        else:
+            query['jrc_citation_count'] = {'$exists': False}
     try:
         cursor = DB['dis'].dois.find(query, {'doi': 1,
                                              SOURCES[ARG.SOURCE]['count_field']: 1,
@@ -886,7 +988,7 @@ def processing():  # pylint: disable=too-many-locals,too-many-statements
     except Exception as err:
         terminate_program(err)
     total = len(rows)
-    LOGGER.info(f"Processing {total:,} {label} DOIs "
+    LOGGER.info(f"Processing {total:,} {'Zenodo' if ARG.ZENODO else label} DOIs "
                 f"({'WRITE' if ARG.WRITE else 'DRY RUN'})")
     interrupted = False
     # Pre-fetch DataCite GraphQL citing DOIs in batches (serialized, low volume)
@@ -899,10 +1001,11 @@ def processing():  # pylint: disable=too-many-locals,too-many-statements
         except KeyboardInterrupt:
             interrupted = True
             LOGGER.warning("Interrupted during DataCite prefetch - skipping enrichment")
-    # Keep the original (unqualified) filenames for datacite runs; crossref runs
-    # get source-qualified names so the two never overwrite each other.
-    filequal = '' if ARG.SOURCE == 'datacite' else f"{ARG.SOURCE}_"
-    monfile = f"citation_updates_{filequal}{ARG.MANIFOLD}.txt"
+    # Plain filenames for datacite runs; crossref and zenodo runs get a qualifier
+    # suffix so they never overwrite the datacite output.
+    filequal = '_zenodo' if ARG.ZENODO else \
+               ('' if ARG.SOURCE == 'datacite' else f"_{ARG.SOURCE}")
+    monfile = f"citation_updates{filequal}.txt"
     with open(monfile, 'w', encoding='utf-8') as monitor, \
          ThreadPoolExecutor(max_workers=ARG.WORKERS) as pool:
         monitor.write(f"# Citation increases - {datetime.now()} "
@@ -932,21 +1035,24 @@ def processing():  # pylint: disable=too-many-locals,too-many-statements
             # queued before an interrupt) so no completed write is silently dropped.
             flush_writes()
     LOGGER.info(f"Citation increases written to {monfile}")
-    recfile = f"citation_records_{filequal}{ARG.MANIFOLD}.json"
+    recfile = f"citation_records{filequal}.json"
     with open(recfile, 'w', encoding='utf-8') as fileout:
         json.dump(RECORDS, fileout, indent=2, default=str)
     LOGGER.info(f"Wrote {len(RECORDS):,} citation records to {recfile}")
-    # RECORDS is the union of DOIs that got citation fields and/or figshare fields
+    # RECORDS is the union of DOIs that got citation and/or figshare/Zenodo fields
     cited = sum(1 for r in RECORDS if 'jrc_citation_count' in r)
     figusage = sum(1 for r in RECORDS if 'jrc_figshare_counts' in r)
-    # DataCite GraphQL and figshare usage apply only to --source datacite
-    dc_line = fs_line = ""
+    zenusage = sum(1 for r in RECORDS if 'jrc_zenodo_counts' in r)
+    # DataCite GraphQL and figshare/Zenodo usage apply only to --source datacite
+    dc_line = fs_line = zen_line = ""
     if ARG.SOURCE == 'datacite':
         dc_line = (f"DataCite GraphQL OK (errors):       {COUNT['datacite_found']:,} "
                    f"({COUNT['datacite_error']:,})\n") if ARG.GRAPHQL else \
                   "DataCite GraphQL:                   disabled (use --datacite-graphql)\n"
         fs_line = (f"Figshare usage OK (errors):         {COUNT['figshare_found']:,} "
                    + f"({COUNT['figshare_error']:,})\n")
+        zen_line = (f"Zenodo usage OK (errors):           {COUNT['zenodo_found']:,} "
+                    + f"({COUNT['zenodo_error']:,})\n")
     summary = (
         f"{label} DOIs processed:            {COUNT['read']:,}\n"
         + f"OpenAlex lookups OK (errors):       {COUNT['openalex_found']:,} "
@@ -957,8 +1063,10 @@ def processing():  # pylint: disable=too-many-locals,too-many-statements
         + f"Fetch errors (DOIs skipped):        {COUNT['fetch_error']:,}\n"
         + f"Counts preserved (source error):    {COUNT['preserved']:,}\n"
         + fs_line
+        + zen_line
         + f"DOIs with citation fields:          {cited:,}\n"
         + (f"DOIs with figshare fields:          {figusage:,}\n"
+           + f"DOIs with Zenodo fields:            {zenusage:,}\n"
            if ARG.SOURCE == 'datacite' else "")
         + f"Total records written (set):        {len(RECORDS):,}\n"
         + f"DOIs with increased citation count: {COUNT['increased']:,}\n"
@@ -981,15 +1089,21 @@ if __name__ == '__main__':
                         default='crossref', choices=['datacite', 'crossref'],
                         help='DOI registrar source to process (default crossref, '
                              + 'case-insensitive)')
+    PARSER.add_argument('--zenodo', dest='ZENODO', action='store_true', default=False,
+                        help='Only process Zenodo DOIs (implies --source datacite); '
+                             + '--cited/--notcited then key on jrc_zenodo_counts '
+                             + 'instead of citation counts')
     PARSER.add_argument('--doi', dest='DOI', action='store', default=None,
                         help='Process a single DOI (for testing)')
     PARSER.add_argument('--cited', dest='CITED', action='store_true', default=False,
                         help='Only process DOIs already known to be cited '
                              + '(datacite: citationCount > 0; crossref: '
-                             + 'jrc_citation_count exists)')
+                             + 'jrc_citation_count exists; --zenodo: '
+                             + 'jrc_zenodo_counts exists)')
     PARSER.add_argument('--notcited', dest='NOTCITED', action='store_true', default=False,
-                        help='Only process DOIs with no stored jrc_citation_count '
-                             + '(not yet enriched)')
+                        help='Only process DOIs not yet enriched (no stored '
+                             + 'jrc_citation_count; with --zenodo, no stored '
+                             + 'jrc_zenodo_counts)')
     PARSER.add_argument('--limit', dest='LIMIT', action='store', type=int, default=0,
                         help='Limit number of DOIs processed (0 = no limit)')
     PARSER.add_argument('--workers', dest='WORKERS', action='store', type=int, default=8,
@@ -1018,6 +1132,11 @@ if __name__ == '__main__':
     LOGGER = JRC.setup_logging(ARG)
     if ARG.CITED and ARG.NOTCITED:
         terminate_program("--cited and --notcited are mutually exclusive")
+    # Zenodo DOIs are DataCite-registered, so --zenodo implies --source datacite
+    if ARG.ZENODO:
+        if ARG.SOURCE == 'crossref':
+            LOGGER.warning("--zenodo implies --source datacite (overriding crossref)")
+        ARG.SOURCE = 'datacite'
     # Crossref runs deal only with jrc_citation_count/_sources/_updated
     if ARG.SOURCE == 'crossref' and ARG.GRAPHQL:
         terminate_program("--datacite-graphql applies only to --source datacite")
