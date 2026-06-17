@@ -19,7 +19,7 @@ import string
 import sys
 from time import sleep, time
 from types import SimpleNamespace
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 import dateutil.parser
 import dateutil.tz
 from bokeh.palettes import all_palettes, plasma
@@ -36,7 +36,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "118.9.0"
+__version__ = "119.6.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -57,7 +57,11 @@ NAV = {"Home": "",
        "DOIs": {"DOIs by insertion date": "dois_insertpicker",
                 "DOI stats": "dois_source",
                 "DOIs by": {"Month": "dois_time/month", "Year": "dois_time/year",
-                            "License": "dois_license", "Subject": "dois_subjectpicker",
+                            "Journal": "journals_dois", "License": "dois_license",
+                            "Publisher": "dois_publisher",
+                            "Subject": {"Crossref": "crossref_subject",
+                                        "DataCite": "datacite_subject",
+                                        "Search": "dois_subjectpicker"},
                             "Type": "dois_type"},
                 "DOI yearly report": "dois_yearly",
                 "Citations": {"Crossref metrics": "citation_metrics/crossref",
@@ -66,7 +70,8 @@ NAV = {"Home": "",
                               "DataCite cited DOIs": "citation_list/datacite"}},
        "DataCite": {"DataCite DOI stats": "datacite_dois",
                     "DataCite DOI downloads": "datacite_downloads",
-                    "DataCite subjects": "datacite_subject"},
+                    "figshare": {"figshare metrics": "figshare",
+                                 "figshare title groups": "figshare_groups"}},
        "Authorship": {"Authors": "orcid_entry",
                       "DOIs by authorship": "dois_author",
                       "DOIs with lab head first/last authors": "doiui_firstlast",
@@ -81,14 +86,17 @@ NAV = {"Home": "",
                      "Preprints with journal publications": "preprint_with_pub",
                      "Preprints without journal publications": "preprint_relation/preprint_no_pub",
                      "Journal publications without preprints": "preprint_relation/pub_no_preprint"},
-       "Journals": {"DOIs by": {"Publisher": "dois_publisher", "Journal": "journals_dois"},
-                    "Open access": {"Report": "dois_oa", "Details": "dois_oa_details"},
+       "Journals": {"Open access": {"Report": "dois_oa", "Details": "dois_oa_details"},
                     "Top": {"Crossref": {"Publishers": "top_entities/publisher",
                                          "Journals": "top_entities/journal"},
                             "DataCite": {"Publishers": "top_entities/publisher/All/DataCite",
                                          "Journals": "top_entities/journal/All/DataCite"}},
-                    "Heatmaps": {"Publisher": "dois_heatmap/publisher",
-                                 "Journal": "dois_heatmap/journal"},
+                    "Heatmaps": {"Crossref": {"Publisher": "dois_heatmap/publisher/Crossref",
+                                              "Journal": "dois_heatmap/journal/Crossref"},
+                                 "DataCite": {"Publisher": "dois_heatmap/publisher/DataCite",
+                                              "Journal": "dois_heatmap/journal/DataCite"},
+                                 "All": {"Publisher": "dois_heatmap/publisher/All",
+                                         "Journal": "dois_heatmap/journal/All"}},
                     "DOIs missing journals": "dois_nojournal",
                     "Journals referenced": "journals_referenced"},
        "Subscriptions": {"Summary": "subscriptions",
@@ -106,12 +114,15 @@ NAV = {"Home": "",
                                        "Acknowledgement": "dois_tag_ack/ack",
                                        "Lab": "dois_lab"},
                            "Top DOI tags by year": "dois_top",
-                           "Acknowledgement stats": "acknowledgement_stats",
                            "Author affiliations": {"P&C": "orcid_tag",
                                                    "Janelia": "janelia_affiliations"},
                            "Labs": "labs",
                            "Projects": "projects"},
+       "Acknowledgements": {"Acknowledgement stats": "acknowledgement_stats"},
        "System" : {"Database stats": "stats_database",
+                   "External systems": {"Search HHMI People system": "people",
+                                        "HHMI Supervisory Organizations": "orgs/full",
+                                        "ROR": "ror"},
                    "API rate limits": "ratelimit/openalex",
                    "Controlled vocabularies": "cv",
                    "DOI relationships": "doi_relationships",
@@ -124,9 +135,6 @@ NAV = {"Home": "",
                                      "Authors with multiple ORCIDs": "orcid_duplicates",
                                      "Duplicate authors": "duplicate_authors"}
                   },
-       "External systems": {"Search HHMI People system": "people",
-                            "HHMI Supervisory Organizations": "orgs/full",
-                            "ROR": "ror"}
       }
 # Global
 BOLD = "<span style='font-weight: bold'>"
@@ -228,7 +236,6 @@ def before_request():
                               uri=os.environ.get("DIS_MONGO_URI"),
                               client=os.environ.get("DIS_MONGO_DATABASE", "dis"))
         app.config["dis"] = JRC.simplenamespace_to_dict(_load_config_ns("dis"))
-        print(app.config["dis"])
         print(f"Connecting to {dbo.client} prod")
         try:
             DB['dis'] = JRC.connect_database(dbo)
@@ -4507,11 +4514,12 @@ def get_figshare_counts(row):
     return figshare
 
 
-def doi_tabs(doi, row, data, authors):
+def doi_tabs(doi, row, rowext, data, authors):
     ''' Generate DOI tabs
         Keyword arguments:
           doi: DOI
           row: row from dois collection
+          rowext: row from external_dois collection
           data: data from Crossref/DataCite API
           authors: authors from Crossref/DataCite API
         Returns:
@@ -4538,7 +4546,6 @@ def doi_tabs(doi, row, data, authors):
     if row and row['jrc_obtained_from'] == 'DataCite':
         if row.get('jrc_figshare_counts', False):
             ahtml = get_figshare_counts(row)
-            print(ahtml)
             if ahtml:
                 content['figshare'] = ahtml
         if ('janelia' in doi or 'figshare' in doi):
@@ -4574,14 +4581,16 @@ def doi_tabs(doi, row, data, authors):
     # Acknowledgements
     ahtml = ""
     tags = []
-    if row and 'jrc_acknowledge' in row:
+    if row.get('jrc_acknowledge'):
         for tag in row['jrc_acknowledge']:
             tags.append(f"<a href='/tag/{escape(tag['name'])}'>{tag['name']}</a>")
         if tags:
             ahtml += "<h4>Acknowledgement tags</h4>" + "<br>".join(tags)
     acktext = asrc = ""
-    if row and row.get('jrc_acknowledgements'):
+    if row.get('jrc_acknowledgements'):
         acktext = row['jrc_acknowledgements'].replace('\n', '<br>')
+    elif rowext and rowext.get('jrc_acknowledgements'):
+        acktext = rowext['jrc_acknowledgements'].replace('\n', '<br>')
     elif row and not row.get('jrc_inserted', False):
         # If this DOI isn't in our database, look for acknowledgements
         try:
@@ -4589,6 +4598,15 @@ def doi_tabs(doi, row, data, authors):
         except Exception:
             pass
     if acktext:
+        if not asrc:
+            if 'elife' in doi:
+                asrc = 'eLife'
+            elif row.get('jrc_pmc') or (rowext and rowext.get('jrc_pmc')):
+                asrc = 'PMC'
+            elif 'arxiv' in doi:
+                asrc = 'arXiv'
+            else:
+                asrc = 'Elsevier'
         highlight = ""
         try:
             highlight = DL.highlight_acknowledgments(acktext, DB['dis'])
@@ -4692,7 +4710,8 @@ def show_doi_ui(doi):
     except Exception as err:
         return inspect_error(err, 'Could not get DOI')
     local = False
-    recsec = html = ""
+    html = recsec = ""
+    rowext = {}
     if row:
         recsec += '<h5 style="color:lime">This DOI is saved locally in the Janelia database</h5>'
         recsec += add_update_times(row)
@@ -4700,10 +4719,10 @@ def show_doi_ui(doi):
         local = True
     else:
         try:
-            row2 = DB['dis'].external_dois.find_one({"doi": doi})
+            rowext = DB['dis'].external_dois.find_one({"doi": doi})
         except Exception as err:
             return inspect_error(err, 'Could not get DOI')
-        if row2:
+        if rowext:
             recsec = "<h4 style='color:goldenrod'><i class='fa-solid fa-warning'></i> " \
                      + "This DOI is saved locally as an external DOI (minimal data saved)</h4><br>"
         else:
@@ -4768,7 +4787,7 @@ def show_doi_ui(doi):
         authors = DL.get_author_details(row, DB['dis'].orcid)
     except Exception as err:
         return inspect_error(err, 'Could not get author list details')
-    html += doi_tabs(doi, row, data, authors)
+    html += doi_tabs(doi, row, rowext, data, authors)
     # Title
     doilink = f"<a href='{app.config['DOI']}{doi}' target='_blank'>{doi}</a>"
     badges = get_display_badges(doi, row, data, local)
@@ -4878,109 +4897,6 @@ def show_doi_by_type_ui(src, typ, sub, year):
     return make_response(render_template('custom.html', urlroot=request.url_root,
                                          title=f"DOIs for {desc}", html=html, oamsg=oamsg,
                                          chartscript=chartscript, chartdiv=chartdiv,
-                                         navbar=generate_navbar('DOIs')))
-
-
-@app.route('/acksui/<string:ack>')
-def show_doi_by_ack_ui(ack):
-    ''' Show DOIs for a given acknowledgement text
-    '''
-    union = []
-    payload = dict(JOURNAL_ARTICLE)
-    payload["jrc_acknowledgements"] = {"$regex": ack, "$options" : "i"}
-    try:
-        rows = DB['dis'].dois.find(payload).sort("jrc_publishing_date", -1)
-    except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get DOIs from dois collection"),
-                               message=error_message(err))
-    internal = 0
-    for row in rows:
-        row['doi_type'] = 'internal'
-        union.append(row)
-        internal += 1
-    # External DOIs
-    external = 0
-    try:
-        rows = DB['dis'].external_dois.find(payload).sort("jrc_publishing_date", -1)
-    except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get DOIs from external_dois " \
-                                                    + "collection"),
-                               message=error_message(err))
-    for row in rows:
-        row['doi_type'] = 'external'
-        union.append(row)
-        external += 1
-    union.sort(key=lambda x: x.get("jrc_publishing_date", ""), reverse=True)
-    # show_count=False: the count is shown in the card below (with id 'totalrows',
-    # which the version/internal-external filters update)
-    html, cnt, _ = standard_ack_table(union, ack, show_count=False)
-    if not cnt:
-        return render_template('warning.html', urlroot=request.url_root,
-                               title=render_warning("Could not find DOIs", 'warning'),
-                               message=f"Could not find any DOIs with acknowledgement {ack}")
-    html = ack_stat_cards(cnt, internal, external) + html
-    title = f"DOIs with acknowledgement text <span style='color:#51b447 !important'>{ack}</span>"
-    endpoint_access()
-    return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title=title, html=html,
-                                         navbar=generate_navbar('DOIs')))
-
-
-@app.route('/acksregexui/<string:group>')
-def show_doi_by_ack_regex_ui(group):
-    ''' Show DOIs with acknowledgements matching a group's configured regex
-    '''
-    entry = (app.config['dis'].get('ack_search_regex') or {}).get(group)
-    if not entry or not entry.get('regex'):
-        return render_template('warning.html', urlroot=request.url_root,
-                               title=render_warning("No search regex", 'warning'),
-                               message=f"No search regex is configured for {group}")
-    regex = entry['regex']
-    union = []
-    payload = dict(JOURNAL_ARTICLE)
-    payload["jrc_acknowledgements"] = {"$regex": regex, "$options" : "i"}
-    try:
-        rows = DB['dis'].dois.find(payload).sort("jrc_publishing_date", -1)
-    except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get DOIs from dois collection"),
-                               message=error_message(err))
-    internal = 0
-    for row in rows:
-        row['doi_type'] = 'internal'
-        union.append(row)
-        internal += 1
-    # External DOIs
-    external = 0
-    try:
-        rows = DB['dis'].external_dois.find(payload).sort("jrc_publishing_date", -1)
-    except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get DOIs from external_dois " \
-                                                    + "collection"),
-                               message=error_message(err))
-    for row in rows:
-        row['doi_type'] = 'external'
-        union.append(row)
-        external += 1
-    union.sort(key=lambda x: x.get("jrc_publishing_date", ""), reverse=True)
-    # show_count=False: the count is shown in the card below (with id 'totalrows',
-    # which the version/internal-external filters update)
-    html, cnt, _ = standard_ack_table(union, regex, is_regex=True, show_count=False)
-    if not cnt:
-        return render_template('warning.html', urlroot=request.url_root,
-                               title=render_warning("Could not find DOIs", 'warning'),
-                               message=f"Could not find any DOIs with acknowledgements for {group}")
-    html = ack_stat_cards(cnt, internal, external) + html
-    if entry.get('description'):
-        html = f"<p><i>Acknowledgements matching {entry['description']} " \
-               + "(case-insensitive)</i></p>" + html
-    title = f"DOIs with acknowledgements for <span style='color:#51b447 !important'>{group}</span>"
-    endpoint_access()
-    return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title=title, html=html,
                                          navbar=generate_navbar('DOIs')))
 
 
@@ -5397,7 +5313,7 @@ def dois_provider_with_janelia(prov):
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=f"DOIs by provider {prov} with " \
-                                               + f"Janelia first author ({cnt:,})",
+                                               + "Janelia first author",
                                          html=html, navbar=generate_navbar('DOIs')))
 
 
@@ -6338,6 +6254,94 @@ def show_doi_pubmed(pmid):
     return generate_response(result)
 
 
+@app.route('/crossref_subject/<string:subject>/<string:year>')
+@app.route('/crossref_subject/<string:subject>')
+@app.route('/crossref_subject')
+def crossref_subject(subject=None, year='All'):
+    ''' Show Crossref MeSH DOI subjects
+    '''
+    if not subject:
+        # List view: the year comes from a query param (the path year segment is
+        # reserved for the subject-detail view)
+        year = request.args.get('year', 'All')
+    if subject:
+        payload = {"jrc_mesh.descriptor_name": subject}
+    else:
+        # Crossref DOIs carry MeSH subjects in the jrc_mesh enrichment field;
+        # MeSH is the only subject scheme present here
+        match = {"jrc_obtained_from": "Crossref", "jrc_mesh": {"$exists": True}}
+        if year != 'All':
+            match["jrc_publishing_date"] = {"$regex": "^" + year}
+        payload = [{"$match": match},
+                   {"$unwind": "$jrc_mesh"},
+                   {"$group": {"_id": "$jrc_mesh.descriptor_name", "count": {"$sum": 1}}},
+                   {"$sort": {"count": -1}}]
+    try:
+        if subject:
+            if year != 'All':
+                payload['jrc_publishing_date'] = {"$regex": "^" + year}
+            rows = DB['dis'].dois.find(payload)
+        else:
+            rows = DB['dis'].dois.aggregate(payload)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get DOI subjects"),
+                               message=error_message(err))
+    if subject:
+        html, cnt, _ = standard_doi_table(rows, prefix=f"crossref_subject/{subject}",
+                                          show_count=False)
+        if not cnt:
+            msg = f"No Crossref DOIs were found for subject {subject}"
+            if year != 'All':
+                msg += f" in publishing year {year}"
+            html = year_pulldown(f"crossref_subject/{subject}") + "<br><br>" \
+                   + render_warning(msg, 'warning')
+        else:
+            cards = stat_cards([("DOIs", f"<span id='totalrows'>{cnt:,}</span>"),
+                                ("Subject", subject)],
+                               div_id='crsubj-stats')
+            html = cards + html
+        title = f"DOIs for {subject}"
+        if year != 'All':
+            title += f" (year={year})"
+    else:
+        cnt = 0
+        total = 0
+        trows = []
+        # Carry the active year into the subject drill-down links
+        ysuffix = '' if year == 'All' else f"/{year}"
+        for row in rows:
+            cnt += 1
+            total += row['count']
+            subj = row['_id']
+            trows.append([subj,
+                          safe(f"<a href='/crossref_subject/{subj}{ysuffix}'>"
+                               + f"{row['count']}</a>")])
+        pulldown = year_pulldown('crossref_subject', query=True)
+        if not cnt:
+            # No subjects for this filter - advise rather than show an empty table,
+            # but keep the year pulldown so another year can be chosen
+            msg = "No Crossref subjects were found"
+            if year != 'All':
+                msg += f" for publishing year {year}"
+            html = pulldown + "<br><br>" + render_warning(msg, 'warning')
+        else:
+            table = render_table(['Subject', 'Count'], trows,
+                                 table_id='subjects', css='tablesorter numberlast-scroll')
+            cards = stat_cards([("DOI occurrences", f"{total:,}"),
+                                ("Subjects", f"{cnt:,}"),
+                                ("Scheme", "MeSH")],
+                               div_id='crsubj-stats')
+            html = cards + pulldown + "<br><br>" + table
+        title = "Crossref subjects"
+        if year != 'All':
+            title += f" (year={year})"
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=title, html=html,
+                                         navbar=generate_navbar('DOIs')))
+
+
 # ******************************************************************************
 # * UI endpoints (DataCite)                                                    *
 # ******************************************************************************
@@ -6428,7 +6432,7 @@ def datacite_subject(subject=None, year='All'):
                                 ("Schemes", f"{len(schemes):,}")],
                                div_id='dcsubj-stats')
             html = cards + pulldown + "<br><br>" + table
-        title = f"DataCite subjects ({cnt:,})"
+        title = "DataCite subjects"
         if year != 'All':
             title += f" (year={year})"
     endpoint_access()
@@ -6549,7 +6553,7 @@ def datacite_dois():
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="DataCite DOI stats", html=html,
-                                         navbar=generate_navbar('DOIs')))
+                                         navbar=generate_navbar('DataCite')))
 
 
 @app.route('/datacite_dois/<string:dtype>/<string:pub>/<string:year>')
@@ -6631,7 +6635,8 @@ def citation_list(source='datacite'):
         total += row['jrc_citation_count']
         cnt += 1
         link = doi_link(row['doi'])
-        trows.append([safe(link), DL.get_title(row), f"{row['jrc_citation_count']:,}"])
+        trows.append([safe(link), strip_html_tags(DL.get_title(row)),
+                      f"{row['jrc_citation_count']:,}"])
         row_classes.append('ver' if DL.is_version(row) else '')
     pulldown = year_pulldown(f"citation_list/{source}", query=True)
     other = 'crossref' if source == 'datacite' else 'datacite'
@@ -6690,7 +6695,7 @@ def datacite_downloads():
         total += row['downloadCount']
         cnt += 1
         link = doi_link(row['doi'])
-        trows.append([safe(link), DL.get_title(row), row['downloadCount']])
+        trows.append([safe(link), strip_html_tags(DL.get_title(row)), row['downloadCount']])
     html = render_table(['DOI', 'Title', 'Downloads'], trows, table_id='data',
                         css='tablesorter numberlast-scroll',
                         footer=[fcell('TOTAL', colspan=2),
@@ -6703,7 +6708,7 @@ def datacite_downloads():
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="DataCite DOI downloads", html=html,
-                                         navbar=generate_navbar('DOIs')))
+                                         navbar=generate_navbar('DataCite')))
 
 
 @app.route('/datacite_metrics')
@@ -6921,6 +6926,463 @@ def citation_metrics(source='datacite'):
                                          chartscript=chartscript, chartdiv='',
                                          chartscript2='', chartdiv2='',
                                          navbar=generate_navbar('DOIs')))
+
+
+# figshare DOIs are DataCite-registered with one of these publisher strings
+FIGSHARE_PUBLISHERS = ["Janelia Research Campus", "Figshare", "figshare"]
+# Strip trailing "specifier" tokens from a figshare title to derive a groupable
+# stem, e.g. "MouseLight Neuron AA0547" -> "MouseLight Neuron". Matches serials,
+# bare numbers/ranges/dates, version tags, roman numerals, single letters, and
+# bracketed ids; _FIG_SPEC_RE additionally strips lab specimen codes
+# ("jrc_mus-skin-1"); _FIG_CONN strips a connector word left dangling after a
+# code is removed ("... P7 mouse skin for" -> "... P7 mouse skin").
+_FIG_ID_RE = re.compile(r'^(?:'
+                        r'[vV]\d+(?:\.\d+)*'
+                        r'|#?\d+(?:[.\-/]\d+)*'
+                        r'|[A-Za-z]{1,5}[-_]?\d+[A-Za-z0-9\-_.]*'
+                        r'|[IVXLCDM]{1,6}'
+                        r'|[A-Za-z]'
+                        r'|\(.*\)|\[.*\]|\{.*\}'
+                        r')$')
+_FIG_SPEC_RE = re.compile(r'^[a-z]{2,5}_[a-z0-9]+(?:[-_][a-z0-9]+)*$', re.I)
+_FIG_TRAIL = ' \t-–—:;,.#/|_'
+_FIG_CONN = {'for', 'of', 'in', 'from', 'the', 'a', 'an'}
+
+
+def strip_html_tags(text):
+    ''' Flatten a title to plain text by removing HTML tags. figshare/DataCite
+        titles occasionally carry emphasis markup (<b>, <i>); it is stripped
+        rather than rendered, since titles are untrusted external metadata.
+        Keyword arguments:
+          text: raw title string
+        Returns:
+          The title with tags removed and surrounding whitespace trimmed
+    '''
+    return re.sub(r'<[^>]+>', '', text or '').strip()
+
+
+def figshare_title_stem(title):
+    ''' Generalize a figshare title by stripping trailing identifier tokens.
+        Keyword arguments:
+          title: raw title string
+        Returns:
+          The groupable stem (the trimmed title if everything would be stripped)
+    '''
+    if not title:
+        return ''
+    toks = title.strip().split()
+    while toks:
+        last = toks[-1]
+        if (_FIG_ID_RE.match(last) or _FIG_SPEC_RE.match(last.strip('()[]{}'))
+                or not last.strip(_FIG_TRAIL) or last.lower() in _FIG_CONN):
+            toks.pop()
+        else:
+            break
+    stem = ' '.join(toks).strip(_FIG_TRAIL)
+    return stem if stem else title.strip()
+
+
+def figshare_title_groups(records):
+    ''' Group per-DOI figshare records by title stem.
+        Keyword arguments:
+          records: list of dicts with title/views/downloads/citations
+        Returns:
+          List of group dicts (stem, count, views, downloads, citations)
+          sorted by descending download count
+    '''
+    buckets = collections.defaultdict(list)
+    casings = collections.defaultdict(collections.Counter)
+    for rec in records:
+        stem = figshare_title_stem(rec['title'])
+        key = stem.lower()
+        buckets[key].append(rec)
+        casings[key][stem] += 1
+    groups = []
+    for key, recs in buckets.items():
+        groups.append({'stem': casings[key].most_common(1)[0][0],
+                       'count': len(recs),
+                       'views': sum(r['views'] for r in recs),
+                       'downloads': sum(r['downloads'] for r in recs),
+                       'citations': sum(r['citations'] for r in recs)})
+    groups.sort(key=lambda g: (-g['downloads'], -g['count']))
+    return groups
+
+
+@app.route('/figshare/<string:year>')
+@app.route('/figshare')
+def figshare_metrics(year='All'):  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
+    ''' Show figshare deposit, usage, and citation metrics.
+        figshare DOIs are DataCite-registered DOIs whose publisher is one of
+        FIGSHARE_PUBLISHERS (the Janelia portal plus generic figshare). Usage
+        counts (views/downloads/shares) come from jrc_figshare_counts; citation
+        totals/sources come from the nightly citation sync.
+    '''
+    coll = DB['dis'].dois
+    match = {"jrc_obtained_from": "DataCite", "publisher": {"$in": FIGSHARE_PUBLISHERS}}
+    if year != 'All':
+        match["jrc_publishing_date"] = {"$regex": "^" + year}
+    proj = {"doi": 1, "titles": 1, "publisher": 1, "relation": 1,
+            "jrc_publishing_date": 1, "jrc_figshare_counts": 1,
+            "jrc_citation_count": 1, "jrc_citation_sources": 1, "types": 1}
+    try:
+        docs = list(coll.find(match, proj))
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get figshare DOIs"),
+                               message=error_message(err))
+    source_name = {"datacite": "DataCite", "openalex": "OpenAlex",
+                   "scholexplorer": "ScholeXplorer", "crossref": "Crossref"}
+    total = len(docs)
+    usage = {'Views': 0, 'Downloads': 0, 'Shares': 0}
+    usage_dois = nonver = cited_dois = cite_total = 0
+    counts = []
+    by_pub = collections.defaultdict(int)
+    by_type = collections.defaultdict(int)
+    cite_src = collections.defaultdict(int)
+    by_year = {}
+    for row in docs:
+        by_pub[row.get('publisher', 'Unknown')] += 1
+        rtype = (row.get('types') or {}).get('resourceTypeGeneral') or 'Unknown'
+        by_type[rtype] += 1
+        if not DL.is_version(row):
+            nonver += 1
+        fcounts = row.get('jrc_figshare_counts') or {}
+        views = fcounts.get('views', 0)
+        downloads = fcounts.get('downloads', 0)
+        shares = fcounts.get('shares', 0)
+        if fcounts:
+            usage_dois += 1
+            usage['Views'] += views
+            usage['Downloads'] += downloads
+            usage['Shares'] += shares
+        ccount = row.get('jrc_citation_count', 0) or 0
+        if ccount:
+            cited_dois += 1
+            cite_total += ccount
+            counts.append(ccount)
+        for src, val in (row.get('jrc_citation_sources') or {}).items():
+            cite_src[source_name.get(src, src.capitalize())] += val
+        yname = (row.get('jrc_publishing_date') or '')[:4]
+        if yname.isdigit():
+            rec = by_year.setdefault(yname, {'dois': 0, 'views': 0,
+                                             'downloads': 0, 'citations': 0})
+            rec['dois'] += 1
+            rec['views'] += views
+            rec['downloads'] += downloads
+            rec['citations'] += ccount
+    if not total:
+        msg = "No figshare DOIs were found"
+        if year != 'All':
+            msg += f" for publishing year {year}"
+        html = year_pulldown('figshare') + "<br><br>" + render_warning(msg, 'warning')
+        endpoint_access()
+        return make_response(render_template('general.html', urlroot=request.url_root,
+                                             title="figshare metrics", html=html,
+                                             navbar=generate_navbar('DataCite')))
+    # ----- headline stat cards -----
+    conv = usage['Downloads'] / usage['Views'] if usage['Views'] else 0
+    cards = stat_cards([("figshare DOIs", f"{total:,}"),
+                        ("DOIs with usage data",
+                         f"{usage_dois:,} ({usage_dois/total*100:,.1f}%)"),
+                        ("Total views", f"{usage['Views']:,}"),
+                        ("Total downloads", f"{usage['Downloads']:,}"),
+                        ("Total shares", f"{usage['Shares']:,}")],
+                       div_id='fig-stats')
+    cards += stat_cards([("Downloads / view", f"{conv*100:,.1f}%"),
+                         ("DOIs cited", f"{cited_dois:,} ({cited_dois/total*100:,.1f}%)"),
+                         ("Total citations", f"{cite_total:,}")],
+                        div_id='fig-stats2')
+    # ----- usage totals -----
+    uhtml = "<h4>Usage totals</h4>"
+    uhtml += render_table(['Metric', 'Count'],
+                          [[k, f"{v:,}"] for k, v in usage.items()],
+                          table_id='fig-usage', css='tablesorter numberlast-scroll')
+    # ----- deposits & usage by publishing year -----
+    ydata = {'Year': [], 'DOIs': [], 'Downloads': []}
+    ytrows = []
+    for yname in sorted(by_year):
+        rec = by_year[yname]
+        ytrows.append([yname, f"{rec['dois']:,}", f"{rec['views']:,}",
+                       f"{rec['downloads']:,}", f"{rec['citations']:,}"])
+        ydata['Year'].append(yname)
+        ydata['DOIs'].append(rec['dois'])
+        ydata['Downloads'].append(rec['downloads'])
+    yhtml = "<h4>Deposits &amp; usage by publishing year</h4>"
+    yhtml += render_table(['Year', 'DOIs', 'Views', 'Downloads', 'Citations'],
+                          ytrows, table_id='fig-years', css='tablesorter numberlast-scroll')
+    # ----- resource type breakdown -----
+    type_data = dict(by_type)
+    thtml = "<h4>DOIs by resource type</h4>"
+    thtml += render_table(['Resource type', 'DOIs'],
+                          [[k, f"{v:,}"] for k, v in
+                           sorted(by_type.items(), key=itemgetter(1), reverse=True)],
+                          table_id='fig-types', css='tablesorter numberlast-scroll')
+    # ----- publisher breakdown -----
+    pub_data = dict(by_pub)
+    phtml = "<h4>DOIs by publisher</h4>"
+    phtml += render_table(['Publisher', 'DOIs'],
+                          [[k, f"{v:,}"] for k, v in
+                           sorted(by_pub.items(), key=itemgetter(1), reverse=True)],
+                          table_id='fig-pubs', css='tablesorter numberlast-scroll')
+    # ----- citation sources (which source surfaces figshare citations) -----
+    src_data = dict(cite_src)
+    shtml = ''
+    if cite_src:
+        shtml = "<h4>Citations by source</h4>"
+        shtml += render_table(['Source', 'Citations'],
+                              [[k, f"{v:,}"] for k, v in
+                               sorted(cite_src.items(), key=itemgetter(1), reverse=True)],
+                              table_id='fig-sources', css='tablesorter numberlast-scroll')
+        shtml += "<div style='font-size:0.85em; color:#a8c4e0; max-width:460px'>" \
+                 + "A citing work found by more than one source is counted once " \
+                 + "per source here.</div>"
+    if request.args.get('fmt') == 'json':
+        result = initialize_result()
+        result['data'] = {"dois": total, "non_versioned_dois": nonver,
+                          "usage_dois": usage_dois, "usage": usage,
+                          "downloads_per_view": round(conv, 4),
+                          "cited_dois": cited_dois, "total_citations": cite_total,
+                          "median_citations": statistics.median(counts) if counts else 0,
+                          "by_publisher": pub_data, "by_type": type_data,
+                          "citations_by_source": src_data,
+                          "by_year": by_year}
+        result['rest']['source'] = 'mongo'
+        result['rest']['row_count'] = total
+        return generate_response(result)
+    # ----- charts -----
+    chartscript = ''
+    usage_div = year_div = type_div = pub_div = src_div = ''
+    script, usage_div = DP.pie_chart(usage, "Usage totals", "metric", width=500,
+                                     fmt="{0,0}")
+    chartscript += script
+    if ydata['Year']:
+        script, year_div = DP.dual_axis_chart(
+            ydata, title="Deposits & downloads by year", x_field='Year',
+            bar_field='DOIs', line_field='Downloads', bar_label='DOIs deposited',
+            line_label='Downloads', bar_color='darkorange', bar_format="0,0",
+            line_format="0,0", width=650, height=400)
+        chartscript += script
+    script, type_div = DP.hbar_chart(type_data, "DOIs by resource type",
+                                     value_label="DOIs", width=500, height=320,
+                                     value_format="0,0", show_values=True)
+    chartscript += script
+    script, pub_div = DP.pie_chart(pub_data, "DOIs by publisher", "publisher",
+                                   width=500, fmt="{0,0}")
+    chartscript += script
+    if src_data:
+        colors = DP.get_colors_by_count(len(src_data))
+        script, src_div = DP.pie_chart(src_data, "Citations by source", "source",
+                                       width=500, colors=colors, fmt="{0,0}")
+        chartscript += script
+    def flexrow(table_html, chart_div):
+        ''' Pair a table and its chart side by side '''
+        return "<div class='flexrow' style='margin-bottom: 40px'><div class='flexcol'>" \
+               + table_html + "</div><div class='flexcol' style='margin: 10px 0 0 20px'>" \
+               + chart_div + "</div></div>"
+    title = "figshare metrics"
+    if year != 'All':
+        title += f" (year={year})"
+    html = year_pulldown('figshare') + "<br><br>" + cards \
+           + flexrow(uhtml, usage_div) + flexrow(yhtml, year_div) \
+           + flexrow(thtml, type_div) + flexrow(phtml, pub_div)
+    if shtml:
+        html += flexrow(shtml, src_div)
+    endpoint_access()
+    return make_response(render_template('bokeh.html', urlroot=request.url_root,
+                                         title=title, html=html,
+                                         chartscript=chartscript, chartdiv='',
+                                         chartscript2='', chartdiv2='',
+                                         navbar=generate_navbar('DataCite')))
+
+
+@app.route('/figshare_groups/<string:year>')
+@app.route('/figshare_groups')
+def figshare_groups(year='All'):  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
+    ''' Show figshare DOIs grouped by generalized title.
+        Many figshare deposits are series that differ only by a trailing
+        identifier ("MouseLight Neuron AA0547" -> "MouseLight Neuron"); this
+        collapses them (see figshare_title_stem) and ranks the groups both by
+        downloads and by DOI count.
+    '''
+    coll = DB['dis'].dois
+    match = {"jrc_obtained_from": "DataCite", "publisher": {"$in": FIGSHARE_PUBLISHERS}}
+    if year != 'All':
+        match["jrc_publishing_date"] = {"$regex": "^" + year}
+    proj = {"doi": 1, "titles": 1, "jrc_figshare_counts": 1, "jrc_citation_count": 1}
+    try:
+        docs = list(coll.find(match, proj))
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get figshare DOIs"),
+                               message=error_message(err))
+    records = []
+    for row in docs:
+        fcounts = row.get('jrc_figshare_counts') or {}
+        records.append({'doi': row['doi'], 'title': strip_html_tags(DL.get_title(row)),
+                        'views': fcounts.get('views', 0),
+                        'downloads': fcounts.get('downloads', 0),
+                        'citations': row.get('jrc_citation_count', 0) or 0})
+    total = len(records)
+    if not total:
+        msg = "No figshare DOIs were found"
+        if year != 'All':
+            msg += f" for publishing year {year}"
+        html = year_pulldown('figshare_groups') + "<br><br>" \
+               + render_warning(msg, 'warning')
+        endpoint_access()
+        return make_response(render_template('general.html', urlroot=request.url_root,
+                                             title="figshare title groups", html=html,
+                                             navbar=generate_navbar('DataCite')))
+    base = '/figshare_groups' if year == 'All' else f"/figshare_groups/{year}"
+    # Drill-down: ?stem=<group> lists the member DOIs of one title group
+    stem = request.args.get('stem')
+    if stem:
+        members = [r for r in records
+                   if figshare_title_stem(r['title']).lower() == stem.lower()]
+        members.sort(key=itemgetter('downloads', 'views'), reverse=True)
+        if request.args.get('fmt') == 'json':
+            result = initialize_result()
+            result['data'] = {"stem": stem, "dois": len(members), "members": members}
+            result['rest']['source'] = 'mongo'
+            result['rest']['row_count'] = len(members)
+            return generate_response(result)
+        dtitle = f"figshare group: {stem}"
+        back = f"<a href='{base}' class='btn btn-outline-primary btn-sm'>" \
+               + "&larr; all groups</a>"
+        if not members:
+            html = back + "<br><br>" \
+                   + render_warning(f"No figshare DOIs match the group "
+                                    f"\"{escape(stem)}\"", 'warning')
+            endpoint_access()
+            return make_response(render_template('general.html', urlroot=request.url_root,
+                                                 title=dtitle, html=html,
+                                                 navbar=generate_navbar('DataCite')))
+        mrows = []
+        tviews = tdl = tcit = 0
+        for rec in members:
+            tviews += rec['views']
+            tdl += rec['downloads']
+            tcit += rec['citations']
+            mrows.append([safe(doi_link(rec['doi'])), rec['title'], f"{rec['views']:,}",
+                          f"{rec['downloads']:,}", f"{rec['citations']:,}"])
+        mtable = render_table(['DOI', 'Title', 'Views', 'Downloads', 'Citations'], mrows,
+                              table_id='fig-members', css='tablesorter numberlast-scroll',
+                              footer=[fcell('TOTAL', colspan=2),
+                                      fcell(f"{tviews:,}", align='center'),
+                                      fcell(f"{tdl:,}", align='center'),
+                                      fcell(f"{tcit:,}", align='center')])
+        mcards = stat_cards([("DOIs in group", f"{len(members):,}"),
+                             ("Total views", f"{tviews:,}"),
+                             ("Total downloads", f"{tdl:,}"),
+                             ("Total citations", f"{tcit:,}")], div_id='figm-stats')
+        html = back + "<br><br>" + mcards + mtable
+        endpoint_access()
+        return make_response(render_template('general.html', urlroot=request.url_root,
+                                             title=dtitle, html=html,
+                                             navbar=generate_navbar('DataCite')))
+    groups = figshare_title_groups(records)
+    multi = [g for g in groups if g['count'] > 1]
+    grouped_dois = sum(g['count'] for g in multi)
+    largest = max(groups, key=lambda g: g['count'])
+    top_n = 20
+
+    def group_table(ordered, table_id):
+        ''' Render a grouped-title table; the stem links to the group's members '''
+        rows = []
+        for grp in ordered[:top_n]:
+            label = f"<a href='{base}?stem={quote(grp['stem'])}'>" \
+                    + f"{escape(grp['stem'])}</a>"
+            rows.append([safe(label), f"{grp['count']:,}", f"{grp['views']:,}",
+                         f"{grp['downloads']:,}", f"{grp['citations']:,}"])
+        foot = None
+        if len(groups) > top_n:
+            rest = ordered[top_n:]
+            foot = [fcell(f"+ {len(rest):,} more groups"),
+                    fcell(f"{sum(g['count'] for g in rest):,}", align='center'),
+                    fcell(f"{sum(g['views'] for g in rest):,}", align='center'),
+                    fcell(f"{sum(g['downloads'] for g in rest):,}", align='center'),
+                    fcell(f"{sum(g['citations'] for g in rest):,}", align='center')]
+        return render_table(['Group', 'DOIs', 'Views', 'Downloads', 'Citations'],
+                            rows, table_id=table_id,
+                            css='tablesorter numberlast-scroll', footer=foot)
+
+    by_dl = groups  # already sorted by downloads
+    by_cnt = sorted(groups, key=lambda g: (-g['count'], -g['downloads']))
+    if request.args.get('fmt') == 'json':
+        result = initialize_result()
+        result['data'] = {"dois": total, "groups": len(groups),
+                          "multi_doi_groups": len(multi), "grouped_dois": grouped_dois,
+                          "largest_group": {"stem": largest['stem'],
+                                            "count": largest['count']},
+                          "title_groups": [{k: g[k] for k in
+                                            ('stem', 'count', 'views', 'downloads',
+                                             'citations')} for g in groups]}
+        result['rest']['source'] = 'mongo'
+        result['rest']['row_count'] = len(groups)
+        return generate_response(result)
+    cards = stat_cards(
+        [("figshare DOIs", f"{total:,}"),
+         ("Title groups", f"{len(groups):,}"),
+         ("Multi-DOI groups", f"{len(multi):,}"),
+         ("DOIs in a multi-DOI group",
+          f"{grouped_dois:,} ({grouped_dois/total*100:,.1f}%)"),
+         (f"Largest group ({escape(largest['stem'])})", f"{largest['count']:,}")],
+        div_id='figg-stats')
+    gnote = "<div style='font-size:0.85em; color:#a8c4e0; max-width:620px; " \
+            + "margin:-8px 0 16px 0'>Groups are formed by stripping trailing " \
+            + "identifiers from each title (serials like AA0547, specimen codes " \
+            + "like jrc_mus-skin-1, versions, dates). Each group label links to " \
+            + "the list of its member DOIs.</div>"
+    dlhtml = "<h4>Title groups by downloads (top 20)</h4>" \
+             + group_table(by_dl, 'fig-grp-dl')
+    cnthtml = "<h4>Title groups by DOI count (top 20)</h4>" \
+              + group_table(by_cnt, 'fig-grp-cnt')
+    def chart_data(ordered, value_key):
+        ''' Build {label: value} for a chart. Shorten long stems with a middle
+            ellipsis (keeps the distinguishing tail, e.g. "...P7 mouse skin")
+            so same-prefixed series stay readable; a uniqueness guard prevents
+            two labels from colliding and silently dropping a bar. '''
+        data = {}
+        for grp in ordered[:15]:
+            value = grp[value_key]
+            if value_key == 'downloads' and not value:
+                continue
+            stem = grp['stem']
+            label = stem if len(stem) <= 41 else stem[:24] + '…' + stem[-16:]
+            while label in data:
+                label += ' '
+            data[label] = value
+        return data
+    grp_dl_data = chart_data(by_dl, 'downloads')
+    grp_cnt_data = chart_data(by_cnt, 'count')
+    chartscript = dl_div = cnt_div = ''
+    if grp_dl_data:
+        script, dl_div = DP.hbar_chart(grp_dl_data, "Top title groups by downloads",
+                                       value_label="Downloads", width=620, height=420,
+                                       value_format="0,0", show_values=True)
+        chartscript += script
+    if grp_cnt_data:
+        script, cnt_div = DP.hbar_chart(grp_cnt_data, "Top title groups by DOI count",
+                                        value_label="DOIs", width=620, height=420,
+                                        value_format="0,0", show_values=True)
+        chartscript += script
+
+    def flexrow(table_html, chart_div):
+        ''' Pair a table and its chart side by side '''
+        return "<div class='flexrow' style='margin-bottom: 40px'><div class='flexcol'>" \
+               + table_html + "</div><div class='flexcol' style='margin: 10px 0 0 20px'>" \
+               + chart_div + "</div></div>"
+    title = "figshare title groups"
+    if year != 'All':
+        title += f" (year={year})"
+    html = year_pulldown('figshare_groups') + "<br><br>" + cards + gnote \
+           + flexrow(dlhtml, dl_div) + flexrow(cnthtml, cnt_div)
+    endpoint_access()
+    return make_response(render_template('bokeh.html', urlroot=request.url_root,
+                                         title=title, html=html,
+                                         chartscript=chartscript, chartdiv='',
+                                         chartscript2='', chartdiv2='',
+                                         navbar=generate_navbar('DataCite')))
 
 # ******************************************************************************
 # * UI endpoints (Authorship)                                                  *
@@ -7936,7 +8398,6 @@ def dois_publisher(year='All'):
     title = "DOIs by publisher"
     if year != 'All':
         title += f" for {year}"
-    title += f" ({len(pubs):,})"
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
@@ -8250,7 +8711,7 @@ def show_journals_dois(year=None):
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
-                                         navbar=generate_navbar('Journals')))
+                                         navbar=generate_navbar('DOIs')))
 
 
 @app.route('/top_entities/<string:entity_type>/<string:year>/<string:source>/<int:top>')
@@ -9231,7 +9692,7 @@ def show_subscription_providers():
                             ("Average APC", f"${row['avg']:,.2f}")], div_id='apc-stats')
     except Exception:
         pass
-    title = f"Subscription providers ({cnt:,})"
+    title = "Subscription providers"
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
@@ -10003,7 +10464,7 @@ def peoporgsle(full=None):
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=f"{title} ({cnt:,})",
-                                         html=html, navbar=generate_navbar('External systems')))
+                                         html=html, navbar=generate_navbar('System')))
 
 
 @app.route('/people/<string:name>')
@@ -10041,7 +10502,7 @@ def people(name=None):
     endpoint_access()
     return make_response(render_template('people.html', urlroot=request.url_root,
                                          title="Search People system", content=html,
-                                         navbar=generate_navbar('External systems')))
+                                         navbar=generate_navbar('System')))
 
 
 @app.route('/peoplerec/<string:eid>')
@@ -10069,7 +10530,7 @@ def peoplerec(eid):
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
-                                         navbar=generate_navbar('External systems')))
+                                         navbar=generate_navbar('System')))
 
 
 @app.route('/ror/<string:rorid>')
@@ -10080,7 +10541,7 @@ def ror(rorid=None):
     if not rorid:
         return make_response(render_template('ror.html', urlroot=request.url_root,
                                              title="Search ROR", content="",
-                                             navbar=generate_navbar('External systems')))
+                                             navbar=generate_navbar('System')))
     try:
         resp = requests.get(f"{app.config['ROR']}{rorid}", timeout=5).json()
     except Exception as err:
@@ -10092,7 +10553,7 @@ def ror(rorid=None):
         return make_response(render_template('ror.html', urlroot=request.url_root,
                                              title="Search ROR",
                                              content=f"<br><h3>{msg}</h3>",
-                                             navbar=generate_navbar('External systems')))
+                                             navbar=generate_navbar('System')))
     link = f"<a href='{resp['id']}'>{resp['id']}</a>"
     html = f"<br><h3>{link}</h3>"
     for idx, name in enumerate(resp['names']):
@@ -10113,7 +10574,7 @@ def ror(rorid=None):
     endpoint_access()
     return make_response(render_template('ror.html', urlroot=request.url_root,
                                          title="Search ROR", content=html,
-                                         navbar=generate_navbar('External systems')))
+                                         navbar=generate_navbar('System')))
 
 # ******************************************************************************
 # * UI endpoints (Tag/affiliation)                                             *
@@ -10204,7 +10665,7 @@ def show_tag_ack(tagtype):
     html = cards + cbutton + html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title=f"{cfg['title']} ({len(tags):,})", html=html,
+                                         title=cfg['title'], html=html,
                                          navbar=generate_navbar('Tag/affiliation')))
 
 
@@ -10645,6 +11106,111 @@ def tag_nohead(aff, year='All'):
                                          title=title, html=html, oamsg=oamsg,
                                          chartscript=chartscript, chartdiv=chartdiv,
                                          navbar=generate_navbar('Tag/affiliation')))
+
+# ******************************************************************************
+# * UI endpoints (acknowledgements)                                            *
+# ******************************************************************************
+@app.route('/acksui/<string:ack>')
+def show_doi_by_ack_ui(ack):
+    ''' Show DOIs for a given acknowledgement text
+    '''
+    union = []
+    payload = dict(JOURNAL_ARTICLE)
+    payload["jrc_acknowledgements"] = {"$regex": ack, "$options" : "i"}
+    try:
+        rows = DB['dis'].dois.find(payload).sort("jrc_publishing_date", -1)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get DOIs from dois collection"),
+                               message=error_message(err))
+    internal = 0
+    for row in rows:
+        row['doi_type'] = 'internal'
+        union.append(row)
+        internal += 1
+    # External DOIs
+    external = 0
+    try:
+        rows = DB['dis'].external_dois.find(payload).sort("jrc_publishing_date", -1)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get DOIs from external_dois " \
+                                                    + "collection"),
+                               message=error_message(err))
+    for row in rows:
+        row['doi_type'] = 'external'
+        union.append(row)
+        external += 1
+    union.sort(key=lambda x: x.get("jrc_publishing_date", ""), reverse=True)
+    # show_count=False: the count is shown in the card below (with id 'totalrows',
+    # which the version/internal-external filters update)
+    html, cnt, _ = standard_ack_table(union, ack, show_count=False)
+    if not cnt:
+        return render_template('warning.html', urlroot=request.url_root,
+                               title=render_warning("Could not find DOIs", 'warning'),
+                               message=f"Could not find any DOIs with acknowledgement {ack}")
+    html = ack_stat_cards(cnt, internal, external) + html
+    title = f"DOIs with acknowledgement text <span style='color:#51b447 !important'>{ack}</span>"
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=title, html=html,
+                                         navbar=generate_navbar('Acknowledgements')))
+
+
+@app.route('/acksregexui/<string:group>')
+def show_doi_by_ack_regex_ui(group):
+    ''' Show DOIs with acknowledgements matching a group's configured regex
+    '''
+    entry = (app.config['dis'].get('ack_search_regex') or {}).get(group)
+    if not entry or not entry.get('regex'):
+        return render_template('warning.html', urlroot=request.url_root,
+                               title=render_warning("No search regex", 'warning'),
+                               message=f"No search regex is configured for {group}")
+    regex = entry['regex']
+    union = []
+    payload = dict(JOURNAL_ARTICLE)
+    payload["jrc_acknowledgements"] = {"$regex": regex, "$options" : "i"}
+    try:
+        rows = DB['dis'].dois.find(payload).sort("jrc_publishing_date", -1)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get DOIs from dois collection"),
+                               message=error_message(err))
+    internal = 0
+    for row in rows:
+        row['doi_type'] = 'internal'
+        union.append(row)
+        internal += 1
+    # External DOIs
+    external = 0
+    try:
+        rows = DB['dis'].external_dois.find(payload).sort("jrc_publishing_date", -1)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get DOIs from external_dois " \
+                                                    + "collection"),
+                               message=error_message(err))
+    for row in rows:
+        row['doi_type'] = 'external'
+        union.append(row)
+        external += 1
+    union.sort(key=lambda x: x.get("jrc_publishing_date", ""), reverse=True)
+    # show_count=False: the count is shown in the card below (with id 'totalrows',
+    # which the version/internal-external filters update)
+    html, cnt, _ = standard_ack_table(union, regex, is_regex=True, show_count=False)
+    if not cnt:
+        return render_template('warning.html', urlroot=request.url_root,
+                               title=render_warning("Could not find DOIs", 'warning'),
+                               message=f"Could not find any DOIs with acknowledgements for {group}")
+    html = ack_stat_cards(cnt, internal, external) + html
+    if entry.get('description'):
+        html = f"<p><i>Acknowledgements matching {entry['description']} " \
+               + "(case-insensitive)</i></p>" + html
+    title = f"DOIs with acknowledgements for <span style='color:#51b447 !important'>{group}</span>"
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=title, html=html,
+                                         navbar=generate_navbar('Acknowledgements')))
 
 # ******************************************************************************
 # * UI endpoints (system)                                                      *
