@@ -23,6 +23,23 @@ function tableInitialize () {
         });
       }
     });
+    // Seed any default row filters declared on a table. data-initial-hide is a
+    // space-separated list of row classes to hide on load (e.g. a cycle_filter
+    // button rendered pre-set to one of its states); data-counter names the
+    // visible-row counter span to keep in sync. Composes with the dis.js filters
+    // via the shared hide set. Requires dis.js (hiddenClasses/applyRowFilters).
+    if (typeof hiddenClasses === 'function' && typeof applyRowFilters === 'function') {
+      $('table[data-initial-hide]').each(function() {
+        var tid = this.id;
+        if (!tid) {
+          return;
+        }
+        var hidden = hiddenClasses(tid);
+        ($(this).attr('data-initial-hide') || '').split(/\s+/).filter(Boolean)
+          .forEach(function(cls) { hidden.add(cls); });
+        applyRowFilters(tid, $(this).attr('data-counter') || null);
+      });
+    }
   });
 }
 

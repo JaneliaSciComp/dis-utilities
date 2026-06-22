@@ -89,6 +89,11 @@ CLASSIFY_RULES = [
     (r'^/dois_time\b',           'chart',   4),
     (r'^/top_entities\b',        'chart',   4),
     (r'^/org_year$',             'chart',   4),
+    # DataCite repository metrics (bokeh chart pages off the DataCite menu)
+    (r'^/figshare_groups\b',     'chart',   8),
+    (r'^/figshare\b',            'chart',   8),
+    (r'^/zenodo_stats\b',        'chart',   8),
+    (r'^/zenodo_groups\b',       'chart',   8),
     # Org sub-pages col 2
     (r'^/org_detail\b',          'org',     2),
     (r'^/org_authors\b',         'org',     2),
