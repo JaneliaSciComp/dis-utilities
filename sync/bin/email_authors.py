@@ -2,7 +2,7 @@
     Email information on newly-added DOIs to authors
 '''
 
-__version__ = '1.2.0'
+__version__ = '1.3.0'
 
 import argparse
 from datetime import datetime, timedelta
@@ -163,6 +163,9 @@ def process_authors(authors, publications, cnt):
             LOGGER.warning(f"No People information found for {auth}")
             continue
         name = ' '.join([resp['nameFirstPreferred'], resp['nameLastPreferred']])
+        if not resp.get('email'):
+            LOGGER.warning(f"No email found for {name}")
+            continue
         email = DISCONFIG['developer'] if ARG.TEST else resp['email']
         subject = "Your recent publication" if len(val['citations']) == 1 \
                   else "Your recent publications"

@@ -36,7 +36,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "119.7.0"
+__version__ = "119.8.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -2002,7 +2002,10 @@ def standard_ack_table(rows, ack, is_regex=False, show_count=True):
           oacnt: number of Open Access
     '''
     header = ['Published', 'DOI', 'Acknowledgements']
-    html = "<table id='dois' class='tablesorter standard-scroll'><thead><tr>" \
+    # data-initial-hide/data-counter: default the view to journal-articles/preprints
+    # only (hide 'other' rows on load); the type cycle button below reveals all types.
+    html = "<table id='dois' class='tablesorter standard-scroll' " \
+           + "data-initial-hide='other' data-counter='totalrows'><thead><tr>" \
            + ''.join([f"<th>{itm}</th>" for itm in header]) + "</tr></thead><tbody>"
     fileoutput = ""
     cnt = oacnt = 0
@@ -2014,7 +2017,11 @@ def standard_ack_table(rows, ack, is_regex=False, show_count=True):
         row['link'] = doi_link(row['doi'])
         row['jrc_ack2'] = row['jrc_acknowledgements'].replace('\n', '<br>')
         row['jrc_ack2'] = highlight_subtext(row['jrc_ack2'], ack, is_regex=is_regex)
-        cls = [row.get('doi_type', 'internal')]
+        # 'jp' (journal-article/preprint) vs 'other' drives the type cycle button;
+        # mirrors the JOURNAL_ARTICLE query filter the endpoints used to apply.
+        is_jp = row.get('type') == 'journal-article' or row.get('subtype') == 'preprint' \
+                or (row.get('types') or {}).get('resourceTypeGeneral') == 'Preprint'
+        cls = [row.get('doi_type', 'internal'), 'jp' if is_jp else 'other']
         if version:
             cls.append('ver')
         html += f"<tr class=\'{' '.join(cls)}\'><td>" \
@@ -2029,10 +2036,17 @@ def standard_ack_table(rows, ack, is_regex=False, show_count=True):
                + "onclick=\"cycle_filter(this, 'dois', 'internal', 'external', " \
                + "'Internal', 'External', 'totalrows');\">" \
                + "Showing Internal &amp; External</button>&nbsp;"
+    # data-state='1' matches the table's data-initial-hide='other': the page loads
+    # showing journal-articles/preprints only; cycling reveals Other, then all types.
+    typebtn = "<button class=\"btn btn-outline-info\" data-state=\"1\" " \
+              + "onclick=\"cycle_filter(this, 'dois', 'jp', 'other', " \
+              + "'Journal/preprint', 'Other', 'totalrows');\">" \
+              + "Showing Journal/preprint only</button>&nbsp;"
     cbutton = "<button id='verbtn' class=\"btn btn-outline-warning\" " \
               + "onclick=\"toggler('dois', 'ver', 'totalrows');\">" \
               + "Filter versioned DOIs</button>&nbsp;"
-    html = counter + cyclebtn + cbutton + create_downloadable('standard', header, fileoutput) + html
+    html = counter + cyclebtn + typebtn + cbutton \
+           + create_downloadable('standard', header, fileoutput) + html
     return html, cnt, oacnt
 
 
@@ -3557,8 +3571,8 @@ def set_jrc_author(doi):
 @app.route('/raw/<string:resource>/<path:doi>')
 def get_raw(resource=None, doi=None):
     ''' JSON metadata for a DOI
-    resource: biorxiv, crossref, datacite, elife, elsevier, figshare, openalex, protocols.io,
-              pubmed, pmc, springer, zenodo
+    resource: biorxiv, crossref, datacite, elife, elsevier, figshare, openalex, plos,
+              protocols.io, pubmed, pmc, springer, zenodo
     '''
     doi = doi.lstrip('/').rstrip('/').lower()
     result = initialize_result()
@@ -3567,8 +3581,8 @@ def get_raw(resource=None, doi=None):
     if resource:
         resource = resource.lower()
         result['rest']['source'] = DL.doi_api_url(doi, source=resource)
-    if resource in ('biorxiv', 'elife', 'elsevier', 'openalex', 'pmc', 'pubmed', 'springer',
-                    'zenodo'):
+    if resource in ('biorxiv', 'elife', 'elsevier', 'openalex', 'plos', 'pmc', 'pubmed',
+                    'springer', 'zenodo'):
         try:
             response = DL.get_doi_record(doi, source=resource, content=content)
         except Exception as err:
@@ -4273,6 +4287,8 @@ def get_display_badges(doi, row, data, local):
         badges += " " + tiny_badge('publisher', 'Springer', f'/raw/springer/{doi}')
     elif 'zenodo' in doi.lower():
         badges += " " + tiny_badge('publisher', 'Zenodo', f'/raw/zenodo/{doi}')
+    elif '10.1371/journal.' in doi.lower():
+        badges += " " + tiny_badge('publisher', 'PLoS', f'/raw/plos/{doi}')
     rlink = f"/doi/{doi}"
     if local:
         jour = DL.get_journal(data)
@@ -5229,7 +5245,7 @@ def dois_license(year='All'):
                                              title="DOIs by license", html=html,
                                              navbar=generate_navbar('DOIs')))
     defcnt = cnt['Crossref'] + cnt['DataCite'] - data.get('Not found', 0)
-    for lic in sorted(lines.keys()):
+    for lic in sorted(lines.keys(), key=str.casefold):
         clink = f"<a href='/dois_licenser/Crossref{lines[lic]['orig']}/{year}'>" \
                 + f"{lines[lic]['Crossref']}</a>" if lines[lic]['Crossref'] else '0'
         dlink = f"<a href='/dois_licenser/DataCite{lines[lic]['orig']}/{year}'>" \
@@ -8265,7 +8281,7 @@ def show_org_authors(org_in):
     html = '<br>'.join(orgs)
     payload = {"$or": [{"managed": {"$in": orgs}}, {"affiliations": {"$in": orgs}}]}
     try:
-        rows = DB['dis'].orcid.find(payload).sort("family", 1)
+        rows = DB['dis'].orcid.find(payload).collation({"locale": "en"}).sort("family", 1)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get authors from orcid collection"),
@@ -8809,7 +8825,7 @@ def dois_publisher(year='All'):
                {"$sort": {"_id.publisher": 1}}
               ]
     try:
-        rows = DB['dis'].dois.aggregate(payload)
+        rows = DB['dis'].dois.aggregate(payload, collation=INSENSITIVE)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get publishers " \
@@ -9145,7 +9161,7 @@ def show_journals_dois(year=None):
             sub = ''
             try:
                 rows = DB['dis'].dois.distinct('publisher', {'jrc_journal': key})
-                publisher = '<br>'.join(sorted(rows))
+                publisher = '<br>'.join(sorted(rows, key=str.lower))
             except Exception as err:
                 publisher = ''
         html += f"<tr><td>{jour}</td><td>{publisher}</td>" \
@@ -9451,7 +9467,7 @@ def show_subscription_summary():
                {"$sort": {"_id.publisher": 1, "_id.type": 1}}
               ]
     try:
-        rows = DB['dis'].subscription.aggregate(payload)
+        rows = DB['dis'].subscription.aggregate(payload, collation=INSENSITIVE)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning(errmsg),
@@ -9514,7 +9530,7 @@ def show_subscription_summary_by_provider(prov):
                {"$sort": {"_id.publisher": 1, "_id.type": 1}}
               ]
     try:
-        rows = DB['dis'].subscription.aggregate(payload)
+        rows = DB['dis'].subscription.aggregate(payload, collation=INSENSITIVE)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning(errmsg),
@@ -9651,7 +9667,8 @@ def show_subscription_year(year=None):
     errmsg = "Could not get data from subscription collection"
     sortorder = [("provider", 1), ("publisher", 1), ("title", 1)]
     try:
-        rows = DB['dis'].subscription.find({f"cost.{year}": {"$exists": True}}).sort(sortorder)
+        rows = DB['dis'].subscription.find({f"cost.{year}": {"$exists": True}}) \
+                                      .collation({"locale": "en"}).sort(sortorder)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning(errmsg),
@@ -10221,7 +10238,7 @@ def show_subscription_apcs(provider=None, publisher=None):
         html = prehtml + "<br><br>" + html
     elif not publisher:
         prehtml = "<h3>Publishers</h3>"
-        for pub in sorted(publisher_list.keys()):
+        for pub in sorted(publisher_list.keys(), key=str.lower):
             prehtml += f"<a href='/subscription/apc/{provider}/{pub}'>{pub}</a><br>"
         html = prehtml + "<br><br>" + html
     title = f"APC costs for {provider}" if provider else "APC costs"
@@ -11495,7 +11512,7 @@ def orcid_affiliation(aff, year='All'):
     try:
         cnt = DB['dis'].orcid.count_documents(payload)
         if cnt:
-            rows = DB['dis'].orcid.find(payload).sort("family", 1)
+            rows = DB['dis'].orcid.find(payload).collation({"locale": "en"}).sort("family", 1)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not find affiliations " \
@@ -11585,7 +11602,9 @@ def show_doi_by_ack_ui(ack):
     ''' Show DOIs for a given acknowledgement text
     '''
     union = []
-    payload = dict(JOURNAL_ARTICLE)
+    # Search all DOI types; the type cycle button in standard_ack_table defaults
+    # the view to journal-articles/preprints and lets the user reveal the rest.
+    payload = {}
     payload["jrc_acknowledgements"] = {"$regex": ack, "$options" : "i"}
     try:
         rows = DB['dis'].dois.find(payload).sort("jrc_publishing_date", -1)
@@ -11631,14 +11650,23 @@ def show_doi_by_ack_ui(ack):
 def show_doi_by_ack_regex_ui(group):
     ''' Show DOIs with acknowledgements matching a group's configured regex
     '''
-    entry = (app.config['dis'].get('ack_search_regex') or {}).get(group)
+    # Regexes live in the search_regex collection (single source of truth, shared with
+    # the tag_janelia_acks.py tagger); group is the document key.
+    try:
+        entry = DB['dis'].search_regex.find_one({"key": group})
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not read search_regex"),
+                               message=error_message(err))
     if not entry or not entry.get('regex'):
         return render_template('warning.html', urlroot=request.url_root,
                                title=render_warning("No search regex", 'warning'),
                                message=f"No search regex is configured for {group}")
     regex = entry['regex']
     union = []
-    payload = dict(JOURNAL_ARTICLE)
+    # Search all DOI types; the type cycle button in standard_ack_table defaults
+    # the view to journal-articles/preprints and lets the user reveal the rest.
+    payload = {}
     payload["jrc_acknowledgements"] = {"$regex": regex, "$options" : "i"}
     try:
         rows = DB['dis'].dois.find(payload).sort("jrc_publishing_date", -1)
