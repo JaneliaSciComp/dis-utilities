@@ -36,7 +36,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "119.11.0"
+__version__ = "119.12.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -8959,15 +8959,29 @@ def show_open_access():
     freely-available open text for.</li>
     </ul>
     '''
+    # OpenAlex meters requests against a daily budget. Anonymous requests get $0,
+    # so we join the polite pool (mailto) and send the API key when one is set.
+    params = {'search': 'Janelia', 'mailto': app.config['EMAIL']}
+    if os.environ.get('OPENALEX_API_KEY'):
+        params['api_key'] = os.environ['OPENALEX_API_KEY']
     try:
-        resp = requests.get('https://api.openalex.org/institutions?search=Janelia', timeout=5)
-        results = resp.json()['results'][0]
-        counts = results['counts_by_year']
+        resp = requests.get(f"{app.config['OPENALEX']}institutions", params=params, timeout=5)
+        payload = resp.json()
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get institution information " \
                                                     + "from OpenAlex"),
                                message=error_message(err))
+    if 'results' not in payload:
+        # Budget-exhausted/error responses carry no 'results' key; show OpenAlex's
+        # own error text rather than a generic exception message.
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get institution information " \
+                                                    + "from OpenAlex"),
+                               message=payload.get('message') or payload.get('error') \
+                                       or 'OpenAlex returned no results')
+    results = payload['results'][0]
+    counts = results['counts_by_year']
     counts = sorted(counts, key=lambda x: x['year'])
     try:
         internal = get_oa_year_counts()
