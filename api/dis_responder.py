@@ -36,7 +36,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "119.10.0"
+__version__ = "119.11.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -125,8 +125,11 @@ NAV = {"Home": "",
        "System" : {"Database stats": "stats_database",
                    "External systems": {"Search HHMI People system": "people",
                                         "HHMI Supervisory Organizations": "orgs/full",
-                                        "ROR": "ror"},
-                   "API rate limits": "ratelimit/openalex",
+                                        "ROR": "ror",
+                                        "Janelia in OpenAlex": "openalex_stats",
+                                        "Janelia in PubMed": "pubmed_stats",
+                                        "API rate limits": "ratelimit",
+                                        "Data source record counts": "source_counts"},
                    "Controlled vocabularies": "cv",
                    "DOI relationships": "doi_relationships",
                    "Endpoints": "stats_endpoints",
@@ -10702,25 +10705,458 @@ def author_duplicates():
                                          navbar=generate_navbar('System')))
 
 
-@app.route('/ratelimit/openalex')
-def openalex_ratelimit():
-    ''' Show OpenAlex rate limit
+def _ratelimit_epoch(epoch):
+    ''' Convert an epoch-seconds value to a tz-aware UTC datetime '''
+    return datetime.fromtimestamp(int(epoch), tz=dateutil.tz.tzutc())
+
+
+def _ratelimit_fmt_reset(when):
+    ''' Format a tz-aware reset datetime in local time (em-dash if unknown) '''
+    if not when:
+        return '—'
+    return when.astimezone(dateutil.tz.gettz()).strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+def _ratelimit_record(service, window):
+    ''' Seed a normalized rate-limit record '''
+    return {'service': service, 'window': window, 'note': '', 'error': None,
+            'limit': None, 'used': None, 'remaining': None, 'resets': None}
+
+
+def _ratelimit_from_headers(rec, headers, status, limit_key, remaining_key, reset_key=None):
+    ''' Populate a record from X-RateLimit-style response headers. Used is derived
+        as limit - remaining. Sets rec['error'] if the expected headers are absent.
     '''
-    resp = requests.get('https://api.openalex.org/rate-limit', timeout=5,
-                        headers={'Authorization': \
-                                 f'Bearer {os.environ["OPENALEX_API_KEY"]}'}).json()
-    limit = resp['rate_limit']['credits_limit']
-    used = resp['rate_limit']['credits_used']
-    dt_object_utc = dateutil.parser.parse(resp['rate_limit']['resets_at'])
-    dt_object_local = dt_object_utc.astimezone(dateutil.tz.gettz())
-    ral = dt_object_local.strftime("%Y-%m-%d %H:%M:%S %Z")
-    html = "<br><span style='font: normal 800 16pt sans-serif; color: white;'>" \
-           + f"{used:,} / {limit:,} &nbsp;({used/limit*100:.2f}%) credits used<br></span>" \
-           + "<br><span style='font: normal 400 16pt sans-serif'>" \
-           + f"Resets at {ral}</span>"
+    lim, rem = headers.get(limit_key), headers.get(remaining_key)
+    if lim is not None and rem is not None:
+        rec['limit'], rec['remaining'] = int(lim), int(rem)
+        rec['used'] = rec['limit'] - rec['remaining']
+        if reset_key and headers.get(reset_key):
+            rec['resets'] = _ratelimit_epoch(headers[reset_key])
+    else:
+        rec['error'] = f"no rate-limit headers (HTTP {status})"
+    return rec
+
+
+def _ratelimit_openalex():
+    ''' OpenAlex: dedicated /rate-limit endpoint returns a daily credit budget '''
+    rec = _ratelimit_record('OpenAlex', 'Daily')
+    try:
+        rl = requests.get('https://api.openalex.org/rate-limit', timeout=8,
+                          headers={'Authorization':
+                                   f'Bearer {os.environ["OPENALEX_API_KEY"]}'}
+                          ).json()['rate_limit']
+        rec['limit'] = rl['credits_limit']
+        rec['used'] = rl['credits_used']
+        rec['remaining'] = rl.get('credits_remaining', rl['credits_limit'] - rl['credits_used'])
+        rec['resets'] = dateutil.parser.parse(rl['resets_at'])
+        if rl.get('daily_budget_usd'):
+            rec['note'] = f"${rl.get('daily_used_usd', 0):.2f} / " \
+                          + f"${rl['daily_budget_usd']:.2f} budget"
+    except Exception as err:
+        rec['error'] = str(err)
+    return rec
+
+
+def _ratelimit_elsevier():
+    ''' Elsevier: weekly quota exposed as X-RateLimit-* headers on any response '''
+    rec = _ratelimit_record('Elsevier', 'Weekly')
+    try:
+        resp = requests.get('https://api.elsevier.com/content/search/sciencedirect',
+                            headers={'X-ELS-APIKey': os.environ['ELSEVIER_API_KEY'],
+                                     'Accept': 'application/json'},
+                            params={'query': 'janelia', 'count': 1}, timeout=12)
+        _ratelimit_from_headers(rec, resp.headers, resp.status_code,
+                                'X-RateLimit-Limit', 'X-RateLimit-Remaining',
+                                'X-RateLimit-Reset')
+    except Exception as err:
+        rec['error'] = str(err)
+    return rec
+
+
+def _ratelimit_wos():
+    ''' Web of Science Starter: per-day quota (plus a per-second burst) headers '''
+    rec = _ratelimit_record('Web of Science', 'Daily')
+    try:
+        resp = requests.get('https://api.clarivate.com/apis/wos-starter/v1/documents',
+                            headers={'X-ApiKey': os.environ['WOS_API_KEY']},
+                            params={'q': 'TS=janelia', 'limit': 1, 'page': 1}, timeout=15)
+        _ratelimit_from_headers(rec, resp.headers, resp.status_code,
+                                'x-ratelimit-limit-day', 'x-ratelimit-remaining-day')
+        burst = resp.headers.get('x-ratelimit-limit-second')
+        if burst:
+            rec['note'] = f"{burst}/sec burst"
+    except Exception as err:
+        rec['error'] = str(err)
+    return rec
+
+
+def _ratelimit_zenodo():
+    ''' Zenodo: per-minute window exposed as x-ratelimit-* headers '''
+    rec = _ratelimit_record('Zenodo', 'Per minute')
+    try:
+        resp = requests.get('https://zenodo.org/api/records',
+                            headers={'Authorization':
+                                     f'Bearer {os.environ["ZENODO_API_KEY"]}'},
+                            params={'size': 1}, timeout=12)
+        _ratelimit_from_headers(rec, resp.headers, resp.status_code,
+                                'x-ratelimit-limit', 'x-ratelimit-remaining',
+                                'x-ratelimit-reset')
+    except Exception as err:
+        rec['error'] = str(err)
+    return rec
+
+
+@app.route('/ratelimit')
+def ratelimit_all():
+    ''' Show API rate-limit / usage status for every service that exposes it
+        (OpenAlex, Elsevier, Web of Science, Zenodo). Each row is fetched live;
+        a service that errors or stops exposing headers shows an error note
+        rather than breaking the page. Springer and NCBI expose no usable
+        limit and are omitted.
+    '''
+    records = [_ratelimit_openalex(), _ratelimit_elsevier(),
+               _ratelimit_wos(), _ratelimit_zenodo()]
+    records.sort(key=lambda rec: rec['service'].lower())
+    trows = []
+    for rec in records:
+        if rec['error']:
+            trows.append([rec['service'], cell('—', align='right'),
+                          cell('—', align='right'), cell('—', align='right'),
+                          cell('—', align='right'), rec['window'], '—',
+                          safe(f"<span style='color:#e74c3c'>{escape(rec['error'])}</span>")])
+            continue
+        limit, used, remaining = rec['limit'], rec['used'], rec['remaining']
+        pct = used / limit * 100 if limit else 0
+        color = '#e74c3c' if pct >= 90 else '#f0c674' if pct >= 70 else '#7ed321'
+        # color must live on a <span>: ".standard-scroll td" forces cell text
+        # color with !important, which an inline <td> color would not override
+        trows.append([rec['service'],
+                      cell(f"{used:,}", sort=used, align='right'),
+                      cell(f"{remaining:,}", sort=remaining, align='right'),
+                      cell(f"{limit:,}", sort=limit, align='right'),
+                      cell(safe(f"<span style='color:{color}'>{pct:.1f}%</span>"),
+                           sort=round(pct, 2), align='right'),
+                      rec['window'], _ratelimit_fmt_reset(rec['resets']),
+                      rec['note'] or ''])
+    note = "<div style='font-size:0.85em; color:#a8c4e0; max-width:700px; " \
+           + "margin-top:10px'>Limits are read live. OpenAlex has a dedicated " \
+           + "rate-limit endpoint; the others report limits as response headers, so " \
+           + "viewing this page consumes one request against Elsevier, Web of Science, " \
+           + "and Zenodo. Springer (no limit headers) and NCBI (fixed 10 req/sec " \
+           + "throttle, no quota) are omitted.</div>"
+    html = render_table(['Service', 'Used', 'Remaining', 'Limit', '% used', 'Window',
+                         'Resets at', 'Notes'], trows, table_id='ratelimits',
+                        css='tablesorter standard-scroll') + note
+    endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title="OpenAlex rate limits", html=html,
+                                         title="API rate limits", html=html,
                                          navbar=generate_navbar('System')))
+
+
+# Janelia Research Campus in OpenAlex (ROR 013sk6x84)
+JANELIA_OPENALEX_ID = 'I195573530'
+
+
+@app.route('/openalex_stats')
+def openalex_stats():
+    ''' Show Janelia's publication footprint in OpenAlex (institution profile:
+        works, citations, h-index, i10-index, and a by-year breakdown), all
+        affiliation-matched. See /pubmed_stats for the PubMed counterpart.
+    '''
+    # OpenAlex institution profile (fatal on failure - it is the page)
+    try:
+        resp = requests.get(f'https://api.openalex.org/institutions/{JANELIA_OPENALEX_ID}',
+                            headers={'Authorization':
+                                     f'Bearer {os.environ["OPENALEX_API_KEY"]}'}, timeout=10)
+        inst = resp.json()
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get OpenAlex institution data"),
+                               message=error_message(err))
+    if resp.status_code != 200 or 'works_count' not in inst:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get OpenAlex institution data"),
+                               message=f"OpenAlex returned HTTP {resp.status_code} for "
+                                       + f"institution {JANELIA_OPENALEX_ID}")
+    works = inst.get('works_count', 0)
+    cited = inst.get('cited_by_count', 0)
+    stats = inst.get('summary_stats') or {}
+    by_year = inst.get('counts_by_year') or []
+    if request.args.get('fmt') == 'json':
+        result = initialize_result()
+        result['rest']['source'] = 'openalex'
+        result['data'] = {"openalex_id": JANELIA_OPENALEX_ID, "ror": inst.get('ror'),
+                          "works_count": works, "cited_by_count": cited,
+                          "summary_stats": stats, "counts_by_year": by_year}
+        result['rest']['row_count'] = 1
+        return generate_response(result)
+    cards = stat_cards([("Works", f"{works:,}"),
+                        ("Citations", f"{cited:,}"),
+                        ("h-index", f"{stats.get('h_index', 0):,}"),
+                        ("i10-index", f"{stats.get('i10_index', 0):,}"),
+                        ("2-yr mean citedness", f"{stats.get('2yr_mean_citedness', 0):.2f}")],
+                       div_id='oa-inst-stats')
+    note = "<div style='font-size:0.85em; color:#a8c4e0; max-width:700px; " \
+           + "margin:-8px 0 16px 0'>OpenAlex institution " \
+           + f"<a href='https://openalex.org/{JANELIA_OPENALEX_ID}' target='_blank'>" \
+           + f"{JANELIA_OPENALEX_ID}</a> (ROR 013sk6x84); works and citations are " \
+           + "affiliation-matched. Yearly counts reflect OpenAlex's own " \
+           + "attribution and may not match the dois collection.</div>"
+    glossary = "<div style='font-size:0.85em; color:#a8c4e0; max-width:700px; " \
+               + "margin:0 0 16px 0'><b>h-index</b>: h works each cited at least h " \
+               + "times.<br><b>i10-index</b>: number of works with at least 10 " \
+               + "citations.<br><b>2-yr mean citedness</b>: average citations in the " \
+               + "current year to works published in the previous two years (OpenAlex's " \
+               + "institution-level analog of the journal impact factor).</div>"
+    # By-year table (newest first) paired with a works/citations chart (chronological)
+    ytrows = []
+    ydata = {'Year': [], 'Works': [], 'Citations': []}
+    for rec in sorted(by_year, key=lambda r: r['year']):
+        yname = str(rec['year'])
+        ytrows.append([yname, f"{rec.get('works_count', 0):,}",
+                       f"{rec.get('oa_works_count', 0):,}", f"{rec.get('cited_by_count', 0):,}"])
+        ydata['Year'].append(yname)
+        ydata['Works'].append(rec.get('works_count', 0))
+        ydata['Citations'].append(rec.get('cited_by_count', 0))
+    yhtml = "<h4>Works &amp; citations by year</h4>"
+    yhtml += render_table(['Year', 'Works', 'OA works', 'Cited-by'], ytrows[::-1],
+                          table_id='oa-years', css='tablesorter numberlast-scroll')
+    chartscript = year_div = ''
+    if ydata['Year']:
+        chartscript, year_div = DP.dual_axis_chart(
+            ydata, title="Works & citations by year", x_field='Year',
+            bar_field='Works', line_field='Citations', bar_label='Works',
+            line_label='Cited-by', bar_color='darkorange', bar_format="0,0",
+            line_format="0,0", width=650, height=400)
+    html = cards + note + glossary \
+           + "<div class='flexrow'><div class='flexcol'>" + yhtml + "</div>" \
+           + "<div class='flexcol' style='margin: 10px 0 0 20px'>" + year_div + "</div></div>"
+    endpoint_access()
+    return make_response(render_template('bokeh.html', urlroot=request.url_root,
+                                         title="Janelia in OpenAlex", html=html,
+                                         chartscript=chartscript, chartdiv='',
+                                         chartscript2='', chartdiv2='',
+                                         navbar=generate_navbar('System')))
+
+
+# Janelia first appears in PubMed affiliations ~2007 (campus opened 2006)
+PUBMED_AFFIL_TERM = 'Janelia[Affiliation]'
+PUBMED_START_YEAR = 2007
+
+
+def _pubmed_count(term, **extra):
+    ''' Return the PubMed esearch result count for a term (raises on error).
+        extra kwargs (e.g. datetype/mindate/maxdate) are passed to esearch.
+    '''
+    params = {'db': 'pubmed', 'term': term, 'retmode': 'json', 'retmax': 0,
+              'api_key': os.environ.get('NCBI_API_KEY', '')}
+    params.update(extra)
+    resp = requests.get('https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi',
+                        params=params, timeout=10)
+    return int(resp.json()['esearchresult']['count'])
+
+
+@app.route('/pubmed_stats')
+def pubmed_stats():
+    ''' Show Janelia's publication footprint in PubMed (affiliation-matched):
+        total publications, the PMC (free full text) subset, reviews, and a
+        by-year breakdown. PubMed is a bibliographic index, not a citation
+        database, so no citation/h-index metrics are available (see
+        /openalex_stats for those). The by-year figures are one esearch per
+        year, so the page makes ~20 NCBI calls.
+    '''
+    try:
+        total = _pubmed_count(PUBMED_AFFIL_TERM)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get PubMed data"),
+                               message=error_message(err))
+    # PMC subset and reviews are non-fatal (shown as n/a on failure)
+    try:
+        pmc = _pubmed_count(f"{PUBMED_AFFIL_TERM} AND pubmed pmc[sb]")
+    except Exception:
+        pmc = None
+    try:
+        reviews = _pubmed_count(f"{PUBMED_AFFIL_TERM} AND review[pt]")
+    except Exception:
+        reviews = None
+    # By-year counts: one esearch per year; skip any year that errors
+    by_year = {}
+    for yname in range(PUBMED_START_YEAR, date.today().year + 1):
+        try:
+            by_year[yname] = _pubmed_count(PUBMED_AFFIL_TERM, datetype='pdat',
+                                           mindate=str(yname), maxdate=str(yname))
+        except Exception:
+            continue
+    if request.args.get('fmt') == 'json':
+        result = initialize_result()
+        result['rest']['source'] = 'pubmed'
+        result['data'] = {"term": PUBMED_AFFIL_TERM, "total": total, "in_pmc": pmc,
+                          "reviews": reviews, "by_year": by_year}
+        result['rest']['row_count'] = 1
+        return generate_response(result)
+    if pmc is None:
+        pmc_label = "n/a"
+    elif total:
+        pmc_label = f"{pmc:,} ({pmc/total*100:,.1f}%)"
+    else:
+        pmc_label = f"{pmc:,}"
+    cards = stat_cards([("Total publications", f"{total:,}"),
+                        ("In PMC (free full text)", pmc_label),
+                        ("Reviews", f"{reviews:,}" if reviews is not None else "n/a")],
+                       div_id='pm-stats')
+    note = "<div style='font-size:0.85em; color:#a8c4e0; max-width:700px; " \
+           + "margin:-8px 0 16px 0'>Affiliation-matched via the " \
+           + "<code>Janelia[Affiliation]</code> filter. PubMed is a bibliographic " \
+           + "index, not a citation database, so no citation or h-index metrics are " \
+           + "available - see <a href='/openalex_stats'>Janelia in OpenAlex</a> for " \
+           + "those.</div>"
+    glossary = "<div style='font-size:0.85em; color:#a8c4e0; max-width:700px; " \
+               + "margin:0 0 16px 0'><b>Total publications</b>: PubMed records with a " \
+               + "Janelia affiliation.<br><b>In PMC (free full text)</b>: the subset " \
+               + "available as free full text in PubMed Central (an open-access " \
+               + "indicator).<br><b>Reviews</b>: works tagged as review articles " \
+               + "(PubMed publication type &quot;review&quot;).</div>"
+    # By-year table (newest first) paired with a chronological publications chart
+    ytrows = []
+    ydata = {'Year': [], 'Publications': []}
+    for yname in sorted(by_year):
+        ytrows.append([str(yname), f"{by_year[yname]:,}"])
+        ydata['Year'].append(str(yname))
+        ydata['Publications'].append(by_year[yname])
+    yhtml = "<h4>Publications by year</h4>"
+    yhtml += render_table(['Year', 'Publications'], ytrows[::-1], table_id='pm-years',
+                          css='tablesorter numberlast-scroll')
+    chartscript = year_div = ''
+    if ydata['Year']:
+        chartscript, year_div = DP.dual_axis_chart(
+            ydata, title="Publications by year", x_field='Year',
+            bar_field='Publications', bar_label='Publications', bar_color='steelblue',
+            bar_format="0,0", width=650, height=400)
+    html = cards + note + glossary \
+           + "<div class='flexrow'><div class='flexcol'>" + yhtml + "</div>" \
+           + "<div class='flexcol' style='margin: 10px 0 0 20px'>" + year_div + "</div></div>"
+    endpoint_access()
+    return make_response(render_template('bokeh.html', urlroot=request.url_root,
+                                         title="Janelia in PubMed", html=html,
+                                         chartscript=chartscript, chartdiv='',
+                                         chartscript2='', chartdiv2='',
+                                         navbar=generate_navbar('System')))
+
+
+# Total holdings of each external data source we have a /raw call for. Eight
+# expose a clean total (fetched live); the other five do not (_SOURCE_COUNT_NA).
+_SOURCE_UA = {'User-Agent': 'JaneliaDIS/1.0 (mailto:svirskasr@janelia.hhmi.org)'}
+_SOURCE_COUNT_NA = {
+    'Elsevier': 'No public total (broad queries blocked)',
+    'Springer': 'No public total (broad queries blocked)',
+    'protocols.io': 'Requires protocols.io API authentication',
+    'figshare': 'API has no global count endpoint (even authenticated)',
+}
+
+
+def _zenodo_total(payload):
+    ''' Zenodo hits.total is an int on some deployments, {value: n} on others '''
+    tot = payload['hits']['total']
+    return tot['value'] if isinstance(tot, dict) else tot
+
+
+def _srccount(source, url, extract, params=None, headers=None, note=''):
+    ''' Fetch one source's total record count into a normalized record. Sets
+        error (rather than raising) so a single bad source can't break the page.
+    '''
+    rec = {'source': source, 'count': None, 'note': note, 'error': None}
+    try:
+        resp = requests.get(url, params=params, headers=headers, timeout=15)
+        if resp.status_code != 200:
+            rec['error'] = f"HTTP {resp.status_code}"
+        else:
+            rec['count'] = int(extract(resp.json()))
+    except Exception as err:
+        rec['error'] = str(err)
+    return rec
+
+
+def _source_counts():
+    ''' Collect total record counts for every /raw source: live for the nine
+        that expose a usable total, n/a for the other four.
+    '''
+    oa = {'Authorization': f'Bearer {os.environ.get("OPENALEX_API_KEY", "")}'}
+    zen = {'Authorization': f'Bearer {os.environ.get("ZENODO_API_KEY", "")}'}
+    einfo = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/einfo.fcgi'
+    nkey = os.environ.get('NCBI_API_KEY', '')
+    recs = [
+        _srccount('OpenAlex', 'https://api.openalex.org/works',
+                  lambda j: j['meta']['count'], params={'per-page': 1}, headers=oa),
+        _srccount('Crossref', 'https://api.crossref.org/works',
+                  lambda j: j['message']['total-results'], params={'rows': 0},
+                  headers=_SOURCE_UA),
+        _srccount('DataCite', 'https://api.datacite.org/dois',
+                  lambda j: j['meta']['total'], params={'page[size]': 1}),
+        _srccount('PubMed', einfo, lambda j: j['einforesult']['dbinfo'][0]['count'],
+                  params={'db': 'pubmed', 'retmode': 'json', 'api_key': nkey}),
+        _srccount('PMC', einfo, lambda j: j['einforesult']['dbinfo'][0]['count'],
+                  params={'db': 'pmc', 'retmode': 'json', 'api_key': nkey}),
+        _srccount('Zenodo', 'https://zenodo.org/api/records', _zenodo_total,
+                  params={'size': 1}, headers=zen),
+        _srccount('PLoS', 'http://api.plos.org/search',
+                  lambda j: j['response']['numFound'],
+                  params={'q': '*:*', 'rows': 0, 'wt': 'json'}),
+        _srccount('eLife', 'https://api.elifesciences.org/search',
+                  lambda j: j['total'], params={'per-page': 1}, headers=_SOURCE_UA),
+        _srccount('bioRxiv',
+                  'https://api.biorxiv.org/details/biorxiv/2013-01-01/'
+                  + f'{date.today().isoformat()}/0',
+                  lambda j: j['messages'][0]['count_new_papers'],
+                  note='Distinct new preprints (excludes versions)'),
+    ]
+    for source, reason in _SOURCE_COUNT_NA.items():
+        recs.append({'source': source, 'count': None, 'note': reason, 'error': None})
+    return recs
+
+
+@app.route('/source_counts')
+def source_counts():
+    ''' Show the total number of records each external data source holds (the
+        service's own holdings, not Janelia-specific) for every source we have a
+        /raw call for. Counts are fetched live - one request per source - so the
+        nine sources with a usable total are queried on each view; the other
+        four expose no public total and show as n/a.
+    '''
+    recs = _source_counts()
+    # Largest holdings first; sources without a count (n/a or error) sort last
+    recs.sort(key=lambda r: (r['count'] is None, -(r['count'] or 0)))
+    if request.args.get('fmt') == 'json':
+        result = initialize_result()
+        result['rest']['source'] = 'external'
+        result['data'] = [{'source': r['source'], 'count': r['count'],
+                           'note': r['note'], 'error': r['error']} for r in recs]
+        result['rest']['row_count'] = len(recs)
+        return generate_response(result)
+    trows = []
+    for r in recs:
+        if r['count'] is not None:
+            cnt = cell(f"{r['count']:,}", sort=r['count'], align='right')
+        else:
+            cnt = cell(safe("<span style='color:#a8c4e0'>n/a</span>"), sort=-1, align='right')
+        rnote = r['note']
+        if r['error']:
+            err = f"<span style='color:#e74c3c'>({escape(r['error'])})</span>"
+            rnote = f"{rnote} {err}" if rnote else err
+        trows.append([r['source'], cnt, safe(rnote)])
+    intro = "<div style='font-size:0.85em; color:#a8c4e0; max-width:720px; " \
+            + "margin-top:10px'>Total records each external service holds (the " \
+            + "service's own holdings, not Janelia-specific), fetched live - so this " \
+            + "page makes one request per source. Four of the 13 <code>/raw</code> " \
+            + "sources expose no usable public total and show as n/a.</div>"
+    html = render_table(['Source', 'Records', 'Notes'], trows, table_id='srccounts',
+                        css='tablesorter standard-scroll') + intro
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="Data source record counts", html=html,
+                                         navbar=generate_navbar('System')))
+
 
 @app.route('/orcid/bulk_search')
 def orcid_bulk_search():
