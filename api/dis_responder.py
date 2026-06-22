@@ -36,7 +36,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "119.9.0"
+__version__ = "119.10.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -70,7 +70,7 @@ NAV = {"Home": "",
                               "DataCite cited DOIs": "citation_list/datacite"}},
        "DataCite": {"DataCite DOI stats": "datacite_dois",
                     "DataCite DOI downloads": "datacite_downloads",
-                    "figshare": {"figshare metrics": "figshare",
+                    "figshare": {"figshare metrics": "figshare_stats",
                                  "figshare title groups": "figshare_groups"},
                     "Zenodo": {"Zenodo metrics": "zenodo_stats",
                                "Zenodo deposits": "zenodo_groups"}},
@@ -116,7 +116,7 @@ NAV = {"Home": "",
                                        "Acknowledgement": "dois_tag_ack/ack",
                                        "Lab": "dois_lab"},
                            "Top DOI tags by year": "dois_top",
-                           "Author affiliations": {"P&C": "orcid_tag",
+                           "Author affiliations": {"P&C": "affiliations",
                                                    "Janelia": "janelia_affiliations"},
                            "Labs": "labs",
                            "Projects": "projects"},
@@ -6740,7 +6740,7 @@ def datacite_metrics():
 @app.route('/citation_metrics/<string:source>')
 @app.route('/citation_metrics')
 def citation_metrics(source='datacite'):
-    ''' Show citation totals by source (and figshare usage totals for DataCite)
+    ''' Show citation totals by source
     '''
     source = source.lower()
     obtained_from = {"datacite": "DataCite", "crossref": "Crossref"}
@@ -6857,35 +6857,9 @@ def citation_metrics(source='datacite'):
         ydata['Citations'].append(cited['citations'])
         ydata['Cited'].append(pct)
     yhtml = "<h4>Citations by publishing year</h4>"
+    # Table shows years newest-first; the chart keeps ascending (chronological) order
     yhtml += render_table(['Year', 'DOIs', 'Cited DOIs', '% cited', 'Unique citations'],
-                          ytrows, table_id='years', css='tablesorter numberlast-scroll')
-    # figshare usage (figshare DOIs are DataCite-registered, so DataCite only)
-    fig_data = {}
-    fcards = fhtml = ''
-    if source == 'datacite':
-        payload = [{"$match": {"jrc_figshare_counts": {"$exists": True}}},
-                   {"$project": {"kv": {"$objectToArray": "$jrc_figshare_counts"}}},
-                   {"$unwind": "$kv"},
-                   {"$group": {"_id": "$kv.k", "dois": {"$sum": 1}, "total": {"$sum": "$kv.v"}}},
-                   {"$sort": {"total": -1}}]
-        try:
-            rows = list(coll.aggregate(payload))
-            fig_dois = coll.count_documents({"jrc_figshare_counts": {"$exists": True}})
-        except Exception as err:
-            return render_template('error.html', urlroot=request.url_root,
-                                   title=render_warning("Could not get figshare counts " \
-                                                        + "from dois collection"),
-                                   message=error_message(err))
-        trows = []
-        for row in rows:
-            label = row['_id'].capitalize()
-            fig_data[label] = row['total']
-            trows.append([label, f"{row['dois']:,}", f"{row['total']:,}"])
-        fcards = stat_cards([("DOIs with figshare usage", f"{fig_dois:,}")],
-                            div_id='dcm-fig-stats')
-        fhtml = "<h4>figshare usage</h4>"
-        fhtml += render_table(['Metric', 'DOIs', 'Count'], trows, table_id='figshare',
-                              css='tablesorter numberlast-scroll')
+                          ytrows[::-1], table_id='years', css='tablesorter numberlast-scroll')
     if request.args.get('fmt') == 'json':
         result = initialize_result()
         result['data'] = {"source": obtained,
@@ -6898,14 +6872,13 @@ def citation_metrics(source='datacite'):
                           "avg_per_doi": round(unique_total/cite_dois, 2) if cite_dois else 0,
                           "median_per_doi": statistics.median(counts) if counts else 0,
                           "last_updated": max(updated).isoformat() if updated else None,
-                          "by_year": by_year,
-                          "figshare": fig_data}
+                          "by_year": by_year}
         result['rest']['source'] = 'mongo'
         # data is a single stats object, not a row list; report the number of
         # cited DOIs the stats summarize rather than the dict's key count
         result['rest']['row_count'] = cite_dois
         return generate_response(result)
-    chartscript = cite_div = fig_div = year_div = ''
+    chartscript = cite_div = year_div = ''
     if cite_data:
         colors = DP.get_colors_by_count(len(cite_data))
         script, cite_div = DP.pie_chart(cite_data, "Citations by source", "source",
@@ -6918,11 +6891,6 @@ def citation_metrics(source='datacite'):
                                               bar_format="0,0", line_format="0%",
                                               width=650, height=400)
         chartscript += script
-    if fig_data:
-        script, fig_div = DP.hbar_chart(fig_data, "figshare usage",
-                                        value_label="Count", width=500, height=300,
-                                        value_format="0,0", show_values=True)
-        chartscript += script
     # Cards (with freshness/version notes) on their own full-width rows, then
     # each table paired with its chart in a flex row so the chart lines up
     # with the table, not the cards
@@ -6933,12 +6901,7 @@ def citation_metrics(source='datacite'):
            + "<div class='flexrow' style='margin-bottom: 40px'><div class='flexcol'>" + yhtml \
            + "</div>" \
            + "<div class='flexcol' style='margin: 10px 0 0 20px'>" + year_div + "</div></div>"
-    if fhtml:
-        html += fcards \
-                + "<div class='flexrow'><div class='flexcol'>" + fhtml + "</div>" \
-                + "<div class='flexcol' style='margin: 10px 0 0 20px'>" + fig_div + "</div></div>"
-    title = f"{obtained} citation/figshare metrics" if source == 'datacite' \
-            else f"{obtained} citation metrics"
+    title = f"{obtained} citation metrics"
     endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title=title, html=html,
@@ -7027,8 +6990,8 @@ def figshare_title_groups(records):
     return groups
 
 
-@app.route('/figshare/<string:year>')
-@app.route('/figshare')
+@app.route('/figshare_stats/<string:year>')
+@app.route('/figshare_stats')
 def figshare_metrics(year='All'):  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
     ''' Show figshare deposit, usage, and citation metrics.
         figshare DOIs are DataCite-registered DOIs whose publisher is one of
@@ -11286,10 +11249,23 @@ def janelia_affiliations():
                                          html=html, navbar=generate_navbar('Tag/affiliation')))
 
 
-@app.route('/orcid_tag')
-def orcid_tag():
-    ''' Show ORCID tags (affiliations) with counts
+@app.route('/affiliations')
+def orcid_affiliations():
     '''
+    Show ORCID affiliations with author counts
+    Browsers (Accept: text/html) get the HTML page; other clients get the
+    per-affiliation author/ORCID counts and SupOrg status as JSON.
+    ---
+    tags:
+      - ORCID
+    responses:
+      200:
+        description: HTML page (browser) or affiliation summary as JSON
+      500:
+        description: MongoDB error
+    '''
+    expected = 'html' if 'Accept' in request.headers \
+                         and 'html' in request.headers['Accept'] else 'json'
     payload = [{"$match": {"affiliations": {"$ne": None}}},
                {"$unwind" : "$affiliations"},
                {"$project": {"_id": 0, "affiliations": 1, "orcid": 1}},
@@ -11300,16 +11276,45 @@ def orcid_tag():
     try:
         orgs = DL.get_supervisory_orgs(DB['dis'].suporg)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get supervisory orgs"),
-                               message=error_message(err))
+        if expected == 'html':
+            return render_template('error.html', urlroot=request.url_root,
+                                   title=render_warning("Could not get supervisory orgs"),
+                                   message=error_message(err))
+        raise InvalidUsage(str(err), 500) from err
     try:
-        rows = DB['dis'].orcid.aggregate(payload)
+        # locale "en" collation sorts affiliations case-insensitively (dictionary
+        # order) rather than MongoDB's default uppercase-before-lowercase
+        rows = DB['dis'].orcid.aggregate(payload, collation={"locale": "en"})
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get affiliations " \
-                                                    + "from orcid collection"),
-                               message=error_message(err))
+        if expected == 'html':
+            return render_template('error.html', urlroot=request.url_root,
+                                   title=render_warning("Could not get affiliations " \
+                                                        + "from orcid collection"),
+                                   message=error_message(err))
+        raise InvalidUsage(str(err), 500) from err
+    if expected == 'json':
+        result = initialize_result()
+        result['rest']['source'] = 'mongo'
+        result['data'] = []
+        for row in rows:
+            name = row['_id']
+            authors = row['count']
+            with_orcid = len(row['orcid'])
+            if name in orgs:
+                if orgs[name]:
+                    status = 'active' if 'active' in orgs[name] else 'inactive'
+                else:
+                    status = 'no code'
+            else:
+                status = 'none'
+            result['data'].append({"affiliation": name,
+                                   "authors": authors,
+                                   "authors_with_orcid": with_orcid,
+                                   "orcid_percent": round(with_orcid / authors * 100, 2)
+                                                    if authors else 0,
+                                   "suporg": status})
+        result['rest']['row_count'] = len(result['data'])
+        return generate_response(result)
     try:
         total_authors = DB['dis'].orcid.count_documents({"affiliations": {"$ne": None}})
         total_orcid = DB['dis'].orcid.count_documents({"affiliations": {"$ne": None},
@@ -11506,8 +11511,34 @@ def show_projects(option=None):
 @app.route('/tag/<path:aff>/<string:year>')
 @app.route('/tag/<path:aff>')
 def orcid_affiliation(aff, year='All'):
-    ''' Show ORCID tags (affiliations or projects) with counts
     '''
+    Show ORCID tag (affiliation or project) information
+    Browsers (Accept: text/html) get the HTML page; other clients get the
+    matching orcid records as JSON (_id and employeeId omitted).
+    ---
+    tags:
+      - ORCID
+    parameters:
+      - in: path
+        name: aff
+        schema:
+          type: string
+        required: true
+        description: Affiliation or project tag name (e.g. Biology)
+      - in: path
+        name: year
+        schema:
+          type: string
+        required: false
+        description: Publishing year to filter on (defaults to All)
+    responses:
+      200:
+        description: HTML page (browser) or matching orcid records as JSON
+      500:
+        description: MongoDB error
+    '''
+    expected = 'html' if 'Accept' in request.headers \
+                         and 'html' in request.headers['Accept'] else 'json'
     # Authors
     payload = {"affiliations": aff}
     try:
@@ -11515,10 +11546,23 @@ def orcid_affiliation(aff, year='All'):
         if cnt:
             rows = DB['dis'].orcid.find(payload).collation({"locale": "en"}).sort("family", 1)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not find affiliations " \
-                                                    + "in orcid collection"),
-                               message=error_message(err))
+        if expected == 'html':
+            return render_template('error.html', urlroot=request.url_root,
+                                   title=render_warning("Could not find affiliations " \
+                                                        + "in orcid collection"),
+                                   message=error_message(err))
+        raise InvalidUsage(str(err), 500) from err
+    if expected == 'json':
+        result = initialize_result()
+        result['rest']['source'] = 'mongo'
+        result['data'] = []
+        if cnt:
+            for row in rows:
+                row.pop('_id', None)       # ObjectId; not JSON-serializable
+                row.pop('employeeId', None)
+                result['data'].append(row)
+        result['rest']['row_count'] = len(result['data'])
+        return generate_response(result)
     htmlp = get_tag_details(aff) + "<br>"
     if cnt:
         htmlp += f"<hr><p>Number of authors: <span id='totalrowsa'>{cnt:,}</span></p>"
