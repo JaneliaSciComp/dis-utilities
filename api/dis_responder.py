@@ -36,7 +36,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "119.8.0"
+__version__ = "119.9.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -120,7 +120,8 @@ NAV = {"Home": "",
                                                    "Janelia": "janelia_affiliations"},
                            "Labs": "labs",
                            "Projects": "projects"},
-       "Acknowledgements": {"Acknowledgement stats": "acknowledgement_stats"},
+       "Acknowledgements": {"Acknowledgement stats": "acknowledgement_stats",
+                            "Search by project or department": "acksregexsearch"},
        "System" : {"Database stats": "stats_database",
                    "External systems": {"Search HHMI People system": "people",
                                         "HHMI Supervisory Organizations": "orgs/full",
@@ -11643,6 +11644,34 @@ def show_doi_by_ack_ui(ack):
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
+                                         navbar=generate_navbar('Acknowledgements')))
+
+
+@app.route('/acksregexsearch')
+def show_acks_regex_search():
+    ''' Show a pulldown of all search_regex keys; selecting one navigates to
+        the matching /acksregexui/<key> result page.
+    '''
+    # Keys live in the search_regex collection (single source of truth, shared with
+    # the tag_janelia_acks.py tagger). Each doc is {key, regex, description}.
+    try:
+        rows = DB['dis'].search_regex.find({}).collation({"locale": "en"}).sort("key", 1)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not read search_regex"),
+                               message=error_message(err))
+    keys = '<option value="">Select a project or department</option>'
+    for row in rows:
+        key = row.get('key')
+        if not key:
+            continue
+        # description, when present, is shown as a hover tooltip on the option
+        desc = row.get('description', '')
+        title = f' title="{escape(desc)}"' if desc else ''
+        keys += f'<option value="{escape(key)}"{title}>{escape(key)}</option>'
+    endpoint_access()
+    return make_response(render_template('acks_search.html', urlroot=request.url_root,
+                                         keys=keys,
                                          navbar=generate_navbar('Acknowledgements')))
 
 

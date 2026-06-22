@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block script %}
+<script>
+  function find_acks_regex() {
+    var key = $("#acksregexkey").val();
+    if (!key) {
+      alert("You must select a project or department");
+      return;
+    }
+    // search_regex keys map directly to the /acksregexui/<key> result page
+    url = "/acksregexui/" + encodeURIComponent(key);
+    window.location = url;
+  }
+</script>
+{% endblock %}
+
+{% block content %}
+<h2>Search acknowledgements by project or department</h2>
+<span style='color:goldenrod'><i class='fa-solid fa-warning'></i>This feature is experimental</span><br><br>
+<form onsubmit="find_acks_regex(); return false;">
+<div class="flexcontainer">
+  <div class="flexitem">
+  <span class="form-control-lg">Project or department:</span>
+  </div>
+  <div class="flexitem">
+    <select class="form-control form-control-lg" id="acksregexkey" onchange="find_acks_regex();">
+      {{ keys | safe }}
+    </select>
+  </div>
+  <div class="flexitem">
+    <button type="submit" id="acksregexb" class="btn btn-primary" onclick="find_acks_regex(); return false;" href="#">Look up</button>
+  </div>
+</div>
+</form>
+{% endblock %}

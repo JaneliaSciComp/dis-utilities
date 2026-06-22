@@ -7,7 +7,7 @@
  "sub_cost_map": {"Journal - Collection": "Collection", "Journal - Individual": "Journal", "Journal - Contract Package": "Collection", "Ebook Collection": "Collection", "Book - Collection": "Collection", "Database": "Database", "DataService": "DataService", "Website": "Website"},
  "sub_type_map": {"Book Series": "Book series", "Book Series Volume": "Book series", "Handbook Series": "Book series"},
  "valid_types": ["Book", "Book series", "Database", "DataService", "Journal", "Monograph", "Repository"],
- "ack_search_regex": {"Visiting Scientist Program": {"regex": "Visiting Scientists? Program", "description": "\"Visiting Scientist Program\" or \"Visiting Scientists Program\""}},
+ "ack_search_regex": {"Visiting Scientist Program": {"regex": "(?:\\bVisiting\\s+(?:Scientist|Researcher)s?\\s+Program|(?:Janelia\\s+(?:Farm\\s+)?)?\\bVisitor\\s+Program(?:\\s+at\\s+Janelia)?)", "description": "\"Visiting Scientist/Researcher(s) Program\", or \"Visitor Program\" optionally prefixed with \"Janelia\"/\"Janelia Farm\" or suffixed with \"at Janelia\""}},
  "developer": "svirskasr@hhmi.org",
  "datacite": "laym@hhmi.org",
  "creceivers": ["acquarolel@hhmi.org", "svirskasr@hhmi.org"],
