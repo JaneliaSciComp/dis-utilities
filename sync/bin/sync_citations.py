@@ -125,7 +125,7 @@
         (falling back to the native citationCount).
 '''
 
-__version__ = '1.4.0'
+__version__ = '1.5.0'
 
 import argparse
 import collections
@@ -172,6 +172,9 @@ ARG = DISCONFIG = LOGGER = None
 # record, used as a floor on the citing-DOI union.
 SOURCES = {'datacite': {'label': 'DataCite', 'count_field': 'citationCount'},
            'crossref': {'label': 'Crossref', 'count_field': 'is-referenced-by-count'}}
+# Sentinel returned by openalex_citing when the cited_by_count matches the
+# previously-stored OpenAlex count — signals "no change, skip pagination".
+_OA_UNCHANGED = object()
 # External sources
 OPENALEX_WORK = 'https://api.openalex.org/works/doi:'
 OPENALEX_WORKS = 'https://api.openalex.org/works'
@@ -358,12 +361,16 @@ def with_openalex_auth(params):
     return params
 
 
-def openalex_citing(doi):  # pylint: disable=too-many-return-statements
+def openalex_citing(doi, existing_oa_count=None):  # pylint: disable=too-many-return-statements
     ''' Get the set of DOIs citing this DOI from OpenAlex
         Keyword arguments:
           doi: DOI string
+          existing_oa_count: previously-stored OpenAlex citation count (or None).
+                             If the live cited_by_count matches this, pagination is
+                             skipped and _OA_UNCHANGED is returned.
         Returns:
-          set of citing DOIs (empty if the work is unknown or uncited), or None on error
+          set of citing DOIs (empty if the work is unknown or uncited),
+          _OA_UNCHANGED if the count is unchanged, or None on error
     '''
     resp = get_with_retry(f"{OPENALEX_WORK}{doi.lower()}",
                           with_openalex_auth({'select': 'id,cited_by_count'}), 20)
@@ -380,6 +387,8 @@ def openalex_citing(doi):  # pylint: disable=too-many-return-statements
         return None
     if not data.get('cited_by_count'):
         return set()
+    if existing_oa_count is not None and data['cited_by_count'] == existing_oa_count:
+        return _OA_UNCHANGED
     wid = (data.get('id') or '').rsplit('/', 1)[-1]
     if not wid:
         return set()
@@ -709,7 +718,7 @@ def fetch_doi(row):
             'native': row.get(SOURCES[ARG.SOURCE]['count_field'], 0) or 0,
             'existing': row.get('jrc_citation_count'),
             'existing_dois': row.get('jrc_citing_dois') or [],
-            'openalex': openalex_citing(doi),
+            'openalex': openalex_citing(doi, (row.get('jrc_citation_sources') or {}).get('openalex')),
             'scholex': scholix_citing(doi),
             'datacite_dois': DATACITE_CITING.get(doi),
             'is_figshare': bool(fid),
@@ -741,15 +750,18 @@ def combine_counts(res, graphql, source='datacite'):
     existing = res['existing']
     # Baseline for "increased": the count stored on the previous run (0 if none).
     previous = existing if isinstance(existing, int) else 0
-    openalex = res['openalex']        # set of citing DOIs, or None on error
+    openalex = res['openalex']        # set of citing DOIs, _OA_UNCHANGED, or None on error
     scholex = res['scholex']
+    oa_unchanged = openalex is _OA_UNCHANGED
+    if oa_unchanged:
+        openalex = None             # treat like a non-error skip for union purposes
     oa_n = None if openalex is None else len(openalex)
     sx_n = None if scholex is None else len(scholex)
     # True union of identifiable citing DOIs across the available sources
     union = set()
     union.update(openalex or set())
     union.update(scholex or set())
-    errored = openalex is None or scholex is None
+    errored = (openalex is None and not oa_unchanged) or scholex is None
     # DataCite GraphQL (citing DOIs) only when enabled - it is slow, so optional
     dc_n = None
     if graphql:
@@ -757,8 +769,8 @@ def combine_counts(res, graphql, source='datacite'):
         dc_n = None if datacite_dois is None else len(datacite_dois)
         union.update(datacite_dois or set())
         errored = errored or datacite_dois is None
-    # On a source error, don't lose citing DOIs we already had stored
-    if errored:
+    # On a source error or an unchanged OpenAlex result, preserve existing citing DOIs
+    if errored or oa_unchanged:
         union.update(filter(None, (normalize_doi(cd) for cd in res['existing_dois'])))
     citing = sorted(union)
     # The registrar contributes a count but no DOIs, so keep it as a floor
@@ -837,7 +849,10 @@ def finalize_doi(res, monitor=None):
     doi = res['doi']
     native = res['native']
     # Per-source lookup outcome counters (a raw None result means that source errored)
-    COUNT['openalex_found' if res['openalex'] is not None else 'openalex_error'] += 1
+    if res['openalex'] is _OA_UNCHANGED:
+        COUNT['openalex_unchanged'] += 1
+    else:
+        COUNT['openalex_found' if res['openalex'] is not None else 'openalex_error'] += 1
     COUNT['scholex_found' if res['scholex'] is not None else 'scholex_error'] += 1
     if ARG.GRAPHQL:
         COUNT['datacite_found' if res['datacite_dois'] is not None
@@ -1083,6 +1098,7 @@ def processing():  # pylint: disable=too-many-locals,too-many-statements
         f"{label} DOIs processed:            {COUNT['read']:,}\n"
         + f"OpenAlex lookups OK (errors):       {COUNT['openalex_found']:,} "
         + f"({COUNT['openalex_error']:,})\n"
+        + f"OpenAlex unchanged (skipped):       {COUNT['openalex_unchanged']:,}\n"
         + f"ScholeXplorer lookups OK (errors):  {COUNT['scholex_found']:,} "
         + f"({COUNT['scholex_error']:,})\n"
         + dc_line
