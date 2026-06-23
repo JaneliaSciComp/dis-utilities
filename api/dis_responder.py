@@ -36,7 +36,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "119.16.0"
+__version__ = "119.17.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -11400,16 +11400,29 @@ def people(name=None):
 def peoplerec(eid):
     ''' Show a single People record
     '''
+    expected = 'html' if 'Accept' in request.headers \
+                         and 'html' in request.headers['Accept'] else 'json'
     try:
         rec = JRC.call_people_by_id(eid)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning(f"Could not get People data for {eid}"),
-                               message=error_message(err))
+        if expected == 'html':
+            return render_template('error.html', urlroot=request.url_root,
+                                   title=render_warning(f"Could not get People data for {eid}"),
+                                   message=error_message(err))
+        raise InvalidUsage(str(err), 500) from err
     if not rec:
-        return render_template('warning.html', urlroot=request.url_root,
-                               title=render_warning(f"Could not find People record for {eid}"),
-                               message="No record found")
+        if expected == 'html':
+            return render_template('warning.html', urlroot=request.url_root,
+                                   title=render_warning(f"Could not find People record for {eid}"),
+                                   message="No record found")
+        raise InvalidUsage(f"Could not find People record for {eid}", 404)
+    if expected == 'json':
+        for field in ['employeeId', 'managerId']:
+            rec.pop(field, None)
+        result = initialize_result()
+        result['rest']['source'] = 'people'
+        result['data'] = rec
+        return generate_response(result)
     title = f"{rec['nameFirstPreferred']} {rec['nameLastPreferred']}"
     for field in ['employeeId', 'managerId']: # Remove employeeId
         if field in rec:
@@ -11417,7 +11430,7 @@ def peoplerec(eid):
     if 'photoURL' in rec:
         title += f"&nbsp;<img src='{rec['photoURL']}' width=100 height=100 " \
                  + f"alt='Photo of {rec['nameFirstPreferred']}'>"
-    html = f"<div class='scroll' style='height:750px'><pre>{json.dumps(rec, indent=2)}</pre></div>"
+    html = f"<div class='codescroll-full'><pre>{json.dumps(rec, indent=2)}</pre></div>"
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
@@ -12018,7 +12031,33 @@ def orcid_affiliation(aff, year='All'):
         if cnt:
             for row in rows:
                 row.pop('_id', None)       # ObjectId; not JSON-serializable
-                row.pop('employeeId', None)
+                orcid_affiliations = row.pop('affiliations', [])
+                eid = row.pop('employeeId', None)
+                if row.get('alumni'):
+                    row['previous_affiliations'] = orcid_affiliations
+                elif eid:
+                    try:
+                        people = JRC.call_people_by_id(eid)
+                    except Exception:
+                        people = None
+                    if people:
+                        current_set = {a['supOrgName'] for a in people.get('affiliations', [])
+                                       if 'supOrgName' in a}
+                        cc_descr = people.get('ccDescr') or ''
+                        current, previous = [], []
+                        for a in orcid_affiliations:
+                            if a in current_set:
+                                current.append(a)
+                            elif a == cc_descr:
+                                row['department'] = a
+                            else:
+                                previous.append(a)
+                        row['current_affiliations'] = current
+                        row['previous_affiliations'] = previous
+                    else:
+                        row['previous_affiliations'] = orcid_affiliations
+                else:
+                    row['previous_affiliations'] = orcid_affiliations
                 result['data'].append(row)
         result['rest']['row_count'] = len(result['data'])
         return generate_response(result)
