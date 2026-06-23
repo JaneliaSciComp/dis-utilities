@@ -70,6 +70,11 @@
 
     ENVIRONMENT
         OPENALEX_EMAIL contact address for the OpenAlex polite pool (required).
+        OPENALEX_API_KEY OpenAlex API key (optional). OpenAlex meters by a daily
+                         budget; the anonymous polite pool is ~$0.10/day (~1,000
+                         requests) and returns 429 with a multi-hour Retry-After
+                         when exhausted. A key raises the budget (~$1/day) and is
+                         sent as the api_key query parameter when set.
         MongoDB connection comes from the JRC "databases" config
 
     USAGE
@@ -226,6 +231,12 @@ DATACITE_TIMEOUT = 120
 DATACITE_CITING = {}    # doi -> set of citing DOIs (or None on error), filled up front
 # Per-thread HTTP session (a requests Session is safest used one-per-thread)
 THREAD = threading.local()
+# Cap on how long a single Retry-After is honored before giving up the attempt.
+# OpenAlex budget-exhaustion 429s carry a Retry-After up to ~7h (budget resets at
+# midnight UTC); without a cap every worker would sleep for hours and the run would
+# appear hung. Capping lets the attempt fail fast so the run degrades to the other
+# sources (combine_counts preserves any previously-stored count) instead of freezing.
+RETRY_AFTER_MAX = 120
 
 
 def http_session():
@@ -308,7 +319,7 @@ def get_with_retry(url, params, timeout, tries=3, json_body=None, headers=None):
                     wait = int(resp.headers.get('Retry-After', wait))
                 except (ValueError, TypeError):
                     pass
-            sleep(wait)
+            sleep(min(wait, RETRY_AFTER_MAX))
     return resp
 
 
@@ -330,6 +341,23 @@ def normalize_doi(value):
     return doi or None
 
 
+def with_openalex_auth(params):
+    ''' Add OpenAlex auth/identity to a request's query params: the polite-pool
+        contact email (always) and the API key (when OPENALEX_API_KEY is set). The
+        key draws on a larger daily budget than the anonymous pool, avoiding the
+        budget-exhaustion 429s that otherwise stall the run.
+        Keyword arguments:
+          params: request query-parameter dict (mutated in place and returned)
+        Returns:
+          the params dict with 'mailto' (and 'api_key' if available) added
+    '''
+    params['mailto'] = os.environ['OPENALEX_EMAIL']
+    key = os.environ.get('OPENALEX_API_KEY')
+    if key:
+        params['api_key'] = key
+    return params
+
+
 def openalex_citing(doi):  # pylint: disable=too-many-return-statements
     ''' Get the set of DOIs citing this DOI from OpenAlex
         Keyword arguments:
@@ -338,8 +366,7 @@ def openalex_citing(doi):  # pylint: disable=too-many-return-statements
           set of citing DOIs (empty if the work is unknown or uncited), or None on error
     '''
     resp = get_with_retry(f"{OPENALEX_WORK}{doi.lower()}",
-                          {'mailto': os.environ['OPENALEX_EMAIL'],
-                           'select': 'id,cited_by_count'}, 20)
+                          with_openalex_auth({'select': 'id,cited_by_count'}), 20)
     if resp is not None and resp.status_code == 404:
         return set()
     if resp is None or resp.status_code != 200:
@@ -360,9 +387,8 @@ def openalex_citing(doi):  # pylint: disable=too-many-return-statements
     cursor = '*'
     while cursor:
         resp = get_with_retry(OPENALEX_WORKS,
-                              {'mailto': os.environ['OPENALEX_EMAIL'],
-                               'filter': f"cites:{wid}", 'select': 'doi',
-                               'per-page': 200, 'cursor': cursor}, 30)
+                              with_openalex_auth({'filter': f"cites:{wid}", 'select': 'doi',
+                                                  'per-page': 200, 'cursor': cursor}), 30)
         if resp is None or resp.status_code != 200:
             return None
         try:
