@@ -4,10 +4,11 @@
     - 
 '''
 
-__version__ = '2.0.0'
+__version__ = '2.2.0'
 
 import argparse
 import collections
+from datetime import datetime, timedelta
 from operator import attrgetter
 import os
 import sys
@@ -60,13 +61,17 @@ def call_responder(server, endpoint, timeout=10):
            else (os.environ.get('CONFIG_SERVER_URL') if server else "")) + endpoint
     try:
         req = requests.get(url, timeout=timeout,
-                           headers={'Authorization': f'Bearer {os.environ["OPENALEX_API_KEY"]}'})
+                           params={'api_key': os.environ["OPENALEX_API_KEY"]})
     except requests.exceptions.RequestException as err:
         terminate_program(f"Could not fetch from {url}\n{str(err)}")
     if req.status_code == 429:
         raise Exception("Rate limit exceeded")
     if req.status_code != 200:
         terminate_program(f"Status: {str(req.status_code)} ({url})")
+    for hdr in ('x-ratelimit-limit', 'x-ratelimit-remaining', 'x-ratelimit-reset',
+                'ratelimit-limit', 'ratelimit-remaining', 'ratelimit-reset'):
+        if hdr in req.headers:
+            LOGGER.info(f"OpenAlex {hdr}: {req.headers[hdr]}")
     return req.json()
 
 
@@ -122,9 +127,11 @@ def get_works():
         Returns:
           List of works
     '''
+    cutoff = (datetime.now() - timedelta(days=ARG.DAYS)).strftime('%Y-%m-%d')
+    LOGGER.info(f"Fetching works updated since {cutoff}")
     base = "/works?filter=authorships.affiliations.institution_ids:" \
-           + f"https://openalex.org/I195573530&mailto={DISCONFIG['developer']}" \
-           + "&per-page=200&cursor="
+           + f"https://openalex.org/I195573530,from_updated_date:{cutoff}" \
+           + f"&mailto={DISCONFIG['developer']}&per-page=200&cursor="
     cursor = "*"
     rows = []
     cnt = 1
@@ -134,10 +141,10 @@ def get_works():
             resp = call_responder('openalex', base + cursor)
             rows.extend(resp['results'])
             LOGGER.info(f"Found {len(rows):,}/{resp['meta']['count']:,} works")
+            cursor = resp['meta']['next_cursor'] if resp['meta']['next_cursor'] else None
         except Exception as err:
             terminate_program(f"Error getting OpenAlex works on call {cnt}: {err}")
         cnt += 1
-        cursor = resp['meta']['next_cursor'] if resp['meta']['next_cursor'] else None
     LOGGER.debug(f"Found {len(rows)} works")
     return rows
 
@@ -214,7 +221,7 @@ def janelia_author(row, doi):
             continue
         if in_collection(auth):
             name = 1
-        if name or orcid and doi not in OUTPUT['ready']:
+        if (name or orcid) and doi not in OUTPUT['ready']:
             OUTPUT['ready'][doi] = [auth['author']['display_name'],
                                     row['publication_date'], hdate, get_title(row)]
             return True
@@ -339,6 +346,8 @@ def processing():
 if __name__ == '__main__':
     PARSER = argparse.ArgumentParser(
         description="Find new works from OpenAlex")
+    PARSER.add_argument('--days', dest='DAYS', type=int, default=3,
+                        help='Number of days to look back for updated works (default: 3)')
     PARSER.add_argument('--orcid', dest='ORCID', action='store_true',
                         default=False, help='Allow authors with Janelia ORCIDs')
     PARSER.add_argument('--test', dest='TEST', action='store_true',
