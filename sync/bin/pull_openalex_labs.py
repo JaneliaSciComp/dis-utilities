@@ -6,11 +6,11 @@
     - The lab head (or any other author) has a Janelia affiliation
 '''
 
-__version__ = '6.0.0'
+__version__ = '6.1.0'
 
 import argparse
 import collections
-from datetime import datetime
+from datetime import datetime, timedelta
 from operator import attrgetter
 import os
 import sys
@@ -62,13 +62,17 @@ def call_responder(server, endpoint, timeout=10):
            else (os.environ.get('CONFIG_SERVER_URL') if server else "")) + endpoint
     try:
         req = requests.get(url, timeout=timeout,
-                           headers={'Authorization': f'Bearer {os.environ["OPENALEX_API_KEY"]}'})
+                           params={'api_key': os.environ["OPENALEX_API_KEY"]})
     except requests.exceptions.RequestException as err:
         terminate_program(f"Could not fetch from {url}\n{str(err)}")
     if req.status_code == 429:
         raise Exception("Rate limit exceeded")
     if req.status_code != 200:
         terminate_program(f"Status: {str(req.status_code)} ({url})")
+    for hdr in ('x-ratelimit-limit', 'x-ratelimit-remaining', 'x-ratelimit-reset',
+                'ratelimit-limit', 'ratelimit-remaining', 'ratelimit-reset'):
+        if hdr in req.headers:
+            LOGGER.info(f"OpenAlex {hdr}: {req.headers[hdr]}")
     return req.json()
 
 
@@ -138,8 +142,9 @@ def get_author_works(orcid, author):
         Returns:
           List of works
     '''
-    base = f"/works?filter=author.orcid:{orcid}&mailto={DISCONFIG['developer']}" \
-           + "&per-page=200&cursor="
+    cutoff = (datetime.now() - timedelta(days=ARG.DAYS)).strftime('%Y-%m-%d')
+    base = f"/works?filter=author.orcid:{orcid},from_updated_date:{cutoff}" \
+           + f"&mailto={DISCONFIG['developer']}&per-page=200&cursor="
     cursor = "*"
     rows = []
     cnt = 1
@@ -148,10 +153,10 @@ def get_author_works(orcid, author):
         try:
             resp = call_responder('openalex', base + cursor)
             rows.extend(resp['results'])
+            cursor = resp['meta']['next_cursor'] if resp['meta']['next_cursor'] else None
         except Exception as err:
             terminate_program(f"Error getting OpenAlex works for {author} on call {cnt}: {err}")
         cnt += 1
-        cursor = resp['meta']['next_cursor'] if resp['meta']['next_cursor'] else None
     LOGGER.debug(f"Found {len(rows)} works for {orcid}")
     return rows
 
@@ -398,6 +403,8 @@ def processing():
 if __name__ == '__main__':
     PARSER = argparse.ArgumentParser(
         description="Find new works for current lab heads")
+    PARSER.add_argument('--days', dest='DAYS', type=int, default=3,
+                        help='Number of days to look back for updated works (default: 3)')
     PARSER.add_argument('--orcid', dest='ORCID', action='store',
                         default=None, help='ORCID to process')
     PARSER.add_argument('--alumni', dest='ALUMNI', action='store_true',
