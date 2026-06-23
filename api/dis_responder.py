@@ -1234,7 +1234,10 @@ def add_orcid_controls(orc, html):
         try:
             olink = f"{app.config['OPENALEX']}authors?filter=orcid:{orc['orcid']}" \
                     + f"&mailto={app.config['EMAIL']}"
-            resp = requests.get(olink, timeout=5)
+            oa_params = {}
+            if os.environ.get('OPENALEX_API_KEY'):
+                oa_params['api_key'] = os.environ['OPENALEX_API_KEY']
+            resp = requests.get(olink, params=oa_params, timeout=5)
             if resp.status_code == 200:
                 html += f" {tiny_badge('info', 'Show OpenAlex data', olink)}"
         except Exception:

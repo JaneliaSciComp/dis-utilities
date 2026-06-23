@@ -588,6 +588,8 @@ def search_openalex():
         params = {'filter': flt, 'per-page': OPENALEX_PAGE_SIZE, 'cursor': cursor,
                   'mailto': OPENALEX_MAILTO,
                   'select': 'id,doi,title,publication_date,locations'}
+        if os.environ.get('OPENALEX_API_KEY'):
+            params['api_key'] = os.environ['OPENALEX_API_KEY']
         try:
             resp = _request_with_retry('GET', OPENALEX_API, params=params, headers=ARXIV_HEADERS)
             page = resp.json()
