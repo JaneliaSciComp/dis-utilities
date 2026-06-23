@@ -36,7 +36,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "119.15.0"
+__version__ = "119.16.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -55,7 +55,7 @@ DOWNLOAD_ICON = '<i class="fa-solid fa-arrow-down" ' \
 # Navigation
 NAV = {"Home": "",
        "DOIs": {"DOIs by insertion date": "dois_insertpicker",
-                "DOI stats": "dois_source",
+                "DOI metrics": "dois_source",
                 "DOIs by": {"Month": "dois_time/month", "Year": "dois_time/year",
                             "Journal": "journals_dois", "License": "dois_license",
                             "Publisher": "dois_publisher",
@@ -68,7 +68,7 @@ NAV = {"Home": "",
                               "DataCite metrics": "citation_metrics/datacite",
                               "Crossref cited DOIs": "citation_list/crossref",
                               "DataCite cited DOIs": "citation_list/datacite"}},
-       "DataCite": {"DataCite DOI stats": "datacite_dois",
+       "DataCite": {"DataCite DOI metrics": "datacite_dois",
                     "DataCite DOI downloads": "datacite_downloads",
                     "figshare": {"figshare metrics": "figshare_stats",
                                  "figshare title groups": "figshare_groups"},
@@ -120,9 +120,9 @@ NAV = {"Home": "",
                                                    "Janelia": "janelia_affiliations"},
                            "Labs": "labs",
                            "Projects": "projects"},
-       "Acknowledgements": {"Acknowledgement stats": "acknowledgement_stats",
+       "Acknowledgements": {"Acknowledgement metrics": "acknowledgement_stats",
                             "Search by project or department": "acksregexsearch"},
-       "System" : {"Database stats": "stats_database",
+       "System" : {"Database metrics": "stats_database",
                    "External systems": {"Search HHMI People system": "people",
                                         "HHMI Supervisory Organizations": "orgs/full",
                                         "ROR": "ror",
@@ -4153,7 +4153,7 @@ def show_acknowledgement_stats(limit=10):
     # and top-journal tables (the template's title is left empty for this).
     summary = render_table(['Collection', 'Count', 'Total', '%'], trows, table_id='ack_summary',
                            css='tablesorter standard-scroll')
-    html = f"<h2>Acknowledgement statistics</h2>{summary}"
+    html = f"<h2>Acknowledgement metrics</h2>{summary}"
     int_types = render_table(['Type', 'Count'],
                              [[typ, f"{cnt:,}"] for typ, cnt
                               in sorted(dois_type_data.items(), key=itemgetter(1), reverse=True)],
@@ -5428,7 +5428,7 @@ def dois_report(year=None):
         rows = coll.aggregate(payload)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get journal figshare stats"),
+                               title=render_warning("Could not get journal figshare metrics"),
                                message=error_message(err))
     if cnt:
         cnt = 0
@@ -6579,7 +6579,7 @@ def datacite_dois():
     html = cards + html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title="DataCite DOI stats", html=html,
+                                         title="DataCite DOI metrics", html=html,
                                          navbar=generate_navbar('DataCite')))
 
 
@@ -12286,13 +12286,13 @@ def stats_database():
                                 }
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get collection stats"),
+                               title=render_warning("Could not get collection metrics"),
                                message=error_message(err))
     try:
         dbstat = DB['dis'].command('dbStats')
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get database stats"),
+                               title=render_warning("Could not get database metrics"),
                                message=error_message(err))
     db_data = dbstat.get('dataSize', 0)
     db_storage = dbstat.get('storageSize', 0)
@@ -12370,7 +12370,7 @@ def stats_database():
                            footer=footer))
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title="Database statistics", html=html,
+                                         title="Database metrics", html=html,
                                          navbar=generate_navbar('System')))
 
 
@@ -12483,7 +12483,7 @@ def stats_endpoints():
         rows = DB['dis'].api_endpoint_log.aggregate(payload)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get endpoint stats"),
+                               title=render_warning("Could not get endpoint metrics"),
                                message=error_message(err))
     trows = []
     for row in rows:
