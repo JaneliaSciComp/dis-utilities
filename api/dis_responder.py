@@ -36,7 +36,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "119.13.0"
+__version__ = "119.14.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -10883,9 +10883,11 @@ def openalex_stats():
     '''
     # OpenAlex institution profile (fatal on failure - it is the page)
     try:
+        oa_params = {}
+        if os.environ.get('OPENALEX_API_KEY'):
+            oa_params['api_key'] = os.environ['OPENALEX_API_KEY']
         resp = requests.get(f'https://api.openalex.org/institutions/{JANELIA_OPENALEX_ID}',
-                            headers={'Authorization':
-                                     f'Bearer {os.environ["OPENALEX_API_KEY"]}'}, timeout=10)
+                            params=oa_params, timeout=10)
         inst = resp.json()
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
@@ -11099,7 +11101,6 @@ def _source_counts():
     ''' Collect total record counts for every /raw source: live for the nine
         that expose a usable total, n/a for the other four.
     '''
-    oa = {'Authorization': f'Bearer {os.environ.get("OPENALEX_API_KEY", "")}'}
     zen = {'Authorization': f'Bearer {os.environ.get("ZENODO_API_KEY", "")}'}
     einfo = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/einfo.fcgi'
     nkey = os.environ.get('NCBI_API_KEY', '')
