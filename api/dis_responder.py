@@ -36,7 +36,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "119.12.0"
+__version__ = "119.13.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -11103,9 +11103,12 @@ def _source_counts():
     zen = {'Authorization': f'Bearer {os.environ.get("ZENODO_API_KEY", "")}'}
     einfo = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/einfo.fcgi'
     nkey = os.environ.get('NCBI_API_KEY', '')
+    oa_params = {'per-page': 1}
+    if os.environ.get('OPENALEX_API_KEY'):
+        oa_params['api_key'] = os.environ['OPENALEX_API_KEY']
     recs = [
         _srccount('OpenAlex', 'https://api.openalex.org/works',
-                  lambda j: j['meta']['count'], params={'per-page': 1}, headers=oa),
+                  lambda j: j['meta']['count'], params=oa_params),
         _srccount('Crossref', 'https://api.crossref.org/works',
                   lambda j: j['message']['total-results'], params={'rows': 0},
                   headers=_SOURCE_UA),

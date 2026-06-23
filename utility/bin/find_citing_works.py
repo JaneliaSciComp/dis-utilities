@@ -13,6 +13,7 @@ import argparse
 import collections
 import json
 from operator import attrgetter
+import os
 import sys
 import time
 import pyalex
@@ -221,6 +222,8 @@ def process_dois():
     '''
     cdict = {}
     pyalex.config.email = "svirskasr@hhmi.org"
+    if "OPENALEX_API_KEY" in os.environ:
+        pyalex.config.api_key = os.environ["OPENALEX_API_KEY"]
     if ARG.DOI:
         dois = [ARG.DOI]
     else:
