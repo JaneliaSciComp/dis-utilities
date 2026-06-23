@@ -36,7 +36,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "119.14.0"
+__version__ = "119.15.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -1279,7 +1279,9 @@ def get_orcid_from_db(oid, use_eid=False, bare=False, show="full"):
                + f"' target='_blank'>{orc['userIdO365']}</a>"
         html += f"<tr><td>User ID:</td><td>{link}</td></tr>"
     if 'affiliations' in orc:
-        html += f"<tr><td>Affiliations:</td><td>{', '.join(orc['affiliations'])}</td></tr>"
+        alinks = ', '.join(f"<a href='/tag/{requests.utils.quote(a)}'>{a}</a>"
+                           for a in orc['affiliations'])
+        html += f"<tr><td>Affiliations:</td><td>{alinks}</td></tr>"
     html += "</table><br>"
     html = add_orcid_controls(orc, html)
     html += "<br>"
