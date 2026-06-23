@@ -81,7 +81,7 @@ from tqdm import tqdm
 import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
 
-__version__ = '1.0.0'
+__version__ = '1.1.0'
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation,no-member
 
@@ -326,10 +326,14 @@ def processing():
             DB['dis']['dois'].update_one({"doi": row['doi']},
                                          {"$set": {"jrc_acknowledgements": row['ack']}})
         COUNT['updated'] += 1
-    print(f"eLife DOIs added:    {COUNT['elife_add']:,}")
-    print(f"Elsevier DOIs added: {COUNT['elsevier_add']:,}")
-    print(f"PMC DOIs added:      {COUNT['pmc_add']:,}")
-    print(f"arXiv DOIs added:    {COUNT['arxiv_add']:,}")
+    if ARG.SOURCE in (None, 'elife'):
+        print(f"eLife DOIs added:    {COUNT['elife_add']:,}")
+    if ARG.SOURCE in (None, 'elsevier'):
+        print(f"Elsevier DOIs added: {COUNT['elsevier_add']:,}")
+    if ARG.SOURCE in (None, 'pmc'):
+        print(f"PMC DOIs added:      {COUNT['pmc_add']:,}")
+    if ARG.SOURCE in (None, 'arxiv'):
+        print(f"arXiv DOIs added:    {COUNT['arxiv_add']:,}")
     print(f"DOIs updated:        {COUNT['updated']:,}")
     if internal:
         with open('pmc_internal_acks.json', 'w', encoding='utf-8') as fileout:

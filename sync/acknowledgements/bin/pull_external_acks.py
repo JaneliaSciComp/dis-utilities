@@ -121,7 +121,7 @@ NOTES
   parameter, i.e. filtered by when the article was added to PubMed Central.
 '''
 
-__version__ = '1.4.0'
+__version__ = '1.5.0'
 
 import argparse
 import collections
@@ -520,7 +520,8 @@ def _fetch_pmc_batch(base_url, batch_pmids, api_key):
     fetch_response = _request_with_retry('GET', f"{base_url}efetch.fcgi", params=fetch_params)
     root = ET.fromstring(fetch_response.content)
     root_json = xmltodict.parse(ET.tostring(root))
-    return root_json.get("pmc-articleset", {}).get("article", [])
+    article = root_json.get("pmc-articleset", {}).get("article", [])
+    return article if isinstance(article, list) else [article]
 
 
 def search_pmc(term, max_results=5000, api_key=None, days=None):
@@ -1049,52 +1050,57 @@ def processing():
             json.dump(INTERNAL_RECORDS, jfp, indent=2)
         LOGGER.info(f"Wrote {len(INTERNAL_RECORDS):,} (potentially) Janelia-authored "
                     f"(not stored) records to {jfile}")
-    summary = f"\neLife records read:                {COUNT['elife_read']:,}\n"
-    summary += f"eLife records in database:         {COUNT['elife_in_database']:,}\n"
-    summary += f"eLife records no ack:              {COUNT['elife_no_ack']:,}\n"
-    summary += f"eLife records term absent:         {COUNT['elife_term_absent']:,}\n"
-    summary += f"eLife records not found:           {COUNT['elife_notfound']:,}\n"
-    summary += f"eLife records Janelia-authored:    {COUNT['elife_janelia_authored']:,}\n"
-    if COUNT['elife_author_check_failed']:
-        summary += f"eLife records author check failed: {COUNT['elife_author_check_failed']:,}\n"
-    if COUNT['elife_author_check_skipped']:
-        summary += f"eLife records ignore-listed:  {COUNT['elife_author_check_skipped']:,}\n"
-    summary += f"eLife records updated:             {COUNT['elife_dois_written']:,}\n"
-    summary += f"Elsevier records read:             {COUNT['elsevier_read']:,}\n"
-    summary += f"Elsevier records in database:      {COUNT['elsevier_in_database']:,}\n"
-    if COUNT['elsevier_date_filtered']:
-        summary += f"Elsevier records date filtered: {COUNT['elsevier_date_filtered']:,}\n"
-    summary += f"Elsevier records no ack:           {COUNT['elsevier_no_ack']:,}\n"
-    summary += f"Elsevier records term absent:      {COUNT['elsevier_term_absent']:,}\n"
-    summary += f"Elsevier records not found:        {COUNT['elsevier_notfound']:,}\n"
-    summary += f"Elsevier records Janelia-authored: {COUNT['elsevier_janelia_authored']:,}\n"
-    if COUNT['elsevier_author_check_failed']:
-        summary += f"Elsevier records author check failed:{COUNT['elsevier_author_check_failed']:,}\n"
-    if COUNT['elsevier_author_check_skipped']:
-        summary += f"Elsevier records ignore-listed:{COUNT['elsevier_author_check_skipped']:,}\n"
-    summary += f"Elsevier records updated:          {COUNT['elsevier_dois_written']:,}\n"
-    summary += f"PMC records read:                  {COUNT['pmc_read']:,}\n"
-    summary += f"PMC records in database:           {COUNT['pmc_in_database']:,}\n"
-    summary += f"PMC records no DOI:                {COUNT['pmc_no_doi']:,}\n"
-    summary += f"PMC records no ack:                {COUNT['pmc_no_ack']:,}\n"
-    summary += f"PMC records term absent:           {COUNT['pmc_term_absent']:,}\n"
-    summary += f"PMC records not found:             {COUNT['pmc_notfound']:,}\n"
-    summary += f"PMC records Janelia-authored:      {COUNT['pmc_janelia_authored']:,}\n"
-    if COUNT['pmc_author_check_failed']:
-        summary += f"PMC records author check failed: {COUNT['pmc_author_check_failed']:,}\n"
-    if COUNT['pmc_author_check_skipped']:
-        summary += f"PMC records ignore-listed:    {COUNT['pmc_author_check_skipped']:,}\n"
-    summary += f"PMC records updated:               {COUNT['pmc_dois_written']:,}\n"
-    summary += f"arXiv records read:                {COUNT['openalex_read']:,}\n"
-    summary += f"arXiv records in database:         {COUNT['openalex_in_database']:,}\n"
-    summary += f"arXiv records no ack:              {COUNT['openalex_no_ack']:,}\n"
-    summary += f"arXiv records term absent:         {COUNT['openalex_term_absent']:,}\n"
-    summary += f"arXiv records Janelia-authored:    {COUNT['openalex_janelia_authored']:,}\n"
-    if COUNT['openalex_author_check_failed']:
-        summary += f"arXiv records author check failed: {COUNT['openalex_author_check_failed']:,}\n"
-    if COUNT['openalex_author_check_skipped']:
-        summary += f"arXiv records ignore-listed:  {COUNT['openalex_author_check_skipped']:,}\n"
-    summary += f"arXiv records updated:             {COUNT['openalex_dois_written']:,}\n"
+    summary = "\n"
+    if ARG.SOURCE in (None, 'elife'):
+        summary += f"eLife records read:                {COUNT['elife_read']:,}\n"
+        summary += f"eLife records in database:         {COUNT['elife_in_database']:,}\n"
+        summary += f"eLife records no ack:              {COUNT['elife_no_ack']:,}\n"
+        summary += f"eLife records term absent:         {COUNT['elife_term_absent']:,}\n"
+        summary += f"eLife records not found:           {COUNT['elife_notfound']:,}\n"
+        summary += f"eLife records Janelia-authored:    {COUNT['elife_janelia_authored']:,}\n"
+        if COUNT['elife_author_check_failed']:
+            summary += f"eLife records author check failed: {COUNT['elife_author_check_failed']:,}\n"
+        if COUNT['elife_author_check_skipped']:
+            summary += f"eLife records ignore-listed:  {COUNT['elife_author_check_skipped']:,}\n"
+        summary += f"eLife records updated:             {COUNT['elife_dois_written']:,}\n"
+    if ARG.SOURCE in (None, 'elsevier'):
+        summary += f"Elsevier records read:             {COUNT['elsevier_read']:,}\n"
+        summary += f"Elsevier records in database:      {COUNT['elsevier_in_database']:,}\n"
+        if COUNT['elsevier_date_filtered']:
+            summary += f"Elsevier records date filtered: {COUNT['elsevier_date_filtered']:,}\n"
+        summary += f"Elsevier records no ack:           {COUNT['elsevier_no_ack']:,}\n"
+        summary += f"Elsevier records term absent:      {COUNT['elsevier_term_absent']:,}\n"
+        summary += f"Elsevier records not found:        {COUNT['elsevier_notfound']:,}\n"
+        summary += f"Elsevier records Janelia-authored: {COUNT['elsevier_janelia_authored']:,}\n"
+        if COUNT['elsevier_author_check_failed']:
+            summary += f"Elsevier records author check failed:{COUNT['elsevier_author_check_failed']:,}\n"
+        if COUNT['elsevier_author_check_skipped']:
+            summary += f"Elsevier records ignore-listed:{COUNT['elsevier_author_check_skipped']:,}\n"
+        summary += f"Elsevier records updated:          {COUNT['elsevier_dois_written']:,}\n"
+    if ARG.SOURCE in (None, 'pmc'):
+        summary += f"PMC records read:                  {COUNT['pmc_read']:,}\n"
+        summary += f"PMC records in database:           {COUNT['pmc_in_database']:,}\n"
+        summary += f"PMC records no DOI:                {COUNT['pmc_no_doi']:,}\n"
+        summary += f"PMC records no ack:                {COUNT['pmc_no_ack']:,}\n"
+        summary += f"PMC records term absent:           {COUNT['pmc_term_absent']:,}\n"
+        summary += f"PMC records not found:             {COUNT['pmc_notfound']:,}\n"
+        summary += f"PMC records Janelia-authored:      {COUNT['pmc_janelia_authored']:,}\n"
+        if COUNT['pmc_author_check_failed']:
+            summary += f"PMC records author check failed: {COUNT['pmc_author_check_failed']:,}\n"
+        if COUNT['pmc_author_check_skipped']:
+            summary += f"PMC records ignore-listed:    {COUNT['pmc_author_check_skipped']:,}\n"
+        summary += f"PMC records updated:               {COUNT['pmc_dois_written']:,}\n"
+    if ARG.SOURCE in (None, 'arxiv'):
+        summary += f"arXiv records read:                {COUNT['openalex_read']:,}\n"
+        summary += f"arXiv records in database:         {COUNT['openalex_in_database']:,}\n"
+        summary += f"arXiv records no ack:              {COUNT['openalex_no_ack']:,}\n"
+        summary += f"arXiv records term absent:         {COUNT['openalex_term_absent']:,}\n"
+        summary += f"arXiv records Janelia-authored:    {COUNT['openalex_janelia_authored']:,}\n"
+        if COUNT['openalex_author_check_failed']:
+            summary += f"arXiv records author check failed: {COUNT['openalex_author_check_failed']:,}\n"
+        if COUNT['openalex_author_check_skipped']:
+            summary += f"arXiv records ignore-listed:  {COUNT['openalex_author_check_skipped']:,}\n"
+        summary += f"arXiv records updated:             {COUNT['openalex_dois_written']:,}\n"
     summary += f"Janelia-authored (not stored):     {len(INTERNAL_RECORDS):,}\n"
     print(summary)
     if ARG.TEST or ARG.WRITE:
