@@ -11,7 +11,7 @@
     jrc_former_status.
 """
 
-__version__ = '3.1.0'
+__version__ = '3.2.0'
 
 import argparse
 import collections
@@ -202,10 +202,7 @@ def update_open_access(row):
         row['jrc_oa_status'] = JOURNAL[row['jrc_journal']]
         payload['jrc_oa_status'] = JOURNAL[row['jrc_journal']]
         LOGGER.warning(f"Using journal OA status {row['jrc_oa_status']} for {row['doi']}")
-    try:
-        data = DL.get_doi_record(row['doi'], source='openalex')
-    except Exception as err:
-        terminate_program(err)
+    data = DL.get_doi_record(row['doi'], source='openalex')
     if not data:
         if not ARG.SILENT:
             LOGGER.warning(f"{row['doi']} was not found in OpenAlex")
