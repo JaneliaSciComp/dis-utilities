@@ -36,7 +36,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "119.18.0"
+__version__ = "119.19.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -7253,34 +7253,44 @@ def figshare_groups(year='All'):  # pylint: disable=too-many-locals,too-many-bra
                                                  title=dtitle, html=html,
                                                  navbar=generate_navbar('DataCite')))
         mrows = []
+        mrow_classes = []
         tviews = tdl = tcit = 0
         nonver_seen = False
         for rec in members:
+            is_ver = bool(re.search(r'/janelia.+\.v\d+$', rec['doi']))
             # Count metrics only for non-versioned DOIs to avoid double-counting
             # (versioned and non-versioned DOIs share identical metric values).
-            if not re.search(r'/janelia.+\.v\d+$', rec['doi']):
+            if not is_ver:
                 tviews += rec['views']
                 tdl += rec['downloads']
                 tcit += rec['citations']
                 nonver_seen = True
             mrows.append([safe(doi_link(rec['doi'])), rec['title'], f"{rec['views']:,}",
                           f"{rec['downloads']:,}", f"{rec['citations']:,}"])
+            mrow_classes.append('ver' if is_ver else '')
         if not nonver_seen and members:
             # All members are versioned; use one record's metrics (all are identical).
             tviews = members[0]['views']
             tdl = members[0]['downloads']
             tcit = members[0]['citations']
+        ver_count = sum(1 for c in mrow_classes if c == 'ver')
         mtable = render_table(['DOI', 'Title', 'Views', 'Downloads', 'Citations'], mrows,
                               table_id='fig-members', css='tablesorter numberlast-scroll',
+                              row_classes=mrow_classes,
                               footer=[fcell('TOTAL', colspan=2),
                                       fcell(f"{tviews:,}", align='center'),
                                       fcell(f"{tdl:,}", align='center'),
                                       fcell(f"{tcit:,}", align='center')])
-        mcards = stat_cards([("DOIs in group", f"{len(members):,}"),
+        mcards = stat_cards([("DOIs in group", f"<span id='totalrows'>{len(members):,}</span>"),
                              ("Total views", f"{tviews:,}"),
                              ("Total downloads", f"{tdl:,}"),
                              ("Total citations", f"{tcit:,}")], div_id='figm-stats')
-        html = back + "<br><br>" + mcards + mtable
+        verbtn = ""
+        if ver_count:
+            verbtn = "<button id='verbtn' class='btn btn-outline-warning' " \
+                     + "onclick=\"toggler('fig-members', 'ver', 'totalrows');\">" \
+                     + "Filter versioned DOIs</button>&nbsp;<br><br>"
+        html = back + "<br><br>" + mcards + verbtn + mtable
         endpoint_access()
         return make_response(render_template('general.html', urlroot=request.url_root,
                                              title=dtitle, html=html,
