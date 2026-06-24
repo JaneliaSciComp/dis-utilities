@@ -7736,6 +7736,11 @@ def zenodo_stats(year='All'):  # pylint: disable=too-many-locals,too-many-branch
                           [[k, f"{v:,}"] for k, v in
                            list(usage.items()) + list(uniq.items())],
                           table_id='zen-usage', css='tablesorter numberlast-scroll')
+    uhtml += "<div style='font-size:0.85em; color:#a8c4e0; max-width:560px; margin:6px 0 0 0'>" \
+             + "<b>Views</b> and <b>Downloads</b> count every access event, including " \
+             + "repeat visits by the same user or bot. <b>Unique views</b> and " \
+             + "<b>Unique downloads</b> count each IP address only once per record, " \
+             + "giving a closer approximation of distinct users reached.</div>"
     # ----- deposits & usage by publishing year -----
     ydata = {'Year': [], 'DOIs': [], 'Downloads': []}
     ytrows = []
@@ -11398,7 +11403,27 @@ def people(name=None):
 
 @app.route('/peoplerec/<string:eid>')
 def peoplerec(eid):
-    ''' Show a single People record
+    '''
+    Show a single People record
+    Browsers (Accept: text/html) get the HTML page; other clients get the
+    People record as JSON (employeeId and managerId omitted).
+    ---
+    tags:
+      - People
+    parameters:
+      - in: path
+        name: eid
+        schema:
+          type: string
+        required: true
+        description: Employee ID (userIdO365, e.g. SMITHJ@hhmi.org)
+    responses:
+      200:
+        description: HTML page (browser) or People record as JSON
+      404:
+        description: People record not found
+      500:
+        description: People system error
     '''
     expected = 'html' if 'Accept' in request.headers \
                          and 'html' in request.headers['Accept'] else 'json'

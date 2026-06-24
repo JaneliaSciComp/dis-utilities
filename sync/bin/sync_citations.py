@@ -14,11 +14,14 @@
           - OpenAIRE ScholeXplorer (relation=References/Cites; parallel, fast)
           - DataCite GraphQL     (work.citations; optional via --datacite-graphql,
                                   slow ~0.8s/DOI - see NOTES; --source datacite only)
-        One further source contributes a bare citation count (no citing DOIs), used
+        Further sources contribute a bare citation count (no citing DOIs), used
         as a floor on the count rather than added to the union:
           - DataCite REST        (citationCount, already on the dois record)
           - Crossref             (is-referenced-by-count, already on the dois record;
                                   used when --source crossref)
+          - Web of Science       (Starter API citation count; --source crossref only,
+                                  since WoS does not index DataCite/Zenodo deposits;
+                                  opt-in via --wos; requires WOS_API_KEY)
 
     FIELDS WRITTEN  (with --write, only for DOIs with a non-zero citation count;
     uncited DOIs get no jrc_ fields, per the DB convention)
@@ -75,6 +78,9 @@
                          requests) and returns 429 with a multi-hour Retry-After
                          when exhausted. A key raises the budget (~$1/day) and is
                          sent as the api_key query parameter when set.
+        WOS_API_KEY Web of Science Starter API key (required when --wos is given).
+                         Used only with --source crossref --wos; WoS does not index
+                         DataCite/Zenodo deposits so the key is ignored otherwise.
         MongoDB connection comes from the JRC "databases" config
 
     USAGE
@@ -125,7 +131,7 @@
         (falling back to the native citationCount).
 '''
 
-__version__ = '1.5.0'
+__version__ = '1.6.0'
 
 import argparse
 import collections
@@ -215,6 +221,14 @@ DATACITE_QUERY = '''query($id: ID!, $after: String) {
     }
   }
 }'''
+# Web of Science Starter API: one request per DOI, returns a bare citation count.
+# Only used for --source crossref (WoS does not index DataCite/Zenodo deposits).
+# The Starter API rate-limits concurrent access, so requests are serialized with
+# a minimum interval (similar to DataCite GraphQL).
+WOS_BASE = 'https://api.clarivate.com/apis/wos-starter/v1/documents'
+WOS_LOCK = threading.Lock()
+WOS_MIN_INTERVAL = 0.2   # 5 req/s max per Starter API docs
+WOS_LAST = [0.0]
 # Scholix relationships where the source work cites our DOI (incoming citation)
 CITING_RELS = {'References', 'Cites'}
 # DataCite GraphQL 429s and cooldown-bans on burst/concurrent access, but is fine
@@ -571,6 +585,43 @@ def zenodo_metrics(doi):
     return {counter: int(stats.get(counter, 0) or 0) for counter in ZENODO_COUNTERS}
 
 
+def wos_count(doi):
+    ''' Get the Web of Science citation count for a DOI via the Starter API.
+        Returns a bare count only (no citing DOIs). WOS_API_KEY must be set.
+        Requests are serialized and rate-limited to avoid 429s from concurrent
+        workers.
+        Keyword arguments:
+          doi: DOI string
+        Returns:
+          citation count (int, 0 if not found in WoS), or None on error
+    '''
+    api_key = os.environ.get('WOS_API_KEY')
+    if not api_key:
+        return None
+    with WOS_LOCK:
+        wait = WOS_MIN_INTERVAL - (monotonic() - WOS_LAST[0])
+        if wait > 0:
+            sleep(wait)
+        WOS_LAST[0] = monotonic()
+    resp = get_with_retry(WOS_BASE, {'db': 'WOS', 'q': f"DO={doi}", 'limit': 1},
+                          20, headers={'X-ApiKey': api_key})
+    if resp is None or resp.status_code != 200:
+        if ARG.DEBUG:
+            tqdm.write(f"WoS error for {doi}: "
+                       + (f"HTTP {resp.status_code}" if resp is not None else "no response"))
+        return None
+    try:
+        hits = resp.json().get('hits') or []
+    except Exception:
+        return None
+    if not hits:
+        return 0
+    for cite in hits[0].get('citations') or []:
+        if cite.get('db') == 'WOS':
+            return int(cite.get('count') or 0)
+    return 0
+
+
 def datacite_graphql_post(json_body):
     ''' Issue a DataCite GraphQL POST, serialized and rate-limited across threads.
         DataCite GraphQL bans bursty/concurrent access, so only one request runs
@@ -724,7 +775,9 @@ def fetch_doi(row):
             'is_figshare': bool(fid),
             'figshare': figshare_metrics(doi) if fid else None,
             'is_zenodo': bool(zid),
-            'zenodo': zenodo_metrics(doi) if zid else None}
+            'zenodo': zenodo_metrics(doi) if zid else None,
+            'wos': wos_count(doi) if (ARG.SOURCE == 'crossref'
+                                       and ARG.WOS) else None}
 
 
 def combine_counts(res, graphql, source='datacite'):
@@ -741,10 +794,10 @@ def combine_counts(res, graphql, source='datacite'):
             combined   final citation count (max of the floor and the union size)
             previous   count stored on the prior run (0 if none)
             citing     sorted list of unique citing DOIs
-            sources    {<source>, openalex, scholexplorer} per-source counts
+            sources    {<source>, openalex, scholexplorer[, wos]} per-source counts
             errored    True if any enabled citing-DOI source failed
             preserved  True if a stored higher count was kept despite an error
-            oa_n/sx_n/dc_n  per-source counts (None on error/disabled), for reporting
+            oa_n/sx_n/dc_n/wos_n  per-source counts (None on error/disabled), for reporting
     '''
     native = res['native']
     existing = res['existing']
@@ -773,8 +826,12 @@ def combine_counts(res, graphql, source='datacite'):
     if errored or oa_unchanged:
         union.update(filter(None, (normalize_doi(cd) for cd in res['existing_dois'])))
     citing = sorted(union)
-    # The registrar contributes a count but no DOIs, so keep it as a floor
-    combined = max(native, len(citing))
+    # WoS contributes a bare count (no DOIs), used as an additional floor
+    wos_n = res.get('wos')      # int, 0, or None (disabled/error)
+    # The registrar (and WoS when available) contribute counts but no DOIs; keep
+    # the max of all bare counts as the floor.
+    floor = max(native, wos_n or 0)
+    combined = max(floor, len(citing))
     # Don't let a transient source error regress a previously-stored higher count
     preserved = False
     if errored and isinstance(existing, int) and existing > combined:
@@ -782,12 +839,25 @@ def combine_counts(res, graphql, source='datacite'):
         preserved = True
     # Per-source counts; the registrar's is a bare count, openalex/scholexplorer
     # are identifiable citing-DOI counts (for datacite, the GraphQL citing-DOI
-    # count when available, falling back to the REST citationCount)
+    # count when available, falling back to the REST citationCount).
+    # For any source that errored or was skipped (None), fall back to the
+    # previously-stored value so a transient failure never writes a null.
+    existing_sources = ((res.get('row') or {}).get('jrc_citation_sources')) or {}
+    if oa_n is None:
+        oa_n = existing_sources.get('openalex', oa_n)
+    if sx_n is None:
+        sx_n = existing_sources.get('scholexplorer', sx_n)
+    if dc_n is None and graphql:
+        dc_n = existing_sources.get(source, dc_n)
     sources = {source: native if dc_n is None else dc_n,
                'openalex': oa_n, 'scholexplorer': sx_n}
+    if wos_n is not None:
+        sources['wos'] = wos_n
+    elif 'wos' in existing_sources:
+        sources['wos'] = existing_sources['wos']
     return {'combined': combined, 'previous': previous, 'citing': citing,
             'sources': sources, 'errored': errored, 'preserved': preserved,
-            'oa_n': oa_n, 'sx_n': sx_n, 'dc_n': dc_n}
+            'oa_n': oa_n, 'sx_n': sx_n, 'dc_n': dc_n, 'wos_n': wos_n}
 
 
 def queue_write(doc_id, fields):
@@ -857,9 +927,14 @@ def finalize_doi(res, monitor=None):
     if ARG.GRAPHQL:
         COUNT['datacite_found' if res['datacite_dois'] is not None
               else 'datacite_error'] += 1
+    if ARG.WOS:
+        if res.get('wos') is None:
+            COUNT['wos_error'] += 1
+        else:
+            COUNT['wos_found'] += 1
     cc = combine_counts(res, ARG.GRAPHQL, ARG.SOURCE)
     combined, previous = cc['combined'], cc['previous']
-    oa_n, sx_n, dc_n = cc['oa_n'], cc['sx_n'], cc['dc_n']
+    oa_n, sx_n, dc_n, wos_n = cc['oa_n'], cc['sx_n'], cc['dc_n'], cc['wos_n']
     if cc['preserved']:
         COUNT['preserved'] += 1
     # Figshare usage metrics (views/downloads/shares) are independent of citations:
@@ -892,7 +967,7 @@ def finalize_doi(res, monitor=None):
         fields['jrc_citation_updated'] = datetime.now()
         if combined > previous:
             COUNT['increased'] += 1
-            HITS.append((doi, previous, native, combined, oa_n, sx_n, dc_n))
+            HITS.append((doi, previous, native, combined, oa_n, sx_n, dc_n, wos_n))
             label = SOURCES[ARG.SOURCE]['label']
             graphql_disp = ('' if ARG.SOURCE == 'crossref' else
                             f", DataCite-GraphQL={dc_n if ARG.GRAPHQL else 'off'}")
@@ -956,17 +1031,20 @@ def generate_email(summary):
     if HITS:
         msg += f"The following {len(HITS):,} {label} DOI(s) had their citation " \
                + "count increased:<br>"
-        for doi, previous, native, combined, openalex, scholex, dcite in HITS:
+        for doi, previous, native, combined, openalex, scholex, dcite, wos in HITS:
             oas = 'err' if openalex is None else openalex
             sxs = 'err' if scholex is None else scholex
             if ARG.SOURCE == 'crossref':
                 dcs = ''
+                woss = (', WoS ' + ('err' if wos is None else str(wos))) \
+                       if ARG.WOS else ''
             else:
                 dcs = ", DataCite-GraphQL " \
                       + (('err' if dcite is None else str(dcite)) if ARG.GRAPHQL else 'off')
+                woss = ''
             msg += f"&nbsp;&nbsp;{doiurl(doi)}: {previous} &rarr; {combined} " \
                    + f"({label} {native}, OpenAlex {oas}, ScholeXplorer {sxs}" \
-                   + f"{dcs})<br>"
+                   + f"{dcs}{woss})<br>"
     else:
         msg += "No citation counts were increased.<br>"
     try:
@@ -1022,6 +1100,7 @@ def processing():  # pylint: disable=too-many-locals,too-many-statements
         cursor = DB['dis'].dois.find(query, {'doi': 1,
                                              SOURCES[ARG.SOURCE]['count_field']: 1,
                                              'jrc_citation_count': 1,
+                                             'jrc_citation_sources': 1,
                                              'jrc_citing_dois': 1})
         if ARG.LIMIT:
             cursor = cursor.limit(ARG.LIMIT)
@@ -1085,7 +1164,8 @@ def processing():  # pylint: disable=too-many-locals,too-many-statements
     figusage = sum(1 for r in RECORDS if 'jrc_figshare_counts' in r)
     zenusage = sum(1 for r in RECORDS if 'jrc_zenodo_counts' in r)
     # DataCite GraphQL and figshare/Zenodo usage apply only to --source datacite
-    dc_line = fs_line = zen_line = ""
+    # WoS applies only to --source crossref and only when WOS_API_KEY is set
+    dc_line = fs_line = zen_line = wos_line = ""
     if ARG.SOURCE == 'datacite':
         dc_line = (f"DataCite GraphQL OK (errors):       {COUNT['datacite_found']:,} "
                    f"({COUNT['datacite_error']:,})\n") if ARG.GRAPHQL else \
@@ -1094,6 +1174,9 @@ def processing():  # pylint: disable=too-many-locals,too-many-statements
                    + f"({COUNT['figshare_error']:,})\n")
         zen_line = (f"Zenodo usage OK (errors):           {COUNT['zenodo_found']:,} "
                     + f"({COUNT['zenodo_error']:,})\n")
+    elif ARG.WOS:
+        wos_line = (f"WoS lookups OK (errors):            {COUNT['wos_found']:,} "
+                    + f"({COUNT['wos_error']:,})\n")
     summary = (
         f"{label} DOIs processed:            {COUNT['read']:,}\n"
         + f"OpenAlex lookups OK (errors):       {COUNT['openalex_found']:,} "
@@ -1101,6 +1184,7 @@ def processing():  # pylint: disable=too-many-locals,too-many-statements
         + f"OpenAlex unchanged (skipped):       {COUNT['openalex_unchanged']:,}\n"
         + f"ScholeXplorer lookups OK (errors):  {COUNT['scholex_found']:,} "
         + f"({COUNT['scholex_error']:,})\n"
+        + wos_line
         + dc_line
         + f"Fetch errors (DOIs skipped):        {COUNT['fetch_error']:,}\n"
         + f"Counts preserved (source error):    {COUNT['preserved']:,}\n"
@@ -1166,6 +1250,10 @@ if __name__ == '__main__':
     PARSER.add_argument('--manifold', dest='MANIFOLD', action='store',
                         default='prod', choices=['dev', 'prod'],
                         help='MongoDB manifold (dev, prod)')
+    PARSER.add_argument('--wos', dest='WOS', action='store_true',
+                        default=False,
+                        help='Include Web of Science citation counts (--source crossref only; '
+                             + 'requires WOS_API_KEY; off by default - use for periodic deep passes)')
     PARSER.add_argument('--verbose', dest='VERBOSE', action='store_true',
                         default=False, help='Flag, Chatty')
     PARSER.add_argument('--debug', dest='DEBUG', action='store_true',
