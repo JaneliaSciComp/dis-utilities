@@ -121,7 +121,7 @@ NOTES
   parameter, i.e. filtered by when the article was added to PubMed Central.
 '''
 
-__version__ = '1.5.0'
+__version__ = '1.6.0'
 
 import argparse
 import collections
@@ -157,6 +157,7 @@ DOI = {}
 # the Janelia-author check is skipped for them and they are eligible for insertion
 # into external_dois.
 IGNORE = set()
+ACK_DOI_IGNORE = set()
 RECORDS = []
 # DOIs (any source) that acknowledge Janelia but are (potentially) Janelia-authored
 # - or whose authorship could not be verified - so they belong in the internal
@@ -234,6 +235,14 @@ def initialize_program():
         if row.get('key'):
             IGNORE.add(row['key'].lower())
     LOGGER.info(f"Found {len(IGNORE):,} non-Janelia DOIs in to_ignore (author check skipped)")
+    try:
+        rows = DB['dis'].to_ignore.find({"type": "ack_doi"}, {"key": 1})
+    except Exception as err:
+        terminate_program(err)
+    for row in rows:
+        if row.get('key'):
+            ACK_DOI_IGNORE.add(row['key'].lower())
+    LOGGER.info(f"Found {len(ACK_DOI_IGNORE):,} DOIs with confirmed no Janelia ack")
 
 
 def doiurl(doi):
@@ -807,12 +816,13 @@ def fetch_and_store_doi(doi, ack, source, pmcid=None):
     return True
 
 
-def _process_ack(doi, ack, source):
+def _process_ack(doi, ack, source, write_ignore=False):
     ''' Check acknowledgement text and store the DOI if the search term is present.
         Keyword arguments:
-          doi: DOI string
-          ack: acknowledgement text
-          source: counter key prefix ('elife' or 'elsevier')
+          doi:          DOI string
+          ack:          acknowledgement text
+          source:       counter key prefix ('elife' or 'elsevier')
+          write_ignore: if True, upsert doi into to_ignore when term is absent
         Returns:
           None
     '''
@@ -821,6 +831,13 @@ def _process_ack(doi, ack, source):
         return
     if ARG.TERM.lower() not in ack.lower():
         COUNT[f'{source}_term_absent'] += 1
+        if write_ignore and ARG.WRITE:
+            DB['dis']['to_ignore'].update_one(
+                {"type": "ack_doi", "key": doi},
+                {"$setOnInsert": {"type": "ack_doi", "key": doi,
+                                  "reason": "Janelia not in ack text"}},
+                upsert=True)
+            COUNT[f'{source}_ack_doi_ignored'] += 1
         return
     fetch_and_store_doi(doi, ack, source)
 
@@ -866,6 +883,9 @@ def _process_elife_articles():
         if doi in DOI:
             COUNT['elife_in_database'] += 1
             continue
+        if doi in ACK_DOI_IGNORE:
+            COUNT['elife_term_absent'] += 1
+            continue
         try:
             edata = DL.get_doi_record(doi, source='elife')
         except Exception as err:
@@ -883,7 +903,7 @@ def _process_elife_articles():
             COUNT['elife_no_ack'] += 1
             continue
         ack = result[0] if isinstance(result, tuple) else result
-        _process_ack(doi, ack, 'elife')
+        _process_ack(doi, ack, 'elife', write_ignore=True)
 
 
 def _process_elsevier_articles():
@@ -918,6 +938,9 @@ def _process_elsevier_articles():
         if doi in DOI:
             COUNT['elsevier_in_database'] += 1
             continue
+        if doi in ACK_DOI_IGNORE:
+            COUNT['elsevier_term_absent'] += 1
+            continue
         ack_result = None
         try:
             ack_result = DL.get_acknowledgements(doi)
@@ -929,7 +952,7 @@ def _process_elsevier_articles():
             COUNT['elsevier_no_ack'] += 1
             continue
         ack = ack_result[0] if isinstance(ack_result, tuple) else ack_result
-        _process_ack(doi, ack, 'elsevier')
+        _process_ack(doi, ack, 'elsevier', write_ignore=True)
 
 
 def _process_pmc_articles():
@@ -990,6 +1013,9 @@ def _process_openalex_articles():
         if doi in DOI:
             COUNT['openalex_in_database'] += 1
             continue
+        if doi in ACK_DOI_IGNORE:
+            COUNT['openalex_term_absent'] += 1
+            continue
         ack_result = None
         try:
             ack_result = DL.get_acknowledgements(doi)
@@ -1003,6 +1029,13 @@ def _process_openalex_articles():
             continue
         if ARG.TERM.lower() not in ack.lower():
             COUNT['openalex_term_absent'] += 1
+            if ARG.WRITE:
+                DB['dis']['to_ignore'].update_one(
+                    {"type": "ack_doi", "key": doi},
+                    {"$setOnInsert": {"type": "ack_doi", "key": doi,
+                                      "reason": "Janelia not in ack text"}},
+                    upsert=True)
+                COUNT['openalex_ack_doi_ignored'] += 1
             continue
         # Guard: a DOI with (potential) Janelia authors belongs in the internal
         # dois collection, not external_dois. arXiv DOIs are DataCite, so fetch the
@@ -1102,6 +1135,10 @@ def processing():
             summary += f"arXiv records ignore-listed:  {COUNT['openalex_author_check_skipped']:,}\n"
         summary += f"arXiv records updated:             {COUNT['openalex_dois_written']:,}\n"
     summary += f"Janelia-authored (not stored):     {len(INTERNAL_RECORDS):,}\n"
+    ack_doi_ignored = (COUNT['elife_ack_doi_ignored'] + COUNT['elsevier_ack_doi_ignored']
+                       + COUNT['openalex_ack_doi_ignored'])
+    if ack_doi_ignored:
+        summary += f"DOIs added to ack ignore list:     {ack_doi_ignored:,}\n"
     print(summary)
     if ARG.TEST or ARG.WRITE:
         generate_email(summary, RECORDS)
