@@ -36,7 +36,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "119.17.0"
+__version__ = "119.18.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -6989,11 +6989,16 @@ def figshare_title_groups(records):
         casings[key][stem] += 1
     groups = []
     for key, recs in buckets.items():
+        # Metrics are identical across versioned and non-versioned DOIs in the same
+        # group; count only non-versioned DOIs to avoid double-counting. If the
+        # group has no non-versioned DOI, count exactly one versioned DOI.
+        nonver = [r for r in recs if not re.search(r'/janelia.+\.v\d+$', r['doi'])]
+        metric_recs = nonver if nonver else recs[:1]
         groups.append({'stem': casings[key].most_common(1)[0][0],
                        'count': len(recs),
-                       'views': sum(r['views'] for r in recs),
-                       'downloads': sum(r['downloads'] for r in recs),
-                       'citations': sum(r['citations'] for r in recs)})
+                       'views': sum(r['views'] for r in metric_recs),
+                       'downloads': sum(r['downloads'] for r in metric_recs),
+                       'citations': sum(r['citations'] for r in metric_recs)})
     groups.sort(key=lambda g: (-g['downloads'], -g['count']))
     return groups
 
@@ -7249,12 +7254,22 @@ def figshare_groups(year='All'):  # pylint: disable=too-many-locals,too-many-bra
                                                  navbar=generate_navbar('DataCite')))
         mrows = []
         tviews = tdl = tcit = 0
+        nonver_seen = False
         for rec in members:
-            tviews += rec['views']
-            tdl += rec['downloads']
-            tcit += rec['citations']
+            # Count metrics only for non-versioned DOIs to avoid double-counting
+            # (versioned and non-versioned DOIs share identical metric values).
+            if not re.search(r'/janelia.+\.v\d+$', rec['doi']):
+                tviews += rec['views']
+                tdl += rec['downloads']
+                tcit += rec['citations']
+                nonver_seen = True
             mrows.append([safe(doi_link(rec['doi'])), rec['title'], f"{rec['views']:,}",
                           f"{rec['downloads']:,}", f"{rec['citations']:,}"])
+        if not nonver_seen and members:
+            # All members are versioned; use one record's metrics (all are identical).
+            tviews = members[0]['views']
+            tdl = members[0]['downloads']
+            tcit = members[0]['citations']
         mtable = render_table(['DOI', 'Title', 'Views', 'Downloads', 'Citations'], mrows,
                               table_id='fig-members', css='tablesorter numberlast-scroll',
                               footer=[fcell('TOTAL', colspan=2),
@@ -7270,10 +7285,10 @@ def figshare_groups(year='All'):  # pylint: disable=too-many-locals,too-many-bra
         return make_response(render_template('general.html', urlroot=request.url_root,
                                              title=dtitle, html=html,
                                              navbar=generate_navbar('DataCite')))
-    groups = figshare_title_groups(records)
-    multi = [g for g in groups if g['count'] > 1]
-    grouped_dois = sum(g['count'] for g in multi)
-    largest = max(groups, key=lambda g: g['count'])
+    all_groups = figshare_title_groups(records)
+    groups = [g for g in all_groups if g['count'] > 1]
+    grouped_dois = sum(g['count'] for g in groups)
+    largest = max(groups, key=lambda g: g['count']) if groups else None
     top_n = 20
 
     def group_table(ordered, table_id):
@@ -7300,23 +7315,25 @@ def figshare_groups(year='All'):  # pylint: disable=too-many-locals,too-many-bra
     by_cnt = sorted(groups, key=lambda g: (-g['count'], -g['downloads']))
     if request.args.get('fmt') == 'json':
         result = initialize_result()
-        result['data'] = {"dois": total, "groups": len(groups),
-                          "multi_doi_groups": len(multi), "grouped_dois": grouped_dois,
+        result['data'] = {"dois": total, "all_groups": len(all_groups),
+                          "multi_doi_groups": len(groups), "grouped_dois": grouped_dois,
                           "largest_group": {"stem": largest['stem'],
-                                            "count": largest['count']},
+                                            "count": largest['count']} if largest else None,
                           "title_groups": [{k: g[k] for k in
                                             ('stem', 'count', 'views', 'downloads',
                                              'citations')} for g in groups]}
         result['rest']['source'] = 'mongo'
         result['rest']['row_count'] = len(groups)
         return generate_response(result)
+    largest_card = (f"Largest group ({escape(largest['stem'])})", f"{largest['count']:,}") \
+                   if largest else ("Largest group", "N/A")
     cards = stat_cards(
         [("figshare DOIs", f"{total:,}"),
-         ("Title groups", f"{len(groups):,}"),
-         ("Multi-DOI groups", f"{len(multi):,}"),
+         ("Title groups (all)", f"{len(all_groups):,}"),
+         ("Multi-DOI groups", f"{len(groups):,}"),
          ("DOIs in a multi-DOI group",
           f"{grouped_dois:,} ({grouped_dois/total*100:,.1f}%)"),
-         (f"Largest group ({escape(largest['stem'])})", f"{largest['count']:,}")],
+         largest_card],
         div_id='figg-stats')
     gnote = "<div style='font-size:0.85em; color:#a8c4e0; max-width:620px; " \
             + "margin:-8px 0 16px 0'>Groups are formed by stripping trailing " \
@@ -7530,10 +7547,10 @@ def zenodo_groups(year='All'):  # pylint: disable=too-many-locals,too-many-branc
         return make_response(render_template('general.html', urlroot=request.url_root,
                                              title=dtitle, html=html,
                                              navbar=generate_navbar('DataCite')))
-    groups = zenodo_concept_groups(records)
-    multi = [g for g in groups if g['count'] > 1]
-    grouped_dois = sum(g['count'] for g in multi)
-    largest = max(groups, key=lambda g: g['count'])
+    all_groups = zenodo_concept_groups(records)
+    groups = [g for g in all_groups if g['count'] > 1]
+    grouped_dois = sum(g['count'] for g in groups)
+    largest = max(groups, key=lambda g: g['count']) if groups else None
     top_n = 20
 
     def group_table(ordered, table_id):
@@ -7561,11 +7578,11 @@ def zenodo_groups(year='All'):  # pylint: disable=too-many-locals,too-many-branc
     by_cit = sorted(groups, key=lambda g: (-g['citations'], -g['count']))
     if request.args.get('fmt') == 'json':
         result = initialize_result()
-        result['data'] = {"dois": total, "groups": len(groups),
-                          "multi_doi_groups": len(multi), "grouped_dois": grouped_dois,
+        result['data'] = {"dois": total, "all_groups": len(all_groups),
+                          "multi_version_groups": len(groups), "grouped_dois": grouped_dois,
                           "largest_group": {"concept": largest['concept'],
                                             "label": largest['label'],
-                                            "count": largest['count']},
+                                            "count": largest['count']} if largest else None,
                           "concept_groups": [{k: g[k] for k in
                                               ('concept', 'label', 'count', 'views',
                                                'downloads', 'citations')}
@@ -7573,13 +7590,15 @@ def zenodo_groups(year='All'):  # pylint: disable=too-many-locals,too-many-branc
         result['rest']['source'] = 'mongo'
         result['rest']['row_count'] = len(groups)
         return generate_response(result)
+    largest_card = (f"Largest deposit ({escape(largest['label'])})", f"{largest['count']:,}") \
+                   if largest else ("Largest deposit", "N/A")
     cards = stat_cards(
         [("Zenodo DOIs", f"{total:,}"),
-         ("Deposits", f"{len(groups):,}"),
-         ("Multi-version deposits", f"{len(multi):,}"),
+         ("Deposits (all)", f"{len(all_groups):,}"),
+         ("Multi-version deposits", f"{len(groups):,}"),
          ("DOIs in multi-version deposits",
           f"{grouped_dois:,} ({grouped_dois/total*100:,.1f}%)"),
-         (f"Largest deposit ({escape(largest['label'])})", f"{largest['count']:,}")],
+         largest_card],
         div_id='zeng-stats')
     cards += stat_cards([("Total views", f"{sum(g['views'] for g in groups):,}"),
                          ("Total downloads", f"{sum(g['downloads'] for g in groups):,}")],
