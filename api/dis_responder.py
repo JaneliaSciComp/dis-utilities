@@ -37,7 +37,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "119.20.0"
+__version__ = "119.21.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -10803,6 +10803,7 @@ def _ratelimit_openalex():
     rec = _ratelimit_record('OpenAlex', 'Daily')
     try:
         rl = requests.get('https://api.openalex.org/rate-limit', timeout=8,
+                          verify=False,
                           headers={'Authorization':
                                    f'Bearer {os.environ["OPENALEX_API_KEY"]}'}
                           ).json()['rate_limit']
@@ -10825,7 +10826,8 @@ def _ratelimit_elsevier():
         resp = requests.get('https://api.elsevier.com/content/search/sciencedirect',
                             headers={'X-ELS-APIKey': os.environ['ELSEVIER_API_KEY'],
                                      'Accept': 'application/json'},
-                            params={'query': 'janelia', 'count': 1}, timeout=12)
+                            params={'query': 'janelia', 'count': 1}, timeout=12,
+                            verify=False)
         _ratelimit_from_headers(rec, resp.headers, resp.status_code,
                                 'X-RateLimit-Limit', 'X-RateLimit-Remaining',
                                 'X-RateLimit-Reset')
@@ -10840,7 +10842,8 @@ def _ratelimit_wos():
     try:
         resp = requests.get('https://api.clarivate.com/apis/wos-starter/v1/documents',
                             headers={'X-ApiKey': os.environ['WOS_API_KEY']},
-                            params={'q': 'TS=janelia', 'limit': 1, 'page': 1}, timeout=15)
+                            params={'q': 'TS=janelia', 'limit': 1, 'page': 1}, timeout=15,
+                            verify=False)
         _ratelimit_from_headers(rec, resp.headers, resp.status_code,
                                 'x-ratelimit-limit-day', 'x-ratelimit-remaining-day')
         burst = resp.headers.get('x-ratelimit-limit-second')
@@ -10858,7 +10861,7 @@ def _ratelimit_zenodo():
         resp = requests.get('https://zenodo.org/api/records',
                             headers={'Authorization':
                                      f'Bearer {os.environ["ZENODO_API_KEY"]}'},
-                            params={'size': 1}, timeout=12)
+                            params={'size': 1}, timeout=12, verify=False)
         _ratelimit_from_headers(rec, resp.headers, resp.status_code,
                                 'x-ratelimit-limit', 'x-ratelimit-remaining',
                                 'x-ratelimit-reset')
@@ -11155,7 +11158,7 @@ def _srccount(source, url, extract, params=None, headers=None, note=''):
     '''
     rec = {'source': source, 'count': None, 'note': note, 'error': None}
     try:
-        resp = requests.get(url, params=params, headers=headers, timeout=15)
+        resp = requests.get(url, params=params, headers=headers, timeout=15, verify=False)
         if resp.status_code != 200:
             rec['error'] = f"HTTP {resp.status_code}"
         else:
