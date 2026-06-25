@@ -15,12 +15,15 @@ function tableInitialize () {
   $(document).ready(function() {
     $("table").each(function() {
       if ($(this).is('.tablesorter')) {
-        $(this).tablesorter({
+        var opts = {
           textExtraction: function(node) {
             var sort = $(node).attr('data-sort');
             return sort !== undefined ? sort : $(node).text().trim();
           }
-        });
+        };
+        var sl = $(this).attr('data-sortlist');
+        if (sl) { opts.sortList = JSON.parse(sl); }
+        $(this).tablesorter(opts);
       }
     });
     // Seed any default row filters declared on a table. data-initial-hide is a

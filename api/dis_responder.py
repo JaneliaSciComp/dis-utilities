@@ -20,6 +20,7 @@ import sys
 from time import sleep, time
 from types import SimpleNamespace
 from urllib.parse import quote, unquote
+import concurrent.futures
 import dateutil.parser
 import dateutil.tz
 from bokeh.palettes import all_palettes, plasma
@@ -36,7 +37,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "119.19.0"
+__version__ = "119.20.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -129,7 +130,7 @@ NAV = {"Home": "",
                                         "Janelia in OpenAlex": "openalex_stats",
                                         "Janelia in PubMed": "pubmed_stats",
                                         "API rate limits": "ratelimit",
-                                        "Data source record counts": "source_counts"},
+                                        "Data sources": "data_sources"},
                    "Controlled vocabularies": "cv",
                    "DOI relationships": "doi_relationships",
                    "Endpoints": "stats_endpoints",
@@ -454,7 +455,7 @@ def fcell(value, colspan=None, align=None, header=True):
 
 
 def render_table(headers, rows, table_id=None, css="tablesorter standard-scroll",
-                 row_classes=None, footer=None, width=None):
+                 row_classes=None, footer=None, width=None, data_attrs=None):
     ''' Build a standard data table.
         Keyword arguments:
           headers: list of column-header values (escaped unless wrapped in safe())
@@ -466,11 +467,15 @@ def render_table(headers, rows, table_id=None, css="tablesorter standard-scroll"
           footer: optional list of <tfoot> cells. fcell() results (Safe) are used
                   verbatim; plain values become default <th> cells (escaped).
           width: optional fixed table width (px)
+          data_attrs: optional dict of data-* attributes to add to the <table> tag,
+                      e.g. {"sortlist": "[[0,0]]"} → data-sortlist="[[0,0]]"
         Returns:
           HTML table as a string
     '''
     idattr = f' id="{table_id}"' if table_id else ''
     idattr += f' width="{width}"' if width else ''
+    if data_attrs:
+        idattr += ''.join(f' data-{k}="{v}"' for k, v in data_attrs.items())
     head = ''.join(f"<th>{_render_cell(h)}</th>" for h in headers)
     body = []
     for idx, cells in enumerate(rows):
@@ -3580,8 +3585,8 @@ def set_jrc_author(doi):
 @app.route('/raw/<string:resource>/<path:doi>')
 def get_raw(resource=None, doi=None):
     ''' JSON metadata for a DOI
-    resource: biorxiv, crossref, datacite, elife, elsevier, figshare, openalex, plos,
-              protocols.io, pubmed, pmc, springer, zenodo
+    resource: arxiv, biorxiv, crossref, datacite, elife, elsevier, figshare, openalex,
+              plos, protocols.io, pubmed, pmc, springer, unpaywall, zenodo
     '''
     doi = doi.lstrip('/').rstrip('/').lower()
     result = initialize_result()
@@ -3590,8 +3595,8 @@ def get_raw(resource=None, doi=None):
     if resource:
         resource = resource.lower()
         result['rest']['source'] = DL.doi_api_url(doi, source=resource)
-    if resource in ('biorxiv', 'elife', 'elsevier', 'openalex', 'plos', 'pmc', 'pubmed',
-                    'springer', 'zenodo'):
+    if resource in ('arxiv', 'biorxiv', 'elife', 'elsevier', 'openalex', 'plos', 'pmc',
+                    'pubmed', 'springer', 'unpaywall', 'zenodo'):
         try:
             response = DL.get_doi_record(doi, source=resource, content=content)
         except Exception as err:
@@ -4288,6 +4293,8 @@ def get_display_badges(doi, row, data, local):
     badges = "&nbsp;&nbsp;<span class='paperdata'>"
     if '/protocols.io.' in doi:
         badges += f" {tiny_badge('publisher', 'protocols.io', f'/raw/protocols.io/{doi}')}"
+    elif '/arxiv.' in doi.lower():
+        badges += " " + tiny_badge('publisher', 'arXiv', f'/raw/arxiv/{doi}')
     elif 'elife' in doi.lower():
         badges += " " + tiny_badge('publisher', 'eLife', f'/raw/eLife/{doi}')
     elif 'publisher' in data and data['publisher'].startswith('Elsevier'):
@@ -10868,8 +10875,10 @@ def ratelimit_all():
         rather than breaking the page. Springer and NCBI expose no usable
         limit and are omitted.
     '''
-    records = [_ratelimit_openalex(), _ratelimit_elsevier(),
-               _ratelimit_wos(), _ratelimit_zenodo()]
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        fns = [_ratelimit_openalex, _ratelimit_elsevier,
+               _ratelimit_wos, _ratelimit_zenodo]
+        records = list(executor.map(lambda f: f(), fns))
     records.sort(key=lambda rec: rec['service'].lower())
     trows = []
     for rec in records:
@@ -11103,11 +11112,34 @@ def pubmed_stats():
 # Total holdings of each external data source we have a /raw call for. Eight
 # expose a clean total (fetched live); the other five do not (_SOURCE_COUNT_NA).
 _SOURCE_UA = {'User-Agent': 'JaneliaDIS/1.0 (mailto:svirskasr@janelia.hhmi.org)'}
+# Rate limits and auth method for each /raw source (for display in /data_sources).
+# Format: (requests/sec, auth description or None)
+_SOURCE_RATE = {
+    'arXiv':        ('1/3sec',  None),
+    'Web of Science': ('5/sec', 'API key (WOS_API_KEY)'),
+    'bioRxiv':      ('~1/sec',  None),
+    'Crossref':     ('50/sec',  'mailto: header'),
+    'DataCite':     ('~15/sec', None),
+    'eLife':        ('~2/sec',  None),
+    'Elsevier':     ('10/sec',  'API key (ELSEVIER_API_KEY)'),
+    'figshare':     ('~5/sec',  None),
+    'OpenAlex':     ('10/sec',  'API key (OPENALEX_API_KEY)'),
+    'PLoS':         ('10/sec',  None),
+    'PMC':          ('10/sec',  'API key (NCBI_API_KEY)'),
+    'PubMed':       ('10/sec',  'API key (NCBI_API_KEY)'),
+    'protocols.io': ('~6/sec',  'Bearer token (PROTOCOLS_API_TOKEN)'),
+    'Springer':     ('10/sec',  'API key (SPRINGER_META_API_KEY)'),
+    'Unpaywall':    ('~10/sec', 'Email address'),
+    'Zenodo':       ('~1/sec',  'Bearer token (ZENODO_API_KEY)'),
+}
 _SOURCE_COUNT_NA = {
+    'arXiv': 'Broad wildcard queries unsupported by API',
+    'Web of Science': 'No supported query for global record count',
     'Elsevier': 'No public total (broad queries blocked)',
     'Springer': 'No public total (broad queries blocked)',
     'protocols.io': 'Requires protocols.io API authentication',
     'figshare': 'API has no global count endpoint (even authenticated)',
+    'Unpaywall': 'No global count endpoint; ~50M DOIs per their documentation',
 }
 
 
@@ -11134,8 +11166,9 @@ def _srccount(source, url, extract, params=None, headers=None, note=''):
 
 
 def _source_counts():
-    ''' Collect total record counts for every /raw source: live for the nine
-        that expose a usable total, n/a for the other four.
+    ''' Collect total record counts for every /raw source: live for the sources
+        that expose a usable total, n/a for the rest. All live fetches run in
+        parallel via ThreadPoolExecutor.
     '''
     zen = {'Authorization': f'Bearer {os.environ.get("ZENODO_API_KEY", "")}'}
     einfo = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/einfo.fcgi'
@@ -11143,41 +11176,44 @@ def _source_counts():
     oa_params = {'per-page': 1}
     if os.environ.get('OPENALEX_API_KEY'):
         oa_params['api_key'] = os.environ['OPENALEX_API_KEY']
-    recs = [
-        _srccount('OpenAlex', 'https://api.openalex.org/works',
-                  lambda j: j['meta']['count'], params=oa_params),
-        _srccount('Crossref', 'https://api.crossref.org/works',
-                  lambda j: j['message']['total-results'], params={'rows': 0},
-                  headers=_SOURCE_UA),
-        _srccount('DataCite', 'https://api.datacite.org/dois',
-                  lambda j: j['meta']['total'], params={'page[size]': 1}),
-        _srccount('PubMed', einfo, lambda j: j['einforesult']['dbinfo'][0]['count'],
-                  params={'db': 'pubmed', 'retmode': 'json', 'api_key': nkey}),
-        _srccount('PMC', einfo, lambda j: j['einforesult']['dbinfo'][0]['count'],
-                  params={'db': 'pmc', 'retmode': 'json', 'api_key': nkey}),
-        _srccount('Zenodo', 'https://zenodo.org/api/records', _zenodo_total,
-                  params={'size': 1}, headers=zen),
-        _srccount('PLoS', 'http://api.plos.org/search',
-                  lambda j: j['response']['numFound'],
-                  params={'q': '*:*', 'rows': 0, 'wt': 'json'}),
-        _srccount('eLife', 'https://api.elifesciences.org/search',
-                  lambda j: j['total'], params={'per-page': 1}, headers=_SOURCE_UA),
-        _srccount('bioRxiv',
-                  'https://api.biorxiv.org/details/biorxiv/2013-01-01/'
-                  + f'{date.today().isoformat()}/0',
-                  lambda j: j['messages'][0]['count_new_papers'],
-                  note='Distinct new preprints (excludes versions)'),
+    specs = [
+        ('OpenAlex', 'https://api.openalex.org/works',
+         lambda j: j['meta']['count'], {'params': oa_params}),
+        ('Crossref', 'https://api.crossref.org/works',
+         lambda j: j['message']['total-results'],
+         {'params': {'rows': 0}, 'headers': _SOURCE_UA}),
+        ('DataCite', 'https://api.datacite.org/dois',
+         lambda j: j['meta']['total'], {'params': {'page[size]': 1}}),
+        ('PubMed', einfo, lambda j: j['einforesult']['dbinfo'][0]['count'],
+         {'params': {'db': 'pubmed', 'retmode': 'json', 'api_key': nkey}}),
+        ('PMC', einfo, lambda j: j['einforesult']['dbinfo'][0]['count'],
+         {'params': {'db': 'pmc', 'retmode': 'json', 'api_key': nkey}}),
+        ('Zenodo', 'https://zenodo.org/api/records', _zenodo_total,
+         {'params': {'size': 1}, 'headers': zen}),
+        ('PLoS', 'http://api.plos.org/search',
+         lambda j: j['response']['numFound'],
+         {'params': {'q': '*:*', 'rows': 0, 'wt': 'json'}}),
+        ('eLife', 'https://api.elifesciences.org/search',
+         lambda j: j['total'], {'params': {'per-page': 1}, 'headers': _SOURCE_UA}),
+        ('bioRxiv',
+         'https://api.biorxiv.org/details/biorxiv/2013-01-01/'
+         + f'{date.today().isoformat()}/0',
+         lambda j: j['messages'][0]['count_new_papers'],
+         {'note': 'Distinct new preprints (excludes versions)'}),
     ]
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        recs = list(executor.map(
+            lambda s: _srccount(s[0], s[1], s[2], **s[3]), specs))
     for source, reason in _SOURCE_COUNT_NA.items():
         recs.append({'source': source, 'count': None, 'note': reason, 'error': None})
     return recs
 
 
-@app.route('/source_counts')
-def source_counts():
+@app.route('/data_sources')
+def source_data_sources():
     ''' Show the total number of records each external data source holds (the
-        service's own holdings, not Janelia-specific) for every source we have a
-        /raw call for. Counts are fetched live - one request per source - so the
+        service's own holdings, not Janelia-specific) for every source we have.
+        Counts are fetched live - one request per source - so the
         nine sources with a usable total are queried on each view; the other
         four expose no public total and show as n/a.
     '''
@@ -11188,6 +11224,8 @@ def source_counts():
         result = initialize_result()
         result['rest']['source'] = 'external'
         result['data'] = [{'source': r['source'], 'count': r['count'],
+                           'rate_limit': _SOURCE_RATE.get(r['source'], ('—', None))[0],
+                           'auth': _SOURCE_RATE.get(r['source'], (None, None))[1],
                            'note': r['note'], 'error': r['error']} for r in recs]
         result['rest']['row_count'] = len(recs)
         return generate_response(result)
@@ -11201,17 +11239,21 @@ def source_counts():
         if r['error']:
             err = f"<span style='color:#e74c3c'>({escape(r['error'])})</span>"
             rnote = f"{rnote} {err}" if rnote else err
-        trows.append([r['source'], cnt, safe(rnote)])
+        rps, auth = _SOURCE_RATE.get(r['source'], ('—', None))
+        auth_html = escape(auth) if auth else safe("<span style='color:#a8c4e0'>none</span>")
+        trows.append([r['source'], cnt, cell(rps, align='center'), safe(auth_html), safe(rnote)])
     intro = "<div style='font-size:0.85em; color:#a8c4e0; max-width:720px; " \
             + "margin-top:10px'>Total records each external service holds (the " \
             + "service's own holdings, not Janelia-specific), fetched live - so this " \
-            + "page makes one request per source. Four of the 13 <code>/raw</code> " \
-            + "sources expose no usable public total and show as n/a.</div>"
-    html = render_table(['Source', 'Records', 'Notes'], trows, table_id='srccounts',
-                        css='tablesorter standard-scroll') + intro
+            + "page makes one request per source. Six sources expose no usable " \
+            + "public total and show as n/a (arXiv, Unpaywall, and " \
+            + "Elsevier/Springer/protocols.io/figshare have no accessible count endpoint).</div>"
+    html = render_table(['Source', 'Records', 'Rate limit', 'Auth', 'Notes'], trows,
+                        table_id='srccounts', css='tablesorter standard-scroll',
+                        data_attrs={"sortlist": "[[0,0]]"}) + intro
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title="Data source record counts", html=html,
+                                         title="Data sources", html=html,
                                          navbar=generate_navbar('System')))
 
 
