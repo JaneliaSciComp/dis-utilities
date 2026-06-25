@@ -11,7 +11,7 @@
     jrc_former_status.
 """
 
-__version__ = '3.2.0'
+__version__ = '3.3.0'
 
 import argparse
 import collections
@@ -136,6 +136,30 @@ def get_pmc_license(pmcid):
     return None
 
 
+def get_unpaywall_license(doi):
+    """ Get the license for a DOI from Unpaywall
+        Keyword arguments:
+          doi: DOI
+        Returns:
+          License string or None
+    """
+    try:
+        data = DL.get_doi_record(doi, source='unpaywall')
+    except Exception as err:
+        LOGGER.debug(f"Could not get Unpaywall license for {doi}: {err}")
+        COUNT['unpaywall_error'] += 1
+        return None
+    if not data:
+        return None
+    best = data.get('best_oa_location') or {}
+    if best.get('license'):
+        return best['license']
+    for loc in data.get('oa_locations', []):
+        if loc.get('license'):
+            return loc['license']
+    return None
+
+
 def update_processing(doi, action, notes=None):
     ''' Update the processing status for a DOI
         Keyword arguments:
@@ -238,6 +262,14 @@ def update_open_access(row):
                     LOGGER.info(f"Using PMC license for {row['doi']}: {alt}")
                 else:
                     LOGGER.warning(f"Unknown PMC license {alt} for {row['doi']}")
+        if ('jrc_license' not in payload or payload['jrc_license'] is None) and try_pmc:
+            alt = get_unpaywall_license(row['doi'])
+            if alt:
+                if alt in LICENSE:
+                    payload['jrc_license'] = LICENSE[alt]
+                    LOGGER.info(f"Using Unpaywall license for {row['doi']}: {alt}")
+                else:
+                    LOGGER.warning(f"Unknown Unpaywall license {alt} for {row['doi']}")
         if not payload:
             return
     except Exception as err:
@@ -305,7 +337,9 @@ def show_counts():
     if COUNT['notfound']:
         msg += f"DOIs not found: {COUNT['notfound']:,}\n"
     if COUNT['pmc_error']:
-        msg += f"PMC errors:     {COUNT['pmc_error']:,}\n"
+        msg += f"PMC errors:       {COUNT['pmc_error']:,}\n"
+    if COUNT['unpaywall_error']:
+        msg += f"Unpaywall errors: {COUNT['unpaywall_error']:,}\n"
     if COUNT['updated']:
         msg += f"DOIs updated:   {COUNT['updated']:,}\n"
     return msg
