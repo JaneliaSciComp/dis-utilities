@@ -37,7 +37,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "119.21.0"
+__version__ = "119.22.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -122,7 +122,8 @@ NAV = {"Home": "",
                            "Labs": "labs",
                            "Projects": "projects"},
        "Acknowledgements": {"Acknowledgement metrics": "acknowledgement_stats",
-                            "Search by project or department": "acksregexsearch"},
+                            "Search by project or department": "acksregexsearch",
+                            "Janelia acks without Janelia references": "acks_no_janelia_refs"},
        "System" : {"Database metrics": "stats_database",
                    "External systems": {"Search HHMI People system": "people",
                                         "HHMI Supervisory Organizations": "orgs/full",
@@ -12379,6 +12380,65 @@ def show_doi_by_ack_regex_ui(group):
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
                                          navbar=generate_navbar('Acknowledgements')))
+
+@app.route('/acks_no_janelia_refs')
+def acks_no_janelia_refs():
+    ''' Show external_dois with Janelia acknowledgements but no Janelia DOIs
+        in their reference list. Fetches all external_dois that have both
+        jrc_acknowledgements and reference fields, then excludes any whose
+        reference list contains at least one DOI present in the dois collection.
+    '''
+    ext_coll = DB['dis'].external_dois
+    doi_coll = DB['dis'].dois
+    proj = {"_id": 0, "doi": 1, "jrc_acknowledgements": 1, "reference": 1,
+            "jrc_publishing_date": 1}
+    match = {"jrc_acknowledgements": {"$exists": True},
+             "reference": {"$exists": True}}
+    try:
+        docs = list(ext_coll.find(match, proj))
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get external DOIs"),
+                               message=error_message(err))
+    # Build set of all Janelia DOIs for fast membership testing
+    try:
+        janelia_dois = set(r['doi'] for r in doi_coll.find({}, {"_id": 0, "doi": 1}))
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get Janelia DOIs"),
+                               message=error_message(err))
+    rows = []
+    fileoutput = ""
+    for doc in docs:
+        refs = doc.get('reference') or []
+        ref_dois = [r['DOI'].lower() for r in refs if r.get('DOI')]
+        # Skip if any reference DOI is a Janelia DOI
+        if any(d in janelia_dois for d in ref_dois):
+            continue
+        ack = doc.get('jrc_acknowledgements', '')
+        published = doc.get('jrc_publishing_date', '')
+        rows.append([safe(doi_link(doc['doi'])), published, escape(ack)])
+        fileoutput += f"{doc['doi']}\t{published}\t{ack}\n"
+    rows.sort(key=lambda r: r[1], reverse=True)
+    title = "Janelia acknowledgements without Janelia references"
+    if not rows:
+        html = render_warning("No matching DOIs found", 'warning')
+        endpoint_access()
+        return make_response(render_template('general.html', urlroot=request.url_root,
+                                             title=title, html=html,
+                                             navbar=generate_navbar('Acknowledgements')))
+    cards = stat_cards([("External DOIs checked", f"{len(docs):,}"),
+                        ("No Janelia references", f"{len(rows):,}")],
+                       div_id='acks-noref-stats')
+    download = create_downloadable('acks_no_janelia_refs',
+                                   ['DOI', 'Published', 'Acknowledgements'], fileoutput)
+    table = render_table(['DOI', 'Published', 'Acknowledgements'], rows,
+                         table_id='acks-no-refs', css='tablesorter standard-scroll')
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=title, html=cards + download + "<br><br>" + table,
+                                         navbar=generate_navbar('Acknowledgements')))
+
 
 # ******************************************************************************
 # * UI endpoints (system)                                                      *
