@@ -20,6 +20,8 @@ COUNT = collections.defaultdict(lambda: 0, {})
 ARG = LOGGER = WORK = None
 LICENSE = {}
 
+__version__ = '1.0.0'
+
 def terminate_program(msg=None):
     ''' Terminate the program gracefully
         Keyword arguments:
@@ -148,7 +150,7 @@ def processing():
     LOGGER.info(f"Found {cnt:,} DOIs to process for DataCite legal data")
     COUNT['read'] = cnt
     for row in rows:
-        if 'rightsListx' in row and row['rightsList']:
+        if 'rightsList' in row and row['rightsList']:
             for right in row['rightsList']:
                 if 'rightsIdentifier' in right and right['rightsIdentifier'] in LICENSE:
                     row['jrc_license'] = LICENSE[right['rightsIdentifier']]
