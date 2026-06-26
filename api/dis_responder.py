@@ -37,7 +37,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "119.22.0"
+__version__ = "119.23.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -6664,15 +6664,22 @@ def citation_list(source='datacite'):
                                message=error_message(err))
     trows = []
     row_classes = []
-    total = 0
-    cnt = 0
+    fileoutput = ""
+    total = total_ver = 0
+    cnt = cnt_ver = 0
     for row in rows:
-        total += row['jrc_citation_count']
+        n = row['jrc_citation_count']
+        total += n
         cnt += 1
+        is_ver = DL.is_version(row)
+        if is_ver:
+            total_ver += n
+            cnt_ver += 1
         link = doi_link(row['doi'])
-        trows.append([safe(link), strip_html_tags(DL.get_title(row)),
-                      f"{row['jrc_citation_count']:,}"])
-        row_classes.append('ver' if DL.is_version(row) else '')
+        title_text = strip_html_tags(DL.get_title(row))
+        trows.append([safe(link), title_text, cell(f"{n:,}", sort=n)])
+        row_classes.append('ver' if is_ver else '')
+        fileoutput += f"{row['doi']}\t{title_text}\t{n}\n"
     pulldown = year_pulldown(f"citation_list/{source}", query=True)
     other = 'crossref' if source == 'datacite' else 'datacite'
     ysuffix = '' if year == 'All' else f"?year={year}"
@@ -6692,19 +6699,35 @@ def citation_list(source='datacite'):
         return make_response(render_template('general.html', urlroot=request.url_root,
                                              title=title, html=html,
                                              navbar=generate_navbar('DOIs')))
+    cnt_nv = cnt - cnt_ver
+    total_nv = total - total_ver
+    avg_all = f"{total/cnt:,.1f}" if cnt else "0"
+    avg_nv = f"{total_nv/cnt_nv:,.1f}" if cnt_nv else "0"
+    download = create_downloadable(f'citation_list_{source}',
+                                   ['DOI', 'Title', 'Citations'], fileoutput)
     html = render_table(['DOI', 'Title', 'Citations'], trows, table_id='data',
                         css='tablesorter numberlast-scroll', row_classes=row_classes,
                         footer=[fcell('TOTAL', colspan=2),
                                 fcell(f"{total:,}", align='center')]) + "<br>"
-    cbutton = "<button id='verbtn' class=\"btn btn-outline-warning\" " \
-              + "style='margin-left: 10px' " \
-              + "onclick=\"toggler('data', 'ver', 'totalrows');\">" \
-              + "Filter versioned DOIs</button>"
+    # data-* attrs store both states so the onclick can swap without a round-trip.
+    # data-filtered tracks current state (0=all shown, 1=versioned filtered).
+    cbutton = (
+        "<button id='verbtn' class=\"btn btn-outline-warning\" style='margin-left: 10px' "
+        + f"data-total-all=\"{total:,}\" data-avg-all=\"{avg_all}\" "
+        + f"data-total-nv=\"{total_nv:,}\" data-avg-nv=\"{avg_nv}\" "
+        + "data-filtered=\"0\" "
+        + "onclick=\"toggler('data', 'ver', 'totalrows'); "
+        + "var f=this.dataset.filtered==='1'; "
+        + "this.dataset.filtered=f?'0':'1'; "
+        + "document.getElementById('cite-total').textContent=f?this.dataset.totalAll:this.dataset.totalNv; "
+        + "document.getElementById('cite-avg').textContent=f?this.dataset.avgAll:this.dataset.avgNv;\">"
+        + "Filter versioned DOIs</button>"
+    )
     cards = stat_cards([("DOIs with citations", f"<span id='totalrows'>{cnt:,}</span>"),
-                        ("Total citations", f"{total:,}"),
-                        ("Avg. per DOI", f"{total/cnt:,.1f}" if cnt else "0")],
+                        ("Total citations", f"<span id='cite-total'>{total:,}</span>"),
+                        ("Avg. per DOI", f"<span id='cite-avg'>{avg_all}</span>")],
                        div_id='dccc-stats')
-    html = cards + pulldown + cbutton + switch + "<br><br>" + html
+    html = cards + pulldown + cbutton + switch + download + "<br><br>" + html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
@@ -6769,7 +6792,7 @@ def citation_metrics(source='datacite'):
     coll = DB['dis'].dois
     source_name = {"datacite": "DataCite", "openalex": "OpenAlex",
                    "scholexplorer": "ScholeXplorer", "crossref": "Crossref",
-                   "dimensions": "Dimensions"}
+                   "wos": "Web of Science", "dimensions": "Dimensions"}
     # Citations by source
     payload = [{"$match": {"jrc_citation_sources": {"$exists": True},
                            "jrc_obtained_from": obtained}},
@@ -6809,7 +6832,8 @@ def citation_metrics(source='datacite'):
         label = source_name.get(row['_id'], row['_id'].capitalize())
         cite_data[label] = row['total']
         cite_total += row['total']
-        trows.append([label, f"{row['dois']:,}", f"{row['total']:,}"])
+        trows.append([label, cell(f"{row['dois']:,}", sort=row['dois']),
+                      cell(f"{row['total']:,}", sort=row['total'])])
     cards = stat_cards([("DOIs with citation sources",
                          f"<a href='/citation_list/{source}'>{cite_dois:,}</a>"),
                         ("% DOIs cited", f"{cite_dois/all_dois*100:,.1f}%" if all_dois else "0%"),
@@ -6867,8 +6891,10 @@ def citation_metrics(source='datacite'):
         pct = cited['dois'] / alln if alln else 0
         by_year[year] = {'dois': alln, 'cited_dois': cited['dois'],
                          'unique_citations': cited['citations']}
-        ytrows.append([year, f"{alln:,}", f"{cited['dois']:,}", f"{pct*100:.1f}%",
-                       f"{cited['citations']:,}"])
+        ytrows.append([year, cell(f"{alln:,}", sort=alln),
+                       cell(f"{cited['dois']:,}", sort=cited['dois']),
+                       cell(f"{pct*100:.1f}%", sort=pct),
+                       cell(f"{cited['citations']:,}", sort=cited['citations'])])
         ydata['Year'].append(year)
         ydata['Citations'].append(cited['citations'])
         ydata['Cited'].append(pct)
@@ -6893,6 +6919,7 @@ def citation_metrics(source='datacite'):
         # data is a single stats object, not a row list; report the number of
         # cited DOIs the stats summarize rather than the dict's key count
         result['rest']['row_count'] = cite_dois
+        endpoint_access()
         return generate_response(result)
     chartscript = cite_div = year_div = ''
     if cite_data:
@@ -7282,6 +7309,10 @@ def figshare_groups(year='All'):  # pylint: disable=too-many-locals,too-many-bra
             tdl = members[0]['downloads']
             tcit = members[0]['citations']
         ver_count = sum(1 for c in mrow_classes if c == 'ver')
+        # When filter is ON only non-versioned rows remain; if ALL were versioned that's 0.
+        tviews_nv = tviews if nonver_seen else 0
+        tdl_nv = tdl if nonver_seen else 0
+        tcit_nv = tcit if nonver_seen else 0
         mtable = render_table(['DOI', 'Title', 'Views', 'Downloads', 'Citations'], mrows,
                               table_id='fig-members', css='tablesorter numberlast-scroll',
                               row_classes=mrow_classes,
@@ -7290,14 +7321,26 @@ def figshare_groups(year='All'):  # pylint: disable=too-many-locals,too-many-bra
                                       fcell(f"{tdl:,}", align='center'),
                                       fcell(f"{tcit:,}", align='center')])
         mcards = stat_cards([("DOIs in group", f"<span id='totalrows'>{len(members):,}</span>"),
-                             ("Total views", f"{tviews:,}"),
-                             ("Total downloads", f"{tdl:,}"),
-                             ("Total citations", f"{tcit:,}")], div_id='figm-stats')
+                             ("Total views", f"<span id='fig-views'>{tviews:,}</span>"),
+                             ("Total downloads", f"<span id='fig-dl'>{tdl:,}</span>"),
+                             ("Total citations", f"<span id='fig-cit'>{tcit:,}</span>")],
+                            div_id='figm-stats')
         verbtn = ""
         if ver_count:
-            verbtn = "<button id='verbtn' class='btn btn-outline-warning' " \
-                     + "onclick=\"toggler('fig-members', 'ver', 'totalrows');\">" \
-                     + "Filter versioned DOIs</button>&nbsp;<br><br>"
+            verbtn = (
+                "<button id='verbtn' class='btn btn-outline-warning' "
+                + f"data-views-all=\"{tviews:,}\" data-views-nv=\"{tviews_nv:,}\" "
+                + f"data-dl-all=\"{tdl:,}\" data-dl-nv=\"{tdl_nv:,}\" "
+                + f"data-cit-all=\"{tcit:,}\" data-cit-nv=\"{tcit_nv:,}\" "
+                + "data-filtered=\"0\" "
+                + "onclick=\"toggler('fig-members', 'ver', 'totalrows'); "
+                + "var f=this.dataset.filtered==='1'; "
+                + "this.dataset.filtered=f?'0':'1'; "
+                + "document.getElementById('fig-views').textContent=f?this.dataset.viewsAll:this.dataset.viewsNv; "
+                + "document.getElementById('fig-dl').textContent=f?this.dataset.dlAll:this.dataset.dlNv; "
+                + "document.getElementById('fig-cit').textContent=f?this.dataset.citAll:this.dataset.citNv;\">"
+                + "Filter versioned DOIs</button>&nbsp;<br><br>"
+            )
         html = back + "<br><br>" + mcards + verbtn + mtable
         endpoint_access()
         return make_response(render_template('general.html', urlroot=request.url_root,
