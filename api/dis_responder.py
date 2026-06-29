@@ -246,23 +246,32 @@ def before_request():
         app.config["dis"] = JRC.simplenamespace_to_dict(_load_config_ns("dis"))
         print(f"Connecting to {dbo.client} prod")
         try:
-            DB['dis'] = JRC.connect_database(dbo)
+            dis_db = JRC.connect_database(dbo)
         except Exception as err:
             return render_template('warning.html', urlroot=request.url_root,
                                    title=render_warning("Database connect error"), message=err)
+        # Build CVTERM/PROJECT into locals and commit (along with DB['dis']) only
+        # after every read succeeds. This keeps init atomic: a transient failure
+        # here leaves DB empty so the next request retries, instead of leaving the
+        # app permanently running with an unpopulated CVTERM.
         try:
-            rows = DB['dis']['cvterm'].find({})
+            local_cvterm = {}
+            rows = dis_db['cvterm'].find({})
             for row in rows:
-                if row['cv'] not in CVTERM:
-                    CVTERM[row['cv']] = {}
-                CVTERM[row['cv']][row['name']] = row
-            rows = DB['dis'].project_map.find({"doNotUse": {"$exists": False}})
+                if row['cv'] not in local_cvterm:
+                    local_cvterm[row['cv']] = {}
+                local_cvterm[row['cv']][row['name']] = row
+            local_project = {}
+            rows = dis_db.project_map.find({"doNotUse": {"$exists": False}})
             for row in rows:
-                PROJECT[row['name']] = True
-                PROJECT[row['project']] = True
+                local_project[row['name']] = True
+                local_project[row['project']] = True
         except Exception as err:
             return render_template('warning.html', urlroot=request.url_root,
                                    title=render_warning("Database error"), message=err)
+        CVTERM.update(local_cvterm)
+        PROJECT.update(local_project)
+        DB['dis'] = dis_db
     app.config["START_TIME"] = time()
     app.config["COUNTER"] += 1
     endpoint = request.endpoint if request.endpoint else "(Unknown)"
