@@ -4,10 +4,15 @@
     builders with no DB, request, or app coupling.
 '''
 
+import json
 import random
+import re
 import string
 from datetime import datetime
 from html import escape
+
+from dis_config import DO_NOT_DISPLAY, NCBI_MESH, PMCID
+from dis_state import CVTERM
 
 
 # Bold white down-arrow prefixed to download-button labels
@@ -458,4 +463,115 @@ def year_pulldown(prefix, all_years=True, suffix = '', start_year=2006, query=Fa
             url = f"/{prefix}/{year}{suffix}"
         html += f"<a class='dropdown-item' href='{url}'>{year}</a>"
     html += "</div></div>"
+    return html
+
+
+
+# --- Helpers moved from dis_responder.py (read CVTERM via dis_state,
+# --- config constants via dis_config); pure HTML, no DB/request/app coupling.
+
+def add_jrc_fields(row):
+    ''' Add a table of custom JRC fields
+        Keyword arguments:
+          row: DOI record
+        Returns:
+          HTML
+    '''
+    jrc = {}
+    prog = re.compile("^jrc_")
+    for key, val in row.items():
+        if not re.match(prog, key) or key in DO_NOT_DISPLAY:
+            continue
+        if isinstance(val, list) and key not in ('jrc_preprint'):
+            if not val:
+                continue
+            try:
+                if isinstance(val[0], dict):
+                    val = ", ".join(sorted(elem['name'] for elem in val))
+                else:
+                    val = ", ".join(sorted(val))
+            except TypeError:
+                val = json.dumps(val)
+            except Exception as err:
+                print(key, val)
+                print(f"Error in add_jrc_fields for {row['doi']}: {err}")
+        jrc[key] = val
+    if not jrc:
+        return ""
+    html = '<table class="standard">'
+    for key in sorted(jrc):
+        if key in ['jrc_pmid']:
+            continue
+        val = jrc[key]
+        if key == 'jrc_author':
+            link = []
+            for auth in val.split(", "):
+                link.append(f"<a href='/userui/{auth}'>{auth}</a>")
+            val = ", ".join(link)
+        if key == 'jrc_preprint':
+            val = doi_link(val)
+        if key == 'jrc_pmc':
+            val = f"<a href='{PMCID}PMC{val}/' target='_blank'>{val}</a>"
+        if key == 'jrc_license' and val in CVTERM['license']:
+            newval = f"{CVTERM['license'][val]['definition']}"
+            if CVTERM['license'][val]['definition'] != CVTERM['license'][val]['display']:
+                newval += f" ({CVTERM['license'][val]['display']})"
+            val = newval
+        if key == 'jrc_oa_status':
+            val = f"<span class='oa_{val}' style='font-weight: bold;'>{val.capitalize()}</span>"
+        html += f"<tr><td>{CVTERM['jrc'][key]['display'] if key in CVTERM['jrc'] else key}</td>" \
+                + f"<td>{val}</td></tr>"
+    html += "</table><br>"
+    return html
+
+
+def get_license(lic):
+    ''' Get a license from a license string
+        Keyword arguments:
+          lic: license string
+        Returns:
+          HTML license
+    '''
+    if lic not in CVTERM['license']:
+        return lic
+    if lic == CVTERM['license'][lic]['definition']:
+        return lic
+    return f"{lic} ({CVTERM['license'][lic]['definition']})"
+
+
+def add_subjects(row, html=None):
+    ''' Add subjects to the HTML
+        Keyword arguments:
+          row: row from dois collection
+          html: HTML to add subjects to
+        Returns:
+          HTML with subjects added
+    '''
+    if row['jrc_obtained_from'] == 'DataCite':
+    # Subjects (DataCite categories)
+        if row and row['jrc_obtained_from'] == 'DataCite' and 'subjects' in row \
+           and row['subjects']:
+            if html:
+                html += "<h4>DataCite subjects</h4>" \
+                        + f"{', '.join(sub['subject'] for sub in row['subjects'])}"
+            else:
+                return f"{', '.join(sub['subject'] for sub in row['subjects'])}"
+    elif 'jrc_mesh' in row:
+        # MeSH subjects (Crossref)
+        subjects = []
+        for mesh in row['jrc_mesh']:
+            if 'descriptor_name' in mesh:
+                if 'major_topic' in mesh and mesh['major_topic']:
+                    subj = mesh['descriptor_name']
+                else:
+                    subj = f"<span style='color: #88a'>{mesh['descriptor_name']}</span>"
+                if 'key' in mesh and mesh['key']:
+                    subj = f"<a href='{NCBI_MESH}{mesh['key']}' " \
+                           + f"target='_blank'>{subj}</a>"
+                subjects.append(subj)
+        if subjects:
+            if html:
+                html += f"<h4>MeSH subjects</h4>{', '.join(subjects)}"
+            else:
+                return f"{', '.join(subjects)}"
     return html
