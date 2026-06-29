@@ -37,7 +37,7 @@ import dis_plots as DP
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "119.23.0"
+__version__ = "119.24.0"
 # Database
 DB = {}
 CVTERM = {}
@@ -5741,6 +5741,7 @@ def dois_time(period, year=None):
                                message=error_message(err))
     counter = collections.defaultdict(lambda: 0, {})
     trows = []
+    nav = {}
     if period == 'year':
         periods = {}
         for row in rows:
@@ -5766,6 +5767,8 @@ def dois_time(period, year=None):
                     data[source].insert(0, 0)
                     cells.append("")
             trows.append(cells)
+        # Tap a year bar -> all DOIs published that year (mirrors the year cell)
+        nav = {y: {"field": "publishing_year", "value": y} for y in data['years']}
         title = "DOIs published by year"
         chart_title = "DOIs published by year/source"
         pulldown = year_pulldown('dois_time/year')
@@ -5786,6 +5789,10 @@ def dois_time(period, year=None):
                 else:
                     cells.append("")
             trows.append(cells)
+        # Tap a month bar -> all DOIs published that year-month
+        if year and year != 'All':
+            nav = {m: {"field": "publishing_year", "value": f"{year}-{m}"}
+                   for m in data['months']}
         title = f"DOIs published by month for {year}"
         chart_title = title
         pulldown = year_pulldown('dois_time/month', all_years=False)
@@ -5797,7 +5804,7 @@ def dois_time(period, year=None):
     xaxis = 'years' if period == 'year' else 'months'
     chartscript, chartdiv = DP.stacked_bar_chart(data, chart_title, xaxis=xaxis,
                                                  yaxis=app.config['SOURCES'],
-                                                 colors=DP.SOURCE_PALETTE)
+                                                 colors=DP.SOURCE_PALETTE, nav=nav)
     endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title=title, html=html,
@@ -6937,11 +6944,14 @@ def citation_metrics(source='datacite'):
                                         width=500, colors=colors)
         chartscript += script
     if ydata['Year']:
+        # Tap a year bar -> the DOIs published that year for this registrar
+        ynav = {yr: {"field": "publishing_year", "value": yr, "source": obtained}
+                for yr in ydata['Year']}
         script, year_div = DP.dual_axis_chart(ydata, title="Citations by publishing year",
                                               x_field='Year', bar_field='Citations',
                                               line_field='Cited', line_label='% cited',
                                               bar_format="0,0", line_format="0%",
-                                              width=650, height=400)
+                                              width=650, height=400, nav=ynav)
         chartscript += script
     # Cards (with freshness/version notes) on their own full-width rows, then
     # each table paired with its chart in a flex row so the chart lines up
@@ -7195,11 +7205,13 @@ def figshare_metrics(year='All'):  # pylint: disable=too-many-locals,too-many-br
                                      fmt="{0,0}")
     chartscript += script
     if ydata['Year']:
+        # Tap a year bar -> figshare metrics scoped to that year
+        ynav = {yr: f"/figshare_stats/{yr}" for yr in ydata['Year']}
         script, year_div = DP.dual_axis_chart(
             ydata, title="Deposits & downloads by year", x_field='Year',
             bar_field='DOIs', line_field='Downloads', bar_label='DOIs deposited',
             line_label='Downloads', bar_color='darkorange', bar_format="0,0",
-            line_format="0,0", width=650, height=400)
+            line_format="0,0", width=650, height=400, nav=ynav)
         chartscript += script
     script, type_div = DP.hbar_chart(type_data, "DOIs by resource type",
                                      value_label="DOIs", width=500, height=320,
@@ -7415,11 +7427,14 @@ def figshare_groups(year='All'):  # pylint: disable=too-many-locals,too-many-bra
     cnthtml = "<h4>Title groups by DOI count (top 20)</h4>" \
               + group_table(by_cnt, 'fig-grp-cnt')
     def chart_data(ordered, value_key):
-        ''' Build {label: value} for a chart. Shorten long stems with a middle
-            ellipsis (keeps the distinguishing tail, e.g. "...P7 mouse skin")
-            so same-prefixed series stay readable; a uniqueness guard prevents
-            two labels from colliding and silently dropping a bar. '''
+        ''' Build {label: value} and a parallel {label: drill-down URL} for a
+            chart. Shorten long stems with a middle ellipsis (keeps the
+            distinguishing tail, e.g. "...P7 mouse skin") so same-prefixed series
+            stay readable; a uniqueness guard prevents two labels from colliding
+            and silently dropping a bar. The nav map carries the full (untruncated)
+            stem so a bar tap reaches the same ?stem= page as the table row. '''
         data = {}
+        nav = {}
         for grp in ordered[:15]:
             value = grp[value_key]
             if value_key == 'downloads' and not value:
@@ -7429,19 +7444,20 @@ def figshare_groups(year='All'):  # pylint: disable=too-many-locals,too-many-bra
             while label in data:
                 label += ' '
             data[label] = value
-        return data
-    grp_dl_data = chart_data(by_dl, 'downloads')
-    grp_cnt_data = chart_data(by_cnt, 'count')
+            nav[label] = f"{base}?stem={quote(stem)}"
+        return data, nav
+    grp_dl_data, grp_dl_nav = chart_data(by_dl, 'downloads')
+    grp_cnt_data, grp_cnt_nav = chart_data(by_cnt, 'count')
     chartscript = dl_div = cnt_div = ''
     if grp_dl_data:
         script, dl_div = DP.hbar_chart(grp_dl_data, "Top title groups by downloads",
                                        value_label="Downloads", width=620, height=420,
-                                       value_format="0,0", show_values=True)
+                                       value_format="0,0", show_values=True, nav=grp_dl_nav)
         chartscript += script
     if grp_cnt_data:
         script, cnt_div = DP.hbar_chart(grp_cnt_data, "Top title groups by DOI count",
                                         value_label="DOIs", width=620, height=420,
-                                        value_format="0,0", show_values=True)
+                                        value_format="0,0", show_values=True, nav=grp_cnt_nav)
         chartscript += script
 
     def flexrow(table_html, chart_div):
@@ -7688,10 +7704,13 @@ def zenodo_groups(year='All'):  # pylint: disable=too-many-locals,too-many-branc
               + group_table(by_cit, 'zen-grp-cit')
 
     def chart_data(ordered, value_key):
-        ''' Build {label: value} for a chart, shortening long labels with a middle
-            ellipsis; a uniqueness guard stops two labels colliding and silently
-            dropping a bar. '''
+        ''' Build {label: value} and a parallel {label: drill-down URL} for a
+            chart, shortening long labels with a middle ellipsis; a uniqueness
+            guard stops two labels colliding and silently dropping a bar. The nav
+            map carries the deposit concept so a bar tap reaches the same ?concept=
+            page as the table row. '''
         data = {}
+        nav = {}
         for grp in ordered[:15]:
             value = grp[value_key]
             if value_key in ('downloads', 'citations') and not value:
@@ -7701,25 +7720,26 @@ def zenodo_groups(year='All'):  # pylint: disable=too-many-locals,too-many-branc
             while label in data:
                 label += ' '
             data[label] = value
-        return data
-    grp_dl_data = chart_data(by_dl, 'downloads')
-    grp_cnt_data = chart_data(by_cnt, 'count')
-    grp_cit_data = chart_data(by_cit, 'citations')
+            nav[label] = f"{base}?concept={quote(grp['concept'])}"
+        return data, nav
+    grp_dl_data, grp_dl_nav = chart_data(by_dl, 'downloads')
+    grp_cnt_data, grp_cnt_nav = chart_data(by_cnt, 'count')
+    grp_cit_data, grp_cit_nav = chart_data(by_cit, 'citations')
     chartscript = dl_div = cnt_div = cit_div = ''
     if grp_dl_data:
         script, dl_div = DP.hbar_chart(grp_dl_data, "Top deposits by downloads",
                                        value_label="Downloads", width=620, height=420,
-                                       value_format="0,0", show_values=True)
+                                       value_format="0,0", show_values=True, nav=grp_dl_nav)
         chartscript += script
     if grp_cnt_data:
         script, cnt_div = DP.hbar_chart(grp_cnt_data, "Top deposits by version count",
                                         value_label="Versions", width=620, height=420,
-                                        value_format="0,0", show_values=True)
+                                        value_format="0,0", show_values=True, nav=grp_cnt_nav)
         chartscript += script
     if grp_cit_data:
         script, cit_div = DP.hbar_chart(grp_cit_data, "Top deposits by citations",
                                         value_label="Citations", width=620, height=420,
-                                        value_format="0,0", show_values=True)
+                                        value_format="0,0", show_values=True, nav=grp_cit_nav)
         chartscript += script
 
     def flexrow(table_html, chart_div):
@@ -7882,11 +7902,13 @@ def zenodo_stats(year='All'):  # pylint: disable=too-many-locals,too-many-branch
                                          fmt="{0,0}")
         chartscript += script
     if ydata['Year']:
+        # Tap a year bar -> Zenodo metrics scoped to that year
+        ynav = {yr: f"/zenodo_stats/{yr}" for yr in ydata['Year']}
         script, year_div = DP.dual_axis_chart(
             ydata, title="Deposits & downloads by year", x_field='Year',
             bar_field='DOIs', line_field='Downloads', bar_label='DOIs deposited',
             line_label='Downloads', bar_color='darkorange', bar_format="0,0",
-            line_format="0,0", width=650, height=400)
+            line_format="0,0", width=650, height=400, nav=ynav)
         chartscript += script
     script, type_div = DP.hbar_chart(type_data, "DOIs by resource type",
                                      value_label="DOIs", width=500, height=320,
@@ -8620,9 +8642,11 @@ def org_year(org="Shared Resources"):
                                 fcell(safe(c2), header=False)]) + "<br>"
     data[f"With {org} authors"] = data.pop(org)
     data[f"No {org} authors"] = data.pop("Janelia")
+    # Tap a year bar -> all Janelia last-author pubs that year (mirrors the "All" cell)
+    nav = {yr: f"/org_summary/all/{yr}/last" for yr in data['years']}
     chartscript, chartdiv = DP.stacked_bar_chart(data, title, xaxis="years",
                                                  yaxis=(f"No {org} authors", f"With {org} authors"),
-                                                 colors=DP.SOURCE_PALETTE)
+                                                 colors=DP.SOURCE_PALETTE, nav=nav)
     endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title=title, html=html,
@@ -8743,10 +8767,12 @@ def dois_preprint_year():
                         css='tablesorter numbers-scroll',
                         footer=[fcell('Total'), fcell(f"{jrn:,}", align='center'),
                                 fcell(f"{pre:,}", align='center')])
+    # Tap a year bar -> the DOIs published that year
+    ynav = {yr: {"field": "publishing_year", "value": yr} for yr in data['years']}
     chartscript, chartdiv = DP.stacked_bar_chart(data, "DOIs published by year/preprint status",
                                                  xaxis="years",
                                                  yaxis=('Journal article', 'Preprint'),
-                                                 colors=DP.SOURCE_PALETTE)
+                                                 colors=DP.SOURCE_PALETTE, nav=ynav)
     endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title="DOIs preprint status by year", html=html,
@@ -9122,10 +9148,12 @@ def show_open_access():
             + "<a href='https://api.openalex.org/institutions?search=Janelia' " \
             + "target='_blank'>OpenAlex</a>"
     tt = [("Year", "@years"), ("Open", "@Open"), ("Closed", "@Closed"), ("Citations", "@Citations")]
+    # Tap a year bar -> the DOIs published that year
+    ynav = {yr: {"field": "publishing_year", "value": yr} for yr in data['years']}
     chartscript, chartdiv = DP.stacked_bar_chart(data, 'OpenAlex DOIs', xaxis="years", orient=pi/4,
                                                  width=900, height=550,
                                                  yaxis=('Closed', 'Open'), yaxis2='Citations',
-                                                 colors=['maroon', 'green'], tooltip=tt)
+                                                 colors=['maroon', 'green'], tooltip=tt, nav=ynav)
     endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title="DOIs/citations by year", html=html,
@@ -9780,8 +9808,10 @@ def show_subscription_year(year=None):
     html += stat_cards([("Providers", f"{len(data):,}"),
                         ("Subscriptions", f"{sub_cnt:,}"),
                         ("Total cost", f"${total:,.2f}")], div_id='subyear-stats')
+    # Tap a provider bar -> that provider's cost-by-year report
+    pnav = {prov: f"/subscription/cost/{quote(prov, safe='')}" for prov in data}
     barscript, bardiv = DP.hbar_chart(data, f'Subscription costs by provider for {year}',
-                                      value_label='Cost', width=650, height=450)
+                                      value_label='Cost', width=650, height=450, nav=pnav)
     endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                         title=f"Subscription costs by provider for {year}",
@@ -9909,10 +9939,11 @@ def show_subscription_costs(provider=None):
         html += "<br><br><h3>Providers</h3>"
         html += '<br>'.join([f"<a href='/subscription/cost/{pp}'>{pp}</a>" \
                 for pp in providers])
-    # Bar/line chart
+    # Bar/line chart; tap a year bar -> that year's costs (mirrors the year cell)
+    ynav = {str(yr): f"/subscription/year/{yr}" for yr in data['Year']}
     chartscript, chartdiv = DP.dual_axis_chart(data, title=title,
                                                x_field='Year', bar_field='Cost',
-                                               line_field='Count', bar_trend=True)
+                                               line_field='Count', bar_trend=True, nav=ynav)
     chartscript2 = None
     try:
         if provider:

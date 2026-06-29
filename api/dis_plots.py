@@ -7,13 +7,89 @@ import json
 from math import ceil, pi
 import numpy as np
 from bokeh.colors import named as _bokeh_named
-from bokeh.models import (BasicTicker, ColorBar, HoverTool, LabelSet, LinearAxis,
-                          LinearColorMapper, ColumnDataSource, NumeralTickFormatter, Range1d)
+from bokeh.models import (BasicTicker, ColorBar, CustomJS, HoverTool, LabelSet, LinearAxis,
+                          LinearColorMapper, ColumnDataSource, NumeralTickFormatter, Range1d,
+                          TapTool)
 from bokeh.embed import components
 from bokeh.palettes import all_palettes, plasma, Turbo256
 from bokeh.plotting import figure
 from bokeh.transform import cumsum, transform
 import pandas as pd
+
+
+# Tap-to-navigate callback shared by the bar charts. Clicking a glyph either
+# follows a URL (GET) or submits a hidden form to /doiui/custom (POST, the app's
+# DOI drill-down endpoint, which is POST-only). Inputs are set as DOM properties
+# (not interpolated HTML) so labels with quotes/ampersands can't break the form.
+_NAV_TAP_JS = """
+    const inds = cb_obj.indices;
+    if (!inds || !inds.length) { return; }
+    const d = src.data;
+    const i = inds[0];
+    const url = d['_nav_url'][i];
+    if (url) { window.location.href = url; return; }
+    const field = d['_nav_field'][i];
+    if (!field) { return; }
+    const form = document.createElement('form');
+    form.method = 'POST';
+    form.action = '/doiui/custom';
+    form.style.display = 'none';
+    const add = (n, v) => {
+        const e = document.createElement('input');
+        e.type = 'hidden';
+        e.name = n;
+        e.value = v;
+        form.appendChild(e);
+    };
+    add('field', field);
+    add('value', d['_nav_value'][i]);
+    if (d['_nav_source'][i]) { add('jrc_obtained_from', d['_nav_source'][i]); }
+    document.body.appendChild(form);
+    form.submit();
+"""
+
+
+def _make_clickable(plot, source, keys, nav, renderers=None):
+    ''' Wire a TapTool so clicking a glyph navigates to a drill-down target.
+        Keyword arguments:
+          plot:      the Bokeh figure
+          source:    the ColumnDataSource backing the glyphs
+          keys:      list of category keys aligned to the source rows
+          nav:       dict mapping a key (matched by str()) to either a URL string
+                     (GET navigation) or a dict {"field":.., "value":.., "source":..}
+                     (POST to /doiui/custom). Keys with no entry stay inert.
+          renderers: glyph renderers the TapTool should hit (default: all)
+        Adds hidden _nav_* columns to `source` and a tap callback. No-op when
+        `nav` is falsy. Must be called before components().
+    '''
+    if not nav:
+        return
+    urls, fields, values, sources = [], [], [], []
+    for key in keys:
+        target = nav.get(str(key))
+        if isinstance(target, str):
+            urls.append(target)
+            fields.append("")
+            values.append("")
+            sources.append("")
+        elif isinstance(target, dict):
+            urls.append("")
+            fields.append(str(target.get("field", "")))
+            values.append(str(target.get("value", "")))
+            sources.append(str(target.get("source", "")))
+        else:
+            urls.append("")
+            fields.append("")
+            values.append("")
+            sources.append("")
+    source.data["_nav_url"] = urls
+    source.data["_nav_field"] = fields
+    source.data["_nav_value"] = values
+    source.data["_nav_source"] = sources
+    plot.add_tools(TapTool(renderers=renderers) if renderers else TapTool())
+    source.selected.js_on_change('indices', CustomJS(args={"src": source},
+                                                     code=_NAV_TAP_JS))
+
 
 def _darken_color(color, factor=0.7):
     ''' Return a darkened version of a CSS named or hex color.
@@ -292,7 +368,7 @@ def pie_chart(data, title, legend, height=300, width=400, location="right",
 
 
 def stacked_bar_chart(data, title, xaxis, yaxis, colors=None, width=None, height=None,
-                      orient=None, yaxis2=None, tooltip=None, legend=True):
+                      orient=None, yaxis2=None, tooltip=None, legend=True, nav=None):
     ''' Create a stacked bar chart
         Keyword arguments:
           data: dictionary of data
@@ -317,13 +393,14 @@ def stacked_bar_chart(data, title, xaxis, yaxis, colors=None, width=None, height
     if width and height:
         plt.width = width
         plt.height = height
+    cds = ColumnDataSource(data)
     if legend:
         bar_renderers = plt.vbar_stack(yaxis, x=xaxis, width=0.9,
-                                       color=colors, source=data,
+                                       color=colors, source=cds,
                                        legend_label=yaxis)
     else:
         bar_renderers = plt.vbar_stack(yaxis, x=xaxis, width=0.9,
-                                       color=colors, source=data)
+                                       color=colors, source=cds)
     plt.add_tools(HoverTool(renderers=bar_renderers, tooltips=tt))
     if orient:
         plt.xaxis.major_label_orientation = orient
@@ -340,11 +417,11 @@ def stacked_bar_chart(data, title, xaxis, yaxis, colors=None, width=None, height
         plt.extra_y_ranges = {yaxis2: Range1d(start=0, end=ymax)}
         plt.add_layout(LinearAxis(y_range_name=yaxis2, axis_label=yaxis2), 'right')
         if legend:
-            line_renderer = plt.line(xaxis, yaxis2, color="black", source=data,
+            line_renderer = plt.line(xaxis, yaxis2, color="black", source=cds,
                                      line_width=2, legend_label=yaxis2,
                                      y_range_name=yaxis2)
         else:
-            line_renderer = plt.line(xaxis, yaxis2, color="black", source=data,
+            line_renderer = plt.line(xaxis, yaxis2, color="black", source=cds,
                                      line_width=2, y_range_name=yaxis2)
         plt.add_tools(HoverTool(renderers=[line_renderer],
                                 tooltips=f"@{xaxis}: @{yaxis2}"))
@@ -355,6 +432,7 @@ def stacked_bar_chart(data, title, xaxis, yaxis, colors=None, width=None, height
     plt.xgrid.grid_line_color = None
     plt.y_range.start = 0
     plt.background_fill_color = "ghostwhite"
+    _make_clickable(plt, cds, list(data[xaxis]), nav, renderers=bar_renderers)
     return components(plt)
 
 
@@ -374,6 +452,7 @@ def dual_axis_chart(  # pylint: disable=too-many-arguments,too-many-positional-a
     height=450,
     bar_trend=False,
     trend_color="firebrick",
+    nav=None,
 ):
     """
     Generate Bokeh chart script and div for a dual-axis chart with a
@@ -450,6 +529,7 @@ def dual_axis_chart(  # pylint: disable=too-many-arguments,too-many-positional-a
     # --- Legend ---
     p.legend.location = "top_left"
     p.legend.click_policy = "hide"
+    _make_clickable(p, source, x_vals, nav, renderers=[bars])
     chartscript, chartdiv = components(p)
     return chartscript, chartdiv
 
@@ -672,7 +752,7 @@ def heat_map(data, title, x_field, y_field, value_field, width=950, height=500,
 
 
 def hbar_chart(data, title, value_label="Value", width=650, height=450,  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
-               color=None, value_format="$0,0", show_pct=True, show_values=False):
+               color=None, value_format="$0,0", show_pct=True, show_values=False, nav=None):
     ''' Create a horizontal bar chart sorted by value (largest at top).
         Accommodates many categories in a fixed footprint and makes relative
         magnitudes easy to compare by bar length.
@@ -731,6 +811,7 @@ def hbar_chart(data, title, value_label="Value", width=650, height=450,  # pylin
     if show_pct:
         tooltips.append(("% of total", "@pct{0.0}%"))
     p.add_tools(HoverTool(renderers=[bars], tooltips=tooltips))
+    _make_clickable(p, source, labels, nav, renderers=[bars])
     return components(p)
 
 
