@@ -42,14 +42,13 @@ from dis_config import (ARTICLES, DATACITE, DOI, DO_NOT_DISPLAY, EMAIL,
                         EPT_ONE, EPT_TWO, LIBRARY, NCBI_MESH, OAREPORT,
                         OPENALEX, ORCID, PMCID, PMID, PREFERRED_AFF,
                         REPOSITORY, ROR, S2, S2_GRAPH, SOURCES, WORKDAY)
+from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "119.24.2"
+__version__ = "119.24.3"
 # Database
 DB = {}
-CVTERM = {}
-PROJECT = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
 # Custom queries
 CUSTOM_REGEX = {"publishing_year": {"field": "jrc_publishing_date",
