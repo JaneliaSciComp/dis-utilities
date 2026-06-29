@@ -38,10 +38,14 @@ from dis_html import (safe, cell, fcell, render_table, stat_cards, tiny_badge,
                       render_warning, oa_status_rank, doi_link, make_link,
                       create_downloadable, dloop, year_pulldown, generate_navbar,
                       DOWNLOAD_ICON)
+from dis_config import (ARTICLES, DATACITE, DOI, DO_NOT_DISPLAY, EMAIL,
+                        EPT_ONE, EPT_TWO, LIBRARY, NCBI_MESH, OAREPORT,
+                        OPENALEX, ORCID, PMCID, PMID, PREFERRED_AFF,
+                        REPOSITORY, ROR, S2, S2_GRAPH, SOURCES, WORKDAY)
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "119.24.1"
+__version__ = "119.24.2"
 # Database
 DB = {}
 CVTERM = {}
@@ -908,7 +912,7 @@ def generate_works_table(rows, name=None, show="full", eid=None):
     a Janelia employee. It is not uncommon for check marks to not appear for former employees. If
     you have a publication below without a check mark, it's most likely that affiliation or ORCID
     information was not provided to Crossref/DataCite. If one of your publications doesn't have a
-    check (or is missing), please email the DOI to the Library at {app.config['LIBRARY']}.
+    check (or is missing), please email the DOI to the Library at {LIBRARY}.
     '''
     html = f"<hr>{preamble}<br>Number of DOIs: " \
            + f"<span id='totalrows'>{len(works):,}</span><br>" + html
@@ -927,8 +931,8 @@ def add_orcid_controls(orc, html):
         olink = f"/orcidapi/{orc['orcid']}"
         html += f" {tiny_badge('info', 'Show ORCID data', olink)}"
         try:
-            olink = f"{app.config['OPENALEX']}authors?filter=orcid:{orc['orcid']}" \
-                    + f"&mailto={app.config['EMAIL']}"
+            olink = f"{OPENALEX}authors?filter=orcid:{orc['orcid']}" \
+                    + f"&mailto={EMAIL}"
             oa_params = {}
             if os.environ.get('OPENALEX_API_KEY'):
                 oa_params['api_key'] = os.environ['OPENALEX_API_KEY']
@@ -967,10 +971,10 @@ def get_orcid_from_db(oid, use_eid=False, bare=False, show="full"):
     html += f"<tr><td>Given name:</td><td>{', '.join(sorted(orc['given']))}</td></tr>"
     html += f"<tr><td>Family name:</td><td>{', '.join(sorted(orc['family']))}</td></tr>"
     if 'orcid' in orc:
-        html += f"<tr><td>ORCID:</td><td><a href='{app.config['ORCID']}{orc['orcid']}'>" \
+        html += f"<tr><td>ORCID:</td><td><a href='{ORCID}{orc['orcid']}'>" \
                 + f"{orc['orcid']}</a></td></tr>"
     if 'userIdO365' in orc:
-        link = "<a href='" + f"{app.config['WORKDAY']}{orc['userIdO365']}" \
+        link = "<a href='" + f"{WORKDAY}{orc['userIdO365']}" \
                + f"' target='_blank'>{orc['userIdO365']}</a>"
         html += f"<tr><td>User ID:</td><td>{link}</td></tr>"
     if 'affiliations' in orc:
@@ -1023,7 +1027,7 @@ def add_orcid_works(data, dois, return_html=True):
                        + work['external-ids']['external-id'][0]['external-id-url']['value'] \
                        + f"' target='_blank'>{doi}</a>"
         else:
-            link = f"{app.config['DOI']}{doi}"
+            link = f"{DOI}{doi}"
             link = f"<a href='{link}' target='_blank'>{doi}</a>"
         inner += f"<tr><td>{pdate}</td><td>{link}</td>" \
                  + f"<td>{wsumm['title']['title']['value']}</td></tr>"
@@ -1068,9 +1072,9 @@ def endpoint_access():
             eroot = endpoint.split('/')[0]
             parts = endpoint.split('/', 2)
             first_two = '/'.join(parts[:2])
-            if first_two in app.config['EPT_TWO']:
+            if first_two in EPT_TWO:
                 endpoint = first_two
-            if eroot in app.config['EPT_ONE']:
+            if eroot in EPT_ONE:
                 endpoint = eroot
     coll = DB['dis'].api_endpoint_log
     try:
@@ -1234,7 +1238,7 @@ def add_jrc_fields(row):
     jrc = {}
     prog = re.compile("^jrc_")
     for key, val in row.items():
-        if not re.match(prog, key) or key in app.config['DO_NOT_DISPLAY']:
+        if not re.match(prog, key) or key in DO_NOT_DISPLAY:
             continue
         if isinstance(val, list) and key not in ('jrc_preprint'):
             if not val:
@@ -1265,7 +1269,7 @@ def add_jrc_fields(row):
         if key == 'jrc_preprint':
             val = doi_link(val)
         if key == 'jrc_pmc':
-            val = f"<a href='{app.config['PMCID']}PMC{val}/' target='_blank'>{val}</a>"
+            val = f"<a href='{PMCID}PMC{val}/' target='_blank'>{val}</a>"
         if key == 'jrc_license' and val in CVTERM['license']:
             newval = f"{CVTERM['license'][val]['definition']}"
             if CVTERM['license'][val]['definition'] != CVTERM['license'][val]['display']:
@@ -1370,7 +1374,7 @@ def get_top_authors(atype, year):
           Top authors as a MongoDB object
     '''
     payload = [{"$match": {f"jrc_{atype}_author": {"$exists": 1},
-                           "type": {"$in": app.config['ARTICLES']}}},
+                           "type": {"$in": ARTICLES}}},
                {"$unwind": f"$jrc_{atype}_author"},
                {"$group": {"_id": f"$jrc_{atype}_author", "count": {"$sum": 1}}},
                {"$sort" : {"count": -1}},
@@ -1433,7 +1437,7 @@ def compute_preprint_data(rows):
         else:
             preprint['DataCite'] = row['count']
             data['Has preprint relation'] += row['count']
-    for key in app.config['ARTICLES']:
+    for key in ARTICLES:
         if key not in preprint:
             preprint[key] = 0
     return data, preprint
@@ -1623,7 +1627,7 @@ def s2_citation_count(doi, fmt='plain'):
         Returns:
           Citation count
     '''
-    url = f"{app.config['S2_GRAPH']}paper/DOI:{doi}?fields=citationCount"
+    url = f"{S2_GRAPH}paper/DOI:{doi}?fields=citationCount"
     headers = {'x-api-key': os.environ.get('S2_API_KEY')}
     try:
         resp = requests.get(url, headers=headers, timeout=5)
@@ -1633,7 +1637,7 @@ def s2_citation_count(doi, fmt='plain'):
             return 0
         data = resp.json()
         if fmt == 'html' and data['citationCount']:
-            cnt = f"<a href='{app.config['S2']}{data['paperId']}' target='_blank'>" \
+            cnt = f"<a href='{S2}{data['paperId']}' target='_blank'>" \
                   + f"{data['citationCount']}</a>"
         else:
             cnt = data['citationCount']
@@ -2165,7 +2169,7 @@ def add_subjects(row, html=None):
                 else:
                     subj = f"<span style='color: #88a'>{mesh['descriptor_name']}</span>"
                 if 'key' in mesh and mesh['key']:
-                    subj = f"<a href='{app.config['NCBI_MESH']}{mesh['key']}' " \
+                    subj = f"<a href='{NCBI_MESH}{mesh['key']}' " \
                            + f"target='_blank'>{subj}</a>"
                 subjects.append(subj)
         if subjects:
@@ -2549,7 +2553,7 @@ def get_doi_migration(doi):
             raise InvalidUsage(str(err), 500) from err
         rec['doi'] = doi
     if not result['rest']['authorized']:
-        for fld in app.config['DO_NOT_DISPLAY']:
+        for fld in DO_NOT_DISPLAY:
             if fld in rec:
                 del rec[fld]
     result['data'] = rec
@@ -2784,7 +2788,7 @@ def get_citation(doi):
     result['rest']['source'] = 'mongo'
     authors = DL.get_author_list(row)
     title = DL.get_title(row)
-    result['data'] = f"{authors} {title}. {app.config['DOI']}{doi}."
+    result['data'] = f"{authors} {title}. {DOI}{doi}."
     if 'jrc_preprint' in row:
         result['jrc_preprint'] = row['jrc_preprint']
     return generate_response(result)
@@ -2838,7 +2842,7 @@ def show_multiple_citations(ctype='dis'):
         journal = DL.get_journal(row)
         result['data'][doi] = f"{authors} {title}."
         if ctype == 'dis':
-            result['data'][doi] = f"{result['data'][doi]}. {app.config['DOI']}{doi}."
+            result['data'][doi] = f"{result['data'][doi]}. {DOI}{doi}."
         else:
             result['data'][doi] = f"{result['data'][doi]}. {journal}."
     return generate_response(result)
@@ -3897,7 +3901,7 @@ def get_display_badges(doi, row, data, local):
     if 'janelia' not in doi:
         oresp = JRC.call_oa(doi)
         if oresp:
-            olink = f"{app.config['OAREPORT']}{doi}"
+            olink = f"{OAREPORT}{doi}"
             badges += f" {tiny_badge('source', 'OA.Report', olink)}"
         if row.get('jrc_openalex_id'):
             sleep(0.02)
@@ -4010,7 +4014,7 @@ def get_citation_counts(doi, row, partial=True):
         if (row.get('jrc_citation_sources') or {}).get('datacite'):
             tblrow.append(f"<td>DataCite: {row['jrc_citation_sources']['datacite']:,}</td>")
         elif row.get('citationCount', False):
-            url = f"{app.config['DATACITE']}{doi}"
+            url = f"{DATACITE}{doi}"
             tblrow.append(f"<td>DataCite: <a href='{url}' target='_blank'>" \
                           + f"{row['citationCount']:,}</a></td>")
     # Dimensions
@@ -4394,14 +4398,14 @@ def show_doi_ui(doi):
         return inspect_error(err, 'Could not get author list details')
     html += doi_tabs(doi, row, rowext, data, authors)
     # Title
-    doilink = f"<a href='{app.config['DOI']}{doi}' target='_blank'>{doi}</a>"
+    doilink = f"<a href='{DOI}{doi}' target='_blank'>{doi}</a>"
     badges = get_display_badges(doi, row, data, local)
     doilink += " <button style='background-color:transparent;border:none;' " \
                + f"onclick=\"copyText('{doi}')\">" \
                + "<i class='fas fa-regular fa-copy shadow' " \
                + "style='background-color:transparent'></i></button>"
     if row and row.get('jrc_pmid'):
-        doititle = f"{doilink} (PMID: <a href='{app.config['PMID']}{row['jrc_pmid']}/' " \
+        doititle = f"{doilink} (PMID: <a href='{PMID}{row['jrc_pmid']}/' " \
                    + f"target='_blank'>{row['jrc_pmid']}</a>)"
     else:
         doititle = doilink
@@ -5251,7 +5255,7 @@ def dois_yearly(year=None):
     cnt = 0
     stat['Topjournals'] = ""
     for key in sorted(journal, key=journal.get, reverse=True):
-        if key in app.config["REPOSITORY"]:
+        if key in REPOSITORY:
             continue
         stat['Topjournals'] += f"&nbsp;&nbsp;&nbsp;&nbsp;{ITALIC}{key}</span>: {journal[key]}<br>"
         cnt += 1
@@ -5317,7 +5321,7 @@ def dois_time(period, year=None):
             data['years'].insert(0, str(yr))
             onclick = "onclick='nav_post(\"publishing_year\",\"" + yr + "\")'"
             cells = [safe(f"<a href='#' {onclick}>{yr}</a>")]
-            for source in app.config['SOURCES']:
+            for source in SOURCES:
                 if source in periods[yr]:
                     data[source].insert(0, periods[yr][source])
                     onclick = "onclick='nav_post(\"publishing_year\",\"" + yr \
@@ -5341,7 +5345,7 @@ def dois_time(period, year=None):
         for mon in data['months']:
             mname = date(1900, int(mon), 1).strftime('%B')
             cells = [mname]
-            for source in app.config['SOURCES']:
+            for source in SOURCES:
                 if data[source][int(mon) - 1]:
                     onclick = "onclick='nav_post(\"publishing_year\",\"" \
                               + f"{year}-{mon}" + "\",\"" + source + "\")'"
@@ -5358,13 +5362,13 @@ def dois_time(period, year=None):
         chart_title = title
         pulldown = year_pulldown('dois_time/month', all_years=False)
     footer = [fcell('Total')] + [fcell(f"{counter[source]:,}", align='center')
-                                 for source in app.config['SOURCES']]
+                                 for source in SOURCES]
     html = render_table([period.capitalize(), 'Crossref', 'DataCite'], trows,
                         table_id=f"{period}s", css='tablesorter numbers-scroll',
                         footer=footer) + "<br>" + pulldown
     xaxis = 'years' if period == 'year' else 'months'
     chartscript, chartdiv = DP.stacked_bar_chart(data, chart_title, xaxis=xaxis,
-                                                 yaxis=app.config['SOURCES'],
+                                                 yaxis=SOURCES,
                                                  colors=DP.SOURCE_PALETTE, nav=nav)
     endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
@@ -7539,7 +7543,7 @@ def dois_author(year='All'):
            + '<th>Authorship</th><th>Crossref</th><th>DataCite</th>' \
            + '</tr></thead><tbody>'
     data = {}
-    for src in app.config['SOURCES']:
+    for src in SOURCES:
         data[src] = source[src]
     html += f"<tr><td>All authors</td><td>{source['Crossref-all']:,}</td>" \
             + f"<td>{source['DataCite-all']:,}</td></tr>"
@@ -8222,7 +8226,7 @@ def dois_preprint(year='All'):
     ''' Show preprints
     '''
     source = {}
-    for src in app.config['SOURCES']:
+    for src in SOURCES:
         payload = {"jrc_obtained_from": src, "jrc_preprint": {"$exists": False}}
         if year != 'All':
             payload['jrc_publishing_date'] = {"$regex": "^"+ year}
@@ -8489,12 +8493,12 @@ def dois_publisher(year='All'):
             pubs[row['_id']['publisher']] = {}
         if row['_id']['source'] not in pubs[row['_id']['publisher']]:
             pubs[row['_id']['publisher']][row['_id']['source']] = row['count']
-    total = {src: 0 for src in app.config['SOURCES']}
+    total = {src: 0 for src in SOURCES}
     for pub, val in pubs.items():
         onclick = "onclick='nav_post(\"publisher\",\"" + pub + "\")'"
         link = f"<a href='#' {onclick}>{pub}</a>"
         cells = [safe(link)]
-        for source in app.config['SOURCES']:
+        for source in SOURCES:
             if source in val:
                 onclick = "onclick='nav_post(\"publisher\",\"" + pub \
                           + "\",\"" + source + "\")'"
@@ -8505,12 +8509,12 @@ def dois_publisher(year='All'):
             cells.append(safe(link))
         trows.append(cells)
     footer = [fcell('TOTAL')] + [fcell(f"{total[source]:,}", align='center')
-                                 for source in app.config['SOURCES']]
+                                 for source in SOURCES]
     html = render_table(['Publisher', 'Crossref', 'DataCite'], trows, table_id='types',
                         css='tablesorter numbers-scroll', footer=footer)
     cards = [("Total DOIs", f"{sum(total.values()):,}"),
              ("Publishers", f"{len(pubs):,}")] \
-            + [(f"{src} DOIs", f"{total[src]:,}") for src in app.config['SOURCES']]
+            + [(f"{src} DOIs", f"{total[src]:,}") for src in SOURCES]
     html = stat_cards(cards, div_id='pub-stats') \
            + year_pulldown('dois_publisher') + html
     title = "DOIs by publisher"
@@ -8645,11 +8649,11 @@ def show_open_access():
     '''
     # OpenAlex meters requests against a daily budget. Anonymous requests get $0,
     # so we join the polite pool (mailto) and send the API key when one is set.
-    params = {'search': 'Janelia', 'mailto': app.config['EMAIL']}
+    params = {'search': 'Janelia', 'mailto': EMAIL}
     if os.environ.get('OPENALEX_API_KEY'):
         params['api_key'] = os.environ['OPENALEX_API_KEY']
     try:
-        resp = requests.get(f"{app.config['OPENALEX']}institutions", params=params, timeout=5)
+        resp = requests.get(f"{OPENALEX}institutions", params=params, timeout=5)
         payload = resp.json()
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
@@ -10075,7 +10079,7 @@ def show_oid_ui(oid):
              + "<i class='fas fa-regular fa-copy shadow' " \
              + "style='background-color:transparent'></i></button>"
     return make_response(render_template('general.html', urlroot=request.url_root, pagetitle=oid,
-                                         title=f"<a href='{app.config['ORCID']}{oid}' " \
+                                         title=f"<a href='{ORCID}{oid}' " \
                                                + f"target='_blank'>{oid}</a>{cpaste}", html=html,
                                          navbar=generate_navbar('ORCID')))
 
@@ -10351,7 +10355,7 @@ def orcid_duplicates():
                 other = []
                 for rec in recs:
                     names.append(f"{rec['given'][0]} {rec['family'][0]}")
-                    other.append(f"<a href=\"{app.config['ORCID']}{rec['orcid']}\">" \
+                    other.append(f"<a href=\"{ORCID}{rec['orcid']}\">" \
                                  + f"{rec['orcid']}</a>")
                 trows.append([', '.join(names), safe(', '.join(other))])
             html += check + render_table(['Name', collabel], trows, table_id='duplicates',
@@ -11189,7 +11193,7 @@ def ror(rorid=None):
                                              title="Search ROR", content="",
                                              navbar=generate_navbar('System')))
     try:
-        resp = requests.get(f"{app.config['ROR']}{rorid}", timeout=5).json()
+        resp = requests.get(f"{ROR}{rorid}", timeout=5).json()
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning(f"Could not get ROR data for {rorid}"),
@@ -11266,7 +11270,7 @@ def show_tag_ack(tagtype):
     trows = []
     row_classes = []
     tags = {}
-    total = {src: 0 for src in app.config['SOURCES']}
+    total = {src: 0 for src in SOURCES}
     active = 0
     for row in rows:
         if row['_id']['tag'] not in tags:
@@ -11286,7 +11290,7 @@ def show_tag_ack(tagtype):
         else:
             org = "<span style='color: red;'>No</span>"
         cells = [safe(link), safe(org)]
-        for source in app.config['SOURCES']:
+        for source in SOURCES:
             if source in val:
                 onclick = f"onclick='nav_post(\"{cfg['nav']}\",\"{tag}\",\"{source}\")'"
                 link = f"<a href='#' {onclick}>{val[source]:,}</a>"
@@ -11297,7 +11301,7 @@ def show_tag_ack(tagtype):
         trows.append(cells)
         row_classes.append(rclass)
     footer = [fcell('TOTAL', colspan=2)] + [fcell(f"{total[source]:,}", align='center')
-                                            for source in app.config['SOURCES']]
+                                            for source in SOURCES]
     html = render_table([cfg['label'], 'SupOrg', 'Crossref', 'DataCite'], trows,
                         table_id='types', css='tablesorter numbers-scroll',
                         row_classes=row_classes, footer=footer)
@@ -11444,16 +11448,16 @@ def janelia_affiliations():
     trows = []
     for aff, count in sorted(affiliations.items(), key=lambda item: item[1], reverse=True):
         daff = aff
-        if aff in app.config['PREFERRED_AFF']:
+        if aff in PREFERRED_AFF:
             daff = safe(f"<span style='color: lime;'>{escape(aff)}</span>")
         dlink = f"<a href='/dois_janelia_affiliations/{aff}'>{count:,}</a>"
         trows.append([daff, safe(dlink)])
     html = render_table(['Affiliation', 'Author count'], trows,
                         table_id='affiliations', css='tablesorter numbers-scroll')
     html = "<p> When publishing a paper, please use the following affiliation for all Janelia " \
-           + f"authors:<br><span style='color: lime;'>{app.config['PREFERRED_AFF'][0]}</span>" \
+           + f"authors:<br><span style='color: lime;'>{PREFERRED_AFF[0]}</span>" \
            + " (if published domestically)" \
-           + f"<br><span style='color: lime;'>{app.config['PREFERRED_AFF'][1]}</span>" \
+           + f"<br><span style='color: lime;'>{PREFERRED_AFF[1]}</span>" \
            + " (if published internationally)</p>" + html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
