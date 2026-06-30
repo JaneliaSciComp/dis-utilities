@@ -121,11 +121,12 @@ NOTES
   parameter, i.e. filtered by when the article was added to PubMed Central.
 '''
 
-__version__ = '1.6.0'
+__version__ = '1.7.0'
 
 import argparse
 import collections
 from datetime import datetime, timedelta
+from email.utils import parsedate_to_datetime
 import json
 from operator import attrgetter
 import os
@@ -152,6 +153,11 @@ ELIFE_SEARCH = "https://api.elifesciences.org/search"
 SD_SEARCH_URL = "https://api.elsevier.com/content/search/sciencedirect"
 PAGE_SIZE = 100
 PMC_BATCH_SIZE = 200
+# Upper bound (seconds) on how long a 429 Retry-After can make us wait. Some APIs
+# (notably OpenAlex on daily-budget exhaustion) return multi-hour values that
+# would otherwise stall the whole run; capping lets the retry budget run out and
+# the source truncate with a warning instead of hanging.
+RETRY_AFTER_CAP = 60
 DOI = {}
 # DOIs in the to_ignore collection (type="doi") are known non-Janelia papers, so
 # the Janelia-author check is skipped for them and they are eligible for insertion
@@ -301,6 +307,32 @@ def generate_email(summary, records):
         terminate_program(err)
 
 
+def _retry_after_seconds(value, default=15):
+    ''' Parse a Retry-After header into a bounded number of seconds.
+        Accepts either delta-seconds or an HTTP-date (RFC 7231), falling back to
+        default when the value is absent or unparseable. The result is clamped to
+        RETRY_AFTER_CAP so an extreme value (e.g. OpenAlex on budget exhaustion)
+        cannot stall the run, and an HTTP-date form cannot raise.
+        Keyword arguments:
+          value: raw Retry-After header value (str or None)
+          default: seconds to use when the header is absent or unparseable
+        Returns:
+          int seconds, clamped to [0, RETRY_AFTER_CAP]
+    '''
+    if value is None:
+        seconds = default
+    else:
+        try:
+            seconds = int(value)
+        except (TypeError, ValueError):
+            try:
+                retry_dt = parsedate_to_datetime(value)
+                seconds = (retry_dt - datetime.now(retry_dt.tzinfo)).total_seconds()
+            except Exception:  # any parse failure falls back to the default
+                seconds = default
+    return max(0, min(int(seconds), RETRY_AFTER_CAP))
+
+
 def _request_with_retry(method, url, params=None, headers=None, body=None, retries=3):  # pylint: disable=too-many-arguments,too-many-positional-arguments
     ''' HTTP request with retry on rate-limit or server errors.
         Keyword arguments:
@@ -323,7 +355,7 @@ def _request_with_retry(method, url, params=None, headers=None, body=None, retri
                 time.sleep(2 ** attempt)
             continue
         if resp.status_code == 429:
-            wait = int(resp.headers.get("Retry-After", 15))
+            wait = _retry_after_seconds(resp.headers.get("Retry-After"))
             LOGGER.warning(f"Rate limited; waiting {wait}s...")
             time.sleep(wait)
             continue
@@ -339,6 +371,10 @@ def _request_with_retry(method, url, params=None, headers=None, body=None, retri
 
 def search_elife():
     ''' Page through the eLife search API and yield article summary dicts.
+        The eLife API caps each page at 10 items and ignores the requested 'show'
+        size, so termination is driven by the number of items actually yielded vs
+        the reported total (not by a fixed page-size assumption); otherwise only
+        the first ~total/PAGE_SIZE pages would be read.
         Keyword arguments:
           None
         Yields:
@@ -346,11 +382,12 @@ def search_elife():
     '''
     page = 1
     total = None
+    yielded = 0
     min_date = (datetime.now() - timedelta(days=ARG.DAYS)).strftime('%Y-%m-%d') \
                if ARG.DAYS else None
     if min_date:
         LOGGER.info(f"Restricting eLife search to articles published since {min_date}")
-    while total is None or (page - 1) * PAGE_SIZE < total:
+    while total is None or yielded < total:
         params = {
             'for': ARG.TERM,
             'show': PAGE_SIZE,
@@ -373,6 +410,7 @@ def search_elife():
         if not items:
             break
         yield from items
+        yielded += len(items)
         page += 1
         time.sleep(0.3)
 
@@ -658,7 +696,9 @@ def arxiv_doi(arxiv_id):
           lowercase DOI string (10.48550/arxiv.2101.08910)
     '''
     base = re.sub(r'v\d+$', '', arxiv_id)
-    return f"10.48550/arxiv.{base}"
+    # Lowercase so old-style ids with an uppercase category (e.g. math.AG/...) still
+    # match the lowercase DOI / IGNORE / ACK_DOI_IGNORE caches and aren't re-written.
+    return f"10.48550/arxiv.{base}".lower()
 
 
 def _janelia_authors(doi, rec):
@@ -750,7 +790,10 @@ def _store_arxiv_doi(doi, ack, pub_date):
                 RECORDS.append({'doi': doi, 'acknowledgement': ack, 'source': 'openalex',
                                 'pmcid': None})
         except Exception as err:
-            terminate_program(err)
+            # Don't abort the whole run on one bad write; log, count, and move on.
+            LOGGER.error(f"Failed to write {doi} to external_dois: {err}")
+            COUNT['openalex_write_failed'] += 1
+            return
     else:
         COUNT['openalex_dois_written'] += 1
         RECORDS.append({'doi': doi, 'acknowledgement': ack, 'source': 'openalex', 'pmcid': None})
@@ -807,13 +850,40 @@ def fetch_and_store_doi(doi, ack, source, pmcid=None):
                 RECORDS.append({'doi': doi, 'acknowledgement': ack, 'source': source,
                                 'pmcid': pmcid})
         except Exception as err:
-            terminate_program(err)
+            # Don't abort the whole run on one bad write; log, count, and move on.
+            LOGGER.error(f"Failed to write {doi} to external_dois: {err}")
+            COUNT[f'{source}_write_failed'] += 1
+            return False
     else:
         COUNT[f'{source}_dois_written'] += 1
         RECORDS.append({'doi': doi, 'acknowledgement': ack, 'source': source, 'pmcid': pmcid})
     # Register the DOI so a later source (e.g. OpenAlex) won't write it again.
     DOI[doi] = payload
     return True
+
+
+def _ignore_ack_doi(doi, source):
+    ''' Record a DOI in to_ignore (type="ack_doi") so future runs skip the
+        ack-fetch for it. No-op in dry-run. to_ignore is keyed by (type, key), so
+        the upsert matches on both and $setOnInsert leaves any existing entry
+        untouched; the counter is bumped only on a successful write.
+        Keyword arguments:
+          doi: DOI string
+          source: counter key prefix ('elife', 'elsevier', 'pmc', 'openalex')
+        Returns:
+          None
+    '''
+    if not ARG.WRITE:
+        return
+    try:
+        DB['dis']['to_ignore'].update_one(
+            {"type": "ack_doi", "key": doi},
+            {"$setOnInsert": {"type": "ack_doi", "key": doi,
+                              "reason": "Janelia not in ack text"}},
+            upsert=True)
+        COUNT[f'{source}_ack_doi_ignored'] += 1
+    except Exception as err:
+        LOGGER.error(f"Failed to add {doi} to ack ignore list: {err}")
 
 
 def _process_ack(doi, ack, source, write_ignore=False):
@@ -831,13 +901,8 @@ def _process_ack(doi, ack, source, write_ignore=False):
         return
     if ARG.TERM.lower() not in ack.lower():
         COUNT[f'{source}_term_absent'] += 1
-        if write_ignore and ARG.WRITE:
-            DB['dis']['to_ignore'].update_one(
-                {"type": "ack_doi", "key": doi},
-                {"$setOnInsert": {"type": "ack_doi", "key": doi,
-                                  "reason": "Janelia not in ack text"}},
-                upsert=True)
-            COUNT[f'{source}_ack_doi_ignored'] += 1
+        if write_ignore:
+            _ignore_ack_doi(doi, source)
         return
     fetch_and_store_doi(doi, ack, source)
 
@@ -982,12 +1047,16 @@ def _process_pmc_articles():
         if doi in DOI:
             COUNT['pmc_in_database'] += 1
             continue
+        if doi in ACK_DOI_IGNORE:
+            COUNT['pmc_term_absent'] += 1
+            continue
         ack = parsed['ack']
         if not ack:
             COUNT['pmc_no_ack'] += 1
             continue
         if ARG.TERM.lower() not in ack.lower():
             COUNT['pmc_term_absent'] += 1
+            _ignore_ack_doi(doi, 'pmc')
             continue
         fetch_and_store_doi(doi, ack, 'pmc', pmcid=parsed['pmcid'])
 
@@ -1029,13 +1098,7 @@ def _process_openalex_articles():
             continue
         if ARG.TERM.lower() not in ack.lower():
             COUNT['openalex_term_absent'] += 1
-            if ARG.WRITE:
-                DB['dis']['to_ignore'].update_one(
-                    {"type": "ack_doi", "key": doi},
-                    {"$setOnInsert": {"type": "ack_doi", "key": doi,
-                                      "reason": "Janelia not in ack text"}},
-                    upsert=True)
-                COUNT['openalex_ack_doi_ignored'] += 1
+            _ignore_ack_doi(doi, 'openalex')
             continue
         # Guard: a DOI with (potential) Janelia authors belongs in the internal
         # dois collection, not external_dois. arXiv DOIs are DataCite, so fetch the
@@ -1136,9 +1199,13 @@ def processing():
         summary += f"arXiv records updated:             {COUNT['openalex_dois_written']:,}\n"
     summary += f"Janelia-authored (not stored):     {len(INTERNAL_RECORDS):,}\n"
     ack_doi_ignored = (COUNT['elife_ack_doi_ignored'] + COUNT['elsevier_ack_doi_ignored']
-                       + COUNT['openalex_ack_doi_ignored'])
+                       + COUNT['pmc_ack_doi_ignored'] + COUNT['openalex_ack_doi_ignored'])
     if ack_doi_ignored:
         summary += f"DOIs added to ack ignore list:     {ack_doi_ignored:,}\n"
+    write_failed = (COUNT['elife_write_failed'] + COUNT['elsevier_write_failed']
+                    + COUNT['pmc_write_failed'] + COUNT['openalex_write_failed'])
+    if write_failed:
+        summary += f"DOIs that failed to write:         {write_failed:,}\n"
     print(summary)
     if ARG.TEST or ARG.WRITE:
         generate_email(summary, RECORDS)

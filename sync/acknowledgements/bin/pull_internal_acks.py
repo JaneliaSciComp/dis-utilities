@@ -18,7 +18,6 @@ INPUTS
 - NCBI_API_KEY environment variable (required): API key for the NCBI E-utilities API.
 - DIS MongoDB database (read/write depending on --write flag):
     - Collection `dois`      : source of DOI records; updated with acknowledgements.
-    - Collection `to_ignore` : DOIs to skip entirely.
 - Command-line flags:
     --doi DOI  Restrict processing to a single DOI (across all sources).
     --source   Restrict processing to a single source (elife, elsevier, pmc, or
@@ -32,7 +31,6 @@ HIGH-LEVEL FLOW
 ---------------
 1. Initialization
    - Connects to the DIS MongoDB database (read-only by default; read/write with --write).
-   - Loads the list of DOIs to ignore from the `to_ignore` collection.
 2. eLife pass (add_elife_internal_acks)
    - Queries `dois` for records whose DOI matches /elife/ and that lack
      `jrc_acknowledgements`.
@@ -58,7 +56,7 @@ HIGH-LEVEL FLOW
      `jrc_acknowledgements` on the matching DOI document.
 7. Output
    - Prints a per-source summary of counts.
-   - Writes pmc_internal_acks.json with all collected acknowledgement records.
+   - Writes internal_acks.json with all collected acknowledgement records.
    - Writes internal_ack_errors.json if any source calls raised exceptions.
    - Sends a summary email when --test or --write is active and records were found.
 
@@ -77,11 +75,12 @@ from operator import attrgetter
 import os
 import sys
 import time
+from pymongo import UpdateOne
 from tqdm import tqdm
 import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
 
-__version__ = '1.1.0'
+__version__ = '1.2.0'
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation,no-member
 
@@ -91,7 +90,6 @@ DB = {}
 COUNT = collections.defaultdict(lambda: 0, {})
 # Global variables
 ARG = DIS = LOGGER = None
-IGNORE = []
 
 def terminate_program(msg=None):
     ''' Terminate the program gracefully
@@ -128,13 +126,6 @@ def initialize_program():
             DB[source] = JRC.connect_database(dbo)
         except Exception as err:
             terminate_program(err)
-    try:
-        rows = DB['dis']['to_ignore'].find({})
-    except Exception as err:
-        terminate_program(err)
-    for row in rows:
-        IGNORE.append(row['key'])
-    LOGGER.info(f"Found {len(IGNORE):,} DOIs to ignore")
 
 
 def restrict_to_doi(payload):
@@ -145,14 +136,15 @@ def restrict_to_doi(payload):
           The (possibly restricted) query payload
     '''
     if ARG.DOI:
-        return {"$and": [payload, {"doi": ARG.DOI}]}
+        return {"$and": [payload, {"doi": ARG.DOI.lower()}]}
     return payload
 
 
-def add_elife_internal_acks(internal):
+def add_elife_internal_acks(internal, error):
     ''' Add eLife acknowledgements to the internal DOIs
         Keyword arguments:
           internal: list of internal DOIs
+          error: list of error records
         Returns:
           None
     '''
@@ -166,15 +158,21 @@ def add_elife_internal_acks(internal):
         terminate_program(err)
     for row in tqdm(rows, total=cnt, desc="Finding eLife acknowledgements"):
         doi = row['doi']
-        edata = DL.get_doi_record(doi, source='elife')
-        if edata and 'acknowledgements' in edata and edata['acknowledgements']:
-            acklist = []
-            for ack in edata['acknowledgements']:
-                acklist.append(ack['text'])
-            acktext =  ' '.join(acklist)
+        time.sleep(0.1)
+        # Guard the whole per-DOI fetch/parse: a single bad record (failed lookup,
+        # malformed acknowledgements, missing 'text') must not abort the pass - and
+        # since eLife runs first, an uncaught error here would block every source.
+        try:
+            edata = DL.get_doi_record(doi, source='elife')
+            acklist = [ack['text'] for ack in (edata or {}).get('acknowledgements', [])
+                       if ack.get('text')]
+        except Exception as err:
+            error.append({"doi": doi, "source": "elife", "error": str(err)})
+            continue
+        if acklist:
             COUNT['elife_add'] += 1
             internal.append({"doi": doi,
-                             "ack": acktext,
+                             "ack": ' '.join(acklist),
                              "source": "eLife"})
 
 
@@ -186,7 +184,7 @@ def add_elsevier_internal_acks(internal, error):
         Returns:
           None
     '''
-    payload = {"doi": {"$regex": "10.1016/"}, "jrc_acknowledgements": {"$exists": False}}
+    payload = {"doi": {"$regex": r"10\.1016/"}, "jrc_acknowledgements": {"$exists": False}}
     payload = restrict_to_doi(payload)
     try:
         cnt = DB['dis'].dois.count_documents(payload)
@@ -227,6 +225,7 @@ def add_pmc_internal_acks(internal, error):
     except Exception as err:
         terminate_program(err)
     for row in tqdm(rows, total=cnt, desc="Finding PMC acknowledgements"):
+        time.sleep(0.1)
         try:
             ack, _ = DL.get_acknowledgements(row['doi'], pmcid=row['jrc_pmc'])
         except Exception as err:
@@ -249,7 +248,7 @@ def add_arxiv_internal_acks(internal, error):
         Returns:
           None
     '''
-    payload = {"doi": {"$regex": "10.48550/arxiv"}, "jrc_acknowledgements": {"$exists": False}}
+    payload = {"doi": {"$regex": r"10\.48550/arxiv"}, "jrc_acknowledgements": {"$exists": False}}
     payload = restrict_to_doi(payload)
     try:
         cnt = DB['dis'].dois.count_documents(payload)
@@ -260,6 +259,7 @@ def add_arxiv_internal_acks(internal, error):
     except Exception as err:
         terminate_program(err)
     for row in tqdm(rows, total=cnt, desc="Finding arXiv acknowledgements"):
+        time.sleep(0.5)
         try:
             acktext, _ = DL.get_acknowledgements(row['doi'])
         except Exception as err:
@@ -309,23 +309,29 @@ def processing():
     '''
     internal = []
     error = []
-    sources = {'elife': lambda: add_elife_internal_acks(internal),
+    sources = {'elife': lambda: add_elife_internal_acks(internal, error),
                'elsevier': lambda: add_elsevier_internal_acks(internal, error),
                'pmc': lambda: add_pmc_internal_acks(internal, error),
                'arxiv': lambda: add_arxiv_internal_acks(internal, error)}
     for source, handler in sources.items():
         if ARG.SOURCE in (None, source):
             handler()
+    operations = []
     for row in tqdm(internal, total=len(internal), desc="Updating internal DOIs"):
         if row['doi'] == 'n/a':
             continue
         if not isinstance(row['ack'], str):
             LOGGER.warning(f"Weird format for {row['doi']}")
             continue
-        if ARG.WRITE:
-            DB['dis']['dois'].update_one({"doi": row['doi']},
-                                         {"$set": {"jrc_acknowledgements": row['ack']}})
+        operations.append(UpdateOne({"doi": row['doi']},
+                                    {"$set": {"jrc_acknowledgements": row['ack']}}))
         COUNT['updated'] += 1
+    if ARG.WRITE and operations:
+        # Unordered so one failed update doesn't block the rest of the batch.
+        try:
+            DB['dis']['dois'].bulk_write(operations, ordered=False)
+        except Exception as err:
+            terminate_program(err)
     if ARG.SOURCE in (None, 'elife'):
         print(f"eLife DOIs added:    {COUNT['elife_add']:,}")
     if ARG.SOURCE in (None, 'elsevier'):
@@ -336,7 +342,7 @@ def processing():
         print(f"arXiv DOIs added:    {COUNT['arxiv_add']:,}")
     print(f"DOIs updated:        {COUNT['updated']:,}")
     if internal:
-        with open('pmc_internal_acks.json', 'w', encoding='utf-8') as fileout:
+        with open('internal_acks.json', 'w', encoding='utf-8') as fileout:
             json.dump(internal, fileout, indent=4)
     if error:
         with open('internal_ack_errors.json', 'w', encoding='utf-8') as fileout:
