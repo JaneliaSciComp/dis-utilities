@@ -3511,10 +3511,44 @@ def show_acknowledgement_stats(limit=10):
     for row in rows:
         label = row['_id'] if row['_id'] else 'Unknown'
         ext_type_data[label] = row['count']
+    # Type breakdown by source (Crossref vs. DataCite), combined across dois and external_dois
+    source_pipeline = [
+        {"$match": ack_filter},
+        {"$group": {
+            "_id": {
+                "label": {
+                    "$cond": [
+                        {"$ifNull": ["$type", False]},
+                        "$type",
+                        {"$ifNull": ["$types.resourceTypeGeneral", "Unknown"]}
+                    ]
+                },
+                "source": {
+                    "$cond": [
+                        {"$and": [{"$not": [{"$ifNull": ["$type", False]}]},
+                                  {"$ifNull": ["$types.resourceTypeGeneral", False]}]},
+                        "DataCite", "Crossref"
+                    ]
+                }
+            },
+            "count": {"$sum": 1}
+        }}
+    ]
+    try:
+        combined_type_data = {}
+        for coll in (DB['dis'].dois, DB['dis'].external_dois):
+            for row in coll.aggregate(source_pipeline):
+                label = row['_id']['label'] if row['_id']['label'] else 'Unknown'
+                combined_type_data.setdefault(label, {"Crossref": 0, "DataCite": 0})
+                combined_type_data[label][row['_id']['source']] += row['count']
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get acknowledgement type data" \
+                                                    + " by source"),
+                               message=error_message(err))
     # Collection totals for percentage calculation, broken down by jrc_obtained_from for dois
     try:
         dois_all = DB['dis'].dois.count_documents({})
-        ext_all = DB['dis'].external_dois.count_documents({})
         source_rows = DB['dis'].dois.aggregate([
             {"$group": {"_id": "$jrc_obtained_from", "count": {"$sum": 1}}}
         ])
@@ -3610,36 +3644,30 @@ def show_acknowledgement_stats(limit=10):
                                title=render_warning("Could not get top journal data"),
                                message=error_message(err))
     # Build HTML
+    def summary_card(label, cnt, total):
+        pct = cnt / total * 100 if total else 0
+        return (label, f"{cnt:,}<div style='font-size:0.62em; font-weight:normal; "
+                       + f"color:#a8c4e0;'>of {total:,} ({pct:.1f}%)</div>")
     dois_total = sum(dois_type_data.values())
     ext_total = sum(ext_type_data.values())
-    dois_pct = dois_total / dois_all * 100 if dois_all else 0
-    ext_pct = ext_total / ext_all * 100 if ext_all else 0
-    trows = [[safe("<b>Internal DOIs</b>"), f"{dois_total:,}", f"{dois_all:,}",
-              f"{dois_pct:.1f}%"]]
+    cardlist = [summary_card("Internal DOIs", dois_total, dois_all)]
     for source in sorted(source_all):
-        ack_cnt = source_ack.get(source, 0)
-        tot_cnt = source_all[source]
-        pct = ack_cnt / tot_cnt * 100 if tot_cnt else 0
-        trows.append([safe(f"&nbsp;&nbsp;&nbsp;{escape(source)}"), f"{ack_cnt:,}",
-                      f"{tot_cnt:,}", f"{pct:.1f}%"])
-    trows.append(["External DOIs", f"{ext_total:,}", f"{ext_all:,}", f"{ext_pct:.1f}%"])
-    # Tables are laid out in three rows: header + summary, by-type tables,
-    # and top-journal tables (the template's title is left empty for this).
-    summary = render_table(['Collection', 'Count', 'Total', '%'], trows, table_id='ack_summary',
-                           css='tablesorter standard-scroll')
+        cardlist.append(summary_card(escape(source), source_ack.get(source, 0),
+                                     source_all[source]))
+    # Every external_dois record has acknowledgements, so a percentage
+    # would always read 100% - just show the count.
+    cardlist.append(("External DOIs", f"{ext_total:,}"))
+    # Layout: header + summary cards, then the by-type table and top-journal
+    # tables (the template's title is left empty for this).
+    summary = stat_cards(cardlist, div_id='ack-summary')
     html = f"<h2>Acknowledgement metrics</h2>{summary}"
-    int_types = render_table(['Type', 'Count'],
-                             [[typ, f"{cnt:,}"] for typ, cnt
-                              in sorted(dois_type_data.items(), key=itemgetter(1), reverse=True)],
-                             table_id='dois_types', css='tablesorter numberlast-scroll')
-    ext_types = render_table(['Type', 'Count'],
-                             [[typ, f"{cnt:,}"] for typ, cnt
-                              in sorted(ext_type_data.items(), key=itemgetter(1), reverse=True)],
-                             table_id='ext_types', css='tablesorter numberlast-scroll')
-    html += "<div class='flexrow'>" \
-            + "<div class='flexcol' style='margin-right: 30px'>" \
-            + f"<h4>Internal DOIs by type</h4>{int_types}</div>" \
-            + f"<div class='flexcol'><h4>External DOIs by type</h4>{ext_types}</div></div>"
+    combined_types = render_table(
+        ['Type', 'Crossref', 'DataCite'],
+        [[typ, f"{cnts['Crossref']:,}", f"{cnts['DataCite']:,}"] for typ, cnts
+         in sorted(combined_type_data.items(),
+                   key=lambda item: item[1]['Crossref'] + item[1]['DataCite'], reverse=True)],
+        table_id='ack_types', css='tablesorter numbers-scroll')
+    html += f"<h4>DOIs by type</h4>{combined_types}"
     jcols = ""
     if int_journals:
         jtable = render_table(['Journal', 'Count'], [[j, f"{c:,}"] for j, c in int_journals],
@@ -3973,12 +4001,11 @@ def get_citation_counts(doi, row, partial=True):
     if citcnt:
         tblrow.append(f"<td>Semantic Scholar: {citcnt}</td>")
     # Web of Science
-    if not partial:
-        citcnt, url = DL.get_citation_count(doi, 'wos',
-                                            bool(row['jrc_obtained_from'] == 'DataCite'))
-        if citcnt:
-            tblrow.append(f"<td>Web of Science: <a href='{url}' target='_blank'>" \
-                          + f"{citcnt:,}</a></td>")
+    citcnt, url = DL.get_citation_count(doi, 'wos',
+                                        bool(row['jrc_obtained_from'] == 'DataCite'))
+    if citcnt:
+        tblrow.append(f"<td>Web of Science: <a href='{url}' target='_blank'>" \
+                      + f"{citcnt:,}</a></td>")
     if tblrow:
         doisec += "<table id='citations' class='citations'><thead>" \
                   + f"<tr><th colspan={len(tblrow)}>Citation counts&nbsp;" \
