@@ -47,7 +47,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "119.24.4"
+__version__ = "119.26.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -6279,9 +6279,10 @@ def citation_metrics(source='datacite'):
         # exclusion, and per-year breakdown (doi/relation are for DL.is_version)
         cited_rows = list(coll.find({"jrc_citation_sources": {"$exists": True},
                                      "jrc_obtained_from": obtained},
-                                    {"doi": 1, "relation": 1, "jrc_citation_count": 1,
-                                     "jrc_citation_updated": 1,
-                                     "jrc_publishing_date": 1}))
+                                    {"doi": 1, "relation": 1,
+                                     "jrc_citation_count": 1, "jrc_citation_sources": 1,
+                                     "jrc_citation_updated": 1, "jrc_publishing_date": 1,
+                                     "types": 1}))
         all_dois = coll.count_documents({"jrc_obtained_from": obtained})
         year_all = {rec['_id']: rec['dois'] for rec in coll.aggregate(
             [{"$match": {"jrc_obtained_from": obtained,
@@ -6298,6 +6299,63 @@ def citation_metrics(source='datacite'):
     unique_total = sum(counts)
     updated = [row['jrc_citation_updated'] for row in cited_rows
                if row.get('jrc_citation_updated')]
+    # Version-deduped view: dataset .v1/.v2/... are separate dois records counted
+    # separately upstream, so per-work impact metrics and the most-cited list use
+    # only non-versioned records to avoid counting one work several times.
+    nonver = [row for row in cited_rows if not DL.is_version(row)]
+    nonver_counts = sorted((row.get('jrc_citation_count', 0) or 0 for row in nonver),
+                           reverse=True)
+    nonver_counts = [c for c in nonver_counts if c > 0]
+    # h-index: largest h such that h works are each cited >= h times. i10/i100:
+    # works cited at least 10/100 times (classic scholarly-impact measures).
+    h_index = 0
+    for idx, cnt in enumerate(nonver_counts, start=1):
+        if cnt >= idx:
+            h_index = idx
+        else:
+            break
+    i10_index = sum(1 for c in nonver_counts if c >= 10)
+    i100_index = sum(1 for c in nonver_counts if c >= 100)
+    # Which single source best approximates the unique total? jrc_citation_count
+    # is the deduplicated union of citing DOIs (OpenAlex + ScholeXplorer, floored
+    # by the registrar's bare count and WoS), so a lone source usually undercounts
+    # it. For each cited DOI find the source whose standalone count is nearest the
+    # unique total (ties split the credit evenly), and accumulate the aggregate
+    # error and coverage that make a source the best single-source proxy.
+    close_stats = {}
+    close_analyzed = 0
+    # Union lift: how often (and how much) the deduped total beats the single best
+    # source - the payoff of combining sources rather than trusting the strongest.
+    union_exceed = 0
+    best_single_sum = 0
+    for row in cited_rows:
+        cnt = row.get('jrc_citation_count', 0) or 0
+        pairs = [(source_name.get(key, key.capitalize()), val)
+                 for key, val in (row.get('jrc_citation_sources') or {}).items()
+                 if isinstance(val, int)]
+        if cnt <= 0 or not pairs:
+            continue
+        close_analyzed += 1
+        best_single = max(val for _, val in pairs)
+        best_single_sum += best_single
+        if cnt > best_single:
+            union_exceed += 1
+        best = min(abs(val - cnt) for _, val in pairs)
+        winners = [lbl for lbl, val in pairs if abs(val - cnt) == best]
+        share = 1.0 / len(winners)
+        for lbl, val in pairs:
+            stat = close_stats.setdefault(lbl, {'present': 0, 'wins': 0.0,
+                                                'abs_err': 0, 'src_sum': 0,
+                                                'true_sum': 0, 'exact': 0})
+            stat['present'] += 1
+            stat['abs_err'] += abs(val - cnt)
+            stat['src_sum'] += val
+            stat['true_sum'] += cnt
+            stat['exact'] += 1 if val == cnt else 0
+        for lbl in winners:
+            close_stats[lbl]['wins'] += share
+    close_winner = max(close_stats, key=lambda lbl: close_stats[lbl]['wins']) \
+        if close_stats else None
     cite_data = {}
     trows = []
     cite_total = 0
@@ -6307,15 +6365,21 @@ def citation_metrics(source='datacite'):
         cite_total += row['total']
         trows.append([label, cell(f"{row['dois']:,}", sort=row['dois']),
                       cell(f"{row['total']:,}", sort=row['total'])])
-    cards = stat_cards([("DOIs with citation sources",
-                         f"<a href='/citation_list/{source}'>{cite_dois:,}</a>"),
-                        ("% DOIs cited", f"{cite_dois/all_dois*100:,.1f}%" if all_dois else "0%"),
-                        ("Total citations", f"{cite_total:,}"),
-                        ("Total unique citations", f"{unique_total:,}"),
-                        ("Avg. per DOI", f"{unique_total/cite_dois:,.1f}" if cite_dois else "0"),
-                        ("Median per DOI",
-                         f"{statistics.median(counts):,.1f}" if counts else "0")],
-                       div_id='dcm-cite-stats')
+    card_list = [("DOIs with citation sources",
+                  f"<a href='/citation_list/{source}'>{cite_dois:,}</a>"),
+                 ("% DOIs cited", f"{cite_dois/all_dois*100:,.1f}%" if all_dois else "0%"),
+                 ("Total citations", f"{cite_total:,}"),
+                 ("Total unique citations", f"{unique_total:,}"),
+                 ("Avg. per DOI", f"{unique_total/cite_dois:,.1f}" if cite_dois else "0"),
+                 ("Median per DOI",
+                  f"{statistics.median(counts):,.1f}" if counts else "0"),
+                 ("h-index / i10-index", f"{h_index:,} / {i10_index:,}")]
+    if close_winner:
+        win_pct = close_stats[close_winner]['wins'] / close_analyzed * 100
+        card_list.append(("Closest source to unique total",
+                          f"{close_winner} <span style='font-size:0.62em; " \
+                          + f"font-weight:normal; color:#a8c4e0;'>({win_pct:.0f}%)</span>"))
+    cards = stat_cards(card_list, div_id='dcm-cite-stats')
     note_style = "font-size:0.85em; color:#a8c4e0;"
     notes = ''
     if updated:
@@ -6324,10 +6388,14 @@ def citation_metrics(source='datacite'):
         if oldest.date() != newest.date():
             line += f" (oldest record: {oldest:%Y-%m-%d})"
         notes += f"<div style='{note_style}'>{line}</div>"
+    if h_index or i10_index:
+        notes += f"<div style='{note_style}'><b>h-index</b> = the largest h such that " \
+                 + "h works are each cited at least h times; <b>i10-index</b> = the number " \
+                 + "of works cited at least 10 times (versioned DOIs excluded).</div>"
     # Versioned DOIs (.v1/.v2/...) are separate dois records, so a citing work
-    # can be counted once per version it cites; show totals without versions.
-    # Applies to both registrars (Crossref has versioned preprints too).
-    nonver = [row for row in cited_rows if not DL.is_version(row)]
+    # can be counted once per version it cites; show totals without versions
+    # (nonver was built above and drives the impact metrics too). Applies to both
+    # registrars (Crossref has versioned preprints too).
     if 0 < len(nonver) < cite_dois:
         nv_total = sum(row.get('jrc_citation_count', 0) for row in nonver)
         notes += f"<div style='{note_style}'>Versioned DOIs are counted " \
@@ -6341,12 +6409,76 @@ def citation_metrics(source='datacite'):
              + f"style='margin-bottom: 12px'>Switch to {obtained_from[other]} metrics</a>"
     chtml = "<h4>Citations by source</h4>"
     chtml += render_table(['Source', 'DOIs', 'Citations'], trows, table_id='sources',
-                          css='tablesorter numberlast-scroll',
+                          css='tablesorter numbers-scroll',
                           footer=[fcell('TOTAL', colspan=2),
                                   fcell(f"{cite_total:,}", align='center')])
     chtml += f"<div style='{note_style} max-width:460px'>A citing work found by more " \
              + "than one source counts once per source here; &quot;Total unique " \
              + "citations&quot; is the deduplicated figure.</div><br>"
+    # Closest source to the unique total: per source, how often its standalone
+    # count is nearest jrc_citation_count (win share), plus the aggregate coverage
+    # and mean absolute distance that quantify it as a single-source proxy.
+    close_data = {}
+    xtrows = []
+    for lbl in sorted(close_stats, key=lambda k: close_stats[k]['wins'], reverse=True):
+        stat = close_stats[lbl]
+        mae = stat['abs_err'] / stat['present'] if stat['present'] else 0
+        cover = stat['src_sum'] / stat['true_sum'] * 100 if stat['true_sum'] else 0
+        win_pct = stat['wins'] / close_analyzed * 100 if close_analyzed else 0
+        close_data[lbl] = stat['wins']
+        xtrows.append([lbl, cell(f"{stat['present']:,}", sort=stat['present']),
+                       cell(f"{stat['wins']:,.0f}", sort=stat['wins']),
+                       cell(f"{win_pct:.1f}%", sort=win_pct),
+                       cell(f"{cover:.1f}%", sort=cover),
+                       cell(f"{mae:,.1f}", sort=mae),
+                       cell(f"{stat['exact']:,}", sort=stat['exact'])])
+    xhtml = ''
+    if xtrows:
+        xhtml = "<h4>Closest source to the unique total</h4>"
+        xhtml += render_table(['Source', 'DOIs', 'Closest', 'Win %', 'Coverage',
+                               'Avg. distance', 'Exact'], xtrows, table_id='closest',
+                              css='tablesorter numbers-scroll',
+                              data_attrs={"sortlist": "[[2,1]]"})
+        xhtml += f"<div style='{note_style} max-width:460px'>&quot;Closest&quot; " \
+                 + "counts the cited DOIs where a source's standalone count is " \
+                 + "nearest the unique total (ties split evenly, so it sums to the " \
+                 + f"{close_analyzed:,} DOIs compared); &quot;Coverage&quot; is the " \
+                 + "source's summed count as a share of that total, and &quot;Avg. " \
+                 + "distance&quot; is its mean gap from it. &quot;Exact&quot; is DOIs " \
+                 + "where the source equals the total.</div>"
+        # Union lift: the concrete payoff of deduping across sources.
+        union_lift_pct = (unique_total - best_single_sum) / best_single_sum * 100 \
+            if best_single_sum else 0
+        xhtml += f"<div style='{note_style} max-width:460px; margin-top:6px'>" \
+                 + "<b>Union lift:</b> the deduped union exceeds the best single source " \
+                 + f"on <b>{union_exceed:,}</b> of {close_analyzed:,} cited DOIs " \
+                 + f"(<b>{union_exceed/close_analyzed*100:.1f}%</b>), a " \
+                 + f"<b>{union_lift_pct:+.1f}%</b> gain over trusting the strongest " \
+                 + "source alone.</div><br>"
+    # Citations by resource type (DataCite only; Crossref records carry no
+    # types.resourceTypeGeneral). Citations and cited DOIs per resource type.
+    rhtml = ''
+    rtype_data = {}
+    if source == 'datacite':
+        rtype = {}
+        for row in cited_rows:
+            cnt = row.get('jrc_citation_count', 0) or 0
+            if cnt <= 0:
+                continue
+            name = (row.get('types') or {}).get('resourceTypeGeneral') or 'Unknown'
+            rec = rtype.setdefault(name, {'dois': 0, 'citations': 0})
+            rec['dois'] += 1
+            rec['citations'] += cnt
+        if rtype:
+            rtrows = []
+            for name, rec in sorted(rtype.items(), key=lambda kv: -kv[1]['citations']):
+                rtype_data[name] = rec['citations']
+                rtrows.append([name, cell(f"{rec['dois']:,}", sort=rec['dois']),
+                               cell(f"{rec['citations']:,}", sort=rec['citations'])])
+            rhtml = "<h4>Citations by resource type</h4>"
+            rhtml += render_table(['Resource type', 'Cited DOIs', 'Citations'], rtrows,
+                                  table_id='restype', css='tablesorter numbers-scroll',
+                                  data_attrs={"sortlist": "[[2,1]]"})
     # Citations by publishing year
     year_cited = {}
     for row in cited_rows:
@@ -6374,7 +6506,7 @@ def citation_metrics(source='datacite'):
     yhtml = "<h4>Citations by publishing year</h4>"
     # Table shows years newest-first; the chart keeps ascending (chronological) order
     yhtml += render_table(['Year', 'DOIs', 'Cited DOIs', '% cited', 'Unique citations'],
-                          ytrows[::-1], table_id='years', css='tablesorter numberlast-scroll')
+                          ytrows[::-1], table_id='years', css='tablesorter numbers-scroll')
     if request.args.get('fmt') == 'json':
         result = initialize_result()
         result['data'] = {"source": obtained,
@@ -6387,6 +6519,32 @@ def citation_metrics(source='datacite'):
                           "avg_per_doi": round(unique_total/cite_dois, 2) if cite_dois else 0,
                           "median_per_doi": statistics.median(counts) if counts else 0,
                           "last_updated": max(updated).isoformat() if updated else None,
+                          "h_index": h_index,
+                          "i10_index": i10_index,
+                          "i100_index": i100_index,
+                          "union_lift": {
+                              "dois_compared": close_analyzed,
+                              "union_exceeds_best": union_exceed,
+                              "union_exceeds_best_pct": round(
+                                  union_exceed / close_analyzed * 100, 2) if close_analyzed else 0,
+                              "best_single_total": best_single_sum,
+                              "lift_pct": round((unique_total - best_single_sum)
+                                                / best_single_sum * 100, 2) if best_single_sum else 0},
+                          "citations_by_type": rtype_data,
+                          "closest_source": {
+                              "winner": close_winner,
+                              "dois_compared": close_analyzed,
+                              "by_source": {lbl: {
+                                  "present": st['present'],
+                                  "closest": round(st['wins'], 2),
+                                  "win_pct": round(st['wins'] / close_analyzed * 100, 2)
+                                               if close_analyzed else 0,
+                                  "coverage_pct": round(st['src_sum'] / st['true_sum'] * 100, 2)
+                                                    if st['true_sum'] else 0,
+                                  "avg_distance": round(st['abs_err'] / st['present'], 2)
+                                                    if st['present'] else 0,
+                                  "exact": st['exact']}
+                                            for lbl, st in close_stats.items()}},
                           "by_year": by_year}
         result['rest']['source'] = 'mongo'
         # data is a single stats object, not a row list; report the number of
@@ -6394,11 +6552,21 @@ def citation_metrics(source='datacite'):
         result['rest']['row_count'] = cite_dois
         endpoint_access()
         return generate_response(result)
-    chartscript = cite_div = year_div = ''
+    chartscript = cite_div = year_div = close_div = rtype_div = ''
     if cite_data:
         colors = DP.get_colors_by_count(len(cite_data))
         script, cite_div = DP.pie_chart(cite_data, "Citations by source", "source",
                                         width=500, colors=colors)
+        chartscript += script
+    if close_data:
+        script, close_div = DP.hbar_chart(close_data, "Nearest to the unique total",
+                                          value_label="Closest on", value_format="0,0",
+                                          width=500, height=300, show_values=True)
+        chartscript += script
+    if rtype_data:
+        script, rtype_div = DP.hbar_chart(rtype_data, "Citations by resource type",
+                                          value_label="Citations", value_format="0,0",
+                                          width=500, height=300, show_values=True)
         chartscript += script
     if ydata['Year']:
         # Tap a year bar -> the DOIs published that year for this registrar
@@ -6416,10 +6584,18 @@ def citation_metrics(source='datacite'):
     html = switch + cards + notes \
            + "<div class='flexrow' style='margin-bottom: 40px'><div class='flexcol'>" + chtml \
            + "</div>" \
-           + "<div class='flexcol' style='margin: 10px 0 0 20px'>" + cite_div + "</div></div>" \
-           + "<div class='flexrow' style='margin-bottom: 40px'><div class='flexcol'>" + yhtml \
-           + "</div>" \
-           + "<div class='flexcol' style='margin: 10px 0 0 20px'>" + year_div + "</div></div>"
+           + "<div class='flexcol' style='margin: 10px 0 0 20px'>" + cite_div + "</div></div>"
+    if xhtml:
+        html += "<div class='flexrow' style='margin-bottom: 40px'><div class='flexcol'>" + xhtml \
+                + "</div>" \
+                + "<div class='flexcol' style='margin: 10px 0 0 20px'>" + close_div + "</div></div>"
+    if rhtml:
+        html += "<div class='flexrow' style='margin-bottom: 40px'><div class='flexcol'>" + rhtml \
+                + "</div>" \
+                + "<div class='flexcol' style='margin: 10px 0 0 20px'>" + rtype_div + "</div></div>"
+    html += "<div class='flexrow' style='margin-bottom: 40px'><div class='flexcol'>" + yhtml \
+            + "</div>" \
+            + "<div class='flexcol' style='margin: 10px 0 0 20px'>" + year_div + "</div></div>"
     title = f"{obtained} citation metrics"
     endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
