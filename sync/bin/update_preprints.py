@@ -58,14 +58,22 @@
 
     An HTML summary of newly-created relations (see generate_email) is sent when
     --test (developer only) or --write (real recipients) is given; sender/recipients
-    come from the "dis" config.
+    come from the "dis" config. Any DOI named on either side of a relation but never
+    loaded locally (not in the dois collection, and not on the to_ignore list) is
+    tracked separately (see MISSING) - written to preprints_missing_dois.txt and
+    attached to the email, and also summarized inline in the email body, grouped by
+    the other DOI each was referenced from (see missing_doi_groups_html), so a
+    curator can see at a glance which record a missing DOI probably belongs to. An
+    associated DOI that's on the to_ignore list is annotated with its recorded
+    reason when one is available, in place of a title.
 """
 
-__version__ = '1.0.0'
+__version__ = '2.0.0'
 
 import argparse
 import collections
 from datetime import datetime
+import html
 from operator import attrgetter
 import sys
 import pandas as pd
@@ -110,6 +118,7 @@ BADGE_PRIMARY = "background-color:#27ae60; color:#fff; padding:2px 8px; " \
                 "border-radius:10px; font-size:11px; font-weight:bold; white-space:nowrap;"
 BADGE_UNKNOWN = "background-color:#7f8c8d; color:#fff; padding:2px 8px; " \
                 "border-radius:10px; font-size:11px; font-weight:bold; white-space:nowrap;"
+ROLE_BADGE = {"Preprint": BADGE_PREPRINT, "Primary": BADGE_PRIMARY, "DOI": BADGE_UNKNOWN}
 
 # Database
 DB = {}
@@ -132,6 +141,10 @@ AUTHOR_CACHE = {}
 ORCID_CACHE = {}
 EMPLOYEE_CACHE = {}
 IGNORE = set()
+# DOI -> to_ignore's "reason" field, for display only (e.g. in the missing-DOIs
+# email section, when an associated DOI has no local title because it was never
+# loaded - only ever referenced via to_ignore - see missing_group_card)
+IGNORE_REASON = {}
 # Internal Janelia roster (the "orcid" collection, maintained by update_orcid.py/
 # apply_orcids.py/add_people_to_orcid.py from HHMI's People system and the public
 # ORCID API - NOT derived from DOI metadata). Preloaded once in initialize_program,
@@ -154,6 +167,9 @@ CURATE = {"Preprint DOI": [], "Preprint Title": [], "Primary DOI": [], "Primary 
           "Score": [], "First author score": [], "Last author score": [],
           "Preprint publishing date": [], "Primary publishing date": []}
 NEARMISS = []
+# DOI -> set of DOI(s) it was related to that triggered the missing flag (see
+# make_doi_relationships) - the associated DOI(s) are what a curator should
+# probably relate/ingest the missing DOI against.
 MISSING = {}
 # Preprint DOIs that cleared the title-matching grace window against at least one
 # primary this run - used by zero_candidate_preprints() to report preprints where
@@ -240,9 +256,12 @@ def initialize_program():
         PREPRINT[row['doi']] = row
     LOGGER.info(f"Preprint DOIs: {len(PREPRINT):,}")
     try:
-        for rec in DB['dis'].to_ignore.find({"type": "doi"}, {"key": 1}):
+        for rec in DB['dis'].to_ignore.find({"type": "doi"}, {"key": 1, "reason": 1}):
             if rec.get('key'):
-                IGNORE.add(rec['key'].lower())
+                key = rec['key'].lower()
+                IGNORE.add(key)
+                if rec.get('reason'):
+                    IGNORE_REASON[key] = rec['reason']
     except Exception as err:
         terminate_program(err)
     LOGGER.info(f"Ignored DOIs: {len(IGNORE):,}")
@@ -331,11 +350,14 @@ def make_doi_relationships(predoi, primdoi, source, scores=None):
         return
     # Find DOIs missing from dois collection entirely (excluding known-ignorable
     # DOIs, and checking both buckets since a DOI can legitimately be loaded under
-    # the "other" role - see the primary/preprint overlap warning in initialize_program)
+    # the "other" role - see the primary/preprint overlap warning in initialize_program).
+    # The other side of the relation is recorded too, so the missing-DOIs email
+    # section can group each missing DOI under the record it should probably be
+    # related to.
     if predoi not in PREPRINT and predoi not in PRIMARY and predoi not in IGNORE:
-        MISSING[predoi] = True
+        MISSING.setdefault(predoi, set()).add(primdoi)
     if primdoi not in PRIMARY and primdoi not in PREPRINT and primdoi not in IGNORE:
-        MISSING[primdoi] = True
+        MISSING.setdefault(primdoi, set()).add(predoi)
     PREPRINTREL.setdefault(predoi, [])
     PRIMARYREL.setdefault(primdoi, [])
     if primdoi in PREPRINTREL[predoi]:
@@ -951,14 +973,16 @@ def write_output_files():
         LOGGER.warning(f"Zero-candidate preprints written to {file_name}")
 
 
-def doiurl(doi):
+def doiurl(doi, color=None):
     ''' Format a DOI as a DIS UI link
         Keyword arguments:
           doi: DOI to format
+          color: optional link text color (e.g. for legibility on a dark card background)
         Returns:
           HTML anchor
     '''
-    return f"<a href='https://dis.int.janelia.org/doiui/{doi}'>{doi}</a>"
+    style = f" style='color:{color};'" if color else ""
+    return f"<a href='https://dis.int.janelia.org/doiui/{doi}'{style}>{doi}</a>"
 
 
 def dedupe_new_pairs():
@@ -1041,13 +1065,12 @@ def new_pair_card(doi_a, doi_b, brand_new):
         Returns:
           HTML string
     '''
-    badge = {"Preprint": BADGE_PREPRINT, "Primary": BADGE_PRIMARY, "DOI": BADGE_UNKNOWN}
     def side(doi):
         rec = get_record(doi)
         title = DL.get_title(rec) if rec else None
         title_html = f"<div style='margin:3px 0 0 4px; color:#555; font-size:13px;'>" \
                      + f"{title}</div>" if title and title != "No title" else ""
-        return f"<span style='{badge[doi_role(doi)]}'>{doi_role(doi)}</span> " \
+        return f"<span style='{ROLE_BADGE[doi_role(doi)]}'>{doi_role(doi)}</span> " \
                + f"{doiurl(doi)}{title_html}"
     if brand_new:
         connector_style = "background-color:#8e44ad; color:#fff; padding:2px 10px; " \
@@ -1068,6 +1091,87 @@ def new_pair_card(doi_a, doi_b, brand_new):
            + side(doi_b) + "</div>"
 
 
+def missing_group_card(associated_doi, missing_dois):
+    ''' Build one HTML card for a group of missing DOIs (see MISSING) that all
+        share the same associated DOI from this run's relations - typically a
+        known primary with one or more preprint DOIs (e.g. version siblings)
+        that were referenced but never loaded into the dois collection.
+        The title/ignore-reason annotation is only ever attempted for
+        associated_doi, not for the items in missing_dois: every DOI in
+        missing_dois is - by construction in make_doi_relationships - guaranteed
+        absent from PREPRINT, PRIMARY, and IGNORE for the whole run, so it could
+        never have a local title or an IGNORE_REASON entry to show.
+        Keyword arguments:
+          associated_doi: the DOI the missing DOIs were related to
+          missing_dois: sorted list of missing DOIs associated with associated_doi
+        Returns:
+          HTML string
+    '''
+    link_color = "#8ecbff"
+    rec = get_record(associated_doi)
+    title = DL.get_title(rec) if rec else None
+    if title and title != "No title":
+        title_html = f"<div style='margin:3px 0 0 4px; color:#c7d0dc; font-size:13px;'>" \
+                      + f"{html.escape(title)}</div>"
+    elif associated_doi in IGNORE_REASON:
+        reason = html.escape(IGNORE_REASON[associated_doi])
+        title_html = f"<div style='margin:3px 0 0 4px; color:#e8a33d; font-size:13px; " \
+                      + f"font-style:italic;'>Ignored: {reason}</div>"
+    else:
+        title_html = ""
+    role = doi_role(associated_doi)
+    header = f"<span style='{ROLE_BADGE[role]}'>{role}</span> " \
+             + f"{doiurl(associated_doi, color=link_color)}{title_html}"
+    items = "".join(f"<li style='margin:2px 0;'>{doiurl(doi, color=link_color)} " \
+                     + f"<span style='{ROLE_BADGE[doi_role(doi)]}'>{doi_role(doi)}</span></li>"
+                     for doi in missing_dois)
+    return "<div style='border:1px solid #c0392b; border-radius:8px; padding:10px 14px; " \
+           + "margin:0 0 10px 0; background-color:#101020; color:#e8ecf1;'>" \
+           + header \
+           + "<div style='margin:6px 0 2px 4px; color:#a9b4c4; font-size:12px;'>" \
+           + f"Missing DOI(s) referenced ({len(missing_dois)}):</div>" \
+           + f"<ul style='margin:0 0 0 14px; padding:0;'>{items}</ul></div>"
+
+
+def missing_doi_groups_html():
+    ''' Build an HTML section grouping missing DOIs (referenced by a relation this
+        run but never loaded locally - see MISSING) by the other DOI each was
+        associated with, so a curator can see at a glance which known record each
+        missing DOI probably belongs to, without cross-referencing the attached
+        preprints_missing_dois.txt by hand. A missing DOI referenced from more than
+        one associated DOI (rare) appears in more than one group, so a card's own
+        count can't be summed across cards to reconstruct len(MISSING).
+        When the "associated DOI" is itself missing too (both sides of a relation
+        unresolved - e.g. two never-loaded version siblings related to each other),
+        that pair would otherwise produce two mirror-image cards, one headed by
+        each side. Canonicalized to a single card, headed by whichever of the two
+        DOIs sorts first, by only processing such a pair once.
+        Keyword arguments:
+          None
+        Returns:
+          HTML string, or "" if MISSING is empty
+    '''
+    if not MISSING:
+        return ""
+    groups = collections.defaultdict(set)
+    for missing_doi, associated in MISSING.items():
+        for assoc_doi in associated:
+            if assoc_doi in MISSING:
+                if missing_doi > assoc_doi:
+                    continue
+                header, item = missing_doi, assoc_doi
+            else:
+                header, item = assoc_doi, missing_doi
+            groups[header].add(item)
+    cards = "".join(missing_group_card(assoc_doi, sorted(missing_dois))
+                     for assoc_doi, missing_dois in sorted(groups.items()))
+    return "<p style='margin:14px 0 6px 0;'><strong>Missing DOIs by associated record:</strong> " \
+           + f"{len(MISSING):,} distinct DOI(s) referenced but not in the database, across " \
+           + f"{len(groups):,} associated record(s) below (a DOI tied to more than one " \
+           + "record appears in more than one card, so card counts won't sum to the " \
+           + "total above).</p>" + cards
+
+
 def generate_email():
     ''' Build and send an HTML summary email highlighting newly-created preprint/
         primary relations from this run - either a brand-new pairing, or an
@@ -1079,9 +1183,11 @@ def generate_email():
         record to diff/label against, and that exclusion is otherwise easy to miss.
         preprints_missing_dois.txt is attached whenever it was written (MISSING is
         non-empty), so the referenced DOIs are one click away rather than requiring
-        server access. Follows the same convention as sync_citations.py/
-        pull_arxiv.py: sent only when --test (developer only) or --write (real
-        recipients) is set, and skipped entirely if there's nothing new to report -
+        server access - the missing_doi_groups_html section below also lists them
+        inline, grouped by the record each was referenced from. Follows the same
+        convention as sync_citations.py/pull_arxiv.py: sent only when --test
+        (developer only) or --write (real recipients) is set, and skipped entirely
+        if there's nothing new to report (no new pairs and no missing DOIs) -
         including on a plain dry run with neither flag.
         Keyword arguments:
           None
@@ -1089,8 +1195,8 @@ def generate_email():
           None
     '''
     pairs = dedupe_new_pairs()
-    if not pairs:
-        LOGGER.info("No new preprint/primary matches - skipping email")
+    if not pairs and not MISSING:
+        LOGGER.info("No new preprint/primary matches or missing DOIs - skipping email")
         return
     pairs.sort(key=lambda pair: not pair[2])  # brand-new relations (True) first
     cards = "".join(new_pair_card(doi_a, doi_b, brand_new) for doi_a, doi_b, brand_new in pairs)
@@ -1109,9 +1215,12 @@ def generate_email():
                        + "referenced in this run's relations were never loaded locally, " \
                        + "so their current value is unknown and they're excluded from " \
                        + "the matches below - see the attached preprints_missing_dois.txt.</p>"
-    html = "<div style='font-family:Arial,Helvetica,sans-serif; color:#222;'>" \
-           + JRC.get_run_data(__file__, __version__) + "<br><br>" \
-           + summary + unknown_note + cards + "</div>"
+    missing_html = missing_doi_groups_html()
+    separator = "<div style='margin:24px 0 10px 0; font-size:20px; font-weight:bold;'>" \
+                + "New/updated relations</div>" if missing_html and cards else ""
+    email_html = "<div style='font-family:Arial,Helvetica,sans-serif; color:#222;'>" \
+                 + JRC.get_run_data(__file__, __version__) + "<br><br>" \
+                 + summary + unknown_note + missing_html + separator + cards + "</div>"
     try:
         email = DISCONFIG['developer'] if ARG.TEST else DISCONFIG['receivers']
         LOGGER.info(f"Sending email to {email}")
@@ -1119,7 +1228,7 @@ def generate_email():
         # so preprints_missing_dois.txt already exists on disk whenever MISSING is
         # non-empty - same condition write_output_files() itself uses to write it.
         attachment = "preprints_missing_dois.txt" if MISSING else None
-        JRC.send_email(html, DISCONFIG['sender'], email, EMAIL_SUBJECT,
+        JRC.send_email(email_html, DISCONFIG['sender'], email, EMAIL_SUBJECT,
                        attachment=attachment, mime='html')
     except Exception as err:
         LOGGER.error(f"Could not send email: {err}")
