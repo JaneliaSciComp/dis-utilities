@@ -6906,6 +6906,98 @@ def figshare_metrics(year='All'):  # pylint: disable=too-many-locals,too-many-br
                                          navbar=generate_navbar('DataCite')))
 
 
+# Shared by the figshare/Zenodo/protocols.io/eLife group-listing endpoints
+# (figshare_groups, zenodo_groups, protocolsio_dois, elife_dois): each groups
+# its publisher's DOIs under a concept/stem key and shows a ranked "top 20"
+# table + companion bar chart per dimension (views/downloads/exports/count/
+# citations). id_key/label_key/nav_param carry each publisher's naming
+# (figshare groups by title "stem"; the others by version "concept" DOI, with
+# the member's own most-common title as the display label).
+def group_table(ordered, top_n, table_id, columns, base, id_key, nav_param, label_key,  # pylint: disable=too-many-arguments,too-many-positional-arguments
+                metric_keys, plural_noun, show_remainder_count):
+    ''' Render one "top N groups" table: a link (drill-down to the group's
+        members) plus its ranked metrics, with a "+N more" summary footer row
+        for anything past top_n.
+        Keyword arguments:
+          ordered: groups sorted by the dimension this table ranks
+          top_n: how many rows to show before folding the rest into the footer
+          table_id: HTML id for the rendered table (drives client-side sorting)
+          columns: column headers, in order: [group label, count, *metric labels]
+          base: the route's own base path (drill-down links are relative to it)
+          id_key: which group field identifies the group in the drill-down URL
+          nav_param: the drill-down query param name
+          label_key: which group field to use as the link's display text
+          metric_keys: group fields for the numeric columns after the count
+                      column, in column order (e.g. ('views', 'downloads', 'citations'))
+          plural_noun: what one row represents, for the footer ("groups", "deposits", ...)
+          show_remainder_count: whether the footer also sums the count column for
+                               the folded-in remainder (figshare/Zenodo do; protocols.io/
+                               eLife instead colspan the label cell across the label and
+                               count columns and drop that figure)
+        Returns:
+          HTML table
+    '''
+    rows = []
+    for grp in ordered[:top_n]:
+        label = f"<a href='{base}?{nav_param}={quote(grp[id_key])}'>{escape(grp[label_key])}</a>"
+        rows.append([safe(label), f"{grp['count']:,}"]
+                    + [f"{grp[key]:,}" for key in metric_keys])
+    foot = None
+    if len(ordered) > top_n:
+        rest = ordered[top_n:]
+        if show_remainder_count:
+            foot = [fcell(f"+ {len(rest):,} more {plural_noun}"),
+                    fcell(f"{sum(g['count'] for g in rest):,}", align='center')]
+        else:
+            foot = [fcell(f"+ {len(rest):,} more {plural_noun}", colspan=2)]
+        foot.extend(fcell(f"{sum(g[key] for g in rest):,}", align='center')
+                    for key in metric_keys)
+    return render_table(columns, rows, table_id=table_id,
+                        css='tablesorter numberlast-scroll', footer=foot)
+
+
+def group_chart_data(ordered, value_key, base, label_key, id_key, nav_param):  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    ''' Build {label: value} and a parallel {label: drill-down URL} for a group
+        table's companion bar chart. A group is skipped if its value for this
+        dimension is zero - except the 'count' dimension, which by construction
+        is never zero for an included (multi-version/multi-DOI) group. Long
+        labels get a middle ellipsis (keeps the distinguishing tail, e.g.
+        "...P7 mouse skin") so same-prefixed series stay readable; a uniqueness
+        guard stops two labels from colliding and silently dropping a bar. The
+        nav map carries the untruncated group key so a bar tap reaches the same
+        drill-down page as the table row.
+        Keyword arguments:
+          ordered: groups sorted by the dimension being charted
+          value_key: which group field to chart ('views'/'downloads'/'count'/etc.)
+          base: the route's own base path (drill-down links are relative to it)
+          label_key: which group field to use as the display label
+          id_key: which group field identifies the group in the drill-down URL
+          nav_param: the drill-down query param name
+        Returns:
+          (data, nav): {label: value} and {label: drill-down URL}
+    '''
+    data = {}
+    nav = {}
+    for grp in ordered[:15]:
+        value = grp[value_key]
+        if value_key != 'count' and not value:
+            continue
+        raw_label = grp[label_key]
+        label = raw_label if len(raw_label) <= 41 else raw_label[:24] + '…' + raw_label[-16:]
+        while label in data:
+            label += ' '
+        data[label] = value
+        nav[label] = f"{base}?{nav_param}={quote(grp[id_key])}"
+    return data, nav
+
+
+def group_flexrow(table_html, chart_div):
+    ''' Pair a table and its chart side by side '''
+    return "<div class='flexrow' style='margin-bottom: 40px'><div class='flexcol'>" \
+           + table_html + "</div><div class='flexcol' style='margin: 10px 0 0 20px'>" \
+           + chart_div + "</div></div>"
+
+
 @app.route('/figshare_groups/<string:year>')
 @app.route('/figshare_groups')
 def figshare_groups(year='All'):  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
@@ -7032,27 +7124,6 @@ def figshare_groups(year='All'):  # pylint: disable=too-many-locals,too-many-bra
     grouped_dois = sum(g['count'] for g in groups)
     largest = max(groups, key=lambda g: g['count']) if groups else None
     top_n = 20
-
-    def group_table(ordered, table_id):
-        ''' Render a grouped-title table; the stem links to the group's members '''
-        rows = []
-        for grp in ordered[:top_n]:
-            label = f"<a href='{base}?stem={quote(grp['stem'])}'>" \
-                    + f"{escape(grp['stem'])}</a>"
-            rows.append([safe(label), f"{grp['count']:,}", f"{grp['views']:,}",
-                         f"{grp['downloads']:,}", f"{grp['citations']:,}"])
-        foot = None
-        if len(groups) > top_n:
-            rest = ordered[top_n:]
-            foot = [fcell(f"+ {len(rest):,} more groups"),
-                    fcell(f"{sum(g['count'] for g in rest):,}", align='center'),
-                    fcell(f"{sum(g['views'] for g in rest):,}", align='center'),
-                    fcell(f"{sum(g['downloads'] for g in rest):,}", align='center'),
-                    fcell(f"{sum(g['citations'] for g in rest):,}", align='center')]
-        return render_table(['Group', 'DOIs', 'Views', 'Downloads', 'Citations'],
-                            rows, table_id=table_id,
-                            css='tablesorter numberlast-scroll', footer=foot)
-
     by_dl = groups  # already sorted by downloads
     by_cnt = sorted(groups, key=lambda g: (-g['count'], -g['downloads']))
     if request.args.get('fmt') == 'json':
@@ -7082,54 +7153,35 @@ def figshare_groups(year='All'):  # pylint: disable=too-many-locals,too-many-bra
             + "identifiers from each title (serials like AA0547, specimen codes " \
             + "like jrc_mus-skin-1, versions, dates). Each group label links to " \
             + "the list of its member DOIs.</div>"
-    dlhtml = "<h4>Title groups by downloads (top 20)</h4>" \
-             + group_table(by_dl, 'fig-grp-dl')
-    cnthtml = "<h4>Title groups by DOI count (top 20)</h4>" \
-              + group_table(by_cnt, 'fig-grp-cnt')
-    def chart_data(ordered, value_key):
-        ''' Build {label: value} and a parallel {label: drill-down URL} for a
-            chart. Shorten long stems with a middle ellipsis (keeps the
-            distinguishing tail, e.g. "...P7 mouse skin") so same-prefixed series
-            stay readable; a uniqueness guard prevents two labels from colliding
-            and silently dropping a bar. The nav map carries the full (untruncated)
-            stem so a bar tap reaches the same ?stem= page as the table row. '''
-        data = {}
-        nav = {}
-        for grp in ordered[:15]:
-            value = grp[value_key]
-            if value_key == 'downloads' and not value:
-                continue
-            stem = grp['stem']
-            label = stem if len(stem) <= 41 else stem[:24] + '…' + stem[-16:]
-            while label in data:
-                label += ' '
-            data[label] = value
-            nav[label] = f"{base}?stem={quote(stem)}"
-        return data, nav
-    grp_dl_data, grp_dl_nav = chart_data(by_dl, 'downloads')
-    grp_cnt_data, grp_cnt_nav = chart_data(by_cnt, 'count')
-    chartscript = dl_div = cnt_div = ''
-    if grp_dl_data:
-        script, dl_div = DP.hbar_chart(grp_dl_data, "Top title groups by downloads",
-                                       value_label="Downloads", width=620, height=420,
-                                       value_format="0,0", show_values=True, nav=grp_dl_nav)
-        chartscript += script
-    if grp_cnt_data:
-        script, cnt_div = DP.hbar_chart(grp_cnt_data, "Top title groups by DOI count",
-                                        value_label="DOIs", width=620, height=420,
-                                        value_format="0,0", show_values=True, nav=grp_cnt_nav)
-        chartscript += script
-
-    def flexrow(table_html, chart_div):
-        ''' Pair a table and its chart side by side '''
-        return "<div class='flexrow' style='margin-bottom: 40px'><div class='flexcol'>" \
-               + table_html + "</div><div class='flexcol' style='margin: 10px 0 0 20px'>" \
-               + chart_div + "</div></div>"
+    # Each dimension's table+chart pair is shown only when it has something to
+    # rank: "DOI count" is guaranteed nonzero whenever any multi-DOI group exists
+    # (every group has count > 1 by construction), but "downloads" can be
+    # entirely zero for a sparse year even though groups exist.
+    total_dl = sum(g['downloads'] for g in groups)
+    chartscript = ''
+    sections = ''
+    for label, ordered, total_metric, value_key, table_id, unit in (
+            ('downloads', by_dl, total_dl, 'downloads', 'fig-grp-dl', 'Downloads'),
+            ('DOI count', by_cnt, len(groups), 'count', 'fig-grp-cnt', 'DOIs')):
+        if not total_metric:
+            continue
+        thtml = f"<h4>Title groups by {label} (top 20)</h4>" \
+                + group_table(ordered, top_n, table_id,
+                             ['Group', 'DOIs', 'Views', 'Downloads', 'Citations'], base,
+                             'stem', 'stem', 'stem', ('views', 'downloads', 'citations'),
+                             'groups', True)
+        data, nav = group_chart_data(ordered, value_key, base, 'stem', 'stem', 'stem')
+        chart_div = ''
+        if data:
+            script, chart_div = DP.hbar_chart(data, f"Top title groups by {label}",
+                                              value_label=unit, width=620, height=420,
+                                              value_format="0,0", show_values=True, nav=nav)
+            chartscript += script
+        sections += group_flexrow(thtml, chart_div)
     title = "figshare title groups"
     if year != 'All':
         title += f" (year={year})"
-    html = year_pulldown('figshare_groups') + "<br><br>" + cards + gnote \
-           + flexrow(dlhtml, dl_div) + flexrow(cnthtml, cnt_div)
+    html = year_pulldown('figshare_groups') + "<br><br>" + cards + gnote + sections
     endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title=title, html=html,
@@ -7298,27 +7350,6 @@ def zenodo_groups(year='All'):  # pylint: disable=too-many-locals,too-many-branc
     grouped_dois = sum(g['count'] for g in groups)
     largest = max(groups, key=lambda g: g['count']) if groups else None
     top_n = 20
-
-    def group_table(ordered, table_id):
-        ''' Render a deposits table; the label links to the deposit's versions '''
-        rows = []
-        for grp in ordered[:top_n]:
-            label = f"<a href='{base}?concept={quote(grp['concept'])}'>" \
-                    + f"{escape(grp['label'])}</a>"
-            rows.append([safe(label), f"{grp['count']:,}", f"{grp['views']:,}",
-                         f"{grp['downloads']:,}", f"{grp['citations']:,}"])
-        foot = None
-        if len(groups) > top_n:
-            rest = ordered[top_n:]
-            foot = [fcell(f"+ {len(rest):,} more deposits"),
-                    fcell(f"{sum(g['count'] for g in rest):,}", align='center'),
-                    fcell(f"{sum(g['views'] for g in rest):,}", align='center'),
-                    fcell(f"{sum(g['downloads'] for g in rest):,}", align='center'),
-                    fcell(f"{sum(g['citations'] for g in rest):,}", align='center')]
-        return render_table(['Deposit', 'Versions', 'Views', 'Downloads', 'Citations'],
-                            rows, table_id=table_id,
-                            css='tablesorter numberlast-scroll', footer=foot)
-
     by_dl = sorted(groups, key=lambda g: (-g['downloads'], -g['count']))
     by_cnt = groups  # already sorted by DOI count
     by_cit = sorted(groups, key=lambda g: (-g['citations'], -g['count']))
@@ -7336,8 +7367,8 @@ def zenodo_groups(year='All'):  # pylint: disable=too-many-locals,too-many-branc
         result['rest']['source'] = 'mongo'
         result['rest']['row_count'] = len(groups)
         return generate_response(result)
-    largest_card = (f"Largest deposit ({escape(largest['label'])})", f"{largest['count']:,}") \
-                   if largest else ("Largest deposit", "N/A")
+    largest_card = (f"Most versions ({escape(largest['label'])})", f"{largest['count']:,}") \
+                   if largest else ("Most versions", "N/A")
     cards = stat_cards(
         [("Zenodo DOIs", f"{total:,}"),
          ("Deposits (all)", f"{len(all_groups):,}"),
@@ -7356,62 +7387,37 @@ def zenodo_groups(year='All'):  # pylint: disable=too-many-locals,too-many-branc
             + "unversioned deposits stand alone. Views, downloads, and citations are " \
             + "summed across a deposit's versions. Each label links to the deposit's " \
             + "version DOIs.</div>"
-    dlhtml = "<h4>Deposits by downloads (top 20)</h4>" \
-             + group_table(by_dl, 'zen-grp-dl')
-    cnthtml = "<h4>Deposits by version count (top 20)</h4>" \
-              + group_table(by_cnt, 'zen-grp-cnt')
-    cithtml = "<h4>Deposits by citations (top 20)</h4>" \
-              + group_table(by_cit, 'zen-grp-cit')
-
-    def chart_data(ordered, value_key):
-        ''' Build {label: value} and a parallel {label: drill-down URL} for a
-            chart, shortening long labels with a middle ellipsis; a uniqueness
-            guard stops two labels colliding and silently dropping a bar. The nav
-            map carries the deposit concept so a bar tap reaches the same ?concept=
-            page as the table row. '''
-        data = {}
-        nav = {}
-        for grp in ordered[:15]:
-            value = grp[value_key]
-            if value_key in ('downloads', 'citations') and not value:
-                continue
-            label = grp['label']
-            label = label if len(label) <= 41 else label[:24] + '…' + label[-16:]
-            while label in data:
-                label += ' '
-            data[label] = value
-            nav[label] = f"{base}?concept={quote(grp['concept'])}"
-        return data, nav
-    grp_dl_data, grp_dl_nav = chart_data(by_dl, 'downloads')
-    grp_cnt_data, grp_cnt_nav = chart_data(by_cnt, 'count')
-    grp_cit_data, grp_cit_nav = chart_data(by_cit, 'citations')
-    chartscript = dl_div = cnt_div = cit_div = ''
-    if grp_dl_data:
-        script, dl_div = DP.hbar_chart(grp_dl_data, "Top deposits by downloads",
-                                       value_label="Downloads", width=620, height=420,
-                                       value_format="0,0", show_values=True, nav=grp_dl_nav)
-        chartscript += script
-    if grp_cnt_data:
-        script, cnt_div = DP.hbar_chart(grp_cnt_data, "Top deposits by version count",
-                                        value_label="Versions", width=620, height=420,
-                                        value_format="0,0", show_values=True, nav=grp_cnt_nav)
-        chartscript += script
-    if grp_cit_data:
-        script, cit_div = DP.hbar_chart(grp_cit_data, "Top deposits by citations",
-                                        value_label="Citations", width=620, height=420,
-                                        value_format="0,0", show_values=True, nav=grp_cit_nav)
-        chartscript += script
-
-    def flexrow(table_html, chart_div):
-        ''' Pair a table and its chart side by side '''
-        return "<div class='flexrow' style='margin-bottom: 40px'><div class='flexcol'>" \
-               + table_html + "</div><div class='flexcol' style='margin: 10px 0 0 20px'>" \
-               + chart_div + "</div></div>"
+    # Each dimension's table+chart pair is shown only when it has something to
+    # rank: "version count" is guaranteed nonzero whenever any multi-version
+    # deposit exists (every group has count > 1 by construction), but
+    # "downloads"/"citations" can each independently be zero for a sparse year.
+    total_dl = sum(g['downloads'] for g in groups)
+    total_cit = sum(g['citations'] for g in groups)
+    chartscript = ''
+    sections = ''
+    for label, ordered, total_metric, value_key, table_id, unit in (
+            ('downloads', by_dl, total_dl, 'downloads', 'zen-grp-dl', 'Downloads'),
+            ('version count', by_cnt, len(groups), 'count', 'zen-grp-cnt', 'Versions'),
+            ('citations', by_cit, total_cit, 'citations', 'zen-grp-cit', 'Citations')):
+        if not total_metric:
+            continue
+        thtml = f"<h4>Deposits by {label} (top 20)</h4>" \
+                + group_table(ordered, top_n, table_id,
+                             ['Deposit', 'Versions', 'Views', 'Downloads', 'Citations'],
+                             base, 'concept', 'concept', 'label',
+                             ('views', 'downloads', 'citations'), 'deposits', True)
+        data, nav = group_chart_data(ordered, value_key, base, 'label', 'concept', 'concept')
+        chart_div = ''
+        if data:
+            script, chart_div = DP.hbar_chart(data, f"Top deposits by {label}",
+                                              value_label=unit, width=620, height=420,
+                                              value_format="0,0", show_values=True, nav=nav)
+            chartscript += script
+        sections += group_flexrow(thtml, chart_div)
     title = "Zenodo deposits"
     if year != 'All':
         title += f" (year={year})"
-    html = year_pulldown('zenodo_groups') + "<br><br>" + cards + gnote \
-           + flexrow(dlhtml, dl_div) + flexrow(cnthtml, cnt_div) + flexrow(cithtml, cit_div)
+    html = year_pulldown('zenodo_groups') + "<br><br>" + cards + gnote + sections
     endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title=title, html=html,
@@ -7598,6 +7604,855 @@ def zenodo_stats(year='All'):  # pylint: disable=too-many-locals,too-many-branch
                                          chartscript=chartscript, chartdiv='',
                                          chartscript2='', chartdiv2='',
                                          navbar=generate_navbar('DataCite')))
+
+
+# protocols.io DOIs are Crossref-registered (unlike figshare/Zenodo, which are
+# DataCite-registered) with prefix 10.17504 (10.17504/protocols.io.<slug>[/v<n>]).
+# Per-protocol usage (views/exports/runs/forks/bookmarks/comments) is stored in
+# jrc_protocolsio_counts by the citation sync; /protocolsio_stats aggregates it
+# site-wide.
+PROTOCOLSIO_DOI_RE = r"^10\.17504/"
+# protocols.io versions a DOI with a trailing /v<n> segment (e.g.
+# 10.17504/protocols.io.xxx/v2) - unlike Zenodo/figshare, there is no
+# relatedIdentifiers link to a concept DOI, so the concept is derived by
+# stripping that suffix; an unversioned DOI (no suffix) groups under its own DOI.
+PROTOCOLSIO_VERSION_RE = re.compile(r'^(.*)/v\d+$', re.IGNORECASE)
+
+
+def protocolsio_match(year='All'):
+    ''' Build the dois query that selects protocols.io DOIs (Crossref-registered,
+        DOI prefix 10.17504). Optionally limited to a publishing year.
+        Keyword arguments:
+          year: 4-digit publishing year, or 'All'
+        Returns:
+          a MongoDB filter dict
+    '''
+    match = {"jrc_obtained_from": "Crossref",
+             "doi": {"$regex": PROTOCOLSIO_DOI_RE, "$options": "i"}}
+    if year != 'All':
+        match["jrc_publishing_date"] = {"$regex": "^" + year}
+    return match
+
+
+def protocolsio_concept_doi(doi):
+    ''' Return a protocols.io DOI's concept (base) identifier - the identifier
+        shared by every version of one protocol (see PROTOCOLSIO_VERSION_RE).
+        Keyword arguments:
+          doi: DOI string
+        Returns:
+          The lower-cased concept DOI string
+    '''
+    match = PROTOCOLSIO_VERSION_RE.match(doi)
+    return (match.group(1) if match else doi).strip().lower()
+
+
+def protocolsio_concept_groups(records):
+    ''' Group protocols.io records by concept (base) DOI, summing usage and
+        citations across the concept's versions.
+        Keyword arguments:
+          records: list of dicts with doi/title/views/exports/citations/concept
+        Returns:
+          List of group dicts (concept, label, count, views, exports, citations)
+          sorted by descending DOI count then citations. The label is the most
+          common member title (versions of one protocol usually share a title).
+    '''
+    buckets = collections.defaultdict(list)
+    for rec in records:
+        buckets[rec['concept']].append(rec)
+    groups = []
+    for concept, recs in buckets.items():
+        casings = collections.Counter(r['title'] for r in recs if r['title'])
+        label = casings.most_common(1)[0][0] if casings else concept
+        groups.append({'concept': concept, 'label': label, 'count': len(recs),
+                       'views': sum(r['views'] for r in recs),
+                       'exports': sum(r['exports'] for r in recs),
+                       'citations': sum(r['citations'] for r in recs)})
+    groups.sort(key=lambda g: (-g['count'], -g['citations']))
+    return groups
+
+
+@app.route('/protocolsio_stats/<string:year>')
+@app.route('/protocolsio_stats')
+def protocolsio_stats(year='All'):  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
+    ''' Show protocols.io usage and citation metrics.
+        protocols.io DOIs are Crossref-registered (see protocolsio_match). Usage
+        (views/exports/runs/forks/bookmarks/comments) comes from
+        jrc_protocolsio_counts; citation totals/sources come from the citation
+        sync. Unlike Zenodo/figshare, resource type and publisher are homogenous
+        across protocols.io DOIs (all Crossref "posted-content"/"preprint"), so
+        no breakdown by those dimensions is shown here.
+    '''
+    coll = DB['dis'].dois
+    proj = {"doi": 1, "jrc_publishing_date": 1, "jrc_protocolsio_counts": 1,
+            "jrc_citation_count": 1, "jrc_citation_sources": 1}
+    try:
+        docs = list(coll.find(protocolsio_match(year), proj))
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get protocols.io DOIs"),
+                               message=error_message(err))
+    source_name = {"crossref": "Crossref", "openalex": "OpenAlex",
+                   "scholexplorer": "ScholeXplorer", "wos": "Web of Science"}
+    total = len(docs)
+    usage = {'Views': 0, 'Exports': 0, 'Runs': 0, 'Bookmarks': 0, 'Comments': 0,
+             'Forks (public)': 0, 'Forks (private)': 0}
+    usage_dois = cited_dois = cite_total = 0
+    counts = []
+    cite_src = collections.defaultdict(int)
+    by_year = {}
+    for row in docs:
+        pc = row.get('jrc_protocolsio_counts') or {}
+        views = pc.get('views', 0)
+        exports = pc.get('exports', 0)
+        if pc:
+            usage_dois += 1
+            usage['Views'] += views
+            usage['Exports'] += exports
+            usage['Runs'] += pc.get('runs', 0)
+            usage['Bookmarks'] += pc.get('bookmarks', 0)
+            usage['Comments'] += pc.get('comments', 0)
+            usage['Forks (public)'] += pc.get('forks_public', 0)
+            usage['Forks (private)'] += pc.get('forks_private', 0)
+        ccount = row.get('jrc_citation_count', 0) or 0
+        if ccount:
+            cited_dois += 1
+            cite_total += ccount
+            counts.append(ccount)
+        for src, val in (row.get('jrc_citation_sources') or {}).items():
+            cite_src[source_name.get(src, src.capitalize())] += val
+        yname = (row.get('jrc_publishing_date') or '')[:4]
+        if yname.isdigit():
+            rec = by_year.setdefault(yname, {'dois': 0, 'views': 0,
+                                             'exports': 0, 'citations': 0})
+            rec['dois'] += 1
+            rec['views'] += views
+            rec['exports'] += exports
+            rec['citations'] += ccount
+    if not total:
+        msg = "No protocols.io DOIs were found"
+        if year != 'All':
+            msg += f" for publishing year {year}"
+        html = year_pulldown('protocolsio_stats') + "<br><br>" + render_warning(msg, 'warning')
+        endpoint_access()
+        return make_response(render_template('general.html', urlroot=request.url_root,
+                                             title="protocols.io metrics", html=html,
+                                             navbar=generate_navbar('DataCite')))
+    # ----- headline stat cards -----
+    conv = usage['Exports'] / usage['Views'] if usage['Views'] else 0
+    cards = stat_cards([("protocols.io DOIs", f"{total:,}"),
+                        ("DOIs with usage data",
+                         f"{usage_dois:,} ({usage_dois/total*100:,.1f}%)"),
+                        ("Total views", f"{usage['Views']:,}"),
+                        ("Total exports", f"{usage['Exports']:,}")],
+                       div_id='pio-stats')
+    cards += stat_cards([("Exports / view", f"{conv*100:,.1f}%"),
+                         ("DOIs cited", f"{cited_dois:,} ({cited_dois/total*100:,.1f}%)"),
+                         ("Total citations", f"{cite_total:,}")],
+                        div_id='pio-stats2')
+    intro = "<div style='font-size:0.85em; color:#a8c4e0; max-width:620px; " \
+            + "margin:-8px 0 16px 0'>Usage is the sum of per-protocol counts from " \
+            + "the protocols.io API. Versioned protocols (.../v2, .../v3, ...) are " \
+            + "stored as separate DOIs and counted separately here. See " \
+            + "<a href='/protocolsio_dois'>protocols.io deposits</a> for the same " \
+            + "DOIs collapsed by concept (version series).</div>"
+    # ----- usage totals -----
+    uhtml = "<h4>Usage totals</h4>"
+    uhtml += render_table(['Attribute', 'Count'],
+                          [[k, f"{v:,}"] for k, v in usage.items()],
+                          table_id='pio-usage', css='tablesorter numberlast-scroll')
+    uhtml += "<div style='font-size:0.85em; color:#a8c4e0; max-width:560px; margin:6px 0 0 0'>" \
+             + "<b>Views</b> and <b>Exports</b> are the largest signals (page views and " \
+             + "PDF/format exports); <b>Runs</b> tracks protocols.io's \"start experiment\" " \
+             + "feature, and <b>Forks</b> counts derivative copies (public/private).</div>"
+    # ----- DOIs & usage by publishing year -----
+    ydata = {'Year': [], 'DOIs': [], 'Views': []}
+    ytrows = []
+    for yname in sorted(by_year):
+        rec = by_year[yname]
+        ytrows.append([yname, f"{rec['dois']:,}", f"{rec['views']:,}",
+                       f"{rec['exports']:,}", f"{rec['citations']:,}"])
+        ydata['Year'].append(yname)
+        ydata['DOIs'].append(rec['dois'])
+        ydata['Views'].append(rec['views'])
+    yhtml = "<h4>DOIs &amp; usage by publishing year</h4>"
+    yhtml += render_table(['Year', 'DOIs', 'Views', 'Exports', 'Citations'],
+                          ytrows, table_id='pio-years', css='tablesorter numberlast-scroll')
+    # ----- citation sources (which source surfaces protocols.io citations) -----
+    src_data = dict(cite_src)
+    shtml = ''
+    if cite_src:
+        shtml = "<h4>Citations by source</h4>"
+        shtml += render_table(['Source', 'Citations'],
+                              [[k, f"{v:,}"] for k, v in
+                               sorted(cite_src.items(), key=itemgetter(1), reverse=True)],
+                              table_id='pio-sources', css='tablesorter numberlast-scroll')
+        shtml += "<div style='font-size:0.85em; color:#a8c4e0; max-width:460px'>" \
+                 + "A citing work found by more than one source is counted once " \
+                 + "per source here.</div>"
+    if request.args.get('fmt') == 'json':
+        result = initialize_result()
+        result['data'] = {"dois": total, "usage_dois": usage_dois, "usage": usage,
+                          "exports_per_view": round(conv, 4),
+                          "cited_dois": cited_dois, "total_citations": cite_total,
+                          "median_citations": statistics.median(counts) if counts else 0,
+                          "citations_by_source": src_data, "by_year": by_year}
+        result['rest']['source'] = 'mongo'
+        result['rest']['row_count'] = total
+        return generate_response(result)
+    # ----- charts -----
+    chartscript = ''
+    usage_div = year_div = src_div = ''
+    if any(usage.values()):
+        script, usage_div = DP.hbar_chart(usage, "Usage totals", value_label="Count",
+                                          width=500, height=320, value_format="0,0",
+                                          show_values=True)
+        chartscript += script
+    if ydata['Year']:
+        # Tap a year bar -> protocols.io metrics scoped to that year
+        ynav = {yr: f"/protocolsio_stats/{yr}" for yr in ydata['Year']}
+        script, year_div = DP.dual_axis_chart(
+            ydata, title="DOIs & views by year", x_field='Year',
+            bar_field='DOIs', line_field='Views', bar_label='DOIs published',
+            line_label='Views', bar_color='darkorange', bar_format="0,0",
+            line_format="0,0", width=650, height=400, nav=ynav)
+        chartscript += script
+    if src_data:
+        colors = DP.get_colors_by_count(len(src_data))
+        script, src_div = DP.pie_chart(src_data, "Citations by source", "source",
+                                       width=500, colors=colors, fmt="{0,0}")
+        chartscript += script
+    def flexrow(table_html, chart_div):
+        ''' Pair a table and its chart side by side '''
+        return "<div class='flexrow' style='margin-bottom: 40px'><div class='flexcol'>" \
+               + table_html + "</div><div class='flexcol' style='margin: 10px 0 0 20px'>" \
+               + chart_div + "</div></div>"
+    title = "protocols.io metrics"
+    if year != 'All':
+        title += f" (year={year})"
+    html = year_pulldown('protocolsio_stats') + "<br><br>" + cards + intro \
+           + flexrow(uhtml, usage_div) + flexrow(yhtml, year_div)
+    if shtml:
+        html += flexrow(shtml, src_div)
+    endpoint_access()
+    return make_response(render_template('bokeh.html', urlroot=request.url_root,
+                                         title=title, html=html,
+                                         chartscript=chartscript, chartdiv='',
+                                         chartscript2='', chartdiv2='',
+                                         navbar=generate_navbar('DataCite')))
+
+
+@app.route('/protocolsio_dois/<string:year>')
+@app.route('/protocolsio_dois')
+def protocolsio_dois(year='All'):  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
+    ''' Show protocols.io deposits ranked by usage and citations, each collapsing
+        a protocol's versions (10.17504/protocols.io.xxx/v2, /v3, ...) under
+        their shared concept (base) DOI (see protocolsio_concept_doi); an
+        unversioned DOI stands alone. Unlike Zenodo, rankings cover every
+        deposit (not just multi-version ones): most protocols.io deposits
+        currently have only one version stored, so restricting to multi-version
+        deposits would leave the "top 20" tables nearly empty.
+    '''
+    coll = DB['dis'].dois
+    proj = {"doi": 1, "DOI": 1, "title": 1, "jrc_citation_count": 1,
+            "jrc_protocolsio_counts": 1}
+    try:
+        docs = list(coll.find(protocolsio_match(year), proj))
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get protocols.io DOIs"),
+                               message=error_message(err))
+    records = []
+    for row in docs:
+        pc = row.get('jrc_protocolsio_counts') or {}
+        records.append({'doi': row['doi'],
+                        'title': strip_html_tags(DL.get_title(row)),
+                        'views': pc.get('views', 0),
+                        'exports': pc.get('exports', 0),
+                        'citations': row.get('jrc_citation_count', 0) or 0,
+                        'concept': protocolsio_concept_doi(row['doi'])})
+    total = len(records)
+    if not total:
+        msg = "No protocols.io DOIs were found"
+        if year != 'All':
+            msg += f" for publishing year {year}"
+        html = year_pulldown('protocolsio_dois') + "<br><br>" \
+               + render_warning(msg, 'warning')
+        endpoint_access()
+        return make_response(render_template('general.html', urlroot=request.url_root,
+                                             title="protocols.io deposits", html=html,
+                                             navbar=generate_navbar('DataCite')))
+    base = '/protocolsio_dois' if year == 'All' else f"/protocolsio_dois/{year}"
+    # Drill-down: ?concept=<doi> lists the member (version) DOIs of one deposit
+    concept = request.args.get('concept')
+    if concept:
+        members = [r for r in records if r['concept'] == concept.lower()]
+        members.sort(key=itemgetter('exports', 'citations'), reverse=True)
+        if request.args.get('fmt') == 'json':
+            result = initialize_result()
+            result['data'] = {"concept": concept, "dois": len(members),
+                              "members": members}
+            result['rest']['source'] = 'mongo'
+            result['rest']['row_count'] = len(members)
+            return generate_response(result)
+        back = f"<a href='{base}' class='btn btn-outline-primary btn-sm'>" \
+               + "&larr; all deposits</a>"
+        if not members:
+            html = back + "<br><br>" \
+                   + render_warning(f"No protocols.io DOIs match the deposit "
+                                    f"\"{escape(concept)}\"", 'warning')
+            endpoint_access()
+            return make_response(render_template('general.html', urlroot=request.url_root,
+                                                 title=f"protocols.io deposit: {concept}",
+                                                 html=html, navbar=generate_navbar('DataCite')))
+        casings = collections.Counter(r['title'] for r in members if r['title'])
+        dtitle = f"protocols.io deposit: {casings.most_common(1)[0][0] if casings else concept}"
+        mrows = []
+        tviews = texp = tcit = 0
+        for rec in members:
+            tviews += rec['views']
+            texp += rec['exports']
+            tcit += rec['citations']
+            mrows.append([safe(doi_link(rec['doi'])), rec['title'], f"{rec['views']:,}",
+                          f"{rec['exports']:,}", f"{rec['citations']:,}"])
+        mtable = render_table(['Version DOI', 'Title', 'Views', 'Exports', 'Citations'],
+                              mrows, table_id='pio-members',
+                              css='tablesorter numberlast-scroll',
+                              footer=[fcell('TOTAL', colspan=2),
+                                      fcell(f"{tviews:,}", align='center'),
+                                      fcell(f"{texp:,}", align='center'),
+                                      fcell(f"{tcit:,}", align='center')])
+        mcards = stat_cards([("Versions", f"{len(members):,}"),
+                             ("Total views", f"{tviews:,}"),
+                             ("Total exports", f"{texp:,}"),
+                             ("Total citations", f"{tcit:,}")], div_id='piom-stats')
+        html = back + "<br><br>" + mcards + mtable
+        endpoint_access()
+        return make_response(render_template('general.html', urlroot=request.url_root,
+                                             title=dtitle, html=html,
+                                             navbar=generate_navbar('DataCite')))
+    all_groups = protocolsio_concept_groups(records)
+    multi = [g for g in all_groups if g['count'] > 1]
+    grouped_dois = sum(g['count'] for g in multi)
+    largest = max(multi, key=lambda g: g['count']) if multi else None
+    top_n = 20
+    by_exports = sorted(all_groups, key=lambda g: (-g['exports'], -g['views']))
+    by_views = sorted(all_groups, key=lambda g: (-g['views'], -g['exports']))
+    by_cit = sorted(all_groups, key=lambda g: (-g['citations'], -g['views']))
+    total_views = sum(g['views'] for g in all_groups)
+    total_exports = sum(g['exports'] for g in all_groups)
+    total_citations = sum(g['citations'] for g in all_groups)
+    if request.args.get('fmt') == 'json':
+        result = initialize_result()
+        result['data'] = {"dois": total, "deposits": len(all_groups),
+                          "multi_version_deposits": len(multi), "grouped_dois": grouped_dois,
+                          "largest_deposit": {"concept": largest['concept'],
+                                              "label": largest['label'],
+                                              "count": largest['count']} if largest else None,
+                          "total_views": total_views, "total_exports": total_exports,
+                          "total_citations": total_citations,
+                          "deposit_groups": [{k: g[k] for k in
+                                              ('concept', 'label', 'count', 'views',
+                                               'exports', 'citations')}
+                                             for g in by_exports]}
+        result['rest']['source'] = 'mongo'
+        result['rest']['row_count'] = len(all_groups)
+        return generate_response(result)
+    largest_card = (f"Most versions ({escape(largest['label'])})", f"{largest['count']:,}") \
+                   if largest else ("Most versions", "N/A")
+    cards = stat_cards(
+        [("protocols.io DOIs", f"{total:,}"),
+         ("Deposits (all)", f"{len(all_groups):,}"),
+         ("Multi-version deposits", f"{len(multi):,}"),
+         ("DOIs in multi-version deposits",
+          f"{grouped_dois:,} ({grouped_dois/total*100:,.1f}%)"),
+         largest_card],
+        div_id='piog-stats')
+    cards += stat_cards([("Total views", f"{total_views:,}"),
+                         ("Total exports", f"{total_exports:,}"),
+                         ("Total citations", f"{total_citations:,}")],
+                        div_id='piog-stats2')
+    gnote = "<div style='font-size:0.85em; color:#a8c4e0; max-width:620px; " \
+            + "margin:-8px 0 16px 0'>Each deposit collapses every version of one " \
+            + "protocol under the shared concept (base) DOI derived by stripping " \
+            + "its trailing <i>/v&lt;n&gt;</i> segment; unversioned DOIs stand " \
+            + "alone. Views, exports, and citations are summed across a deposit's " \
+            + "versions. Unlike Zenodo, rankings below cover every deposit, not " \
+            + "just multi-version ones, since most protocols.io deposits " \
+            + "currently have only one version stored. Each label links to the " \
+            + "deposit's version DOIs.</div>"
+    # Each dimension's table+chart pair is shown only when at least one deposit
+    # has a non-zero value for it (e.g. a year with views but no citations yet).
+    chartscript = ''
+    sections = ''
+    for label, ordered, total_metric, value_key, table_id, unit in (
+            ('exports', by_exports, total_exports, 'exports', 'pio-grp-exp', 'Exports'),
+            ('views', by_views, total_views, 'views', 'pio-grp-views', 'Views'),
+            ('citations', by_cit, total_citations, 'citations', 'pio-grp-cit', 'Citations')):
+        if not total_metric:
+            continue
+        thtml = f"<h4>Deposits by {label} (top 20)</h4>" \
+                + group_table(ordered, top_n, table_id,
+                             ['Deposit', 'Versions', 'Views', 'Exports', 'Citations'],
+                             base, 'concept', 'concept', 'label',
+                             ('views', 'exports', 'citations'), 'deposits', False)
+        data, nav = group_chart_data(ordered, value_key, base, 'label', 'concept', 'concept')
+        chart_div = ''
+        if data:
+            script, chart_div = DP.hbar_chart(data, f"Top deposits by {label}",
+                                              value_label=unit, width=620, height=420,
+                                              value_format="0,0", show_values=True, nav=nav)
+            chartscript += script
+        sections += group_flexrow(thtml, chart_div)
+    title = "protocols.io deposits"
+    if year != 'All':
+        title += f" (year={year})"
+    html = year_pulldown('protocolsio_dois') + "<br><br>" + cards + gnote + sections
+    endpoint_access()
+    return make_response(render_template('bokeh.html', urlroot=request.url_root,
+                                         title=title, html=html,
+                                         chartscript=chartscript, chartdiv='',
+                                         chartscript2='', chartdiv2='',
+                                         navbar=generate_navbar('DataCite')))
+
+
+# eLife DOIs are Crossref-registered with prefix 10.7554
+# (10.7554/elife.<id>[.<n>[.sa<n>]]). Per-article usage (views/downloads) is
+# stored in jrc_elife_counts by the citation sync; /elife_stats aggregates it
+# site-wide. Peer-review sub-documents (decision letters, author responses)
+# share their parent article's numeric ID and aren't usage-eligible - excluded
+# via `type` at the query level (see elife_match), same as the citation sync.
+# Nav lives under DOIs (not DataCite, unlike figshare/Zenodo/protocols.io),
+# since eLife is a Crossref-registered journal, not a DataCite repository.
+ELIFE_DOI_RE = r"^10\.7554/elife\."
+# eLife's "Reviewed Preprint" model versions a DOI with a trailing
+# .<n>[.sa<n>] segment (e.g. 10.7554/elife.94168.2); the numeric article ID
+# (leading zeros stripped) doubles as the canonical concept key, matching the
+# extraction logic already used by the citation sync (sync_citations.py).
+ELIFE_CONCEPT_RE = re.compile(r'^10\.7554/elife\.0*(\d+)', re.IGNORECASE)
+
+
+def elife_match(year='All'):
+    ''' Build the dois query that selects eLife DOIs (Crossref-registered, DOI
+        prefix 10.7554), excluding peer-review sub-documents (decision letters,
+        author responses - not usage-eligible; see elife_concept_doi).
+        Optionally limited to a publishing year.
+        Keyword arguments:
+          year: 4-digit publishing year, or 'All'
+        Returns:
+          a MongoDB filter dict
+    '''
+    match = {"jrc_obtained_from": "Crossref",
+             "doi": {"$regex": ELIFE_DOI_RE, "$options": "i"},
+             "type": {"$ne": "peer-review"}}
+    if year != 'All':
+        match["jrc_publishing_date"] = {"$regex": "^" + year}
+    return match
+
+
+def elife_concept_doi(doi):
+    ''' Return an eLife DOI's concept (base) identifier - the identifier shared
+        by every version of one article (see ELIFE_CONCEPT_RE). eLife's
+        "Reviewed Preprint" model versions a DOI with a trailing .<n>[.sa<n>]
+        segment; the canonical numeric article ID (leading zeros stripped)
+        doubles as the concept key, matching the citation sync's extraction.
+        Keyword arguments:
+          doi: DOI string
+        Returns:
+          The lower-cased concept DOI string (10.7554/elife.<id>)
+    '''
+    match = ELIFE_CONCEPT_RE.match(doi)
+    return f"10.7554/elife.{match.group(1)}" if match else doi.strip().lower()
+
+
+def elife_concept_groups(records):
+    ''' Group eLife records by concept (base) DOI, summing usage and citations
+        across the concept's versions.
+        Keyword arguments:
+          records: list of dicts with doi/title/views/downloads/citations/concept
+        Returns:
+          List of group dicts (concept, label, count, views, downloads, citations)
+          sorted by descending DOI count then citations. The label is the most
+          common member title (versions of one article usually share a title).
+    '''
+    buckets = collections.defaultdict(list)
+    for rec in records:
+        buckets[rec['concept']].append(rec)
+    groups = []
+    for concept, recs in buckets.items():
+        casings = collections.Counter(r['title'] for r in recs if r['title'])
+        label = casings.most_common(1)[0][0] if casings else concept
+        groups.append({'concept': concept, 'label': label, 'count': len(recs),
+                       'views': sum(r['views'] for r in recs),
+                       'downloads': sum(r['downloads'] for r in recs),
+                       'citations': sum(r['citations'] for r in recs)})
+    groups.sort(key=lambda g: (-g['count'], -g['citations']))
+    return groups
+
+
+def elife_type_label(doc_type, subtype):
+    ''' Map an eLife DOI's Crossref type/subtype to a friendly display label.
+        Unlike protocols.io (homogenous "posted-content"/"preprint"), eLife
+        DOIs split meaningfully between traditional journal articles and the
+        newer "Reviewed Preprint" model, so this breakdown is worth showing.
+        Delegates the type/subtype classification itself to doi_common (used
+        the same way everywhere else in this file) rather than reimplementing
+        it with a local type/subtype check.
+        Keyword arguments:
+          doc_type: the DOI record's Crossref `type` field
+          subtype: the DOI record's Crossref `subtype` field
+        Returns:
+          "Journal article", "Reviewed preprint", or the raw type as a fallback
+    '''
+    rec = {'type': doc_type, 'subtype': subtype}
+    if DL.is_journal(rec):
+        return 'Journal article'
+    if DL.is_preprint(rec):
+        return 'Reviewed preprint'
+    return doc_type or 'Unknown'
+
+
+@app.route('/elife_stats/<string:year>')
+@app.route('/elife_stats')
+def elife_stats(year='All'):  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
+    ''' Show eLife usage and citation metrics.
+        eLife DOIs are Crossref-registered (see elife_match), which already
+        excludes peer-review sub-documents since they aren't usage-eligible.
+        Usage (views/downloads) comes from jrc_elife_counts; citation totals/
+        sources come from the citation sync.
+    '''
+    coll = DB['dis'].dois
+    proj = {"doi": 1, "type": 1, "subtype": 1, "jrc_publishing_date": 1,
+            "jrc_elife_counts": 1, "jrc_citation_count": 1, "jrc_citation_sources": 1}
+    try:
+        docs = list(coll.find(elife_match(year), proj))
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get eLife DOIs"),
+                               message=error_message(err))
+    source_name = {"crossref": "Crossref", "openalex": "OpenAlex",
+                   "scholexplorer": "ScholeXplorer", "wos": "Web of Science"}
+    total = len(docs)
+    usage = {'Views': 0, 'Downloads': 0}
+    usage_dois = cited_dois = cite_total = 0
+    counts = []
+    by_type = collections.defaultdict(int)
+    cite_src = collections.defaultdict(int)
+    by_year = {}
+    for row in docs:
+        ec = row.get('jrc_elife_counts') or {}
+        views = ec.get('views', 0)
+        downloads = ec.get('downloads', 0)
+        if ec:
+            usage_dois += 1
+            usage['Views'] += views
+            usage['Downloads'] += downloads
+        by_type[elife_type_label(row.get('type'), row.get('subtype'))] += 1
+        ccount = row.get('jrc_citation_count', 0) or 0
+        if ccount:
+            cited_dois += 1
+            cite_total += ccount
+            counts.append(ccount)
+        for src, val in (row.get('jrc_citation_sources') or {}).items():
+            cite_src[source_name.get(src, src.capitalize())] += val
+        yname = (row.get('jrc_publishing_date') or '')[:4]
+        if yname.isdigit():
+            rec = by_year.setdefault(yname, {'dois': 0, 'views': 0,
+                                             'downloads': 0, 'citations': 0})
+            rec['dois'] += 1
+            rec['views'] += views
+            rec['downloads'] += downloads
+            rec['citations'] += ccount
+    if not total:
+        msg = "No eLife DOIs were found"
+        if year != 'All':
+            msg += f" for publishing year {year}"
+        html = year_pulldown('elife_stats') + "<br><br>" + render_warning(msg, 'warning')
+        endpoint_access()
+        return make_response(render_template('general.html', urlroot=request.url_root,
+                                             title="eLife metrics", html=html,
+                                             navbar=generate_navbar('DOIs')))
+    # ----- headline stat cards -----
+    conv = usage['Downloads'] / usage['Views'] if usage['Views'] else 0
+    cards = stat_cards([("eLife DOIs", f"{total:,}"),
+                        ("DOIs with usage data",
+                         f"{usage_dois:,} ({usage_dois/total*100:,.1f}%)"),
+                        ("Total views", f"{usage['Views']:,}"),
+                        ("Total downloads", f"{usage['Downloads']:,}")],
+                       div_id='eli-stats')
+    cards += stat_cards([("Downloads / view", f"{conv*100:,.1f}%"),
+                         ("DOIs cited", f"{cited_dois:,} ({cited_dois/total*100:,.1f}%)"),
+                         ("Total citations", f"{cite_total:,}")],
+                        div_id='eli-stats2')
+    intro = "<div style='font-size:0.85em; color:#a8c4e0; max-width:620px; " \
+            + "margin:-8px 0 16px 0'>Usage is the sum of per-article counts from " \
+            + "the public eLife metrics API. Peer-review sub-documents (decision " \
+            + "letters, author responses) are excluded - they share their parent " \
+            + "article's numeric ID and aren't usage-eligible. Versioned " \
+            + "\"Reviewed Preprint\" DOIs are stored as separate DOIs and counted " \
+            + "separately here. See <a href='/elife_dois'>eLife articles</a> for " \
+            + "the same DOIs collapsed by concept (version series).</div>"
+    # ----- usage totals -----
+    uhtml = "<h4>Usage totals</h4>"
+    uhtml += render_table(['Metric', 'Count'],
+                          [[k, f"{v:,}"] for k, v in usage.items()],
+                          table_id='eli-usage', css='tablesorter numberlast-scroll')
+    # ----- DOIs & usage by publishing year -----
+    ydata = {'Year': [], 'DOIs': [], 'Views': []}
+    ytrows = []
+    for yname in sorted(by_year):
+        rec = by_year[yname]
+        ytrows.append([yname, f"{rec['dois']:,}", f"{rec['views']:,}",
+                       f"{rec['downloads']:,}", f"{rec['citations']:,}"])
+        ydata['Year'].append(yname)
+        ydata['DOIs'].append(rec['dois'])
+        ydata['Views'].append(rec['views'])
+    yhtml = "<h4>DOIs &amp; usage by publishing year</h4>"
+    yhtml += render_table(['Year', 'DOIs', 'Views', 'Downloads', 'Citations'],
+                          ytrows, table_id='eli-years', css='tablesorter numberlast-scroll')
+    # ----- DOIs by type (journal article vs. Reviewed Preprint) -----
+    type_data = dict(by_type)
+    thtml = "<h4>DOIs by type</h4>"
+    thtml += render_table(['Type', 'DOIs'],
+                          [[k, f"{v:,}"] for k, v in
+                           sorted(by_type.items(), key=itemgetter(1), reverse=True)],
+                          table_id='eli-types', css='tablesorter numberlast-scroll')
+    # ----- citation sources (which source surfaces eLife citations) -----
+    src_data = dict(cite_src)
+    shtml = ''
+    if cite_src:
+        shtml = "<h4>Citations by source</h4>"
+        shtml += render_table(['Source', 'Citations'],
+                              [[k, f"{v:,}"] for k, v in
+                               sorted(cite_src.items(), key=itemgetter(1), reverse=True)],
+                              table_id='eli-sources', css='tablesorter numberlast-scroll')
+        shtml += "<div style='font-size:0.85em; color:#a8c4e0; max-width:460px'>" \
+                 + "A citing work found by more than one source is counted once " \
+                 + "per source here.</div>"
+    if request.args.get('fmt') == 'json':
+        result = initialize_result()
+        result['data'] = {"dois": total, "usage_dois": usage_dois, "usage": usage,
+                          "downloads_per_view": round(conv, 4),
+                          "cited_dois": cited_dois, "total_citations": cite_total,
+                          "median_citations": statistics.median(counts) if counts else 0,
+                          "by_type": type_data, "citations_by_source": src_data,
+                          "by_year": by_year}
+        result['rest']['source'] = 'mongo'
+        result['rest']['row_count'] = total
+        return generate_response(result)
+    # ----- charts -----
+    chartscript = ''
+    usage_div = year_div = type_div = src_div = ''
+    if usage['Views'] or usage['Downloads']:
+        script, usage_div = DP.pie_chart(usage, "Usage totals", "metric", width=500,
+                                         fmt="{0,0}")
+        chartscript += script
+    if ydata['Year']:
+        # Tap a year bar -> eLife metrics scoped to that year
+        ynav = {yr: f"/elife_stats/{yr}" for yr in ydata['Year']}
+        script, year_div = DP.dual_axis_chart(
+            ydata, title="DOIs & views by year", x_field='Year',
+            bar_field='DOIs', line_field='Views', bar_label='DOIs published',
+            line_label='Views', bar_color='darkorange', bar_format="0,0",
+            line_format="0,0", width=650, height=400, nav=ynav)
+        chartscript += script
+    script, type_div = DP.hbar_chart(type_data, "DOIs by type", value_label="DOIs",
+                                     width=500, height=280, value_format="0,0",
+                                     show_values=True)
+    chartscript += script
+    if src_data:
+        colors = DP.get_colors_by_count(len(src_data))
+        script, src_div = DP.pie_chart(src_data, "Citations by source", "source",
+                                       width=500, colors=colors, fmt="{0,0}")
+        chartscript += script
+    def flexrow(table_html, chart_div):
+        ''' Pair a table and its chart side by side '''
+        return "<div class='flexrow' style='margin-bottom: 40px'><div class='flexcol'>" \
+               + table_html + "</div><div class='flexcol' style='margin: 10px 0 0 20px'>" \
+               + chart_div + "</div></div>"
+    title = "eLife metrics"
+    if year != 'All':
+        title += f" (year={year})"
+    html = year_pulldown('elife_stats') + "<br><br>" + cards + intro \
+           + flexrow(uhtml, usage_div) + flexrow(yhtml, year_div) + flexrow(thtml, type_div)
+    if shtml:
+        html += flexrow(shtml, src_div)
+    endpoint_access()
+    return make_response(render_template('bokeh.html', urlroot=request.url_root,
+                                         title=title, html=html,
+                                         chartscript=chartscript, chartdiv='',
+                                         chartscript2='', chartdiv2='',
+                                         navbar=generate_navbar('DOIs')))
+
+
+@app.route('/elife_dois/<string:year>')
+@app.route('/elife_dois')
+def elife_dois(year='All'):  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
+    ''' Show eLife articles ranked by usage and citations, each collapsing an
+        article's versions (10.7554/elife.NNNNN.1, .2, ...) under their shared
+        concept (base) DOI (see elife_concept_doi); an unversioned DOI stands
+        alone. Like protocols.io, rankings cover every article (not just
+        multi-version ones), so a highly-cited single-version article isn't
+        hidden from the "top 20" tables.
+    '''
+    coll = DB['dis'].dois
+    proj = {"doi": 1, "DOI": 1, "title": 1, "jrc_citation_count": 1, "jrc_elife_counts": 1}
+    try:
+        docs = list(coll.find(elife_match(year), proj))
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get eLife DOIs"),
+                               message=error_message(err))
+    records = []
+    for row in docs:
+        ec = row.get('jrc_elife_counts') or {}
+        records.append({'doi': row['doi'],
+                        'title': strip_html_tags(DL.get_title(row)),
+                        'views': ec.get('views', 0),
+                        'downloads': ec.get('downloads', 0),
+                        'citations': row.get('jrc_citation_count', 0) or 0,
+                        'concept': elife_concept_doi(row['doi'])})
+    total = len(records)
+    if not total:
+        msg = "No eLife DOIs were found"
+        if year != 'All':
+            msg += f" for publishing year {year}"
+        html = year_pulldown('elife_dois') + "<br><br>" \
+               + render_warning(msg, 'warning')
+        endpoint_access()
+        return make_response(render_template('general.html', urlroot=request.url_root,
+                                             title="eLife articles", html=html,
+                                             navbar=generate_navbar('DOIs')))
+    base = '/elife_dois' if year == 'All' else f"/elife_dois/{year}"
+    # Drill-down: ?concept=<doi> lists the member (version) DOIs of one article
+    concept = request.args.get('concept')
+    if concept:
+        members = [r for r in records if r['concept'] == concept.lower()]
+        members.sort(key=itemgetter('downloads', 'citations'), reverse=True)
+        if request.args.get('fmt') == 'json':
+            result = initialize_result()
+            result['data'] = {"concept": concept, "dois": len(members),
+                              "members": members}
+            result['rest']['source'] = 'mongo'
+            result['rest']['row_count'] = len(members)
+            return generate_response(result)
+        back = f"<a href='{base}' class='btn btn-outline-primary btn-sm'>" \
+               + "&larr; all articles</a>"
+        if not members:
+            html = back + "<br><br>" \
+                   + render_warning(f"No eLife DOIs match the article "
+                                    f"\"{escape(concept)}\"", 'warning')
+            endpoint_access()
+            return make_response(render_template('general.html', urlroot=request.url_root,
+                                                 title=f"eLife article: {concept}",
+                                                 html=html, navbar=generate_navbar('DOIs')))
+        casings = collections.Counter(r['title'] for r in members if r['title'])
+        dtitle = f"eLife article: {casings.most_common(1)[0][0] if casings else concept}"
+        mrows = []
+        tviews = tdl = tcit = 0
+        for rec in members:
+            tviews += rec['views']
+            tdl += rec['downloads']
+            tcit += rec['citations']
+            mrows.append([safe(doi_link(rec['doi'])), rec['title'], f"{rec['views']:,}",
+                          f"{rec['downloads']:,}", f"{rec['citations']:,}"])
+        mtable = render_table(['Version DOI', 'Title', 'Views', 'Downloads', 'Citations'],
+                              mrows, table_id='eli-members',
+                              css='tablesorter numberlast-scroll',
+                              footer=[fcell('TOTAL', colspan=2),
+                                      fcell(f"{tviews:,}", align='center'),
+                                      fcell(f"{tdl:,}", align='center'),
+                                      fcell(f"{tcit:,}", align='center')])
+        mcards = stat_cards([("Versions", f"{len(members):,}"),
+                             ("Total views", f"{tviews:,}"),
+                             ("Total downloads", f"{tdl:,}"),
+                             ("Total citations", f"{tcit:,}")], div_id='elim-stats')
+        html = back + "<br><br>" + mcards + mtable
+        endpoint_access()
+        return make_response(render_template('general.html', urlroot=request.url_root,
+                                             title=dtitle, html=html,
+                                             navbar=generate_navbar('DOIs')))
+    all_groups = elife_concept_groups(records)
+    multi = [g for g in all_groups if g['count'] > 1]
+    grouped_dois = sum(g['count'] for g in multi)
+    largest = max(multi, key=lambda g: g['count']) if multi else None
+    top_n = 20
+    by_downloads = sorted(all_groups, key=lambda g: (-g['downloads'], -g['views']))
+    by_views = sorted(all_groups, key=lambda g: (-g['views'], -g['downloads']))
+    by_cit = sorted(all_groups, key=lambda g: (-g['citations'], -g['views']))
+    total_views = sum(g['views'] for g in all_groups)
+    total_downloads = sum(g['downloads'] for g in all_groups)
+    total_citations = sum(g['citations'] for g in all_groups)
+    if request.args.get('fmt') == 'json':
+        result = initialize_result()
+        result['data'] = {"dois": total, "articles": len(all_groups),
+                          "multi_version_articles": len(multi), "grouped_dois": grouped_dois,
+                          "largest_article": {"concept": largest['concept'],
+                                              "label": largest['label'],
+                                              "count": largest['count']} if largest else None,
+                          "total_views": total_views, "total_downloads": total_downloads,
+                          "total_citations": total_citations,
+                          "article_groups": [{k: g[k] for k in
+                                              ('concept', 'label', 'count', 'views',
+                                               'downloads', 'citations')}
+                                             for g in by_downloads]}
+        result['rest']['source'] = 'mongo'
+        result['rest']['row_count'] = len(all_groups)
+        return generate_response(result)
+    largest_card = (f"Most versions ({escape(largest['label'])})", f"{largest['count']:,}") \
+                   if largest else ("Most versions", "N/A")
+    cards = stat_cards(
+        [("eLife DOIs", f"{total:,}"),
+         ("Articles (all)", f"{len(all_groups):,}"),
+         ("Multi-version articles", f"{len(multi):,}"),
+         ("DOIs in multi-version articles",
+          f"{grouped_dois:,} ({grouped_dois/total*100:,.1f}%)"),
+         largest_card],
+        div_id='elig-stats')
+    cards += stat_cards([("Total views", f"{total_views:,}"),
+                         ("Total downloads", f"{total_downloads:,}"),
+                         ("Total citations", f"{total_citations:,}")],
+                        div_id='elig-stats2')
+    gnote = "<div style='font-size:0.85em; color:#a8c4e0; max-width:620px; " \
+            + "margin:-8px 0 16px 0'>Each article collapses every version - " \
+            + "the eLife \"Reviewed Preprint\" model versions a DOI as " \
+            + "<i>.1</i>, <i>.2</i>, ... - under a shared concept (base) DOI; " \
+            + "unversioned DOIs stand alone. Views, downloads, and citations " \
+            + "are summed across an article's versions. Rankings below cover " \
+            + "every article, not just multi-version ones. Each label links " \
+            + "to the article's version DOIs.</div>"
+    # Each dimension's table+chart pair is shown only when at least one article
+    # has a non-zero value for it (e.g. a year with views but no citations yet).
+    chartscript = ''
+    sections = ''
+    for label, ordered, total_metric, value_key, table_id, unit in (
+            ('downloads', by_downloads, total_downloads, 'downloads', 'eli-grp-dl', 'Downloads'),
+            ('views', by_views, total_views, 'views', 'eli-grp-views', 'Views'),
+            ('citations', by_cit, total_citations, 'citations', 'eli-grp-cit', 'Citations')):
+        if not total_metric:
+            continue
+        thtml = f"<h4>Articles by {label} (top 20)</h4>" \
+                + group_table(ordered, top_n, table_id,
+                             ['Article', 'Versions', 'Views', 'Downloads', 'Citations'],
+                             base, 'concept', 'concept', 'label',
+                             ('views', 'downloads', 'citations'), 'articles', False)
+        data, nav = group_chart_data(ordered, value_key, base, 'label', 'concept', 'concept')
+        chart_div = ''
+        if data:
+            script, chart_div = DP.hbar_chart(data, f"Top articles by {label}",
+                                              value_label=unit, width=620, height=420,
+                                              value_format="0,0", show_values=True, nav=nav)
+            chartscript += script
+        sections += group_flexrow(thtml, chart_div)
+    title = "eLife articles"
+    if year != 'All':
+        title += f" (year={year})"
+    html = year_pulldown('elife_dois') + "<br><br>" + cards + gnote + sections
+    endpoint_access()
+    return make_response(render_template('bokeh.html', urlroot=request.url_root,
+                                         title=title, html=html,
+                                         chartscript=chartscript, chartdiv='',
+                                         chartscript2='', chartdiv2='',
+                                         navbar=generate_navbar('DOIs')))
 
 # ******************************************************************************
 # * UI endpoints (Authorship)                                                  *
