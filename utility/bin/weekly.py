@@ -9,7 +9,7 @@
     - Sends citations email to the user that ran the program
 """
 
-__version__ = '2.0.0'
+__version__ = '3.0.0'
 
 import argparse
 from datetime import datetime
@@ -108,6 +108,9 @@ def load_new_dois(file):
             "--file", file,
             "--manifold", ARG.MANIFOLD]
     _ = run_subprocess(cmd, file)
+    cmd = ["../../sync/bin/update_preprints.py",
+           "--manifold", ARG.MANIFOLD]
+    _ = run_subprocess(cmd, '')
 
 
 def generate_email(citations):
