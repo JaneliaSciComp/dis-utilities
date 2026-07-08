@@ -60,16 +60,50 @@
                               concept's versions downstream.
         jrc_zenodo_updated    timestamp of the Zenodo usage fetch.
 
+    PROTOCOLS.IO FIELDS WRITTEN  (with --write, for protocols.io DOIs only, which
+    are Crossref-registered, so --source crossref only; like figshare/Zenodo these
+    are independent of citations - Crossref/OpenAlex already index protocols.io
+    DOIs for citations, so no protocols.io-specific citation code is needed)
+        jrc_protocolsio_counts  {views, exports, runs, forks_public, forks_private,
+                                bookmarks, comments} per-protocol usage from the
+                                protocols.io v4 API. Requires PROTOCOLS_API_TOKEN;
+                                with no token configured, protocols.io usage is
+                                skipped entirely rather than attempted per-DOI and
+                                reported as an error.
+        jrc_protocolsio_updated  timestamp of the protocols.io usage fetch.
+
+    ELIFE FIELDS WRITTEN  (with --write, for eLife DOIs only, which are
+    Crossref-registered, so --source crossref only; like protocols.io these are
+    independent of citations - Crossref/OpenAlex already index eLife DOIs for
+    citations, so no eLife-specific citation code is needed). Peer-review
+    sub-documents (type "peer-review": decision letters, author responses -
+    Crossref DOIs like 10.7554/elife.NNNNN.0NN) are skipped: they share their
+    parent article's numeric eLife ID, so fetching usage for them would just
+    duplicate the parent's numbers under a DOI that isn't really "an article".
+        jrc_elife_counts      {views, downloads} per-article usage from the
+                              public eLife metrics API. No auth required.
+        jrc_elife_updated     timestamp of the eLife usage fetch.
+
     OUTPUT FILES  (written to the current directory every run, dry-run included;
-    crossref/zenodo runs use citation_updates_crossref.txt / _zenodo etc. so they
-    never overwrite the datacite output)
+    crossref/figshare/zenodo/protocolsio/elife runs use
+    citation_updates_crossref.txt / _figshare / _zenodo / _protocolsio / _elife
+    etc. so they never overwrite the datacite output)
         citation_updates.txt   tab-delimited log of DOIs whose count rose.
         citation_records.json  full records (the jrc_ fields above) for every
                                DOI that has a non-zero count.
 
     EMAIL
-        An HTML summary is sent when --test (developer only) or --write (receivers)
-        is given; sender/recipients come from the "dis" config.
+        A richly-formatted HTML summary is sent when --test (developer only) or
+        --write (receivers) is given; sender/recipients come from the "dis" config.
+        Sections: header banner (run data, mode, DRY RUN/WRITE badge), KPI stat
+        tiles, a Citation Enrichment metrics table, a Usage Sources section with
+        one card per active source (figshare/Zenodo/protocols.io/eLife) - each card has
+        an OK/error status pill and a per-attribute "DOIs changed" table with an
+        inline mini bar-chart - and a Citation Increases table. "Changed" means an
+        attribute's value differs from its previously-stored value this run (a
+        first-ever fetch counts every non-zero attribute as changed, from an
+        implicit 0). Built entirely from inline styles/tables (no <style> block or
+        percentage-width bars) for compatibility with older email clients.
 
     ENVIRONMENT
         OPENALEX_EMAIL contact address for the OpenAlex polite pool (required).
@@ -81,6 +115,12 @@
         WOS_API_KEY Web of Science Starter API key (required when --wos is given).
                          Used only with --source crossref --wos; WoS does not index
                          DataCite/Zenodo deposits so the key is ignored otherwise.
+        PROTOCOLS_API_TOKEN protocols.io v4 API bearer token. Every protocols.io
+                         API request requires auth (no anonymous tier); with no
+                         token set, protocols.io usage is silently skipped rather
+                         than attempted and reported as an error.
+        (eLife usage needs no environment variable - api.elifesciences.org is
+        unauthenticated and public.)
         MongoDB connection comes from the JRC "databases" config
 
     USAGE
@@ -95,20 +135,26 @@
         python sync_citations.py --write --datacite-graphql
         # single DOI, verbose, no writes:
         python sync_citations.py --doi 10.xxxx/yyy --debug
+        # usage-only backfill for one publisher:
+        python sync_citations.py --publisher elife --write
 
     OPTIONS
         --source SOURCE      datacite (default) or crossref; selects the
                              jrc_obtained_from subset of the dois collection
-        --zenodo             restrict to Zenodo DOIs only (implies --source
-                             datacite); --cited/--notcited then key on
-                             jrc_zenodo_counts (usage) instead of citation counts
+        --publisher {figshare,zenodo,protocolsio,elife}
+                             restrict to one usage source's DOIs only (implies
+                             --source per that source: figshare/zenodo=datacite,
+                             protocolsio/elife=crossref); --cited/--notcited then
+                             key on its jrc_<publisher>_counts (usage) instead of
+                             citation counts; protocolsio requires
+                             PROTOCOLS_API_TOKEN
         --doi DOI            process a single DOI (testing)
         --cited              only DOIs already known to be cited: citationCount > 0
                              for datacite, jrc_citation_count exists for crossref
-                             (with --zenodo: jrc_zenodo_counts exists)
+                             (with --publisher <x>: jrc_<x>_counts exists)
         --notcited           only DOIs with no stored jrc_citation_count (not yet
-                             enriched; with --zenodo: no stored jrc_zenodo_counts);
-                             mutually exclusive with --cited
+                             enriched; with --publisher <x>: no stored
+                             jrc_<x>_counts); mutually exclusive with --cited
         --limit N            cap the number of DOIs processed (0 = no limit)
         --workers N          concurrent OpenAlex/ScholeXplorer workers (default 8)
         --datacite-graphql   include DataCite GraphQL citing DOIs (off by default;
@@ -131,7 +177,7 @@
         (falling back to the native citationCount).
 '''
 
-__version__ = '1.6.0'
+__version__ = '1.11.0'
 
 import argparse
 import collections
@@ -171,6 +217,11 @@ WRITE_BATCH = 500
 # same stats across versions. Populated from the worker threads, hence the lock.
 FIGSHARE_CACHE = {}
 FIGSHARE_CACHE_LOCK = threading.Lock()
+# eLife usage is keyed on the article ID, so version DOIs (.<n>/.<n>.sa<n>) share
+# a result; cache successful fetches by article_id to avoid refetching the same
+# stats across versions. Populated from the worker threads, hence the lock.
+ELIFE_CACHE = {}
+ELIFE_CACHE_LOCK = threading.Lock()
 # Global variables
 ARG = DISCONFIG = LOGGER = None
 # Per --source registrar: the jrc_obtained_from label selecting the DOI subset,
@@ -210,9 +261,78 @@ ZENODO_RECORDS = 'https://zenodo.org/api/records/'
 ZENODO_COUNTERS = ('views', 'unique_views', 'downloads', 'unique_downloads')
 ZENODO_DOI_RE = re.compile(r'zenodo\.(\d+)', re.IGNORECASE)
 # Zenodo DOIs are DataCite-registered: publisher "Zenodo", or (belt-and-suspenders)
-# a 10.5281/zenodo. DOI - some carry a non-Zenodo publisher string. --zenodo filters
-# the dois query to this subset (and reinterprets --cited/--notcited on usage).
+# a 10.5281/zenodo. DOI - some carry a non-Zenodo publisher string. --publisher
+# zenodo filters the dois query to this subset (and reinterprets --cited/--notcited
+# on usage).
 ZENODO_PUBLISHERS = ["Zenodo"]
+# protocols.io usage metrics: the v4 protocols API accepts the DOI directly as the
+# {id} path segment (no numeric-ID extraction needed, unlike Zenodo/figshare) and
+# returns a per-protocol `stats` object in one request. protocols.io DOIs are
+# Crossref-registered (prefix 10.17504), unlike figshare/Zenodo which are
+# DataCite-registered - Crossref/OpenAlex already index these DOIs for citations,
+# so only usage is protocols.io-specific. Every request requires a bearer token
+# (PROTOCOLS_API_TOKEN, no anonymous tier); with none configured, protocols.io
+# usage is skipped entirely rather than attempted per-DOI and reported as an error.
+PROTOCOLSIO_API = 'https://www.protocols.io/api/v4/protocols/'
+PROTOCOLSIO_COUNTERS = (('number_of_views', 'views'), ('number_of_exports', 'exports'),
+                        ('number_of_runs', 'runs'), ('number_of_bookmarks', 'bookmarks'),
+                        ('number_of_comments', 'comments'))
+# Stored attribute names, in report order (the two fork counters are flattened
+# out of number_of_forks separately, so they're not in PROTOCOLSIO_COUNTERS).
+PROTOCOLSIO_OUT_ATTRS = tuple(out_key for _, out_key in PROTOCOLSIO_COUNTERS) \
+                        + ('forks_public', 'forks_private')
+PROTOCOLSIO_DOI_RE = re.compile(r'^10\.17504/', re.IGNORECASE)
+# eLife usage metrics: the public metrics API takes eLife's own numeric article
+# ID (not the DOI) as the path segment and returns {views, downloads} in one
+# request. No auth needed - fully public/anonymous. eLife DOIs are
+# Crossref-registered (prefix 10.7554, journal slug "elife"), like protocols.io -
+# Crossref/OpenAlex already index these DOIs for citations, so only usage is
+# eLife-specific. Unlike protocols.io, the numeric ID has to be extracted from
+# the DOI (elife.0*<id>, leading zeros in the older DOI style are not part of
+# the real ID - e.g. 10.7554/elife.00170 -> id 170). A version suffix
+# (.<n>[.sa<n>]) is ignored by the regex, so every version of a "reviewed
+# preprint" resolves to the same underlying article ID and gets identical
+# usage - the same behavior already accepted for protocols.io/Zenodo versions.
+# PEER-REVIEW SUB-DOCUMENTS (Crossref type "peer-review": decision letters,
+# author responses, e.g. 10.7554/elife.00337.023) are NOT usage-eligible: they
+# share their parent article's numeric ID, so fetching usage for them would
+# silently duplicate the parent's numbers under a DOI that isn't really "an
+# article" - excluded by checking the DOI record's own `type` field, not by a
+# DOI-shape heuristic (a legitimate reviewed-preprint version has the same
+# dotted shape as a peer-review sub-document, e.g. elife.106548.1).
+ELIFE_METRICS = 'https://api.elifesciences.org/metrics/article/'
+ELIFE_DOI_RE = re.compile(r'^10\.7554/elife\.0*(\d+)', re.IGNORECASE)
+ELIFE_EXCLUDE_TYPES = {'peer-review'}
+ELIFE_COUNTERS = ('views', 'downloads')
+# Registry of restrictable per-publisher usage sources (--publisher <key>).
+# Each entry captures everything that differs across restrict modes: which
+# --source it implies, the jrc_<key>_counts field --cited/--notcited key on,
+# the DOI-match query filter to AND with jrc_obtained_from, the per-attribute
+# report order, and (if any) a required environment variable that gates the
+# source entirely (checked at parse time so a misconfigured run fails fast).
+PUBLISHERS = {
+    'figshare': {'label': 'Figshare', 'source': 'datacite',
+                'count_field': 'jrc_figshare_counts', 'counters': FIGSHARE_COUNTERS,
+                'match': {'$or': [{'doi': {'$regex': pattern.pattern, '$options': 'i'}}
+                                  for pattern, _ in FIGSHARE_DOI_PATTERNS]},
+                'token_env': None},
+    'zenodo': {'label': 'Zenodo', 'source': 'datacite',
+              'count_field': 'jrc_zenodo_counts', 'counters': ZENODO_COUNTERS,
+              'match': {'$or': [{'publisher': {'$in': ZENODO_PUBLISHERS}},
+                                {'doi': {'$regex': ZENODO_DOI_RE.pattern, '$options': 'i'}}]},
+              'token_env': None},
+    'protocolsio': {'label': 'protocols.io', 'source': 'crossref',
+                    'count_field': 'jrc_protocolsio_counts', 'counters': PROTOCOLSIO_OUT_ATTRS,
+                    'match': {'doi': {'$regex': PROTOCOLSIO_DOI_RE.pattern, '$options': 'i'}},
+                    'token_env': 'PROTOCOLS_API_TOKEN'},
+    'elife': {'label': 'eLife', 'source': 'crossref',
+             'count_field': 'jrc_elife_counts', 'counters': ELIFE_COUNTERS,
+             'match': {'doi': {'$regex': ELIFE_DOI_RE.pattern, '$options': 'i'},
+                      'type': {'$nin': list(ELIFE_EXCLUDE_TYPES)}},
+             'token_env': None},
+}
+# Which PUBLISHERS keys apply under each --source, in report/card order.
+SOURCE_PUBLISHERS = {'datacite': ('figshare', 'zenodo'), 'crossref': ('protocolsio', 'elife')}
 DATACITE_QUERY = '''query($id: ID!, $after: String) {
   work(id: $id) {
     citations(first: 100, after: $after) {
@@ -254,6 +374,24 @@ THREAD = threading.local()
 # appear hung. Capping lets the attempt fail fast so the run degrades to the other
 # sources (combine_counts preserves any previously-stored count) instead of freezing.
 RETRY_AFTER_MAX = 120
+# HTML run-summary email palette/layout (generate_email and its html_* helpers).
+# Colors pair a status with an icon/label, not color alone, for colorblind
+# accessibility. All inline styles (no <style> block/classes) and fixed pixel
+# bar widths (not percentages) for reliable rendering across email clients,
+# including older Outlook.
+EMAIL_NAVY = '#1f3a5f'
+EMAIL_GREEN = '#1c7c3f'
+EMAIL_GREEN_BG = '#eefaf1'
+EMAIL_RED = '#c0392b'
+EMAIL_RED_BG = '#fdecea'
+EMAIL_AMBER = '#d68a1f'
+EMAIL_GRAY = '#5b6b7c'
+EMAIL_GRAY_BG = '#f2f4f6'
+EMAIL_STRIPE_BG = '#f7f9fb'
+EMAIL_BORDER = '#eef1f4'
+EMAIL_BLUE = '#2f7fd1'
+EMAIL_BLUE_LIGHT = '#a9c8ea'
+EMAIL_BAR_PX = 140
 
 
 def http_session():
@@ -585,6 +723,129 @@ def zenodo_metrics(doi):
     return {counter: int(stats.get(counter, 0) or 0) for counter in ZENODO_COUNTERS}
 
 
+def protocolsio_doi(doi):
+    ''' Return the DOI itself if it is a protocols.io DOI (Crossref prefix
+        10.17504), which doubles as the "is this a protocols.io DOI" test. Unlike
+        Zenodo/figshare, the v4 API accepts the DOI directly as the lookup id, so
+        no separate numeric ID needs to be extracted.
+        Keyword arguments:
+          doi: DOI string
+        Returns:
+          the DOI string, or None if this is not a protocols.io DOI
+    '''
+    if doi and PROTOCOLSIO_DOI_RE.match(doi):
+        return doi
+    return None
+
+
+def protocolsio_metrics(doi):
+    ''' Get protocols.io usage metrics (views/exports/runs/forks/bookmarks/
+        comments) for a protocols.io DOI. The v4 API's per-protocol `stats` object
+        carries no citation count of its own - Crossref/OpenAlex already index
+        these DOIs for citations. PROTOCOLS_API_TOKEN must be set (every request
+        requires it, no anonymous tier); the caller only invokes this once a
+        token is confirmed present.
+        Keyword arguments:
+          doi: DOI string
+        Returns:
+          {'views', 'exports', 'runs', 'forks_public', 'forks_private', 'bookmarks',
+          'comments'} for a protocols.io DOI, or None if the request failed or
+          carried no usable stats (a partial result is discarded so a stored count
+          is never silently incomplete)
+    '''
+    headers = {'Authorization': f"Bearer {os.environ['PROTOCOLS_API_TOKEN']}"}
+    resp = get_with_retry(f"{PROTOCOLSIO_API}{doi.lower()}", None, 20, headers=headers)
+    if resp is None or resp.status_code != 200:
+        if ARG.DEBUG:
+            tqdm.write(f"protocols.io stats error for {doi}: "
+                       + (f"HTTP {resp.status_code}" if resp is not None
+                          else "no response"))
+        return None
+    try:
+        stats = ((resp.json() or {}).get('payload') or {}).get('stats') or {}
+    except Exception:
+        return None
+    if not stats:
+        return None
+    counts = {out_key: int(stats.get(json_key, 0) or 0)
+              for json_key, out_key in PROTOCOLSIO_COUNTERS}
+    forks = stats.get('number_of_forks') or {}
+    counts['forks_public'] = int(forks.get('public', 0) or 0)
+    counts['forks_private'] = int(forks.get('private', 0) or 0)
+    return counts
+
+
+def elife_article_id(doi, doc_type):
+    ''' Return the numeric eLife article ID embedded in an eLife DOI (see
+        ELIFE_DOI_RE), which doubles as the "is this a usage-eligible eLife
+        DOI" test. Peer-review sub-documents (doc_type == 'peer-review') are
+        excluded: they share their parent article's numeric ID, so fetching
+        usage for them would just duplicate the parent's numbers under a DOI
+        that isn't really "an article".
+        Keyword arguments:
+          doi: DOI string
+          doc_type: the DOI record's Crossref `type` field
+        Returns:
+          the numeric ID string (leading zeros stripped), or None if this is
+          not a usage-eligible eLife DOI
+    '''
+    if doc_type in ELIFE_EXCLUDE_TYPES:
+        return None
+    match = ELIFE_DOI_RE.match(doi)
+    return match.group(1) if match else None
+
+
+def elife_metrics(doi, doc_type):
+    ''' Get eLife usage metrics (views/downloads) for an eLife DOI. The
+        metrics API's crossref/pubmed/scopus sub-fields are eLife's own
+        citation self-count, already superseded by the union DIS computes
+        from OpenAlex/ScholeXplorer/Crossref for every Crossref DOI, so only
+        views/downloads are kept. The API is fully public (no auth). NOTE: an
+        invalid/nonexistent article ID returns HTTP 200 with all-zero counts
+        rather than a 404, so a bad ID can't be distinguished from genuine
+        zero usage - correctness here depends on elife_article_id() only ever
+        matching real, usage-eligible articles.
+        Keyword arguments:
+          doi: DOI string
+          doc_type: the DOI record's Crossref `type` field (see elife_article_id)
+        Returns:
+          {'views', 'downloads'} for the article, or None if this is not a
+          usage-eligible eLife DOI, the request failed, or it carried no
+          usable stats (a partial result is discarded so a stored count is
+          never silently incomplete)
+    '''
+    article_id = elife_article_id(doi, doc_type)
+    if not article_id:
+        return None
+    # Version DOIs (.<n>/.<n>.sa<n>) resolve to the same article ID, so return a
+    # cached per-article result instead of refetching identical stats. Only
+    # successes are cached; a failure stays uncached so it is retried rather
+    # than poisoning every version of this article for the whole run.
+    with ELIFE_CACHE_LOCK:
+        cached = ELIFE_CACHE.get(article_id)
+    if cached is not None:
+        return cached
+    resp = get_with_retry(f"{ELIFE_METRICS}{article_id}/summary", None, 20)
+    if resp is None or resp.status_code != 200:
+        if ARG.DEBUG:
+            tqdm.write(f"eLife stats error for {doi}: "
+                       + (f"HTTP {resp.status_code}" if resp is not None
+                          else "no response"))
+        return None
+    try:
+        items = (resp.json() or {}).get('items') or []
+    except Exception:
+        return None
+    if not items:
+        return None
+    item = items[0]
+    counts = {'views': int(item.get('views', 0) or 0),
+              'downloads': int(item.get('downloads', 0) or 0)}
+    with ELIFE_CACHE_LOCK:
+        ELIFE_CACHE[article_id] = counts
+    return counts
+
+
 def wos_count(doi):
     ''' Get the Web of Science citation count for a DOI via the Starter API.
         Returns a bare count only (no citing DOIs). WOS_API_KEY must be set.
@@ -761,9 +1022,15 @@ def fetch_doi(row):
     '''
     doi = row['doi']
     # Figshare/Zenodo DOIs are DataCite-registered; Crossref runs deal only with
-    # citations, so their usage fetches are skipped there.
+    # citations, so their usage fetches are skipped there. protocols.io/eLife
+    # DOIs are Crossref-registered (the opposite split); protocols.io
+    # additionally requires a configured token - with none set, its usage is
+    # skipped rather than attempted.
     fid = figshare_article(doi)[0] if ARG.SOURCE == 'datacite' else None
     zid = zenodo_record_id(doi) if ARG.SOURCE == 'datacite' else None
+    pio = bool(ARG.SOURCE == 'crossref' and protocolsio_doi(doi)
+               and os.environ.get('PROTOCOLS_API_TOKEN'))
+    eid = elife_article_id(doi, row.get('type')) if ARG.SOURCE == 'crossref' else None
     return {'row': row,
             'doi': doi,
             'native': row.get(SOURCES[ARG.SOURCE]['count_field'], 0) or 0,
@@ -776,6 +1043,10 @@ def fetch_doi(row):
             'figshare': figshare_metrics(doi) if fid else None,
             'is_zenodo': bool(zid),
             'zenodo': zenodo_metrics(doi) if zid else None,
+            'is_protocolsio': pio,
+            'protocolsio': protocolsio_metrics(doi) if pio else None,
+            'is_elife': bool(eid),
+            'elife': elife_metrics(doi, row.get('type')) if eid else None,
             'wos': wos_count(doi) if (ARG.SOURCE == 'crossref'
                                        and ARG.WOS) else None}
 
@@ -906,6 +1177,25 @@ def flush_writes():
             tqdm.write(f"Bulk write error ({len(ops)} ops): {err}")
 
 
+def record_usage_changes(prefix, new_counts, previous_counts):
+    ''' Bump a per-attribute "how many DOIs changed" counter for a usage source
+        (figshare/Zenodo/protocols.io), for the run summary. A DOI with no
+        previously-stored counts (first-ever fetch) treats every non-zero
+        attribute as changed from an implicit 0, since populating usage for
+        the first time is itself a real, reportable change.
+        Keyword arguments:
+          prefix: COUNT key prefix for this source (e.g. 'figshare')
+          new_counts: this run's usage counts dict
+          previous_counts: the previously-stored usage counts dict, or None
+        Returns:
+          None
+    '''
+    previous_counts = previous_counts or {}
+    for attr, value in new_counts.items():
+        if value != previous_counts.get(attr, 0):
+            COUNT[f"{prefix}_changed_{attr}"] += 1
+
+
 def finalize_doi(res, monitor=None):
     ''' Record and (optionally) queue the write for one DOI's enrichment. Runs in
         the main thread, so COUNT updates and the write buffer are serialized; the
@@ -940,6 +1230,7 @@ def finalize_doi(res, monitor=None):
     # Figshare usage metrics (views/downloads/shares) are independent of citations:
     # a figshare DOI may have usage but no citations, and is still recorded/stored.
     usage_fields = {}
+    row = res['row']
     if res['is_figshare']:
         if res['figshare'] is None:
             COUNT['figshare_error'] += 1
@@ -947,6 +1238,7 @@ def finalize_doi(res, monitor=None):
             COUNT['figshare_found'] += 1
             usage_fields['jrc_figshare_counts'] = res['figshare']
             usage_fields['jrc_figshare_updated'] = datetime.now()
+            record_usage_changes('figshare', res['figshare'], row.get('jrc_figshare_counts'))
     # Zenodo usage metrics (views/downloads + unique) are likewise independent of
     # citations: a Zenodo DOI may have usage but no citations, and is still stored.
     if res['is_zenodo']:
@@ -956,6 +1248,30 @@ def finalize_doi(res, monitor=None):
             COUNT['zenodo_found'] += 1
             usage_fields['jrc_zenodo_counts'] = res['zenodo']
             usage_fields['jrc_zenodo_updated'] = datetime.now()
+            record_usage_changes('zenodo', res['zenodo'], row.get('jrc_zenodo_counts'))
+    # protocols.io usage metrics (views/exports/runs/forks/bookmarks/comments) are
+    # likewise independent of citations: Crossref/OpenAlex already index these DOIs
+    # for citations, so only usage is protocols.io-specific.
+    if res['is_protocolsio']:
+        if res['protocolsio'] is None:
+            COUNT['protocolsio_error'] += 1
+        else:
+            COUNT['protocolsio_found'] += 1
+            usage_fields['jrc_protocolsio_counts'] = res['protocolsio']
+            record_usage_changes('protocolsio', res['protocolsio'],
+                                 row.get('jrc_protocolsio_counts'))
+            usage_fields['jrc_protocolsio_updated'] = datetime.now()
+    # eLife usage metrics (views/downloads) are likewise independent of
+    # citations: Crossref/OpenAlex already index these DOIs for citations, so
+    # only usage is eLife-specific.
+    if res['is_elife']:
+        if res['elife'] is None:
+            COUNT['elife_error'] += 1
+        else:
+            COUNT['elife_found'] += 1
+            usage_fields['jrc_elife_counts'] = res['elife']
+            record_usage_changes('elife', res['elife'], row.get('jrc_elife_counts'))
+            usage_fields['jrc_elife_updated'] = datetime.now()
     # Citation jrc_ fields exist only when there is usable data, so uncited DOIs
     # get no citation fields (but a figshare DOI may still get figshare fields).
     fields = {}
@@ -979,14 +1295,49 @@ def finalize_doi(res, monitor=None):
                 monitor.flush()
             if ARG.DEBUG:
                 tqdm.write(hit)
-    # Persist citation and usage (figshare/Zenodo) fields together; nothing to do
-    # if all are empty
+    # Persist citation and usage (figshare/Zenodo/protocols.io/eLife) fields
+    # together; nothing to do if all are empty
     fields.update(usage_fields)
     if not fields:
         return
     RECORDS.append({'doi': doi, **fields})
     if ARG.WRITE:
         queue_write(res['row']['_id'], fields)
+
+
+def usage_change_block(label, prefix, attrs):
+    ''' Build the "<label> attribute changes" summary block for a usage source:
+        how many DOIs had that attribute differ from its previously-stored value
+        this run (see record_usage_changes for what counts as "changed").
+        Keyword arguments:
+          label: display label (e.g. "Figshare")
+          prefix: COUNT key prefix for this source (e.g. 'figshare')
+          attrs: ordered attribute names to report
+        Returns:
+          text block: a header line plus one "  attr: n" line per attribute
+    '''
+    lines = [f"{label} attribute changes:"]
+    lines.extend(f"  {attr}: {COUNT[f'{prefix}_changed_{attr}']:,}" for attr in attrs)
+    return "\n".join(lines) + "\n"
+
+
+def usage_summary_line(key):
+    ''' Build one usage source's plain-text summary block for the console/log
+        report: its "OK (errors)" (or "disabled") line plus its
+        attribute-change block. Registry-driven off PUBLISHERS so each
+        source's report text lives in one place instead of being
+        hand-repeated per --publisher key.
+        Keyword arguments:
+          key: PUBLISHERS registry key (e.g. 'figshare')
+        Returns:
+          formatted text block
+    '''
+    pub = PUBLISHERS[key]
+    if pub['token_env'] and not os.environ.get(pub['token_env']):
+        return f"{pub['label']} usage:".ljust(36) + f"disabled (set {pub['token_env']})\n"
+    return (f"{pub['label']} usage OK (errors):".ljust(36)
+            + f"{COUNT[f'{key}_found']:,} ({COUNT[f'{key}_error']:,})\n"
+            + usage_change_block(pub['label'], key, pub['counters']))
 
 
 def doiurl(doi):
@@ -996,64 +1347,337 @@ def doiurl(doi):
         Returns:
           HTML anchor
     '''
-    return f"<a href='https://dis.int.janelia.org/doiui/{doi}'>{doi}</a>"
+    return (f"<a href='https://dis.int.janelia.org/doiui/{doi}' "
+            f"style='color:{EMAIL_BLUE};text-decoration:none;'>{doi}</a>")
 
 
-def text_to_html_table(text):
-    ''' Convert a "label: value" summary block to an HTML table
+def html_kpi_card(value, label, tone='neutral'):
+    ''' Build one KPI stat tile for the run-summary email's header row.
+        A single <td> carries the box look directly (bgcolor attribute +
+        background-color, no nested table) - Outlook's Word rendering engine
+        chokes on a percentage-width table nested inside a percentage-width
+        <td> (this one used to nest a width="100%" table inside width="25%"),
+        sometimes dumping raw markup as visible text instead of rendering it.
         Keyword arguments:
-          text: summary text
+          value: display value (already formatted, e.g. "52" or "33/0")
+          label: caption under the value
+          tone: 'neutral', 'good', or 'bad' - selects the tile's color scheme
+        Returns:
+          HTML for one table cell
+    '''
+    bg, fg = {'good': (EMAIL_GREEN_BG, EMAIL_GREEN),
+              'bad': (EMAIL_RED_BG, EMAIL_RED),
+              'neutral': (EMAIL_GRAY_BG, EMAIL_GRAY)}[tone]
+    return (f'<td width="25%" align="center" valign="top" bgcolor="{bg}" '
+            f'style="padding:14px 6px;background-color:{bg};border-radius:8px;">'
+            f'<div style="font-size:24px;font-weight:700;color:{fg};">{value}</div>'
+            f'<div style="font-size:10.5px;color:{EMAIL_GRAY};text-transform:uppercase;'
+            f'letter-spacing:.04em;margin-top:2px;">{label}</div>'
+            f'</td>')
+
+
+def html_section_header(title):
+    ''' Build a section header bar for the run-summary email
+        Keyword arguments:
+          title: section title (may include an HTML entity icon prefix)
+        Returns:
+          HTML div block
+    '''
+    return (f'<div style="font-size:14px;font-weight:700;color:{EMAIL_NAVY};'
+            f'border-bottom:2px solid {EMAIL_BORDER};padding-bottom:7px;'
+            f'margin-bottom:10px;">{title}</div>')
+
+
+def html_metric_rows(rows):
+    ''' Build a zebra-striped label/value table for the run-summary email
+        Keyword arguments:
+          rows: list of (label, value_html) pairs
         Returns:
           HTML table
     '''
-    rows = []
-    for line in text.strip().splitlines():
-        if ":" in line:
-            label, value = line.rsplit(":", 1)
-            rows.append((label.strip(), value.strip()))
-    html = ['<table>']
-    for label, value in rows:
-        html.append(f'  <tr><td>{label}:</td><td>{value}</td></tr>')
-    html.append('</table>')
-    return "\n".join(html)
+    trs = []
+    for i, (mlabel, value) in enumerate(rows):
+        striped = i % 2 == 0
+        bgattr = f' bgcolor="{EMAIL_STRIPE_BG}"' if striped else ''
+        bg = f'background-color:{EMAIL_STRIPE_BG};' if striped else ''
+        r_l = 'border-radius:6px 0 0 6px;' if bg else ''
+        r_r = 'border-radius:0 6px 6px 0;' if bg else ''
+        trs.append(f'<tr{bgattr} style="{bg}">'
+                   f'<td style="padding:8px 10px;{r_l}">{mlabel}</td>'
+                   f'<td align="right" style="padding:8px 10px;text-align:right;{r_r}">'
+                   f'{value}</td></tr>')
+    return ('<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+            'style="border-collapse:collapse;font-size:13px;margin-top:6px;">'
+            + "".join(trs) + '</table>')
 
 
-def generate_email(summary):
-    ''' Generate and send the run summary email
+def html_usage_bar(count, total):
+    ''' Build one inline mini bar-chart cell for a usage-source attribute row.
+        Fixed pixel widths (not percentages) are used for the track/fill, since
+        nested percentage-width tables render unreliably in some email clients.
         Keyword arguments:
-          summary: run summary text
+          count: DOIs changed for this attribute
+          total: DOIs successfully fetched for this source this run (bar denominator)
+        Returns:
+          HTML table cell
+    '''
+    pct = 0 if not total else min(1.0, count / total)
+    fill = max(4, round(EMAIL_BAR_PX * pct)) if count else 0
+    color = EMAIL_BLUE if pct >= 0.15 else EMAIL_BLUE_LIGHT
+    fill_html = (f'<table cellpadding="0" cellspacing="0"><tr>'
+                 f'<td bgcolor="{color}" style="background-color:{color};'
+                 f'border-radius:4px;height:7px;line-height:7px;font-size:1px;'
+                 f'width:{fill}px;">&nbsp;</td></tr></table>') if fill else ''
+    return (f'<td style="padding:5px 4px 5px 12px;width:{EMAIL_BAR_PX + 10}px;">'
+            f'<table role="presentation" cellpadding="0" cellspacing="0"><tr>'
+            f'<td bgcolor="{EMAIL_BORDER}" style="background-color:{EMAIL_BORDER};'
+            f'border-radius:4px;height:7px;'
+            f'line-height:7px;font-size:1px;" width="{EMAIL_BAR_PX}">{fill_html}</td>'
+            f'</tr></table></td>')
+
+
+def html_pill(bg, fg, text):
+    ''' Build a small colored status badge as an auto-width single-cell table
+        (bgcolor attribute + background-color CSS), not a <span> - Outlook's
+        Word engine does not honor background-color on inline elements, and
+        <span> has no bgcolor attribute to fall back on (see html_kpi_card for
+        the same issue on block elements). Only safe where the badge is the
+        sole content of its table cell: an auto-width table still renders as a
+        block, so it cannot sit inline mid-sentence next to other text.
+        Keyword arguments:
+          bg: background color
+          fg: text color
+          text: pill text (may include an HTML entity icon prefix)
+        Returns:
+          HTML for a single-cell table sized to its content
+    '''
+    return (f'<table role="presentation" cellpadding="0" cellspacing="0"><tr>'
+            f'<td bgcolor="{bg}" style="background-color:{bg};color:{fg};padding:2px 10px;'
+            f'border-radius:10px;font-size:11.5px;font-weight:600;">{text}</td></tr></table>')
+
+
+def html_usage_card(label, ok, err, attrs, prefix):
+    ''' Build one Usage Sources card: a status pill (OK/error counts) plus a
+        per-attribute "how many DOIs changed" table with an inline mini bar-chart.
+        Keyword arguments:
+          label: display label (e.g. "Figshare")
+          ok: DOIs successfully fetched this run (also the bar-chart denominator)
+          err: DOIs that errored this run
+          attrs: ordered attribute names to report
+          prefix: COUNT key prefix for this source (e.g. 'figshare')
+        Returns:
+          HTML card block
+    '''
+    if err:
+        pill_bg, pill_fg, pill_icon = EMAIL_RED_BG, EMAIL_RED, '&#9888;'
+    else:
+        pill_bg, pill_fg, pill_icon = EMAIL_GREEN_BG, EMAIL_GREEN, '&#10003;'
+    pill = html_pill(pill_bg, pill_fg, f'{pill_icon} {ok:,} ok &middot; {err:,} err')
+    rows = []
+    for attr in attrs:
+        changed = COUNT[f"{prefix}_changed_{attr}"]
+        fg = EMAIL_NAVY if changed else EMAIL_GRAY
+        rows.append(f'<tr><td style="padding:5px 4px;">{attr}</td>'
+                    f'<td style="padding:5px 4px;font-weight:700;color:{fg};" '
+                    f'align="right">{changed:,}</td>'
+                    + html_usage_bar(changed, ok) + '</tr>')
+    table = ('<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+             f'style="font-size:12.5px;"><tr style="color:{EMAIL_GRAY};font-size:10.5px;'
+             'text-transform:uppercase;letter-spacing:.03em;">'
+             '<td style="padding:6px 4px;">Attribute</td>'
+             '<td style="padding:6px 4px;" align="right">Changed</td><td></td></tr>'
+             + "".join(rows) + '</table>')
+    # Header row is two <td>s directly in the outer table (not a nested
+    # width="100%" table inside one <td>) - see html_kpi_card for why: Outlook's
+    # Word engine chokes on that nesting. The body row below spans both with
+    # colspan="2".
+    return (
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+        f'style="border:1px solid {EMAIL_BORDER};border-radius:8px;margin-bottom:14px;'
+        'border-collapse:separate;">'
+        f'<tr><td bgcolor="{EMAIL_STRIPE_BG}" style="background-color:{EMAIL_STRIPE_BG};'
+        f'padding:10px 16px;border-radius:8px 0 0 0;font-weight:700;color:{EMAIL_NAVY};'
+        f'font-size:13.5px;">{label}</td>'
+        f'<td bgcolor="{EMAIL_STRIPE_BG}" align="right" style="background-color:'
+        f'{EMAIL_STRIPE_BG};padding:10px 16px;border-radius:0 8px 0 0;">{pill}</td></tr>'
+        f'<tr><td colspan="2" style="padding:4px 16px 10px 16px;">{table}</td></tr></table>')
+
+
+def html_usage_disabled_card(label, note):
+    ''' Build a "disabled" Usage Sources card (e.g. protocols.io with no token set)
+        Keyword arguments:
+          label: display label
+          note: short explanation (e.g. how to enable it)
+        Returns:
+          HTML card block
+    '''
+    # The "disabled" badge stays a <span> (no bgcolor fallback, unlike
+    # html_pill): it sits inline right after {label} on the same line, and
+    # html_pill's table renders as a block, which would push it to its own
+    # line. The badge text alone ("disabled") already conveys the state
+    # without relying on its background color, so the degradation in Outlook
+    # is cosmetic only.
+    return (
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+        f'style="border:1px solid {EMAIL_BORDER};border-radius:8px;margin-bottom:14px;">'
+        '<tr><td style="padding:12px 16px;">'
+        f'<span style="font-weight:700;color:{EMAIL_NAVY};font-size:13.5px;">{label}</span> '
+        f'<span style="background-color:{EMAIL_GRAY_BG};color:{EMAIL_GRAY};padding:2px 10px;'
+        'border-radius:10px;font-size:11.5px;font-weight:600;">disabled</span>'
+        f'<div style="color:{EMAIL_GRAY};font-size:12px;margin-top:6px;">{note}</div>'
+        '</td></tr></table>')
+
+
+def html_citation_increases():  # pylint: disable=too-many-locals
+    ''' Build the Citation Increases table for the run-summary email from the
+        module-level HITS list.
+        Keyword arguments:
+          None
+        Returns:
+          HTML block: a table of DOI / old->new / per-source breakdown, or a
+          plain "no increases" message if HITS is empty
+    '''
+    if not HITS:
+        return (f'<div style="color:{EMAIL_GRAY};font-size:13px;">'
+                'No citation counts were increased.</div>')
+    label = SOURCES[ARG.SOURCE]['label']
+    rows = []
+    for i, (doi, previous, native, combined, openalex, scholex, dcite, wos) in enumerate(HITS):
+        oas = 'err' if openalex is None else f"{openalex:,}"
+        sxs = 'err' if scholex is None else f"{scholex:,}"
+        if ARG.SOURCE == 'crossref':
+            extra = (f" &middot; WoS {'err' if wos is None else f'{wos:,}'}") if ARG.WOS else ""
+        else:
+            extra = " &middot; DataCite-GraphQL " \
+                    + (('err' if dcite is None else f'{dcite:,}') if ARG.GRAPHQL else 'off')
+        sources = f"{label} {native:,} &middot; OpenAlex {oas} &middot; ScholeXplorer {sxs}{extra}"
+        striped = i % 2 == 0
+        bgattr = f' bgcolor="{EMAIL_STRIPE_BG}"' if striped else ''
+        bg = f'background-color:{EMAIL_STRIPE_BG};' if striped else ''
+        r_l = 'border-radius:6px 0 0 6px;' if bg else ''
+        r_r = 'border-radius:0 6px 6px 0;' if bg else ''
+        rows.append(
+            f'<tr{bgattr} style="{bg}"><td style="padding:8px 8px;{r_l}">{doiurl(doi)}</td>'
+            f'<td style="padding:8px 8px;text-align:center;white-space:nowrap;">{previous:,} '
+            f'<span style="color:#c9ced4;">&rarr;</span> '
+            f'<b style="color:{EMAIL_GREEN};">{combined:,}</b></td>'
+            f'<td style="padding:8px 8px;{r_r}color:{EMAIL_GRAY};">{sources}</td></tr>')
+    return (
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+        'style="border-collapse:collapse;font-size:12.5px;">'
+        f'<tr style="color:{EMAIL_GRAY};font-size:10.5px;text-transform:uppercase;'
+        'letter-spacing:.03em;"><td style="padding:6px 8px;">DOI</td>'
+        '<td style="padding:6px 8px;" align="center">Change</td>'
+        '<td style="padding:6px 8px;">Sources</td></tr>'
+        + "".join(rows) + '</table>')
+
+
+def generate_email():  # pylint: disable=too-many-locals
+    ''' Generate and send the HTML run-summary email. Built directly from the
+        module-level COUNT/RECORDS/HITS/ARG state (same convention as the rest of
+        this module) rather than re-parsing the plain-text console summary.
+        Keyword arguments:
+          None
         Returns:
           None
     '''
-    label = SOURCES[ARG.SOURCE]['label']
-    msg = JRC.get_run_data(__file__, __version__) + "<br><br>" \
-        + text_to_html_table(summary) + "<br>"
-    if HITS:
-        msg += f"The following {len(HITS):,} {label} DOI(s) had their citation " \
-               + "count increased:<br>"
-        for doi, previous, native, combined, openalex, scholex, dcite, wos in HITS:
-            oas = 'err' if openalex is None else openalex
-            sxs = 'err' if scholex is None else scholex
-            if ARG.SOURCE == 'crossref':
-                dcs = ''
-                woss = (', WoS ' + ('err' if wos is None else str(wos))) \
-                       if ARG.WOS else ''
-            else:
-                dcs = ", DataCite-GraphQL " \
-                      + (('err' if dcite is None else str(dcite)) if ARG.GRAPHQL else 'off')
-                woss = ''
-            msg += f"&nbsp;&nbsp;{doiurl(doi)}: {previous} &rarr; {combined} " \
-                   + f"({label} {native}, OpenAlex {oas}, ScholeXplorer {sxs}" \
-                   + f"{dcs}{woss})<br>"
-    else:
-        msg += "No citation counts were increased.<br>"
+    label = PUBLISHERS[ARG.PUBLISHER]['label'] if ARG.PUBLISHER else SOURCES[ARG.SOURCE]['label']
+    restrict = f' (--publisher {ARG.PUBLISHER})' if ARG.PUBLISHER else ''
+    run_data = JRC.get_run_data(__file__, __version__).strip()
+    mode_badge_bg = EMAIL_GREEN if ARG.WRITE else EMAIL_AMBER
+    mode_label = 'WRITE' if ARG.WRITE else 'DRY RUN'
+
+    kpis = ''.join([
+        html_kpi_card(f"{COUNT['read']:,}", f"{label} DOIs processed"),
+        html_kpi_card(f"{COUNT['openalex_found']:,}/{COUNT['openalex_error']:,}",
+                      "OpenAlex OK/err", 'bad' if COUNT['openalex_error'] else 'good'),
+        html_kpi_card(f"{COUNT['scholex_found']:,}/{COUNT['scholex_error']:,}",
+                      "ScholeXplorer OK/err", 'bad' if COUNT['scholex_error'] else 'good'),
+        html_kpi_card(f"{COUNT['fetch_error']:,}", "Fetch errors",
+                      'bad' if COUNT['fetch_error'] else 'neutral'),
+    ])
+
+    citation_rows = [("OpenAlex unchanged (skipped)", f"{COUNT['openalex_unchanged']:,}"),
+                     ("Counts preserved (source error)", f"{COUNT['preserved']:,}")]
+    if ARG.SOURCE == 'crossref' and ARG.WOS:
+        citation_rows.append(("WoS lookups OK (errors)",
+                              f"{COUNT['wos_found']:,} ({COUNT['wos_error']:,})"))
+    if ARG.SOURCE == 'datacite':
+        dc_val = (f"{COUNT['datacite_found']:,} ({COUNT['datacite_error']:,})" if ARG.GRAPHQL
+                  else "disabled (use --datacite-graphql)")
+        citation_rows.append(("DataCite GraphQL", dc_val))
+    cited = sum(1 for r in RECORDS if 'jrc_citation_count' in r)
+    citation_rows.append(("DOIs with citation fields", f"{cited:,}"))
+    citation_rows.append(("DOIs with increased citation count",
+                          html_pill(EMAIL_GREEN_BG, EMAIL_GREEN, f'{COUNT["increased"]:,}')))
+    citation_rows.append(("DOIs matched", f"{COUNT['matched']:,}"))
+    citation_rows.append(("DOIs updated (errors)",
+                          f"{COUNT['written']:,} ({COUNT['write_error']:,})"))
+    citation_rows.append(("Total records written (set)", f"{len(RECORDS):,}"))
+    citation_section = (html_section_header("&#128202; Citation Enrichment")
+                        + html_metric_rows(citation_rows))
+
+    usage_cards = []
+    for key in SOURCE_PUBLISHERS[ARG.SOURCE]:
+        # A --publisher restrict narrows the query to just that publisher's DOIs,
+        # so a sibling source would always read 0/0 - just noise; omit its card
+        # rather than show a fake zero.
+        if ARG.PUBLISHER not in (None, key):
+            continue
+        pub = PUBLISHERS[key]
+        if pub['token_env'] and not os.environ.get(pub['token_env']):
+            usage_cards.append(html_usage_disabled_card(
+                pub['label'], f"Set {pub['token_env']} to enable usage stats."))
+            continue
+        usage_cards.append(html_usage_card(pub['label'], COUNT[f'{key}_found'],
+                                           COUNT[f'{key}_error'], pub['counters'], key))
+    usage_section = html_section_header("&#128200; Usage Sources") + "".join(usage_cards)
+
+    hits_section = (html_section_header(f"&#11014; Citation Increases ({len(HITS):,})")
+                    + html_citation_increases())
+
+    msg = (
+        f'<div style="font-family:-apple-system,\'Segoe UI\',Roboto,Helvetica,Arial,sans-serif;'
+        f'background-color:#eef1f4;padding:8px 0;">'
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>'
+        '<td align="center" style="padding:8px 14px 32px 14px;">'
+        '<table role="presentation" width="720" cellpadding="0" cellspacing="0" '
+        'bgcolor="#ffffff" '
+        f'style="max-width:720px;width:100%;background-color:#ffffff;border-radius:10px;'
+        f'border:1px solid {EMAIL_BORDER};overflow:hidden;">'
+        f'<tr><td bgcolor="{EMAIL_NAVY}" style="background-color:{EMAIL_NAVY};'
+        f'padding:22px 28px;">'
+        f'<div style="color:#ffffff;font-size:19px;font-weight:600;">'
+        f'{os.path.basename(__file__)}&nbsp;'
+        f'<span style="font-weight:400;opacity:.7;font-size:14px;">v{__version__}</span></div>'
+        f'<div style="color:#c9d6e6;font-size:12.5px;margin-top:6px;">{run_data} &middot; '
+        f'{label} mode{restrict} &middot; '
+        f'<span style="background-color:{mode_badge_bg};color:#fff;border-radius:10px;'
+        f'padding:1px 9px;font-size:11px;font-weight:600;letter-spacing:.03em;">'
+        f'{mode_label}</span> &middot; manifold: {ARG.MANIFOLD}</div></td></tr>'
+        f'<tr><td style="padding:22px 22px 6px 22px;">'
+        # cellspacing (not CSS margin, which <td> mostly ignores) puts a real gap
+        # between the KPI tiles; Outlook's Word engine honors this old-school
+        # HTML attribute far more reliably than CSS spacing tricks.
+        f'<table role="presentation" width="100%" cellpadding="0" cellspacing="6"><tr>'
+        f'{kpis}</tr></table></td></tr>'
+        f'<tr><td style="padding:18px 28px 4px 28px;">{citation_section}</td></tr>'
+        f'<tr><td style="padding:20px 28px 4px 28px;">{usage_section}</td></tr>'
+        f'<tr><td style="padding:16px 28px 6px 28px;">{hits_section}</td></tr>'
+        f'<tr><td bgcolor="{EMAIL_STRIPE_BG}" style="padding:18px 28px;'
+        f'background-color:{EMAIL_STRIPE_BG};color:{EMAIL_GRAY};'
+        f'font-size:11px;text-align:center;border-top:1px solid {EMAIL_BORDER};">'
+        'Generated by sync_citations.py &middot; Data and Information Services &middot; '
+        'Janelia Research Campus</td></tr>'
+        '</table></td></tr></table></div>')
+
     try:
         if ARG.TEST:
             email = DISCONFIG['developer']
         elif ARG.SOURCE == 'datacite':
             email = DISCONFIG['dcreceivers']
         else:
-            email = DISCONFIG['creceivers']
+            email = DISCONFIG['developer']
         LOGGER.info(f"Sending email to {email}")
         JRC.send_email(msg, DISCONFIG['sender'], email,
                        f"{label} citation enrichment", mime='html')
@@ -1072,43 +1696,50 @@ def processing():  # pylint: disable=too-many-locals,too-many-statements
     '''
     label = SOURCES[ARG.SOURCE]['label']
     query = {'jrc_obtained_from': label}
-    if ARG.ZENODO:
-        # Narrow the DataCite subset to Zenodo DOIs (AND-ed with jrc_obtained_from)
-        query['$or'] = [{'publisher': {'$in': ZENODO_PUBLISHERS}},
-                        {'doi': {'$regex': r'zenodo\.', '$options': 'i'}}]
+    if ARG.PUBLISHER and not ARG.DOI:
+        # Narrow the --source subset to this publisher's DOIs (AND-ed with
+        # jrc_obtained_from above - update(), not reassign, or that filter is lost).
+        # Skipped when --doi targets one exact DOI: ANDing in a publisher match
+        # there would find nothing if that DOI belongs to a different publisher,
+        # instead of running against the one DOI the caller asked for.
+        query.update(PUBLISHERS[ARG.PUBLISHER]['match'])
     if ARG.DOI:
         query['doi'] = ARG.DOI.lower()
     elif ARG.CITED:
-        # AND-ed with the registrar constraint above (don't reassign query, or the
-        # jrc_obtained_from filter is lost and other DOIs could be included).
-        # In --zenodo mode "cited" means "already has usage data" (jrc_zenodo_counts).
-        if ARG.ZENODO:
-            query['jrc_zenodo_counts'] = {'$exists': True}
+        # In --publisher <x> mode "cited" means "already has usage data".
+        if ARG.PUBLISHER:
+            query[PUBLISHERS[ARG.PUBLISHER]['count_field']] = {'$exists': True}
         elif ARG.SOURCE == 'crossref':
             query['jrc_citation_count'] = {'$exists': True}
         else:
             query['citationCount'] = {'$gt': 0}
     elif ARG.NOTCITED:
         # DOIs not yet enriched; useful for a first pass / filling gaps without
-        # reprocessing the done subset. --zenodo keys this on jrc_zenodo_counts
-        # (e.g. to retry deposits that a transient Zenodo error missed).
-        if ARG.ZENODO:
-            query['jrc_zenodo_counts'] = {'$exists': False}
+        # reprocessing the done subset. --publisher <x> keys this on its usage
+        # field (e.g. to retry deposits a transient error missed).
+        if ARG.PUBLISHER:
+            query[PUBLISHERS[ARG.PUBLISHER]['count_field']] = {'$exists': False}
         else:
             query['jrc_citation_count'] = {'$exists': False}
     try:
-        cursor = DB['dis'].dois.find(query, {'doi': 1,
+        # Only project the usage fields that apply under this --source; the
+        # other source's fields are never read or written from this run.
+        usage_fields = {PUBLISHERS[key]['count_field']: 1
+                        for key in SOURCE_PUBLISHERS[ARG.SOURCE]}
+        cursor = DB['dis'].dois.find(query, {'doi': 1, 'type': 1,
                                              SOURCES[ARG.SOURCE]['count_field']: 1,
                                              'jrc_citation_count': 1,
                                              'jrc_citation_sources': 1,
-                                             'jrc_citing_dois': 1})
+                                             'jrc_citing_dois': 1,
+                                             **usage_fields})
         if ARG.LIMIT:
             cursor = cursor.limit(ARG.LIMIT)
         rows = list(cursor)
     except Exception as err:
         terminate_program(err)
     total = len(rows)
-    LOGGER.info(f"Processing {total:,} {'Zenodo' if ARG.ZENODO else label} DOIs "
+    kind = PUBLISHERS[ARG.PUBLISHER]['label'] if ARG.PUBLISHER else label
+    LOGGER.info(f"Processing {total:,} {kind} DOIs "
                 f"({'WRITE' if ARG.WRITE else 'DRY RUN'})")
     interrupted = False
     # Pre-fetch DataCite GraphQL citing DOIs in batches (serialized, low volume)
@@ -1121,9 +1752,9 @@ def processing():  # pylint: disable=too-many-locals,too-many-statements
         except KeyboardInterrupt:
             interrupted = True
             LOGGER.warning("Interrupted during DataCite prefetch - skipping enrichment")
-    # Plain filenames for datacite runs; crossref and zenodo runs get a qualifier
-    # suffix so they never overwrite the datacite output.
-    filequal = '_zenodo' if ARG.ZENODO else \
+    # Plain filenames for datacite runs; crossref and --publisher runs get a
+    # qualifier suffix so they never overwrite the datacite output.
+    filequal = f"_{ARG.PUBLISHER}" if ARG.PUBLISHER else \
                ('' if ARG.SOURCE == 'datacite' else f"_{ARG.SOURCE}")
     monfile = f"citation_updates{filequal}.txt"
     with open(monfile, 'w', encoding='utf-8') as monitor, \
@@ -1159,21 +1790,25 @@ def processing():  # pylint: disable=too-many-locals,too-many-statements
     with open(recfile, 'w', encoding='utf-8') as fileout:
         json.dump(RECORDS, fileout, indent=2, default=str)
     LOGGER.info(f"Wrote {len(RECORDS):,} citation records to {recfile}")
-    # RECORDS is the union of DOIs that got citation and/or figshare/Zenodo fields
+    # RECORDS is the union of DOIs that got citation and/or usage-source fields
     cited = sum(1 for r in RECORDS if 'jrc_citation_count' in r)
-    figusage = sum(1 for r in RECORDS if 'jrc_figshare_counts' in r)
-    zenusage = sum(1 for r in RECORDS if 'jrc_zenodo_counts' in r)
-    # DataCite GraphQL and figshare/Zenodo usage apply only to --source datacite
-    # WoS applies only to --source crossref and only when WOS_API_KEY is set
-    dc_line = fs_line = zen_line = wos_line = ""
+    usage_counts = {key: sum(1 for r in RECORDS if f"jrc_{key}_counts" in r)
+                    for key in SOURCE_PUBLISHERS[ARG.SOURCE]}
+    # A --publisher restrict narrows the query to just that publisher's DOIs, so
+    # a sibling source under the same --source would always read 0/0 - just
+    # noise; omit it rather than report a fake zero.
+    active_keys = [key for key in SOURCE_PUBLISHERS[ARG.SOURCE]
+                   if ARG.PUBLISHER in (None, key)]
+    usage_lines = "".join(usage_summary_line(key) for key in active_keys)
+    field_lines = "".join(f"DOIs with {PUBLISHERS[key]['label']} fields:".ljust(36)
+                          + f"{usage_counts[key]:,}\n" for key in active_keys)
+    # DataCite GraphQL applies only to --source datacite; WoS (opt-in) only to
+    # --source crossref.
+    dc_line = wos_line = ""
     if ARG.SOURCE == 'datacite':
         dc_line = (f"DataCite GraphQL OK (errors):       {COUNT['datacite_found']:,} "
                    f"({COUNT['datacite_error']:,})\n") if ARG.GRAPHQL else \
                   "DataCite GraphQL:                   disabled (use --datacite-graphql)\n"
-        fs_line = (f"Figshare usage OK (errors):         {COUNT['figshare_found']:,} "
-                   + f"({COUNT['figshare_error']:,})\n")
-        zen_line = (f"Zenodo usage OK (errors):           {COUNT['zenodo_found']:,} "
-                    + f"({COUNT['zenodo_error']:,})\n")
     elif ARG.WOS:
         wos_line = (f"WoS lookups OK (errors):            {COUNT['wos_found']:,} "
                     + f"({COUNT['wos_error']:,})\n")
@@ -1186,14 +1821,12 @@ def processing():  # pylint: disable=too-many-locals,too-many-statements
         + f"({COUNT['scholex_error']:,})\n"
         + wos_line
         + dc_line
+        + (usage_lines if ARG.SOURCE == 'crossref' else "")
         + f"Fetch errors (DOIs skipped):        {COUNT['fetch_error']:,}\n"
         + f"Counts preserved (source error):    {COUNT['preserved']:,}\n"
-        + fs_line
-        + zen_line
+        + (usage_lines if ARG.SOURCE == 'datacite' else "")
         + f"DOIs with citation fields:          {cited:,}\n"
-        + (f"DOIs with figshare fields:          {figusage:,}\n"
-           + f"DOIs with Zenodo fields:            {zenusage:,}\n"
-           if ARG.SOURCE == 'datacite' else "")
+        + field_lines
         + f"Total records written (set):        {len(RECORDS):,}\n"
         + f"DOIs with increased citation count: {COUNT['increased']:,}\n"
         + f"DOIs matched:                       {COUNT['matched']:,}\n"
@@ -1203,7 +1836,7 @@ def processing():  # pylint: disable=too-many-locals,too-many-statements
     if interrupted:
         LOGGER.warning("Run interrupted - summary email not sent")
     elif ARG.TEST or ARG.WRITE:
-        generate_email(summary)
+        generate_email()
 
 # -----------------------------------------------------------------------------
 
@@ -1215,21 +1848,24 @@ if __name__ == '__main__':
                         default='crossref', choices=['datacite', 'crossref'],
                         help='DOI registrar source to process (default crossref, '
                              + 'case-insensitive)')
-    PARSER.add_argument('--zenodo', dest='ZENODO', action='store_true', default=False,
-                        help='Only process Zenodo DOIs (implies --source datacite); '
-                             + '--cited/--notcited then key on jrc_zenodo_counts '
-                             + 'instead of citation counts')
+    PARSER.add_argument('--publisher', dest='PUBLISHER', action='store', type=str.lower,
+                        default=None, choices=sorted(PUBLISHERS),
+                        help='Restrict to one usage source\'s DOIs only (implies '
+                             + '--source per that source: figshare/zenodo=datacite, '
+                             + 'protocolsio/elife=crossref); --cited/--notcited then '
+                             + 'key on its jrc_<publisher>_counts (usage) instead of '
+                             + 'citation counts; protocolsio requires PROTOCOLS_API_TOKEN')
     PARSER.add_argument('--doi', dest='DOI', action='store', default=None,
                         help='Process a single DOI (for testing)')
     PARSER.add_argument('--cited', dest='CITED', action='store_true', default=False,
                         help='Only process DOIs already known to be cited '
                              + '(datacite: citationCount > 0; crossref: '
-                             + 'jrc_citation_count exists; --zenodo: '
-                             + 'jrc_zenodo_counts exists)')
+                             + 'jrc_citation_count exists; --publisher <x>: '
+                             + 'jrc_<x>_counts exists)')
     PARSER.add_argument('--notcited', dest='NOTCITED', action='store_true', default=False,
                         help='Only process DOIs not yet enriched (no stored '
-                             + 'jrc_citation_count; with --zenodo, no stored '
-                             + 'jrc_zenodo_counts)')
+                             + 'jrc_citation_count; with --publisher <x>, no stored '
+                             + 'jrc_<x>_counts)')
     PARSER.add_argument('--limit', dest='LIMIT', action='store', type=int, default=0,
                         help='Limit number of DOIs processed (0 = no limit)')
     PARSER.add_argument('--workers', dest='WORKERS', action='store', type=int, default=8,
@@ -1262,11 +1898,17 @@ if __name__ == '__main__':
     LOGGER = JRC.setup_logging(ARG)
     if ARG.CITED and ARG.NOTCITED:
         terminate_program("--cited and --notcited are mutually exclusive")
-    # Zenodo DOIs are DataCite-registered, so --zenodo implies --source datacite
-    if ARG.ZENODO:
-        if ARG.SOURCE == 'crossref':
-            LOGGER.warning("--zenodo implies --source datacite (overriding crossref)")
-        ARG.SOURCE = 'datacite'
+    # A single choices-constrained --publisher value structurally rules out
+    # selecting more than one restrict mode, so no separate exclusivity check
+    # is needed (unlike the three standalone boolean flags this replaced).
+    if ARG.PUBLISHER:
+        pubcfg = PUBLISHERS[ARG.PUBLISHER]
+        if ARG.SOURCE != pubcfg['source']:
+            LOGGER.warning(f"--publisher {ARG.PUBLISHER} implies --source {pubcfg['source']} "
+                           f"(overriding {ARG.SOURCE})")
+        ARG.SOURCE = pubcfg['source']
+        if pubcfg['token_env'] and not os.environ.get(pubcfg['token_env']):
+            terminate_program(f"--publisher {ARG.PUBLISHER} requires {pubcfg['token_env']}")
     # Crossref runs deal only with jrc_citation_count/_sources/_updated
     if ARG.SOURCE == 'crossref' and ARG.GRAPHQL:
         terminate_program("--datacite-graphql applies only to --source datacite")
