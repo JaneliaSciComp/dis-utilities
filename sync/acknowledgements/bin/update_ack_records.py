@@ -164,7 +164,7 @@ def process_internal():
         rows = DB['dis'].dois.find(payload)
     except Exception as err:
         terminate_program(err)
-    LOGGER.info(f"Found {cnt:,} records in external_dois")
+    LOGGER.info(f"Found {cnt:,} records in internal_dois")
     COUNT['internal_read'] = cnt
     for row in tqdm(rows, total=cnt, desc="Internal"):
         missing = False
