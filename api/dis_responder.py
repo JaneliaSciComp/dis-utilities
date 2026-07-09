@@ -47,7 +47,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "119.27.0"
+__version__ = "119.28.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -1619,7 +1619,10 @@ def standard_ack_table(rows, ack, is_regex=False, show_count=True):
         if 'jrc_is_oa' in row and row['jrc_is_oa']:
             oacnt += 1
         version = DL.is_version(row)
-        row['published'] = DL.get_publishing_date(row)
+        # external_dois documents only store the flattened jrc_publishing_date, not
+        # the raw Crossref/DataCite record DL.get_publishing_date() expects, so use
+        # the precomputed field directly (present on both internal and external rows).
+        row['published'] = row.get('jrc_publishing_date', 'unknown')
         row['link'] = doi_link(row['doi'])
         row['jrc_ack2'] = row['jrc_acknowledgements'].replace('\n', '<br>')
         row['jrc_ack2'] = highlight_subtext(row['jrc_ack2'], ack, is_regex=is_regex)
