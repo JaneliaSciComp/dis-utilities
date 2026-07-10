@@ -19,9 +19,14 @@ INPUTS
     --source   Restrict processing to a single source (elife, elsevier, pmc, or
                arxiv). Omit to process all sources.
     --write    Actually update the database (default: dry-run).
-    --test     Send email to developer rather than normal recipients.
     --verbose  Increase logging verbosity.
     --debug    Maximum logging verbosity.
+
+EMAIL RECIPIENT
+----------------
+The summary email always goes to the configured developer address, never the
+full receivers list, and is sent any time a DOI is added or diverted -
+--write or not (a dry run's findings are just as worth seeing as a real run's).
 
 HIGH-LEVEL FLOW
 ---------------
@@ -94,7 +99,19 @@ HIGH-LEVEL FLOW
    - Writes janelia_authored.json with the DOIs (from any source) diverted by the
      Janelia-author guard (acknowledge Janelia but are Janelia-authored, or could
      not be author-verified).
-   - Sends an email summary if --write or --test is set.
+   - Sends an email summary whenever at least one DOI was added OR diverted,
+     --write or not (a run that only finds Janelia-authored diversions,
+     with no new external DOIs, still gets a review email): a header banner
+     (run data, search term/--days, DRY RUN/WRITE badge), KPI stat tiles (DOIs
+     added, Janelia-authored diverted, write failures, ack ignore-listed), a
+     Source Funnel section with one card per source (read -> in-database/no-
+     ack/term-absent/not-found/Janelia-authored -> written), a DOIs Added
+     section with one card per source listing its new DOIs (PMC's card
+     includes a PMCID column), and - when any DOI was diverted - a
+     Janelia-authored review table (DOI, source, reason, Janelia author names)
+     for human follow-up. Built entirely from inline styles/tables (no
+     <style> block) for compatibility with older email clients, matching the
+     convention used by sync_citations.py.
 
 DEPENDENCIES
 ------------
@@ -121,7 +138,7 @@ NOTES
   parameter, i.e. filtered by when the article was added to PubMed Central.
 '''
 
-__version__ = '1.7.0'
+__version__ = '1.9.0'
 
 import argparse
 import collections
@@ -183,6 +200,34 @@ ARXIV_HEADERS = {'User-Agent': 'janelia-dis/pull_external_acks'}
 # Shared HTTP session so the many sequential search-paging calls reuse TCP/TLS
 # connections (connection pooling) instead of reconnecting on every request.
 SESSION = requests.Session()
+# Registry keyed by the counter-prefix used throughout this module (also the
+# 'source' value stored on RECORDS/INTERNAL_RECORDS entries): display label and
+# the --source restrict-flag value that gates this source's panel in the
+# run-summary email (arXiv's counter prefix is 'openalex', but --source uses
+# 'arxiv' - the two differ, everything else matches).
+SOURCES = {
+    'elife': {'label': 'eLife', 'restrict': 'elife'},
+    'elsevier': {'label': 'Elsevier', 'restrict': 'elsevier'},
+    'pmc': {'label': 'PMC', 'restrict': 'pmc'},
+    'openalex': {'label': 'arXiv', 'restrict': 'arxiv'},
+}
+SOURCE_ORDER = ('elife', 'elsevier', 'pmc', 'openalex')
+# HTML run-summary email palette/layout (generate_email and its html_* helpers).
+# Mirrors sync_citations.py's email convention: inline styles only (no <style>
+# block/classes), colors paired with an icon/label (not color alone) for
+# colorblind accessibility, for reliable rendering across email clients
+# including older Outlook.
+EMAIL_NAVY = '#1f3a5f'
+EMAIL_GREEN = '#1c7c3f'
+EMAIL_GREEN_BG = '#eefaf1'
+EMAIL_RED = '#c0392b'
+EMAIL_RED_BG = '#fdecea'
+EMAIL_AMBER = '#d68a1f'
+EMAIL_GRAY = '#5b6b7c'
+EMAIL_GRAY_BG = '#f2f4f6'
+EMAIL_STRIPE_BG = '#f7f9fb'
+EMAIL_BORDER = '#eef1f4'
+EMAIL_BLUE = '#2f7fd1'
 
 def terminate_program(msg=None):
     ''' Terminate the program gracefully
@@ -241,66 +286,330 @@ def initialize_program():
         if row.get('key'):
             IGNORE.add(row['key'].lower())
     LOGGER.info(f"Found {len(IGNORE):,} non-Janelia DOIs in to_ignore (author check skipped)")
+    # Scoped to the current --term: a DOI ignored because term X was absent
+    # from its ack text must still be checked on a later run using term Y.
     try:
-        rows = DB['dis'].to_ignore.find({"type": "ack_doi"}, {"key": 1})
+        rows = DB['dis'].to_ignore.find({"type": "ack_doi", "term": ARG.TERM.lower()},
+                                        {"key": 1})
     except Exception as err:
         terminate_program(err)
     for row in rows:
         if row.get('key'):
             ACK_DOI_IGNORE.add(row['key'].lower())
-    LOGGER.info(f"Found {len(ACK_DOI_IGNORE):,} DOIs with confirmed no Janelia ack")
+    LOGGER.info(f"Found {len(ACK_DOI_IGNORE):,} DOIs with confirmed no '{ARG.TERM}' in ack text")
 
 
 def doiurl(doi):
-    ''' Format a DOI as a URL
+    ''' Format a DOI as a DIS UI link
         Keyword arguments:
           doi: DOI to format
         Returns:
-          Formatted DOI
+          HTML anchor
     '''
-    return f"&nbsp;&nbsp;<a href='https://dis.int.janelia.org/doiui/{doi}'>{doi}</a><br>"
+    return (f"<a href='https://dis.int.janelia.org/doiui/{doi}' "
+            f"style='color:{EMAIL_BLUE};text-decoration:none;'>{doi}</a>")
 
 
-def text_to_html_table(text):
-    ''' Convert text to an HTML table
+def html_kpi_card(value, label, tone='neutral', width='25%'):
+    ''' Build one KPI stat tile for the run-summary email's header row.
+        A single <td> carries the box look directly (bgcolor attribute +
+        background-color, no nested table) - Outlook's Word rendering engine
+        chokes on a percentage-width table nested inside a percentage-width <td>.
         Keyword arguments:
-          text: text to convert
+          value: display value (already formatted, e.g. "3")
+          label: caption under the value
+          tone: 'neutral', 'good', or 'bad' - selects the tile's color scheme
+          width: tile width as a percentage string (tune to the tile count)
+        Returns:
+          HTML for one table cell
+    '''
+    bg, fg = {'good': (EMAIL_GREEN_BG, EMAIL_GREEN),
+              'bad': (EMAIL_RED_BG, EMAIL_RED),
+              'neutral': (EMAIL_GRAY_BG, EMAIL_GRAY)}[tone]
+    return (f'<td width="{width}" align="center" valign="top" bgcolor="{bg}" '
+            f'style="padding:14px 6px;background-color:{bg};border-radius:8px;">'
+            f'<div style="font-size:24px;font-weight:700;color:{fg};">{value}</div>'
+            f'<div style="font-size:10.5px;color:{EMAIL_GRAY};text-transform:uppercase;'
+            f'letter-spacing:.04em;margin-top:2px;">{label}</div>'
+            f'</td>')
+
+
+def html_section_header(title):
+    ''' Build a section header bar for the run-summary email
+        Keyword arguments:
+          title: section title (may include an HTML entity icon prefix)
+        Returns:
+          HTML div block
+    '''
+    return (f'<div style="font-size:14px;font-weight:700;color:{EMAIL_NAVY};'
+            f'border-bottom:2px solid {EMAIL_BORDER};padding-bottom:7px;'
+            f'margin-bottom:10px;">{title}</div>')
+
+
+def html_metric_rows(rows):
+    ''' Build a zebra-striped label/value table for the run-summary email
+        Keyword arguments:
+          rows: list of (label, value_html) pairs
         Returns:
           HTML table
     '''
-    rows = []
-    for line in text.strip().splitlines():
-        if ":" in line:
-            label, value = line.rsplit(":", 1)
-            rows.append((label.strip(), value.strip()))
-    html = ['<table>']
-    for label, value in rows:
-        html.append(f'  <tr><td>{label}:</td><td>{value}</td></tr>')
-    html.append('</table>')
-    return "\n".join(html)
+    trs = []
+    for i, (mlabel, value) in enumerate(rows):
+        striped = i % 2 == 0
+        bgattr = f' bgcolor="{EMAIL_STRIPE_BG}"' if striped else ''
+        bg = f'background-color:{EMAIL_STRIPE_BG};' if striped else ''
+        r_l = 'border-radius:6px 0 0 6px;' if bg else ''
+        r_r = 'border-radius:0 6px 6px 0;' if bg else ''
+        trs.append(f'<tr{bgattr} style="{bg}">'
+                   f'<td style="padding:8px 10px;{r_l}">{mlabel}</td>'
+                   f'<td align="right" style="padding:8px 10px;text-align:right;{r_r}">'
+                   f'{value}</td></tr>')
+    return ('<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+            'style="border-collapse:collapse;font-size:13px;margin-top:6px;">'
+            + "".join(trs) + '</table>')
 
 
-def generate_email(summary, records):
-    ''' Generate and send an email
+def html_pill(bg, fg, text):
+    ''' Build a small colored status badge as an auto-width single-cell table
+        (bgcolor attribute + background-color CSS), not a <span> - Outlook's
+        Word engine does not honor background-color on inline elements. Only
+        safe where the badge is the sole content of its table cell.
         Keyword arguments:
-          summary: summary of the results
-          records: list of record dicts with doi and source keys
+          bg: background color
+          fg: text color
+          text: pill text (may include an HTML entity icon prefix)
+        Returns:
+          HTML for a single-cell table sized to its content
+    '''
+    return (f'<table role="presentation" cellpadding="0" cellspacing="0"><tr>'
+            f'<td bgcolor="{bg}" style="background-color:{bg};color:{fg};padding:2px 10px;'
+            f'border-radius:10px;font-size:11.5px;font-weight:600;">{text}</td></tr></table>')
+
+
+def html_card_shell(label, pill_html, body_html):
+    ''' Build the shared card chrome used by both the per-source funnel cards and
+        the per-source "DOIs added" cards: a header row (label + a pill on the
+        right) over a full-width body. Header is two <td>s directly in the outer
+        table (not a nested width="100%" table inside one <td>) - Outlook's Word
+        engine chokes on that nesting; the body row spans both with colspan="2".
+        Keyword arguments:
+          label: display label (e.g. "eLife")
+          pill_html: HTML for the header's right-aligned pill
+          body_html: HTML for the card body (e.g. a metric-rows or DOI table)
+        Returns:
+          HTML card block
+    '''
+    return (
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+        f'style="border:1px solid {EMAIL_BORDER};border-radius:8px;margin-bottom:14px;'
+        'border-collapse:separate;">'
+        f'<tr><td bgcolor="{EMAIL_STRIPE_BG}" style="background-color:{EMAIL_STRIPE_BG};'
+        f'padding:10px 16px;border-radius:8px 0 0 0;font-weight:700;color:{EMAIL_NAVY};'
+        f'font-size:13.5px;">{label}</td>'
+        f'<td bgcolor="{EMAIL_STRIPE_BG}" align="right" style="background-color:'
+        f'{EMAIL_STRIPE_BG};padding:10px 16px;border-radius:0 8px 0 0;">{pill_html}</td></tr>'
+        f'<tr><td colspan="2" style="padding:4px 16px 10px 16px;">{body_html}</td></tr></table>')
+
+
+def html_funnel_card(key):
+    ''' Build one Source Funnel card: how many candidates this source read were
+        winnowed down to DOIs actually written, as a metric-rows table, plus a
+        "written" count pill in the header.
+        Keyword arguments:
+          key: SOURCES registry key (counter prefix, e.g. 'elife')
+        Returns:
+          HTML card block
+    '''
+    rows = [("Read", f"{COUNT[f'{key}_read']:,}")]
+    if key == 'pmc':
+        rows.append(("No DOI found", f"{COUNT['pmc_no_doi']:,}"))
+    if key == 'elsevier' and COUNT['elsevier_date_filtered']:
+        rows.append(("Date filtered", f"{COUNT['elsevier_date_filtered']:,}"))
+    rows.append(("Already in database", f"{COUNT[f'{key}_in_database']:,}"))
+    rows.append(("No acknowledgement text", f"{COUNT[f'{key}_no_ack']:,}"))
+    rows.append((f"'{ARG.TERM}' absent from acknowledgement",
+                f"{COUNT[f'{key}_term_absent']:,}"))
+    if key != 'openalex':
+        rows.append(("Metadata not found", f"{COUNT[f'{key}_notfound']:,}"))
+    rows.append(("Janelia-authored (diverted)", f"{COUNT[f'{key}_janelia_authored']:,}"))
+    if COUNT[f'{key}_author_check_failed']:
+        rows.append(("Author check failed", f"{COUNT[f'{key}_author_check_failed']:,}"))
+    if COUNT[f'{key}_author_check_skipped']:
+        rows.append(("Author check skipped (ignore-listed)",
+                    f"{COUNT[f'{key}_author_check_skipped']:,}"))
+    written = COUNT[f'{key}_dois_written']
+    pill = html_pill(EMAIL_GREEN_BG, EMAIL_GREEN, f'&#10003; {written:,} written')
+    return html_card_shell(SOURCES[key]['label'], pill, html_metric_rows(rows))
+
+
+def html_source_card(label, records):
+    ''' Build one "DOIs added" card for a single source: a header with a count
+        pill, followed by a zebra-striped table of DOIs (each linked to its DIS
+        UI page), with a PMCID column when the source's records carry one
+        (PMC only).
+        Keyword arguments:
+          label: display label (e.g. "eLife")
+          records: list of RECORDS entries for this source
+        Returns:
+          HTML card block
+    '''
+    has_pmcid = any(rec.get('pmcid') for rec in records)
+    rows = []
+    for i, rec in enumerate(records):
+        striped = i % 2 == 0
+        bgattr = f' bgcolor="{EMAIL_STRIPE_BG}"' if striped else ''
+        bg = f'background-color:{EMAIL_STRIPE_BG};' if striped else ''
+        if has_pmcid:
+            doi_radius = 'border-radius:6px 0 0 6px;' if bg else ''
+            pmcid_radius = 'border-radius:0 6px 6px 0;' if bg else ''
+            pmcid_html = (f'<td style="padding:6px 10px;{pmcid_radius}color:{EMAIL_GRAY};" '
+                          f'align="right">{rec["pmcid"]}</td>')
+        else:
+            doi_radius = 'border-radius:6px;' if bg else ''
+            pmcid_html = ''
+        rows.append(f'<tr{bgattr} style="{bg}">'
+                    f'<td style="padding:6px 10px;{doi_radius}">{doiurl(rec["doi"])}</td>'
+                    f'{pmcid_html}</tr>')
+    header = ('<td style="padding:5px 10px;">DOI</td>'
+              + ('<td style="padding:5px 10px;" align="right">PMCID</td>' if has_pmcid else ''))
+    table = ('<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+             'style="border-collapse:collapse;font-size:12.5px;">'
+             f'<tr style="color:{EMAIL_GRAY};font-size:10.5px;text-transform:uppercase;'
+             f'letter-spacing:.03em;">{header}</tr>' + "".join(rows) + '</table>')
+    pill = html_pill(EMAIL_GREEN_BG, EMAIL_GREEN, f'&#10003; {len(records):,}')
+    return html_card_shell(label, pill, table)
+
+
+def html_diverted_table(records):
+    ''' Build the Janelia-authored (not stored) table for the run-summary email:
+        DOIs that acknowledge the search term but were diverted rather than
+        written to external_dois, because they are (potentially) Janelia-authored
+        or their authorship could not be verified.
+        Keyword arguments:
+          records: INTERNAL_RECORDS list
+        Returns:
+          HTML table block
+    '''
+    rows = []
+    for i, rec in enumerate(records):
+        striped = i % 2 == 0
+        bgattr = f' bgcolor="{EMAIL_STRIPE_BG}"' if striped else ''
+        bg = f'background-color:{EMAIL_STRIPE_BG};' if striped else ''
+        r_l = 'border-radius:6px 0 0 6px;' if bg else ''
+        r_r = 'border-radius:0 6px 6px 0;' if bg else ''
+        label = SOURCES.get(rec['source'], {}).get('label', rec['source'])
+        reason = 'Author check failed' if rec['excluded_reason'] == 'author check failed' \
+                 else 'Janelia author(s)'
+        authors = ', '.join(rec.get('janelia_authors') or []) or '&mdash;'
+        rows.append(
+            f'<tr{bgattr} style="{bg}"><td style="padding:6px 10px;{r_l}">'
+            f'{doiurl(rec["doi"])}</td>'
+            f'<td style="padding:6px 10px;">{label}</td>'
+            f'<td style="padding:6px 10px;">{reason}</td>'
+            f'<td style="padding:6px 10px;{r_r}color:{EMAIL_GRAY};">{authors}</td></tr>')
+    return (
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+        'style="border-collapse:collapse;font-size:12.5px;">'
+        f'<tr style="color:{EMAIL_GRAY};font-size:10.5px;text-transform:uppercase;'
+        'letter-spacing:.03em;"><td style="padding:6px 10px;">DOI</td>'
+        '<td style="padding:6px 10px;">Source</td>'
+        '<td style="padding:6px 10px;">Reason</td>'
+        '<td style="padding:6px 10px;">Janelia author(s)</td></tr>'
+        + "".join(rows) + '</table>')
+
+
+def generate_email():
+    ''' Generate and send the HTML run-summary email. Built directly from the
+        module-level COUNT/RECORDS/INTERNAL_RECORDS/ARG state (same convention as
+        sync_citations.py) rather than re-parsing a plain-text summary. Grouped
+        into a Source Funnel section (read -> written, per source), a DOIs Added
+        section (per-source card of new DOIs), and a Janelia-authored review
+        section (diverted DOIs needing a human look), instead of one flat list.
+        Keyword arguments:
+          None
         Returns:
           None
     '''
-    if not records:
-        return
-    msg = "<br>The following external DOIs were added to the database:<br>"
-    for rec in records:
-        msg += f"  {doiurl(rec['doi'])} ({rec['source']})<br>"
-    msg = JRC.get_run_data(__file__, __version__) + "<br><br>" \
-        + text_to_html_table(summary) + "<br>" + msg
+    active = [key for key in SOURCE_ORDER if ARG.SOURCE in (None, SOURCES[key]['restrict'])]
+    run_data = JRC.get_run_data(__file__, __version__).strip()
+    mode_badge_bg = EMAIL_GREEN if ARG.WRITE else EMAIL_AMBER
+    mode_label = 'WRITE' if ARG.WRITE else 'DRY RUN'
+    restrict = f" &middot; term: '{ARG.TERM}'"
+    if ARG.DAYS:
+        restrict += f" &middot; last {ARG.DAYS:,} days"
+
+    write_failed = sum(COUNT[f'{key}_write_failed'] for key in SOURCE_ORDER)
+    ack_ignored = sum(COUNT[f'{key}_ack_doi_ignored'] for key in SOURCE_ORDER)
+    kpis = ''.join([
+        html_kpi_card(f"{len(RECORDS):,}", "DOIs added",
+                      'good' if RECORDS else 'neutral'),
+        html_kpi_card(f"{len(INTERNAL_RECORDS):,}", "Janelia-authored (diverted)",
+                      'neutral' if INTERNAL_RECORDS else 'neutral'),
+        html_kpi_card(f"{write_failed:,}", "Write failures",
+                      'bad' if write_failed else 'neutral'),
+        html_kpi_card(f"{ack_ignored:,}", "Ack ignore-listed", 'neutral'),
+    ])
+
+    funnel_section = (html_section_header("&#128200; Source Funnel")
+                      + "".join(html_funnel_card(key) for key in active))
+
+    by_source = collections.defaultdict(list)
+    for rec in RECORDS:
+        by_source[rec['source']].append(rec)
+    added_cards = ''.join(html_source_card(SOURCES[key]['label'], by_source[key])
+                          for key in active if by_source.get(key))
+    added_section = (
+        html_section_header(f"&#128209; DOIs Added ({len(RECORDS):,})")
+        + (added_cards if added_cards else f'<div style="color:{EMAIL_GRAY};font-size:13px;">'
+                                            'No new DOIs were added.</div>'))
+
+    diverted_row = ''
+    if INTERNAL_RECORDS:
+        diverted_row = (
+            f'<tr><td style="padding:16px 28px 4px 28px;">'
+            + html_section_header(
+                f"&#9888; Janelia-authored - Not Stored ({len(INTERNAL_RECORDS):,})")
+            + html_diverted_table(INTERNAL_RECORDS) + '</td></tr>')
+
+    msg = (
+        f'<div style="font-family:-apple-system,\'Segoe UI\',Roboto,Helvetica,Arial,sans-serif;'
+        f'background-color:#eef1f4;padding:8px 0;">'
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>'
+        '<td align="center" style="padding:8px 14px 32px 14px;">'
+        '<table role="presentation" width="720" cellpadding="0" cellspacing="0" '
+        'bgcolor="#ffffff" '
+        f'style="max-width:720px;width:100%;background-color:#ffffff;border-radius:10px;'
+        f'border:1px solid {EMAIL_BORDER};overflow:hidden;">'
+        f'<tr><td bgcolor="{EMAIL_NAVY}" style="background-color:{EMAIL_NAVY};'
+        f'padding:22px 28px;">'
+        f'<div style="color:#ffffff;font-size:19px;font-weight:600;">'
+        f'{os.path.basename(__file__)}&nbsp;'
+        f'<span style="font-weight:400;opacity:.7;font-size:14px;">v{__version__}</span></div>'
+        f'<div style="color:#c9d6e6;font-size:12.5px;margin-top:6px;">{run_data}{restrict}'
+        f' &middot; <span style="background-color:{mode_badge_bg};color:#fff;'
+        f'border-radius:10px;padding:1px 9px;font-size:11px;font-weight:600;'
+        f'letter-spacing:.03em;">{mode_label}</span></div></td></tr>'
+        f'<tr><td style="padding:22px 22px 6px 22px;">'
+        # cellspacing (not CSS margin, which <td> mostly ignores) puts a real gap
+        # between the KPI tiles; Outlook's Word engine honors this old-school
+        # HTML attribute far more reliably than CSS spacing tricks.
+        f'<table role="presentation" width="100%" cellpadding="0" cellspacing="6"><tr>'
+        f'{kpis}</tr></table></td></tr>'
+        f'<tr><td style="padding:18px 28px 4px 28px;">{funnel_section}</td></tr>'
+        f'<tr><td style="padding:16px 28px 4px 28px;">{added_section}</td></tr>'
+        f'{diverted_row}'
+        f'<tr><td bgcolor="{EMAIL_STRIPE_BG}" style="padding:18px 28px;'
+        f'background-color:{EMAIL_STRIPE_BG};color:{EMAIL_GRAY};'
+        f'font-size:11px;text-align:center;border-top:1px solid {EMAIL_BORDER};">'
+        'Generated by pull_external_acks.py &middot; Data and Information Services &middot; '
+        'Janelia Research Campus</td></tr>'
+        '</table></td></tr></table></div>')
+
     try:
-        email = DISCONFIG['developer'] if ARG.TEST else DISCONFIG['receivers']
+        email = DISCONFIG['developer']
         LOGGER.info(f"Sending email to {email}")
-        opts = {'mime': 'html'}
         JRC.send_email(msg, DISCONFIG['sender'], email,
-                       "External acknowledgement DOI sync", **opts)
+                       "External acknowledgement DOI sync", mime='html')
     except Exception as err:
         print(str(err))
         traceback.print_exc()
@@ -591,8 +900,13 @@ def search_pmc(term, max_results=5000, api_key=None, days=None):
         LOGGER.info(f"Searching PubMed Central for '{term}' (last {days} days)")
     else:
         LOGGER.info(f"Searching PubMed Central for '{term}'")
-    search_response = _request_with_retry('GET', f"{base_url}esearch.fcgi", params=search_params)
-    search_data = search_response.json()
+    try:
+        search_response = _request_with_retry('GET', f"{base_url}esearch.fcgi",
+                                              params=search_params)
+        search_data = search_response.json()
+    except Exception as err:
+        LOGGER.warning(f"PMC search error: {err}")
+        return []
     pmids = search_data.get("esearchresult", {}).get("idlist", [])
     total_count = int(search_data.get("esearchresult", {}).get("count", 0))
     LOGGER.info(f"Found {total_count:,} PMC articles, retrieving {len(pmids):,} records")
@@ -607,7 +921,11 @@ def search_pmc(term, max_results=5000, api_key=None, days=None):
         batch_pmids = pmids[i:i + PMC_BATCH_SIZE]
         if i > 0:
             time.sleep(0.1 if api_key else 0.34)
-        articles.extend(_fetch_pmc_batch(base_url, batch_pmids, api_key))
+        try:
+            articles.extend(_fetch_pmc_batch(base_url, batch_pmids, api_key))
+        except Exception as err:
+            LOGGER.warning(f"PMC fetch error on batch starting at {i}: {err}")
+            break
     return articles
 
 
@@ -863,10 +1181,12 @@ def fetch_and_store_doi(doi, ack, source, pmcid=None):
 
 
 def _ignore_ack_doi(doi, source):
-    ''' Record a DOI in to_ignore (type="ack_doi") so future runs skip the
-        ack-fetch for it. No-op in dry-run. to_ignore is keyed by (type, key), so
-        the upsert matches on both and $setOnInsert leaves any existing entry
-        untouched; the counter is bumped only on a successful write.
+    ''' Record a DOI in to_ignore (type="ack_doi") so future runs using the same
+        --term skip the ack-fetch for it. No-op in dry-run. to_ignore is keyed
+        by (type, key, term) - scoped to the current search term, since a DOI
+        lacking one term in its ack text says nothing about a different term -
+        so the upsert matches on all three and $setOnInsert leaves any existing
+        entry untouched; the counter is bumped only on a successful write.
         Keyword arguments:
           doi: DOI string
           source: counter key prefix ('elife', 'elsevier', 'pmc', 'openalex')
@@ -877,9 +1197,9 @@ def _ignore_ack_doi(doi, source):
         return
     try:
         DB['dis']['to_ignore'].update_one(
-            {"type": "ack_doi", "key": doi},
-            {"$setOnInsert": {"type": "ack_doi", "key": doi,
-                              "reason": "Janelia not in ack text"}},
+            {"type": "ack_doi", "key": doi, "term": ARG.TERM.lower()},
+            {"$setOnInsert": {"type": "ack_doi", "key": doi, "term": ARG.TERM.lower(),
+                              "reason": f"'{ARG.TERM}' not in ack text"}},
             upsert=True)
         COUNT[f'{source}_ack_doi_ignored'] += 1
     except Exception as err:
@@ -1207,8 +1527,11 @@ def processing():
     if write_failed:
         summary += f"DOIs that failed to write:         {write_failed:,}\n"
     print(summary)
-    if ARG.TEST or ARG.WRITE:
-        generate_email(summary, RECORDS)
+    # INTERNAL_RECORDS (Janelia-authored diversions) are review-worthy even when
+    # RECORDS (new external DOIs) is empty - gate on either, not just RECORDS.
+    # Sent regardless of --write: a dry run's findings are worth seeing too.
+    if RECORDS or INTERNAL_RECORDS:
+        generate_email()
 
 # -----------------------------------------------------------------------------
 
@@ -1224,8 +1547,6 @@ if __name__ == '__main__':
     PARSER.add_argument('--source', dest='SOURCE', action='store',
                         choices=['elife', 'elsevier', 'pmc', 'arxiv'], default=None,
                         help='Restrict processing to a single source [all]')
-    PARSER.add_argument('--test', dest='TEST', action='store_true',
-                        default=False, help='Send email to developer')
     PARSER.add_argument('--write', dest='WRITE', action='store_true',
                         default=False, help='Flag, Update database')
     PARSER.add_argument('--verbose', dest='VERBOSE', action='store_true',

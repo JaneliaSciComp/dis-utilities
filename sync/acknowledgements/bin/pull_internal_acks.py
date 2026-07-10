@@ -23,9 +23,15 @@ INPUTS
     --source   Restrict processing to a single source (elife, elsevier, pmc, or
                arxiv). Omit to process all sources.
     --write    Actually update the database (default: dry-run).
-    --test     Send email to developer rather than the normal recipient list.
     --verbose  Increase logging verbosity.
     --debug    Maximum logging verbosity.
+
+EMAIL RECIPIENT
+----------------
+The summary email always goes to the configured developer address, never the
+full receivers list, and is sent any time acknowledgements are found -
+--write or not (a dry run's "would update" findings are just as worth seeing
+as a real run's).
 
 HIGH-LEVEL FLOW
 ---------------
@@ -58,7 +64,13 @@ HIGH-LEVEL FLOW
    - Prints a per-source summary of counts.
    - Writes internal_acks.json with all collected acknowledgement records.
    - Writes internal_ack_errors.json if any source calls raised exceptions.
-   - Sends a summary email when --test or --write is active and records were found.
+   - Sends a summary email whenever records were found (--write or not):
+     a header banner (run data, mode, DRY RUN/WRITE badge), KPI stat tiles per
+     source plus an error tile, one card per source (eLife/Elsevier/PMC/arXiv)
+     listing its DOIs (linked to the DIS UI, with a PMCID column for PMC), and
+     an Errors table when any source call raised. Built entirely from inline
+     styles/tables (no <style> block) for compatibility with older email clients,
+     matching the convention used by sync_citations.py.
 
 DEPENDENCIES
 ------------
@@ -70,17 +82,19 @@ DEPENDENCIES
 
 import argparse
 import collections
+import html
 import json
 from operator import attrgetter
 import os
 import sys
 import time
 from pymongo import UpdateOne
+from pymongo.errors import BulkWriteError
 from tqdm import tqdm
 import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
 
-__version__ = '1.2.0'
+__version__ = '1.4.0'
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation,no-member
 
@@ -90,6 +104,25 @@ DB = {}
 COUNT = collections.defaultdict(lambda: 0, {})
 # Global variables
 ARG = DIS = LOGGER = None
+# Display order for the "source" label stored on each internal-DOI record
+# (add_elife_internal_acks etc.), used to group the run-summary email.
+SOURCE_LABELS = ('eLife', 'Elsevier', 'PMC', 'arXiv')
+# HTML run-summary email palette/layout (generate_email and its html_* helpers).
+# Mirrors sync_citations.py's email convention: inline styles only (no <style>
+# block/classes), colors paired with an icon/label (not color alone) for
+# colorblind accessibility, for reliable rendering across email clients
+# including older Outlook.
+EMAIL_NAVY = '#1f3a5f'
+EMAIL_GREEN = '#1c7c3f'
+EMAIL_GREEN_BG = '#eefaf1'
+EMAIL_RED = '#c0392b'
+EMAIL_RED_BG = '#fdecea'
+EMAIL_AMBER = '#d68a1f'
+EMAIL_GRAY = '#5b6b7c'
+EMAIL_GRAY_BG = '#f2f4f6'
+EMAIL_STRIPE_BG = '#f7f9fb'
+EMAIL_BORDER = '#eef1f4'
+EMAIL_BLUE = '#2f7fd1'
 
 def terminate_program(msg=None):
     ''' Terminate the program gracefully
@@ -148,7 +181,7 @@ def add_elife_internal_acks(internal, error):
         Returns:
           None
     '''
-    payload = {"doi": {"$regex": "elife"}, "jrc_acknowledgements": {"$exists": False}}
+    payload = {"doi": {"$regex": r"10\.7554/elife"}, "jrc_acknowledgements": {"$exists": False}}
     payload = restrict_to_doi(payload)
     try:
         cnt = DB['dis'].dois.count_documents(payload)
@@ -272,32 +305,222 @@ def add_arxiv_internal_acks(internal, error):
                              "source": "arXiv"})
 
 
+def doiurl(doi):
+    ''' Format a DOI as a DIS UI link
+        Keyword arguments:
+          doi: DOI to format
+        Returns:
+          HTML anchor
+    '''
+    return (f"<a href='https://dis.int.janelia.org/doiui/{doi}' "
+            f"style='color:{EMAIL_BLUE};text-decoration:none;'>{doi}</a>")
+
+
+def html_kpi_card(value, label, tone='neutral', width='20%'):
+    ''' Build one KPI stat tile for the run-summary email's header row.
+        A single <td> carries the box look directly (bgcolor attribute +
+        background-color, no nested table) - Outlook's Word rendering engine
+        chokes on a percentage-width table nested inside a percentage-width <td>.
+        Keyword arguments:
+          value: display value (already formatted, e.g. "3")
+          label: caption under the value
+          tone: 'neutral', 'good', or 'bad' - selects the tile's color scheme
+          width: tile width as a percentage string (tune to the tile count)
+        Returns:
+          HTML for one table cell
+    '''
+    bg, fg = {'good': (EMAIL_GREEN_BG, EMAIL_GREEN),
+              'bad': (EMAIL_RED_BG, EMAIL_RED),
+              'neutral': (EMAIL_GRAY_BG, EMAIL_GRAY)}[tone]
+    return (f'<td width="{width}" align="center" valign="top" bgcolor="{bg}" '
+            f'style="padding:14px 6px;background-color:{bg};border-radius:8px;">'
+            f'<div style="font-size:24px;font-weight:700;color:{fg};">{value}</div>'
+            f'<div style="font-size:10.5px;color:{EMAIL_GRAY};text-transform:uppercase;'
+            f'letter-spacing:.04em;margin-top:2px;">{label}</div>'
+            f'</td>')
+
+
+def html_section_header(title):
+    ''' Build a section header bar for the run-summary email
+        Keyword arguments:
+          title: section title (may include an HTML entity icon prefix)
+        Returns:
+          HTML div block
+    '''
+    return (f'<div style="font-size:14px;font-weight:700;color:{EMAIL_NAVY};'
+            f'border-bottom:2px solid {EMAIL_BORDER};padding-bottom:7px;'
+            f'margin-bottom:10px;">{title}</div>')
+
+
+def html_pill(bg, fg, text):
+    ''' Build a small colored status badge as an auto-width single-cell table
+        (bgcolor attribute + background-color CSS), not a <span> - Outlook's
+        Word engine does not honor background-color on inline elements. Only
+        safe where the badge is the sole content of its table cell.
+        Keyword arguments:
+          bg: background color
+          fg: text color
+          text: pill text (may include an HTML entity icon prefix)
+        Returns:
+          HTML for a single-cell table sized to its content
+    '''
+    return (f'<table role="presentation" cellpadding="0" cellspacing="0"><tr>'
+            f'<td bgcolor="{bg}" style="background-color:{bg};color:{fg};padding:2px 10px;'
+            f'border-radius:10px;font-size:11.5px;font-weight:600;">{text}</td></tr></table>')
+
+
+def html_source_card(label, records):
+    ''' Build one "acknowledgements found" card for a single source: a header
+        with a count pill, followed by a zebra-striped table of DOIs (each
+        linked to its DIS UI page), with a PMCID column when the source's
+        records carry one (PMC only).
+        Keyword arguments:
+          label: display label (e.g. "eLife")
+          records: list of internal-DOI records for this source
+        Returns:
+          HTML card block
+    '''
+    has_pmcid = any(rec.get('pmcid') for rec in records)
+    rows = []
+    for i, rec in enumerate(records):
+        striped = i % 2 == 0
+        bgattr = f' bgcolor="{EMAIL_STRIPE_BG}"' if striped else ''
+        bg = f'background-color:{EMAIL_STRIPE_BG};' if striped else ''
+        if has_pmcid:
+            doi_radius = 'border-radius:6px 0 0 6px;' if bg else ''
+            pmcid_radius = 'border-radius:0 6px 6px 0;' if bg else ''
+            pmcid_html = (f'<td style="padding:6px 10px;{pmcid_radius}color:{EMAIL_GRAY};" '
+                          f'align="right">{rec["pmcid"]}</td>')
+        else:
+            doi_radius = 'border-radius:6px;' if bg else ''
+            pmcid_html = ''
+        rows.append(f'<tr{bgattr} style="{bg}">'
+                    f'<td style="padding:6px 10px;{doi_radius}">{doiurl(rec["doi"])}</td>'
+                    f'{pmcid_html}</tr>')
+    header = ('<td style="padding:5px 10px;">DOI</td>'
+              + ('<td style="padding:5px 10px;" align="right">PMCID</td>' if has_pmcid else ''))
+    table = ('<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+             'style="border-collapse:collapse;font-size:12.5px;">'
+             f'<tr style="color:{EMAIL_GRAY};font-size:10.5px;text-transform:uppercase;'
+             f'letter-spacing:.03em;">{header}</tr>' + "".join(rows) + '</table>')
+    # Header row is two <td>s directly in the outer table (not a nested
+    # width="100%" table inside one <td>) - Outlook's Word engine chokes on
+    # that nesting. The body row below spans both with colspan="2".
+    return (
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+        f'style="border:1px solid {EMAIL_BORDER};border-radius:8px;margin-bottom:14px;'
+        'border-collapse:separate;">'
+        f'<tr><td bgcolor="{EMAIL_STRIPE_BG}" style="background-color:{EMAIL_STRIPE_BG};'
+        f'padding:10px 16px;border-radius:8px 0 0 0;font-weight:700;color:{EMAIL_NAVY};'
+        f'font-size:13.5px;">{label}</td>'
+        f'<td bgcolor="{EMAIL_STRIPE_BG}" align="right" style="background-color:'
+        f'{EMAIL_STRIPE_BG};padding:10px 16px;border-radius:0 8px 0 0;">'
+        + html_pill(EMAIL_GREEN_BG, EMAIL_GREEN, f'&#10003; {len(records):,}') + '</td></tr>'
+        f'<tr><td colspan="2" style="padding:4px 16px 10px 16px;">{table}</td></tr></table>')
+
+
+def html_error_table(error):
+    ''' Build the Errors table for the run-summary email
+        Keyword arguments:
+          error: list of error records (doi, source, error)
+        Returns:
+          HTML table block
+    '''
+    rows = []
+    for i, err in enumerate(error):
+        striped = i % 2 == 0
+        bgattr = f' bgcolor="{EMAIL_STRIPE_BG}"' if striped else ''
+        bg = f'background-color:{EMAIL_STRIPE_BG};' if striped else ''
+        r_l = 'border-radius:6px 0 0 6px;' if bg else ''
+        r_r = 'border-radius:0 6px 6px 0;' if bg else ''
+        rows.append(
+            f'<tr{bgattr} style="{bg}"><td style="padding:6px 10px;{r_l}">'
+            f'{doiurl(err["doi"])}</td>'
+            f'<td style="padding:6px 10px;">{err["source"]}</td>'
+            f'<td style="padding:6px 10px;{r_r}color:{EMAIL_RED};">'
+            f'{html.escape(str(err["error"]))}</td></tr>')
+    return (
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+        'style="border-collapse:collapse;font-size:12.5px;">'
+        f'<tr style="color:{EMAIL_GRAY};font-size:10.5px;text-transform:uppercase;'
+        'letter-spacing:.03em;"><td style="padding:6px 10px;">DOI</td>'
+        '<td style="padding:6px 10px;">Source</td>'
+        '<td style="padding:6px 10px;">Error</td></tr>'
+        + "".join(rows) + '</table>')
+
+
 def generate_email(internal, error):
-    ''' Generate and send an email
+    ''' Generate and send the HTML run-summary email, grouping DOIs by source
+        (eLife/Elsevier/PMC/arXiv) into cards rather than one flat list.
         Keyword arguments:
           internal: list of internal DOIs
           error: list of error records
         Returns:
           None
     '''
-    msg = JRC.get_run_data(__file__, __version__) +  "<br><br>"
-    if internal:
-        msg += "Internal DOIs:<br>"
-        for rec in internal:
-            link = f"https://dis.int.janelia.org/doiui/{rec['doi']}"
-            pmcid = rec.get('pmcid')
-            if pmcid:
-                msg += f"<a href='{link}'>{rec['doi']}</a> " \
-                       f"(Source: {rec['source']}) (PMCID: {pmcid})<br>"
-            else:
-                msg += f"<a href='{link}'>{rec['doi']}</a> (Source: {rec['source']})<br>"
-        msg += "<br>"
+    run_data = JRC.get_run_data(__file__, __version__).strip()
+    mode_badge_bg = EMAIL_GREEN if ARG.WRITE else EMAIL_AMBER
+    mode_label = 'WRITE' if ARG.WRITE else 'DRY RUN'
+
+    by_source = collections.defaultdict(list)
+    for rec in internal:
+        by_source[rec['source']].append(rec)
+
+    kpis = ''.join(html_kpi_card(f"{len(by_source.get(label, [])):,}", f"{label} added",
+                                 'good' if by_source.get(label) else 'neutral')
+                   for label in SOURCE_LABELS)
+    kpis += html_kpi_card(f"{len(error):,}", "Errors", 'bad' if error else 'neutral')
+
+    cards = ''.join(html_source_card(label, by_source[label])
+                    for label in SOURCE_LABELS if by_source.get(label))
+    found_section = (
+        html_section_header(f"&#128209; Acknowledgements Found ({len(internal):,})")
+        + (cards if cards else f'<div style="color:{EMAIL_GRAY};font-size:13px;">'
+                                'No new acknowledgements were found.</div>'))
+
+    error_row = ''
     if error:
-        msg += f"Found {len(error):,} error records<br>"
-    email = DIS['developer'] if ARG.TEST else DIS['receivers']
+        error_row = (
+            f'<tr><td style="padding:16px 28px 6px 28px;">'
+            + html_section_header(f"&#9888; Errors ({len(error):,})")
+            + html_error_table(error) + '</td></tr>')
+
+    msg = (
+        f'<div style="font-family:-apple-system,\'Segoe UI\',Roboto,Helvetica,Arial,sans-serif;'
+        f'background-color:#eef1f4;padding:8px 0;">'
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>'
+        '<td align="center" style="padding:8px 14px 32px 14px;">'
+        '<table role="presentation" width="720" cellpadding="0" cellspacing="0" '
+        'bgcolor="#ffffff" '
+        f'style="max-width:720px;width:100%;background-color:#ffffff;border-radius:10px;'
+        f'border:1px solid {EMAIL_BORDER};overflow:hidden;">'
+        f'<tr><td bgcolor="{EMAIL_NAVY}" style="background-color:{EMAIL_NAVY};'
+        f'padding:22px 28px;">'
+        f'<div style="color:#ffffff;font-size:19px;font-weight:600;">'
+        f'{os.path.basename(__file__)}&nbsp;'
+        f'<span style="font-weight:400;opacity:.7;font-size:14px;">v{__version__}</span></div>'
+        f'<div style="color:#c9d6e6;font-size:12.5px;margin-top:6px;">{run_data} &middot; '
+        f'<span style="background-color:{mode_badge_bg};color:#fff;border-radius:10px;'
+        f'padding:1px 9px;font-size:11px;font-weight:600;letter-spacing:.03em;">'
+        f'{mode_label}</span></div></td></tr>'
+        f'<tr><td style="padding:22px 22px 6px 22px;">'
+        # cellspacing (not CSS margin, which <td> mostly ignores) puts a real gap
+        # between the KPI tiles; Outlook's Word engine honors this old-school
+        # HTML attribute far more reliably than CSS spacing tricks.
+        f'<table role="presentation" width="100%" cellpadding="0" cellspacing="6"><tr>'
+        f'{kpis}</tr></table></td></tr>'
+        f'<tr><td style="padding:18px 28px 4px 28px;">{found_section}</td></tr>'
+        f'{error_row}'
+        f'<tr><td bgcolor="{EMAIL_STRIPE_BG}" style="padding:18px 28px;'
+        f'background-color:{EMAIL_STRIPE_BG};color:{EMAIL_GRAY};'
+        f'font-size:11px;text-align:center;border-top:1px solid {EMAIL_BORDER};">'
+        'Generated by pull_internal_acks.py &middot; Data and Information Services &middot; '
+        'Janelia Research Campus</td></tr>'
+        '</table></td></tr></table></div>')
+
+    email = DIS['developer']
     subject = "Acknowledgements updated for DOIs"
-    JRC.send_email(msg, DIS['sender'], email, subject,
-                   mime='html')
+    JRC.send_email(msg, DIS['sender'], email, subject, mime='html')
 
 
 def processing():
@@ -318,18 +541,26 @@ def processing():
             handler()
     operations = []
     for row in tqdm(internal, total=len(internal), desc="Updating internal DOIs"):
-        if row['doi'] == 'n/a':
-            continue
         if not isinstance(row['ack'], str):
             LOGGER.warning(f"Weird format for {row['doi']}")
             continue
         operations.append(UpdateOne({"doi": row['doi']},
                                     {"$set": {"jrc_acknowledgements": row['ack']}}))
-        COUNT['updated'] += 1
+    COUNT['updated'] = len(operations)
     if ARG.WRITE and operations:
         # Unordered so one failed update doesn't block the rest of the batch.
         try:
-            DB['dis']['dois'].bulk_write(operations, ordered=False)
+            result = DB['dis']['dois'].bulk_write(operations, ordered=False)
+            COUNT['updated'] = result.modified_count
+        except BulkWriteError as err:
+            # Unordered means every non-failing op in the batch already went
+            # through - report the real counts and keep going instead of
+            # losing this run's JSON/email output over one bad document.
+            write_errors = err.details.get('writeErrors', [])
+            COUNT['updated'] = err.details.get('nModified', 0)
+            COUNT['write_errors'] = len(write_errors)
+            LOGGER.error(f"{len(write_errors):,} of {len(operations):,} updates failed: "
+                        f"{write_errors}")
         except Exception as err:
             terminate_program(err)
     if ARG.SOURCE in (None, 'elife'):
@@ -341,13 +572,15 @@ def processing():
     if ARG.SOURCE in (None, 'arxiv'):
         print(f"arXiv DOIs added:    {COUNT['arxiv_add']:,}")
     print(f"DOIs updated:        {COUNT['updated']:,}")
+    if COUNT['write_errors']:
+        print(f"DOIs failed to update: {COUNT['write_errors']:,}")
     if internal:
         with open('internal_acks.json', 'w', encoding='utf-8') as fileout:
             json.dump(internal, fileout, indent=4)
     if error:
         with open('internal_ack_errors.json', 'w', encoding='utf-8') as fileout:
             json.dump(error, fileout, indent=4)
-    if (ARG.TEST or ARG.WRITE) and internal:
+    if internal:
         generate_email(internal, error)
 
 # -----------------------------------------------------------------------------
@@ -360,8 +593,6 @@ if __name__ == '__main__':
     PARSER.add_argument('--source', dest='SOURCE', action='store',
                         choices=['elife', 'elsevier', 'pmc', 'arxiv'], default=None,
                         help='Restrict processing to a single source [all]')
-    PARSER.add_argument('--test', dest='TEST', action='store_true',
-                        default=False, help='Send email to developer')
     PARSER.add_argument('--write', dest='WRITE', action='store_true',
                         default=False, help='Flag, Update database')
     PARSER.add_argument('--verbose', dest='VERBOSE', action='store_true',
