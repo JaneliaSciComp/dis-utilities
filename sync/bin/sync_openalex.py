@@ -11,7 +11,7 @@
     jrc_former_status.
 """
 
-__version__ = '3.3.0'
+__version__ = '4.1.0'
 
 import argparse
 import collections
@@ -25,8 +25,9 @@ import traceback
 from tqdm import tqdm
 import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
+import dis_license_lib as DISL
 
-# pylint: disable=broad-exception-caught,logging-fstring-interpolation,logging-not-lazy
+# pylint: disable=broad-exception-caught,logging-fstring-interpolation,logging-not-lazy,duplicate-code
 
 ARG = DISCONFIG = LOGGER = None
 DB = {}
@@ -75,6 +76,13 @@ def initialize_program():
     for row in rows:
         LICENSE[row['name']] = row['display']
     try:
+        rows = DB['dis'].cvterm.find({'cv': 'license'})
+    except Exception as err:
+        terminate_program(err)
+    for row in rows:
+        if row['name'] not in LICENSE:
+            LICENSE[row['name']] = row['name']
+    try:
         rows = DB['dis'].subscription.find({"oa_status": {"$exists": True}})
     except Exception as err:
         terminate_program(err)
@@ -103,63 +111,6 @@ def get_dois():
     return dois
 
 
-def get_pmc_license(pmcid):
-    """ Get the license for a PMCID
-        Keyword arguments:
-          pmcid: PMCID
-        Returns:
-          License
-    """
-    try:
-        data = DL.get_doi_record(pmcid, source='pmc')
-    except Exception as err:
-        LOGGER.debug(f"Could not get PMC license for {pmcid}: {err}")
-        COUNT['pmc_error'] += 1
-        return None
-    if not data or 'OAI-PMH' not in data or 'GetRecord' not in data['OAI-PMH'] \
-       or 'record' not in data['OAI-PMH']['GetRecord'] \
-       or 'metadata' not in data['OAI-PMH']['GetRecord']['record'] \
-       or 'article' not in data['OAI-PMH']['GetRecord']['record']['metadata'] \
-       or 'front' not in data['OAI-PMH']['GetRecord']['record']['metadata']['article']:
-        return None
-    front = data['OAI-PMH']['GetRecord']['record']['metadata']['article']['front']
-    if 'article-meta' not in front or 'custom-meta-group' not in front['article-meta'] \
-       or 'custom-meta' not in front['article-meta']['custom-meta-group'] \
-        or not front['article-meta']['custom-meta-group']['custom-meta']:
-        return None
-    custom_meta_list = front['article-meta']['custom-meta-group']['custom-meta']
-    if isinstance(custom_meta_list, dict):
-        custom_meta_list = [custom_meta_list]
-    for custom_meta in custom_meta_list:
-        if custom_meta['meta-name'] == 'license':
-            return custom_meta['meta-value'].replace(" ", "-").lower()
-    return None
-
-
-def get_unpaywall_license(doi):
-    """ Get the license for a DOI from Unpaywall
-        Keyword arguments:
-          doi: DOI
-        Returns:
-          License string or None
-    """
-    try:
-        data = DL.get_doi_record(doi, source='unpaywall')
-    except Exception as err:
-        LOGGER.debug(f"Could not get Unpaywall license for {doi}: {err}")
-        COUNT['unpaywall_error'] += 1
-        return None
-    if not data:
-        return None
-    best = data.get('best_oa_location') or {}
-    if best.get('license'):
-        return best['license']
-    for loc in data.get('oa_locations', []):
-        if loc.get('license'):
-            return loc['license']
-    return None
-
-
 def update_processing(doi, action, notes=None):
     ''' Update the processing status for a DOI
         Keyword arguments:
@@ -183,99 +134,56 @@ def update_processing(doi, action, notes=None):
         terminate_program(err)
 
 
-def update_datacite_license(row):
-    """ Update jrc_license from DataCite rightsList
-        Keyword arguments:
-          row: row to update from dois collection
-        Returns:
-          None
-    """
-    if row.get('jrc_license'):
-        return
-    payload = {}
-    if 'rightsList' in row and row['rightsList']:
-        for right in row['rightsList']:
-            if 'rightsIdentifier' in right and right['rightsIdentifier'] in LICENSE:
-                payload['jrc_license'] = LICENSE[right['rightsIdentifier']]
-                LOGGER.info(f"Using license (rightsIdentifier) {payload['jrc_license']} " \
-                            + f"for {row['doi']}")
-                break
-            elif 'rights' in right and right['rights'] in LICENSE:
-                payload['jrc_license'] = LICENSE[right['rights']]
-                LOGGER.info(f"Using license (rights) {payload['jrc_license']} for {row['doi']}")
-    if payload:
-        write_record(row, payload)
-        update_processing(row['doi'], 'sync_openaccess_license',
-                          f"update_datacite_license: {payload['jrc_license']}")
-
-
-def update_open_access(row):
-    """ Update jrc_is_oa and jrc_oa_status
+def update_open_access(row):  # pylint: disable=too-many-branches,too-many-statements
+    """ Update jrc_is_oa, jrc_oa_status, and jrc_license
         Keyword arguments:
           row: row to update from dois collection
         Returns:
           None
     """
     payload = {}
-    if 'jrc_obtained_from' in row and row['jrc_obtained_from'] == 'DataCite':
-        update_datacite_license(row)
-    time.sleep(.05)
     if not row.get('jrc_oa_status') and row.get('jrc_journal') and row['jrc_journal'] in JOURNAL:
         row['jrc_is_oa'] = True
         payload['jrc_is_oa'] = True
         row['jrc_oa_status'] = JOURNAL[row['jrc_journal']]
         payload['jrc_oa_status'] = JOURNAL[row['jrc_journal']]
         LOGGER.warning(f"Using journal OA status {row['jrc_oa_status']} for {row['doi']}")
-    data = DL.get_doi_record(row['doi'], source='openalex')
-    if not data:
+    time.sleep(.05)
+    data, openalex_unreachable = DISL.get_openalex_record(row['doi'])
+    if openalex_unreachable:
+        COUNT['openalex_unreachable'] += 1
+    elif not data:
         if not ARG.SILENT:
             LOGGER.warning(f"{row['doi']} was not found in OpenAlex")
         COUNT["notfound"] += 1
+    else:
+        try:
+            if 'open_access' in data and data['open_access']:
+                if 'jrc_is_oa' not in row:
+                    payload['jrc_is_oa'] = bool(data['open_access']['is_oa'])
+                if 'jrc_oa_status' not in row:
+                    payload['jrc_oa_status'] = data['open_access']['oa_status']
+        except Exception as err:
+            LOGGER.error(f"Could not process {row['doi']}")
+            terminate_program(err)
+    # License -- tries DataCite rightsList, OpenAlex (reusing the fetch above), PMC, Unpaywall
+    if not row.get('jrc_license'):
+        result = DISL.resolve_license(row, LICENSE, openalex_data=data)
+        if result.mapped:
+            payload['jrc_license'] = result.mapped
+        if result.pmc_skipped_no_id:
+            COUNT['pmc_skipped_no_id'] += 1
+        if result.pmc_429_exhausted:
+            COUNT['pmc_429_exhausted'] += 1
+        if result.pmc_unreachable:
+            COUNT['pmc_unreachable'] += 1
+        if result.unpaywall_not_indexed:
+            COUNT['unpaywall_not_indexed'] += 1
+        if result.unpaywall_unreachable:
+            COUNT['unpaywall_unreachable'] += 1
+    if not payload:
         return
-    try_pmc = True
-    try:
-        # Open Access
-        if 'open_access' in data and data['open_access']:
-            if 'jrc_is_oa' not in row:
-                payload['jrc_is_oa'] = bool(data['open_access']['is_oa'])
-            if 'jrc_oa_status' not in row:
-                payload['jrc_oa_status'] = data['open_access']['oa_status']
-        # License
-        if ('jrc_license' not in row or not row['jrc_license']) \
-           and 'primary_location' in data and data['primary_location'] \
-           and data['primary_location']['license'] \
-           and data['primary_location']['license'] != "False":
-            if data['primary_location']['license'] in LICENSE:
-                payload['jrc_license'] = LICENSE[data['primary_location']['license']]
-                LOGGER.info(f"Using license (primary_location) {payload['jrc_license']} " \
-                            + f"for {row['doi']}")
-                try_pmc = False
-            else:
-                LOGGER.warning(f"Unknown license {data['primary_location']['license']} " \
-                               + f"for {row['doi']}")
-        if ('jrc_license' not in payload or payload['jrc_license'] is None) and try_pmc \
-           and 'jrc_pmc' in row:
-            alt = get_pmc_license(row['jrc_pmc'])
-            if alt:
-                if alt in LICENSE:
-                    payload['jrc_license'] = LICENSE[alt]
-                    LOGGER.info(f"Using PMC license for {row['doi']}: {alt}")
-                else:
-                    LOGGER.warning(f"Unknown PMC license {alt} for {row['doi']}")
-        if ('jrc_license' not in payload or payload['jrc_license'] is None) and try_pmc:
-            alt = get_unpaywall_license(row['doi'])
-            if alt:
-                if alt in LICENSE:
-                    payload['jrc_license'] = LICENSE[alt]
-                    LOGGER.info(f"Using Unpaywall license for {row['doi']}: {alt}")
-                else:
-                    LOGGER.warning(f"Unknown Unpaywall license {alt} for {row['doi']}")
-        if not payload:
-            return
-    except Exception as err:
-        LOGGER.error(f"Could not process {row['doi']}")
-        terminate_program(err)
-    if data.get('id'):
+    if data and data.get('id'):
         payload['jrc_openalex_id'] = data['id']
     write_record(row, payload)
     notes = "update_openalex"
@@ -336,10 +244,18 @@ def show_counts():
     msg = f"DOIs read:      {COUNT['dois']:,}\n"
     if COUNT['notfound']:
         msg += f"DOIs not found: {COUNT['notfound']:,}\n"
-    if COUNT['pmc_error']:
-        msg += f"PMC errors:       {COUNT['pmc_error']:,}\n"
-    if COUNT['unpaywall_error']:
-        msg += f"Unpaywall errors: {COUNT['unpaywall_error']:,}\n"
+    if COUNT['pmc_skipped_no_id']:
+        msg += f"DOIs with no PMC ID:            {COUNT['pmc_skipped_no_id']:,}\n"
+    if COUNT['pmc_429_exhausted']:
+        msg += f"DOIs with PMC 429 exhausted:    {COUNT['pmc_429_exhausted']:,}\n"
+    if COUNT['pmc_unreachable']:
+        msg += f"DOIs skipped (PMC down):        {COUNT['pmc_unreachable']:,}\n"
+    if COUNT['openalex_unreachable']:
+        msg += f"DOIs skipped (OpenAlex down):   {COUNT['openalex_unreachable']:,}\n"
+    if COUNT['unpaywall_not_indexed']:
+        msg += f"DOIs not indexed in Unpaywall:  {COUNT['unpaywall_not_indexed']:,}\n"
+    if COUNT['unpaywall_unreachable']:
+        msg += f"DOIs skipped (Unpaywall down):  {COUNT['unpaywall_unreachable']:,}\n"
     if COUNT['updated']:
         msg += f"DOIs updated:   {COUNT['updated']:,}\n"
     return msg
@@ -403,7 +319,9 @@ def process_dois():
     msg1 = show_counts()
     print(msg1)
     # Open Access status override
-    COUNT['dois'] = COUNT["updated"] = COUNT["notfound"] = 0
+    COUNT.update(dois=0, updated=0, notfound=0, pmc_skipped_no_id=0, pmc_429_exhausted=0,
+                 pmc_unreachable=0, openalex_unreachable=0, unpaywall_not_indexed=0,
+                 unpaywall_unreachable=0)
     if dois:
         rows = []
         for doi in dois:
