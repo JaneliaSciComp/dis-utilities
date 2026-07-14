@@ -24,8 +24,10 @@ TAGLIST = {}
 PEOPLE_CACHE = {}
 ORCID_CACHE = {}
 # doi_common author-detail match type -> display label/color for the staff email
-MATCH_LABEL = {'asserted': 'Affiliation', 'ORCID': 'ORCID', 'name': 'Name'}
-MATCH_COLOR = {'asserted': 'limegreen', 'ORCID': 'limegreen', 'name': 'crimson'}
+MATCH_LABEL = {'asserted': 'Affiliation', 'ORCID': 'ORCID', 'name': 'Name',
+               'jrc_author': 'Author list'}
+MATCH_COLOR = {'asserted': 'limegreen', 'ORCID': 'limegreen', 'name': 'crimson',
+               'jrc_author': 'dodgerblue'}
 # Inline CSS for the staff-email author match table
 TH_L = "style='text-align:left; padding:4px 8px; border-bottom:2px solid #888;'"
 TH_C = "style='text-align:center; padding:4px 8px; border-bottom:2px solid #888;'"
@@ -238,23 +240,56 @@ def matched_authors(row):
           row: row from the dois collection
         Returns:
           List of author detail dicts whose match type is affiliation, ORCID,
-          or name (i.e. 'match' is set). Each dict is tagged with 'name_green':
-          True only when the author's employeeId is in the DOI's jrc_author
-          list. Empty list on error or no matches.
+          name, or jrc_author (on this DOI's authoritative Janelia author list,
+          even if get_author_details() couldn't independently confirm it --
+          e.g. after a transient lookup failure). Each dict is tagged with
+          'name_green': True only when the author's employeeId is in the
+          DOI's jrc_author list.
     '''
     try:
         details = DL.get_author_details(row, DB['dis'].orcid)
     except Exception as err:
         LOGGER.error(f"Could not get author details for {row['doi']}: {err}")
-        return []
+        details = []
     jrc_authors = set(row.get('jrc_author', []))
     matched = []
+    seen = set()
     for auth in details or []:
         if not auth.get('match'):
             continue
         auth['name_green'] = bool(auth.get('employeeId')) \
                              and auth['employeeId'] in jrc_authors
         matched.append(auth)
+        if auth.get('employeeId'):
+            seen.add(auth['employeeId'])
+    # jrc_author is this DOI's authoritative, already-curated Janelia author
+    # list -- it's what individual notification emails are actually driven
+    # by. get_author_details() re-derives matches independently (asserted
+    # affiliation, ORCID, or an exact name match) and can miss or fail on
+    # someone jrc_author already confirms (e.g. a transient OpenAlex lookup
+    # failure can wipe out an entire DOI's details). Anyone on jrc_author not
+    # already covered above still needs to show up here, since they ARE
+    # being emailed.
+    for employee_id in jrc_authors - seen:
+        resp = people_by_id(employee_id)
+        if not resp:
+            continue
+        first = resp.get('nameFirstPreferred')
+        last = resp.get('nameLastPreferred')
+        if not (first and last):
+            continue
+        orc = orcid_record(employee_id) or {}
+        matched.append({
+            'name': f"{first} {last}",
+            'employeeId': employee_id,
+            'name_green': True,
+            'orcid': orc.get('orcid'),
+            'alumni': 'alumni' in orc,
+            'workerType': orc.get('workerType'),
+            'in_database': True,
+            'match': 'jrc_author',
+            'match_notes': "On this DOI's Janelia author list",
+        })
     return matched
 
 
@@ -320,8 +355,11 @@ def legend_section():
         f"{circle_f} / {circle_l} &ndash; first / last author of the paper.",
         "<strong>Match type</strong> &ndash; how the author was matched: "
         f"<span style='color:{MATCH_COLOR['asserted']};'>Affiliation</span>, "
-        f"<span style='color:{MATCH_COLOR['ORCID']};'>ORCID</span>, or "
-        f"<span style='color:{MATCH_COLOR['name']};'>Name</span>.",
+        f"<span style='color:{MATCH_COLOR['ORCID']};'>ORCID</span>, "
+        f"<span style='color:{MATCH_COLOR['name']};'>Name</span>, or "
+        f"<span style='color:{MATCH_COLOR['jrc_author']};'>Author list</span> "
+        "(already on this DOI's Janelia author list, but not independently "
+        "re-confirmed here).",
         f"<strong>Current employee</strong> &ndash; {check} current employee; "
         f"<span style='{BADGE_ORANGE}'>worker type</span> non-standard worker type; "
         f"<span style='{BADGE_RED}'>Former employee</span> or "
