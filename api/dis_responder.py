@@ -47,7 +47,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "119.28.0"
+__version__ = "119.29.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -4047,6 +4047,31 @@ def get_figshare_counts(row):
     return figshare
 
 
+def curator_display(tag):
+    ''' Build a display label for a jrc_acknowledge tag's curator.
+        Keyword arguments:
+          tag: jrc_acknowledge tag object ({name, code, type, curator})
+        Returns:
+          "IRIS" (in lime) for machine-tagged entries; <name> (linked to their
+          /userui/ record) for human-curated entries whose curator (looked up
+          by userIdO365 in the orcid collection, since a human curator may not
+          have an ORCID) resolves to a name; "Human curated" if no curator is
+          set or no matching orcid record is found.
+    '''
+    curator = tag.get('curator')
+    if curator == 'IRIS':
+        return "<span style='color: lime'>IRIS</span>"
+    if curator:
+        try:
+            orc = DB['dis'].orcid.find_one({"userIdO365": curator})
+        except Exception:
+            orc = None
+        if orc:
+            name = " ".join([orc['given'][0], orc['family'][0]])
+            return f"<a href='/userui/{orc['userIdO365']}'>{name}</a>"
+    return 'Human curated'
+
+
 def doi_tabs(doi, row, rowext, data, authors):
     ''' Generate DOI tabs
         Keyword arguments:
@@ -4113,12 +4138,17 @@ def doi_tabs(doi, row, rowext, data, authors):
         content['abstract'] = ahtml
     # Acknowledgements
     ahtml = ""
-    tags = []
     if row.get('jrc_acknowledge'):
+        trows = []
         for tag in row['jrc_acknowledge']:
-            tags.append(f"<a href='/tag/{escape(tag['name'])}'>{tag['name']}</a>")
-        if tags:
-            ahtml += "<h4>Acknowledgement tags</h4>" + "<br>".join(tags)
+            curator = curator_display(tag)
+            updated = str(tag['updated']).split(' ', maxsplit=1)[0] if tag.get('updated') else ''
+            trows.append([safe(f"<a href='/tag/{escape(tag['name'])}'>{tag['name']}</a>"),
+                          safe(curator), updated])
+        if trows:
+            ahtml += "<h4>Acknowledgement tags</h4>" \
+                     + render_table(['Tag', 'Curator', 'Updated'], trows, table_id='acktags',
+                                   css='tablesorter standard-scroll')
     acktext = asrc = ""
     if row.get('jrc_acknowledgements'):
         acktext = row['jrc_acknowledgements'].replace('\n', '<br>')
@@ -4149,7 +4179,7 @@ def doi_tabs(doi, row, rowext, data, authors):
                 highlight = ""
         except Exception:
             pass
-        ahtml += f"<h4>Acknowledgements</h4><div class='abstract'>{acktext}"
+        ahtml += f"<h4 style='margin-top:22px;'>Acknowledgements</h4><div class='abstract'>{acktext}"
         if asrc:
             ahtml += "<br><span style='font-size:10pt;background-color:#777;" \
                      + f"color:aqua;'>Source: {asrc}</span></div>"
