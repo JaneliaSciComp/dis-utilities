@@ -19,8 +19,9 @@ updates the following fields if they have changed:
     - Managed teams and lab group
     - hireDate (set once, never overwritten)
 
-If --alumni is set, records with no matching People entry are marked as
-former employees (alumni=True) rather than causing an error.
+Records with no matching People entry (e.g. departed employees) are logged
+and skipped without aborting the run. If --alumni is set, they are instead
+marked as former employees (alumni=True).
 
 If --reset is set, affiliations, group, and group_code are cleared before
 updates are applied; useful for rebuilding stale affiliation data.
@@ -35,7 +36,7 @@ With Changes table listing every updated author (linked to their /userui/
 record) with a plain-English diff of exactly what changed on their record.
 """
 
-__version__ = '6.2.0'
+__version__ = '6.3.0'
 
 import argparse
 import collections
@@ -253,16 +254,21 @@ def update_affiliations(idresp, row):
     dirty = False
     bumped = False
     old_affiliations = row['affiliations'].copy() if 'affiliations' in row else []
-    # Add affiliations from People
+    # Add affiliations from People (COUNT['affiliations'] is bumped once per
+    # record in record_updates, not here - so a record with several new
+    # affiliations counts as one changed record, consistent with the other
+    # per-record metrics)
     if 'affiliations' in idresp and idresp['affiliations']:
         for aff in idresp['affiliations']:
+            org = aff.get('supOrgName')
+            if not org:
+                continue
             set_row(row, 'affiliations')
-            if aff['supOrgName'] not in row['affiliations']:
-                row['affiliations'].append(aff['supOrgName'])
+            if org not in row['affiliations']:
+                row['affiliations'].append(org)
                 dirty = True
         if dirty:
             bumped = True
-            COUNT['affiliations'] += 1
             LOGGER.warning(f"{row['given'][0]} {row['family'][0]}: {old_affiliations} -> " \
                            + f"{row['affiliations']}")
     # Add ccDescr if this person doesn't already have a group
@@ -273,7 +279,6 @@ def update_affiliations(idresp, row):
             dirty = True
             if not bumped:
                 bumped = True
-                COUNT['affiliations'] += 1
                 LOGGER.warning(f"{row['given'][0]} {row['family'][0]}: {old_affiliations} -> " \
                                + f"{row['affiliations']}")
     # Add supOrgName if the supOrgSubType isn't Company or Division
@@ -285,7 +290,6 @@ def update_affiliations(idresp, row):
             dirty = True
             if not bumped:
                 bumped = True
-                COUNT['affiliations'] += 1
                 LOGGER.warning(f"{row['given'][0]} {row['family'][0]}: {old_affiliations} -> " \
                                + f"{row['affiliations']}")
     return dirty
@@ -308,33 +312,38 @@ def update_managed_teams(idresp, row):  # pylint: disable=too-many-branches
     # Reset managed so it's rebuilt from scratch; old_managed holds the prior value for comparison
     row.pop('managed', None)
     for team in idresp['managedTeams']:
-        if team['supOrgSubType'] == 'Lab' and team['supOrgName'].endswith(' Lab'):
+        org = team.get('supOrgName')
+        subtype = team.get('supOrgSubType')
+        code = team.get('supOrgCode')
+        if not org:
+            continue
+        if subtype == 'Lab' and org.endswith(' Lab'):
             # Lab head
-            if team['supOrgCode'] in IGNORE:
+            if code in IGNORE:
                 continue
             if lab:
                 LOGGER.warning(f"Multiple labs found for {idresp['nameFirstPreferred']} " \
                                + idresp['nameLastPreferred'])
-            lab = team['supOrgName']
+            lab = org
             if 'group' not in row or row['group'] != lab:
                 dirty = True
             row['group'] = lab
-            row['group_code'] = team['supOrgCode']
+            row['group_code'] = code
         else:
             # Managed team
             set_row(row, 'managed')
-            if team['supOrgName'] not in row['managed'] and team['supOrgSubType']:
-                if team['supOrgSubType'] != 'Lab' or not team['supOrgName'].endswith(' Lab'):
-                    row['managed'].append(team['supOrgName'])
+            if org not in row['managed'] and subtype:
+                if subtype != 'Lab' or not org.endswith(' Lab'):
+                    row['managed'].append(org)
                     LOGGER.debug(f"{row['given'][0]} {row['family'][0]}: {old_managed} -> " \
                                  + f"{row['managed']}")
                     if not dirty:
                         COUNT['managed'] += 1
                         dirty = True
+        # COUNT['affiliations'] is bumped once per record in record_updates
         set_row(row, 'affiliations')
-        if team['supOrgName'] not in row['affiliations']:
-            row['affiliations'].append(team['supOrgName'])
-            COUNT['affiliations'] += 1
+        if org not in row['affiliations']:
+            row['affiliations'].append(org)
             LOGGER.debug(f"{row['given'][0]} {row['family'][0]}: {old_affiliations} -> " \
                          + f"{row['affiliations']}")
             dirty = True
@@ -370,6 +379,11 @@ def record_updates(idresp, row):
           dirty: indicates if record is dirty
     '''
     dirty = False
+    # Snapshot affiliations up front: update_affiliations() and
+    # update_managed_teams() both append to row['affiliations'], so we count a
+    # single "affiliations updated" per record here rather than once per source
+    # or per team (keeps the metric per-record, like names/workerType/hireDate).
+    aff_before = row.get('affiliations', []).copy()
     # Update preferred name
     pdirty = update_preferred_name(idresp, row)
     # Update affiliations
@@ -382,6 +396,8 @@ def record_updates(idresp, row):
             COUNT['workerType'] += 1
     # Update managed teams
     mdirty = update_managed_teams(idresp, row)
+    if row.get('affiliations', []) != aff_before:
+        COUNT['affiliations'] += 1
     if 'affiliations' in row and not row['affiliations']:
         del row['affiliations']
     if 'managed' in row and not row['managed']:
@@ -395,7 +411,7 @@ def record_updates(idresp, row):
             dirty = True
             COUNT['hireDate'] += 1
         except Exception as err:
-            LOGGER.error(f"Error updating hire date {idresp['hireDate']} {hdate} for " \
+            LOGGER.error(f"Error updating hire date {idresp['hireDate']} for " \
                          + f"{row['given'][0]} {row['family'][0]}: {err}")
     if pdirty or udirty or mdirty:
         dirty = True
@@ -545,6 +561,7 @@ def generate_email(changes_log):
         ("Managed teams updated", f"{COUNT['managed']:,}"),
         ("Hire dates updated", f"{COUNT['hireDate']:,}"),
         ("Set to former employee", f"{COUNT['alumni']:,}"),
+        ("No People record (skipped)", f"{COUNT['no_people_record']:,}"),
     ]
     breakdown_section = (html_section_header("&#128202; Change Breakdown")
                          + html_metric_rows(breakdown_rows))
@@ -609,6 +626,7 @@ def postprocessing(audit, changes_log):
           None
     '''
     msg = f"Authors read from orcid:  {COUNT['orcid']:,}\n" \
+          + f"No People record:         {COUNT['no_people_record']:,}\n" \
           + f"Authors updated:          {COUNT['updated']:,}\n" \
           + f"  Names updated:          {COUNT['name']:,}\n" \
           + f"  Affiliations updated:   {COUNT['affiliations']:,}\n" \
@@ -674,7 +692,14 @@ def update_orcid():  # pylint: disable=too-many-branches
                 COUNT['alumni'] += 1
                 dirty = True
             else:
-                terminate_program(f"No People record for {row}")
+                # A departed employee (gone from People) shouldn't abort the
+                # whole run and lose the report/partial writes - skip and count
+                # it. Use --alumni to auto-mark these as former employees.
+                name = f"{row.get('given', ['?'])[0]} {row.get('family', ['?'])[0]}"
+                LOGGER.warning(f"No People record for {name} "
+                               f"(employeeId {row['employeeId']}) - skipping")
+                COUNT['no_people_record'] += 1
+                continue
         else:
             dirty = record_updates(idresp, row)
         LOGGER.debug(json.dumps(row, indent=4, default=str))
