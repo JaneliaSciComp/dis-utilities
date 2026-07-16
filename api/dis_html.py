@@ -85,14 +85,14 @@ NAV = {"Home": "",
                          "Missing costs": "subscription/missingcost",
                         },
        "Tag/affiliation": {"DOIs by": {"Tag": "dois_tag_ack/tag",
-                                       "Acknowledgement": "dois_tag_ack/ack",
                                        "Lab": "dois_lab"},
                            "Top DOI tags by year": "dois_top",
                            "Author affiliations": {"P&C": "affiliations",
                                                    "Janelia": "janelia_affiliations"},
                            "Labs": "labs",
                            "Projects": "projects"},
-       "Acknowledgements": {"Acknowledgement metrics": "acknowledgement_stats",
+       "Acknowledgements": {"DOIs by acknowledgement": "dois_tag_ack/ack",
+                            "Acknowledgement metrics": "acknowledgement_stats",
                             "Search by project or department": "acksregexsearch",
                             "Janelia acks without Janelia references": "acks_no_janelia_refs"},
        "System" : {"Database metrics": "stats_database",
@@ -439,7 +439,8 @@ def dloop(row, keys, sep="\t"):
     return sep.join([str(row[fld]) for fld in keys])
 
 
-def year_pulldown(prefix, all_years=True, suffix = '', start_year=2006, query=False):
+def year_pulldown(prefix, all_years=True, suffix = '', start_year=2006, query=False,
+                  selected=None):
     ''' Generate a year pulldown
         Keyword arguments:
           prefix: navigation prefix
@@ -449,6 +450,9 @@ def year_pulldown(prefix, all_years=True, suffix = '', start_year=2006, query=Fa
           query: if True, link as /<prefix>?year=<year> (and /<prefix> for All)
                  instead of the path form /<prefix>/<year><suffix>; use when the
                  path's positional segments are reserved for something else
+          selected: if given, the currently-selected value is shown on a widened
+                    button (the value in bright white), instead of the generic
+                    "Select publishing year" label
         Returns:
           Pulldown HTML
     '''
@@ -457,9 +461,28 @@ def year_pulldown(prefix, all_years=True, suffix = '', start_year=2006, query=Fa
         start_year -= 1
     for year in range(datetime.now().year, start_year, -1):
         years.append(str(year))
-    html = "<div class='btn-group'><button type='button' class='btn btn-info dropdown-toggle' " \
-           + "data-toggle='dropdown' aria-haspopup='true' aria-expanded='false'>" \
-           + "Select publishing year</button><div class='dropdown-menu'>"
+    if selected is not None:
+        # Own caret glyph in the label so the selected value can sit on the far
+        # side of the arrow (separated by a bar); Bootstrap's dropdown-toggle
+        # auto-caret always renders last, so drop that class here. Use a
+        # .dropdown wrapper (not .btn-group): btn-group would square the
+        # button's right corners for a non-:last-child, non-.dropdown-toggle
+        # button. The dropdown still opens via data-toggle="dropdown".
+        wrapper_class = 'dropdown'
+        btn_class = "btn btn-info"
+        btn_label = ("<span style='opacity:0.85;'>Publishing year</span> "
+                     "<span style='opacity:0.85;'>&#9662;</span> "
+                     "<span style='opacity:0.5;'>|</span> "
+                     f"<span style='color:#ffffff;font-weight:700;'>{selected}</span>")
+        btn_style = " style='min-width:240px;'"
+    else:
+        wrapper_class = 'btn-group'
+        btn_class = "btn btn-info dropdown-toggle"
+        btn_label = "Select publishing year"
+        btn_style = ""
+    html = f"<div class='{wrapper_class}'><button type='button' class='{btn_class}'" \
+           + f"{btn_style} data-toggle='dropdown' aria-haspopup='true' aria-expanded='false'>" \
+           + f"{btn_label}</button><div class='dropdown-menu'>"
     for year in years:
         if query:
             url = f"/{prefix}" if year == 'All' else f"/{prefix}?year={year}"

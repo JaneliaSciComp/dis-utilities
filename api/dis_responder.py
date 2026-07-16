@@ -38,7 +38,8 @@ from dis_html import (DOWNLOAD_ICON, add_jrc_fields, add_subjects, cell,
                       create_downloadable, dloop, doi_link, fcell,
                       generate_navbar, get_license, make_link,
                       oa_status_rank, render_table, render_warning,
-                      safe, stat_cards, tiny_badge, year_pulldown)
+                      safe, stat_cards, tiny_badge,
+                      year_pulldown as _year_pulldown)
 from dis_config import (ARTICLES, DATACITE, DOI, DO_NOT_DISPLAY, EMAIL,
                         EPT_ONE, EPT_TWO, LIBRARY, NCBI_MESH, OAREPORT,
                         OPENALEX, ORCID, PMCID, PMID, PREFERRED_AFF,
@@ -47,7 +48,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "119.29.0"
+__version__ = "119.30.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -223,6 +224,41 @@ def error_message(err):
     else:
         msg = f"An exception of type {type(err).__name__} occurred. Arguments:\n{err.args}"
     return msg
+
+
+def year_pulldown(prefix, all_years=True, suffix='', start_year=2006, query=False,
+                  selected=None):
+    ''' Request-aware wrapper around dis_html.year_pulldown. When the caller
+        doesn't pass an explicit `selected`, derive the currently-active year
+        from the request URL (the path segment after the prefix, or ?year= in
+        query mode) so the button shows it after the caret. Falls back to "All"
+        (all_years) or the current year when no year is present in the URL.
+        dis_html stays request-agnostic; this app-layer shadow adds the request
+        coupling. Endpoints whose default isn't "All"/current-year (e.g. the
+        preprint pages) pass `selected` explicitly.
+        Keyword arguments:
+          prefix, all_years, suffix, start_year, query: as dis_html.year_pulldown
+          selected: explicit value to show (skips the request-based derivation)
+        Returns:
+          Pulldown HTML
+    '''
+    if selected is None:
+        if query:
+            yr = request.args.get('year')
+        else:
+            path = request.path.strip('/')
+            pfx = prefix.strip('/')
+            yr = None
+            if path.startswith(pfx + '/'):
+                rest = path[len(pfx) + 1:]
+                if suffix and rest.endswith(suffix):
+                    rest = rest[:-len(suffix)]
+                yr = rest or None
+        if not yr:
+            yr = 'All' if all_years else str(datetime.now().year)
+        selected = "(all years)" if yr == 'All' else yr
+    return _year_pulldown(prefix, all_years=all_years, suffix=suffix,
+                          start_year=start_year, query=query, selected=selected)
 
 
 def inspect_error(err, errtype):
@@ -8580,27 +8616,23 @@ def dois_author(year='All'):
 def dois_top_author(year='All'):
     ''' Show top first and last authors
     '''
-    rows = get_top_authors('first', year)
-    first = "<h2>Top first authors</h2><table id='topauthors' class='tablesorter numbers-scroll'>" \
-            + "<thead></thead><tbody><tr><th>Author</th><th>DOIs</th></tr>"
-    for row in rows:
-        first += f"<tr><td>{row['_id']}</td><td>{row['count']}</td></tr>"
-    first += "</tbody></table>"
-    rows = get_top_authors('last', year)
-    last = "<h2>Top last authors</h2><table id='topauthors' class='tablesorter numbers-scroll'>" \
-           + "<thead></thead><tbody><tr><th>Author</th><th>DOIs</th></tr>"
-    for row in rows:
-        last += f"<tr><td>{row['_id']}</td><td>{row['count']}</td></tr>"
-    last += "</tbody></table>"
+    ftrows = [[row['_id'], f"{row['count']:,}"] for row in get_top_authors('first', year)]
+    first = "<h2>Top first authors</h2>" \
+            + render_table(['Author', 'DOIs'], ftrows, table_id='topauthors_first',
+                           css='tablesorter numbers-scroll')
+    ltrows = [[row['_id'], f"{row['count']:,}"] for row in get_top_authors('last', year)]
+    last = "<h2>Top last authors</h2>" \
+           + render_table(['Author', 'DOIs'], ltrows, table_id='topauthors_last',
+                          css='tablesorter numbers-scroll')
     html = "<div class='flexrow'><div class='flexcol'>" + first + "</div>" \
            + "<div class='flexcol' style='margin-left: 40px;'>" + last + "</div></div>" \
            + "<br>" + year_pulldown('dois_top_author')
-    title = "Top first authors"
+    title = "Top first and last authors"
     if year != 'All':
         title += f" ({year})"
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
-                                         html=html,
+                                         title=title, html=html,
                                          navbar=generate_navbar('Authorship')))
 
 
@@ -9329,10 +9361,18 @@ def dois_preprint_year():
 
 
 @app.route('/preprint_with_pub')
-def preprint_with_pub():
+@app.route('/preprint_with_pub/<string:year>')
+def preprint_with_pub(year=None):
     ''' Show preprints with publications
+        Keyword arguments:
+          year: preprint publishing year to filter by; defaults to the current
+                year, or "All" for no year filter
     '''
     payload = {"subtype": "preprint", "jrc_preprint": {"$exists": 1}}
+    if year is None:
+        year = str(datetime.now().year)
+    if year != 'All':
+        payload['jrc_publishing_date'] = {"$regex": "^" + year}
     coll = DB['dis'].dois
     try:
         rows = coll.find(payload).sort([("jrc_publishing_date", -1)])
@@ -9396,7 +9436,9 @@ def preprint_with_pub():
     pre += render_table(['Journal', 'Average days to publication'], ptrows,
                         table_id='preprint_with_pub', css='tablesorter numbers-scroll') \
            + create_downloadable('preprint_with_pub', header, fileoutput)
-    html = pre + html
+    # Defaults to the current year (not "All"), so pass the button value explicitly.
+    selected = "(all years)" if year == 'All' else year
+    html = f"{year_pulldown('preprint_with_pub', selected=selected)}<br><br>" + pre + html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="Preprints with journal publications", html=html,
@@ -9404,10 +9446,13 @@ def preprint_with_pub():
 
 
 @app.route('/preprint_relation/<string:relation_type>')
-def show_preprint_relation(relation_type):
+@app.route('/preprint_relation/<string:relation_type>/<string:year>')
+def show_preprint_relation(relation_type, year=None):
     ''' Show preprints without publications or publications without preprints
         Keyword arguments:
           relation_type: "preprint_no_pub" or "pub_no_preprint"
+          year: publishing year to filter by; defaults to the current year, or
+                "All" for no year filter
     '''
     relation_config = {
         'preprint_no_pub': {'payload': {"subtype": "preprint", "jrc_preprint": {"$exists": 0}},
@@ -9421,8 +9466,15 @@ def show_preprint_relation(relation_type):
                                message="relation_type must be one of: " \
                                        + f"{', '.join(relation_config)}")
     cfg = relation_config[relation_type]
+    payload = dict(cfg['payload'])
+    # Both relation types offer a publishing-year pulldown that defaults to the
+    # current year (pick "All" for no year filter).
+    if year is None:
+        year = str(datetime.now().year)
+    if year != 'All':
+        payload['jrc_publishing_date'] = {"$regex": "^" + year}
     try:
-        rows = DB['dis'].dois.find(cfg['payload']).sort([("jrc_publishing_date", -1)])
+        rows = DB['dis'].dois.find(payload).sort([("jrc_publishing_date", -1)])
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get preprint data from dois"),
@@ -9439,7 +9491,13 @@ def show_preprint_relation(relation_type):
                                  DL.get_title(row), journal]) + "\n"
         trows.append([row['jrc_publishing_date'], safe(doi_link(row['doi'])), ptitle, journal])
     html = render_table(header, trows, table_id=relation_type, css='tablesorter numbers-scroll')
-    html = f"{cfg['title']}: {cnt:,}<br><br>" \
+    label = "all years" if year == 'All' else year
+    # These pages default to the current year (not "All"), so pass the button's
+    # selected value explicitly rather than letting the wrapper derive it.
+    selected = "(all years)" if year == 'All' else year
+    top = year_pulldown(f"preprint_relation/{relation_type}", selected=selected) + "<br><br>"
+    count_line = f"{cfg['title']} ({label}): {cnt:,}"
+    html = f"{top}{count_line}<br><br>" \
            + create_downloadable(relation_type, header, fileoutput) + html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
@@ -12223,10 +12281,11 @@ def show_tag_ack(tagtype):
     '''
     tag_config = {
         'tag': {'mongo': 'jrc_tag', 'nav': 'jrc_tag.name',
-                'label': 'Tag', 'errmsg': 'tags', 'title': 'DOI tags'},
+                'label': 'Tag', 'errmsg': 'tags', 'title': 'DOI tags',
+                'navbar': 'Tag/affiliation'},
         'ack': {'mongo': 'jrc_acknowledge', 'nav': 'jrc_acknowledge.name',
                 'label': 'Acknowledgement', 'errmsg': 'acknowledgements',
-                'title': 'DOI acknowledgements'},
+                'title': 'DOI acknowledgements', 'navbar': 'Acknowledgements'},
     }
     if tagtype not in tag_config:
         return render_template('error.html', urlroot=request.url_root,
@@ -12301,7 +12360,7 @@ def show_tag_ack(tagtype):
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=cfg['title'], html=html,
-                                         navbar=generate_navbar('Tag/affiliation')))
+                                         navbar=generate_navbar(cfg['navbar'])))
 
 
 @app.route('/dois_lab')
