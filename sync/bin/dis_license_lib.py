@@ -4,7 +4,7 @@
     a waterfall: DataCite rightsList -> OpenAlex -> PMC (efetch) -> Unpaywall.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import logging
 import os
 import re
@@ -25,6 +25,10 @@ CC0_RE = re.compile(r'creativecommons\.org/publicdomain/zero/([0-9.]+)', re.IGNO
 _UNSET = object()
 _STATE = {'unpaywall_unreachable': False, 'openalex_unreachable': False,
           'pmc_unreachable': False}
+# A single OpenAlex read timeout is usually a slow query or blip, not the API
+# being down, so retry a few times before tripping the run-wide circuit breaker.
+OPENALEX_MAX_RETRIES = 3
+OPENALEX_BACKOFF = 2
 
 # pyalex sets no timeout on its requests.Session calls, so a network that can't
 # reach api.openalex.org hangs for the OS-level TCP timeout (minutes) instead of
@@ -35,7 +39,7 @@ def _request_with_default_timeout(self, method, url, **kwargs):
     return _ORIG_SESSION_REQUEST(self, method, url, **kwargs)
 requests.Session.request = _request_with_default_timeout
 
-__version__ = '1.3.0'
+__version__ = '1.4.0'
 
 
 @dataclass
@@ -49,6 +53,10 @@ class LicenseResult:  # pylint: disable=too-many-instance-attributes
     unpaywall_not_indexed: bool = False
     unpaywall_unreachable: bool = False
     openalex_unreachable: bool = False
+    # Raw license strings found (from PMC/Unpaywall) that aren't in the license
+    # map, i.e. the "Unknown ... license" cases - so a caller can collect them
+    # for triage.
+    unknown_licenses: list = field(default_factory=list)
 
 
 def cc_url_to_slug(url):
@@ -104,6 +112,21 @@ def get_pmc_license(pmcid):  # pylint: disable=too-many-return-statements
             elif '429' in str(err):
                 LOGGER.warning(f"PMC 429 for {pmcid} after 3 attempts, skipping")
                 return None, True, False
+            elif isinstance(err, requests.exceptions.RequestException):
+                # Transient network/stream error, e.g. ChunkedEncodingError
+                # ("Response ended prematurely") - which is a RequestException but
+                # NOT a ConnectionError/Timeout subclass, so it used to fall through
+                # to the bare "raise" below and kill the whole run. A mid-stream
+                # drop is usually per-request (not PMC being down), so retry this
+                # PMCID and, if it keeps failing, skip just this DOI.
+                if attempt < 2:
+                    LOGGER.warning(f"PMC request error for {pmcid}, retrying "
+                                   f"(attempt {attempt+1}): {err}")
+                    time.sleep(2 * (attempt + 1))
+                else:
+                    LOGGER.warning(f"PMC request error for {pmcid} after 3 attempts, "
+                                   f"skipping: {err}")
+                    return None, False, True
             else:
                 raise
     if not data:
@@ -165,18 +188,30 @@ def get_openalex_record(doi):
     """
     if _STATE['openalex_unreachable']:
         return None, True
-    try:
-        results = pyalex.Works().filter(doi=doi).get()
-    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as err:
-        LOGGER.warning(f"OpenAlex unreachable, skipping it for the rest of this run: {err}")
-        _STATE['openalex_unreachable'] = True
-        return None, True
-    except Exception as err:
-        LOGGER.warning(f"OpenAlex unavailable for {doi}: {err}")
-        return None, False
-    if not results:
-        return None, False
-    return results[0], False
+    for attempt in range(1, OPENALEX_MAX_RETRIES + 1):
+        try:
+            results = pyalex.Works().filter(doi=doi).get()
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as err:
+            # Retry a connection-level failure a few times; only trip the run-wide
+            # circuit breaker once retries are exhausted (a genuine outage will
+            # still fail every attempt, but one slow response won't disable
+            # OpenAlex for the rest of the run).
+            if attempt < OPENALEX_MAX_RETRIES:
+                LOGGER.warning(f"OpenAlex timed out for {doi}, retrying "
+                               f"(attempt {attempt}/{OPENALEX_MAX_RETRIES}): {err}")
+                time.sleep(OPENALEX_BACKOFF * attempt)
+                continue
+            LOGGER.warning(f"OpenAlex unreachable after {OPENALEX_MAX_RETRIES} attempts, "
+                           f"skipping it for the rest of this run: {err}")
+            _STATE['openalex_unreachable'] = True
+            return None, True
+        except Exception as err:
+            LOGGER.warning(f"OpenAlex unavailable for {doi}: {err}")
+            return None, False
+        if not results:
+            return None, False
+        return results[0], False
+    return None, True
 
 
 def license_from_rights_list(row, licmap):
@@ -272,6 +307,7 @@ def resolve_license(row, licmap, openalex_data=_UNSET):
                 result.tier = 'pmc'
                 LOGGER.info(f"Using license (PMC) {result.mapped} for {row['doi']}")
                 return result
+            result.unknown_licenses.append(raw)
             LOGGER.warning(f"Unknown PMC license {raw} for {row['doi']}")
     else:
         result.pmc_skipped_no_id = True
@@ -284,5 +320,6 @@ def resolve_license(row, licmap, openalex_data=_UNSET):
             result.tier = 'unpaywall'
             LOGGER.info(f"Using license (Unpaywall) {result.mapped} for {row['doi']}")
             return result
+        result.unknown_licenses.append(raw)
         LOGGER.warning(f"Unknown Unpaywall license {raw} for {row['doi']}")
     return result
