@@ -12,7 +12,7 @@
     their organization is on the ignore list.
 '''
 
-__version__ = '7.3.0'
+__version__ = '7.3.1'
 
 import argparse
 import collections
@@ -364,9 +364,14 @@ def html_metric_rows(rows):
         documents with many rows repeating the same complex inline style
         (confirmed via a real Outlook test - a trailing spacer row alone did
         not fix it), so cells here use only plain background-color striping,
-        which Word handles reliably. A trailing throwaway spacer row is kept
-        anyway as cheap insurance against the last-row-before-</table>
-        boundary (see html_section_header).
+        which Word handles reliably. Also no margin-top on the table itself
+        (html_section_header's trailing spacer row already provides that
+        gap) - confirmed via a real Outlook test that a <table> carrying its
+        own margin-top, sitting immediately after a sibling table's
+        </table>, leaks a stray closing tag as literal visible text. A
+        trailing throwaway spacer row is kept anyway as cheap insurance
+        against the last-row-before-</table> boundary (see
+        html_section_header).
         Keyword arguments:
           rows: list of (label, value_html) pairs
         Returns:
@@ -384,7 +389,7 @@ def html_metric_rows(rows):
     trs.append('<tr><td colspan="2" style="height:1px;line-height:1px;font-size:1px;">'
                '&nbsp;</td></tr>')
     return ('<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
-            'style="border-collapse:collapse;font-size:13px;margin-top:6px;">'
+            'style="border-collapse:collapse;font-size:13px;">'
             + "".join(trs) + '</table>')
 
 
