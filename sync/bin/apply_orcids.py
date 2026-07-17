@@ -10,7 +10,7 @@
     linked to orcid.org).
 '''
 
-__version__ = '2.1.0'
+__version__ = '2.1.1'
 
 import argparse
 import collections
@@ -361,8 +361,13 @@ def html_metric_rows(rows):
     ''' Build a zebra-striped label/value table. No per-cell border-radius:
         Outlook's Word engine can leak a cell's opening tag as literal text in
         tables that repeat the same complex inline style across many rows, so
-        cells use only plain background-color striping. A trailing spacer row
-        absorbs the last-row-before-</table> boundary (see html_section_header).
+        cells use only plain background-color striping. Also no margin-top on
+        the table itself (html_section_header's trailing spacer row already
+        provides that gap) - confirmed via a real Outlook test that a <table>
+        carrying its own margin-top, sitting immediately after a sibling
+        table's </table>, leaks a stray closing tag as literal visible text.
+        A trailing spacer row absorbs the last-row-before-</table> boundary
+        (see html_section_header).
         Keyword arguments:
           rows: list of (label, value) pairs
         Returns:
@@ -379,7 +384,7 @@ def html_metric_rows(rows):
     trs.append('<tr><td colspan="2" style="height:1px;line-height:1px;font-size:1px;">'
                '&nbsp;</td></tr>')
     return ('<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
-            'style="border-collapse:collapse;font-size:13px;margin-top:6px;">'
+            'style="border-collapse:collapse;font-size:13px;">'
             + "".join(trs) + '</table>')
 
 

@@ -36,7 +36,7 @@ With Changes table listing every updated author (linked to their /userui/
 record) with a plain-English diff of exactly what changed on their record.
 """
 
-__version__ = '6.3.0'
+__version__ = '6.3.1'
 
 import argparse
 import collections
@@ -466,7 +466,12 @@ def html_section_header(title):
 
 
 def html_metric_rows(rows):
-    ''' Build a zebra-striped label/value table for the run-summary email
+    ''' Build a zebra-striped label/value table for the run-summary email.
+        No margin-top on the table itself (html_section_header's trailing
+        spacer row already provides that gap) - confirmed via a real Outlook
+        test that a <table> carrying its own margin-top, sitting immediately
+        after a sibling table's </table>, leaks a stray closing tag as
+        literal visible text.
         Keyword arguments:
           rows: list of (label, value_html) pairs
         Returns:
@@ -484,7 +489,7 @@ def html_metric_rows(rows):
                    f'<td align="right" style="padding:8px 10px;text-align:right;{r_r}">'
                    f'{value}</td></tr>')
     return ('<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
-            'style="border-collapse:collapse;font-size:13px;margin-top:6px;">'
+            'style="border-collapse:collapse;font-size:13px;">'
             + "".join(trs) + '</table>')
 
 
