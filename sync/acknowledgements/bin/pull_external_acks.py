@@ -138,7 +138,7 @@ NOTES
   parameter, i.e. filtered by when the article was added to PubMed Central.
 '''
 
-__version__ = '1.9.0'
+__version__ = '1.9.1'
 
 import argparse
 import collections
@@ -152,6 +152,7 @@ import sys
 import time
 import traceback
 import xml.etree.ElementTree as ET
+import pymongo.errors
 import requests
 import xmltodict
 from tqdm import tqdm
@@ -1202,6 +1203,10 @@ def _ignore_ack_doi(doi, source):
                               "reason": f"'{ARG.TERM}' not in ack text"}},
             upsert=True)
         COUNT[f'{source}_ack_doi_ignored'] += 1
+    except pymongo.errors.DuplicateKeyError:
+        # (key, type, term) already exists - another process/run already recorded
+        # this DOI for this term, so the intended state already holds.
+        LOGGER.debug(f"{doi} already in ack ignore list for term '{ARG.TERM}'")
     except Exception as err:
         LOGGER.error(f"Failed to add {doi} to ack ignore list: {err}")
 
