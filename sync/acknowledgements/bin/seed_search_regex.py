@@ -47,18 +47,23 @@ ENTITIES = [
         r"Janelia\s+CryoE[TM]\b",
         r"Janelia\s+Cryo[- ‐]?EM\b",
         r"Cryo[- ‐]Electron\s+Microscopy\s+(?:facility|Facility|team|Team)",
-        # An explicit cryo-EM/EM-facility/MicroED term co-occurring with Janelia
-        # in the same clause (bounded by '.' or ';', not just a character count) -
-        # no reliance on staff names (people leave, and common surname+initial
-        # combos collide with people who aren't at Janelia at all) or equipment
-        # brand names (e.g. "Krios" is sold to and used by many other institutions
-        # and says nothing about Janelia specifically).
-        r"(?:Cryo[- ‐]?EM|CryoEM|CryoET|MicroED)\b[^.;]*(?:at\s+|of\s+)?(?:the\s+)?(?:HHMI\s+)?Janelia",
-        r"(?:HHMI\s+)?Janelia[^.;]*(?:Cryo[- ‐]?EM|CryoEM|CryoET|MicroED)\b",
-        r"\b(?:Cryo[- ‐]?)?EM\s+(?:facilit(?:y|ies)|shared\s+resource)\b[^.;]*(?:HHMI\s+)?Janelia",
-        r"(?:HHMI\s+)?Janelia[^.;]*\b(?:Cryo[- ‐]?)?EM\s+(?:facilit(?:y|ies)|shared\s+resource)\b",
-        r"\bElectron\s+Microscopy\s+(?:Core|Facility)\b[^.;]*(?:HHMI\s+)?Janelia",
-        r"(?:HHMI\s+)?Janelia[^.;]*\bElectron\s+Microscopy\s+(?:Core|Facility)\b",
+        # An explicit "Cryo" + EM term co-occurring with Janelia in the same
+        # clause (bounded by '.' or ';', not just a character count). "Cryo"
+        # must be literally present - a bare "EM facility"/"Electron Microscopy
+        # Core" mention doesn't imply cryo-EM specifically (could be room-temp
+        # or negative-stain EM, here or elsewhere), so those are intentionally
+        # NOT matched on their own. No reliance on staff names (people leave,
+        # and common surname+initial combos collide with people who aren't at
+        # Janelia at all) or equipment brand names (e.g. "Krios" is sold to and
+        # used by many other institutions and says nothing about Janelia
+        # specifically). The negative lookahead excludes a clause that credits
+        # Janelia as the technique's historical origin ("MicroED was developed
+        # at the Janelia Research Campus...") rather than as a facility that
+        # served this particular study.
+        r"(?:Cryo[- ‐]?EM|CryoEM|CryoET)\b(?![^.;]*?\b(?:develop\w*|invent\w*|pioneer\w*|originat\w*|creat\w*)\b)"
+        r"[^.;]*(?:at\s+|of\s+)?(?:the\s+)?(?:HHMI\s+)?Janelia",
+        r"(?:HHMI\s+)?Janelia(?![^.;]*?\b(?:develop\w*|invent\w*|pioneer\w*|originat\w*|creat\w*)\b)"
+        r"[^.;]*(?:Cryo[- ‐]?EM|CryoEM|CryoET)\b",
     ]),
     ("Gene Targeting and Transgenic Facility", [
         r"Gene\s+Targeting\s+(?:and|&)\s+Transgen(?:ic|ics)\s+(?:Facility|Facilities|Team|Resources|[Cc]ore)",
