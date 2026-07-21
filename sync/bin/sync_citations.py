@@ -177,7 +177,7 @@
         (falling back to the native citationCount).
 '''
 
-__version__ = '1.11.0'
+__version__ = '1.11.2'
 
 import argparse
 import collections
@@ -1377,19 +1377,35 @@ def html_kpi_card(value, label, tone='neutral'):
 
 
 def html_section_header(title):
-    ''' Build a section header bar for the run-summary email
+    ''' Build a section header bar. Table-based (not a bare <div>) so it never
+        sits as a naked div immediately before a sibling <table> in the same
+        <td> - Outlook's Word engine can misparse that boundary and leak a stray
+        closing tag as literal text. The spacer row substitutes for CSS
+        margin-bottom, which <td> doesn't honor.
         Keyword arguments:
           title: section title (may include an HTML entity icon prefix)
         Returns:
-          HTML div block
+          HTML table block
     '''
-    return (f'<div style="font-size:14px;font-weight:700;color:{EMAIL_NAVY};'
-            f'border-bottom:2px solid {EMAIL_BORDER};padding-bottom:7px;'
-            f'margin-bottom:10px;">{title}</div>')
+    return ('<table role="presentation" width="100%" cellpadding="0" cellspacing="0">'
+            f'<tr><td style="font-size:14px;font-weight:700;color:{EMAIL_NAVY};'
+            f'border-bottom:2px solid {EMAIL_BORDER};padding-bottom:7px;">'
+            f'{title}</td></tr>'
+            '<tr><td style="height:10px;line-height:10px;font-size:1px;">&nbsp;</td></tr>'
+            '</table>')
 
 
 def html_metric_rows(rows):
-    ''' Build a zebra-striped label/value table for the run-summary email
+    ''' Build a zebra-striped label/value table. No per-cell border-radius:
+        Outlook's Word engine can leak a cell's opening tag as literal text in
+        tables that repeat the same complex inline style across many rows, so
+        cells use only plain background-color striping. Also no margin-top on
+        the table itself (html_section_header's trailing spacer row already
+        provides that gap) - confirmed via a real Outlook test that a <table>
+        carrying its own margin-top, sitting immediately after a sibling
+        table's </table>, leaks a stray closing tag as literal visible text.
+        A trailing spacer row absorbs the last-row-before-</table> boundary
+        (see html_section_header).
         Keyword arguments:
           rows: list of (label, value_html) pairs
         Returns:
@@ -1397,17 +1413,16 @@ def html_metric_rows(rows):
     '''
     trs = []
     for i, (mlabel, value) in enumerate(rows):
-        striped = i % 2 == 0
-        bgattr = f' bgcolor="{EMAIL_STRIPE_BG}"' if striped else ''
-        bg = f'background-color:{EMAIL_STRIPE_BG};' if striped else ''
-        r_l = 'border-radius:6px 0 0 6px;' if bg else ''
-        r_r = 'border-radius:0 6px 6px 0;' if bg else ''
+        bgattr = f' bgcolor="{EMAIL_STRIPE_BG}"' if i % 2 == 0 else ''
+        bg = f'background-color:{EMAIL_STRIPE_BG};' if i % 2 == 0 else ''
         trs.append(f'<tr{bgattr} style="{bg}">'
-                   f'<td style="padding:8px 10px;{r_l}">{mlabel}</td>'
-                   f'<td align="right" style="padding:8px 10px;text-align:right;{r_r}">'
+                   f'<td style="padding:8px 10px;">{mlabel}</td>'
+                   f'<td align="right" style="padding:8px 10px;text-align:right;">'
                    f'{value}</td></tr>')
+    trs.append('<tr><td colspan="2" style="height:1px;line-height:1px;font-size:1px;">'
+               '&nbsp;</td></tr>')
     return ('<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
-            'style="border-collapse:collapse;font-size:13px;margin-top:6px;">'
+            'style="border-collapse:collapse;font-size:13px;">'
             + "".join(trs) + '</table>')
 
 
@@ -1436,7 +1451,7 @@ def html_usage_bar(count, total):
             f'</tr></table></td>')
 
 
-def html_pill(bg, fg, text):
+def html_pill(bg, fg, text, align=None):
     ''' Build a small colored status badge as an auto-width single-cell table
         (bgcolor attribute + background-color CSS), not a <span> - Outlook's
         Word engine does not honor background-color on inline elements, and
@@ -1448,10 +1463,14 @@ def html_pill(bg, fg, text):
           bg: background color
           fg: text color
           text: pill text (may include an HTML entity icon prefix)
+          align: optional HTML align attribute (e.g. 'right') - a nested
+                 <table> is a block box, so a parent <td>'s text-align/align
+                 does nothing to reposition it; the table needs its own align
         Returns:
           HTML for a single-cell table sized to its content
     '''
-    return (f'<table role="presentation" cellpadding="0" cellspacing="0"><tr>'
+    align_attr = f' align="{align}"' if align else ''
+    return (f'<table role="presentation" cellpadding="0" cellspacing="0"{align_attr}><tr>'
             f'<td bgcolor="{bg}" style="background-color:{bg};color:{fg};padding:2px 10px;'
             f'border-radius:10px;font-size:11.5px;font-weight:600;">{text}</td></tr></table>')
 
@@ -1472,7 +1491,8 @@ def html_usage_card(label, ok, err, attrs, prefix):
         pill_bg, pill_fg, pill_icon = EMAIL_RED_BG, EMAIL_RED, '&#9888;'
     else:
         pill_bg, pill_fg, pill_icon = EMAIL_GREEN_BG, EMAIL_GREEN, '&#10003;'
-    pill = html_pill(pill_bg, pill_fg, f'{pill_icon} {ok:,} ok &middot; {err:,} err')
+    pill = html_pill(pill_bg, pill_fg, f'{pill_icon} {ok:,} ok &middot; {err:,} err',
+                     align='right')
     rows = []
     for attr in attrs:
         changed = COUNT[f"{prefix}_changed_{attr}"]
@@ -1530,7 +1550,11 @@ def html_usage_disabled_card(label, note):
 
 def html_citation_increases():  # pylint: disable=too-many-locals
     ''' Build the Citation Increases table for the run-summary email from the
-        module-level HITS list.
+        module-level HITS list. No per-cell border-radius (Outlook's Word
+        engine can leak a cell's opening tag as literal text in tables that
+        repeat the same complex inline style across many rows) and a
+        trailing spacer row absorbs the last-row-before-</table> boundary
+        (see html_metric_rows/html_section_header).
         Keyword arguments:
           None
         Returns:
@@ -1551,17 +1575,16 @@ def html_citation_increases():  # pylint: disable=too-many-locals
             extra = " &middot; DataCite-GraphQL " \
                     + (('err' if dcite is None else f'{dcite:,}') if ARG.GRAPHQL else 'off')
         sources = f"{label} {native:,} &middot; OpenAlex {oas} &middot; ScholeXplorer {sxs}{extra}"
-        striped = i % 2 == 0
-        bgattr = f' bgcolor="{EMAIL_STRIPE_BG}"' if striped else ''
-        bg = f'background-color:{EMAIL_STRIPE_BG};' if striped else ''
-        r_l = 'border-radius:6px 0 0 6px;' if bg else ''
-        r_r = 'border-radius:0 6px 6px 0;' if bg else ''
+        bgattr = f' bgcolor="{EMAIL_STRIPE_BG}"' if i % 2 == 0 else ''
+        bg = f'background-color:{EMAIL_STRIPE_BG};' if i % 2 == 0 else ''
         rows.append(
-            f'<tr{bgattr} style="{bg}"><td style="padding:8px 8px;{r_l}">{doiurl(doi)}</td>'
+            f'<tr{bgattr} style="{bg}"><td style="padding:8px 8px;">{doiurl(doi)}</td>'
             f'<td style="padding:8px 8px;text-align:center;white-space:nowrap;">{previous:,} '
             f'<span style="color:#c9ced4;">&rarr;</span> '
             f'<b style="color:{EMAIL_GREEN};">{combined:,}</b></td>'
-            f'<td style="padding:8px 8px;{r_r}color:{EMAIL_GRAY};">{sources}</td></tr>')
+            f'<td style="padding:8px 8px;color:{EMAIL_GRAY};">{sources}</td></tr>')
+    rows.append('<tr><td colspan="3" style="height:1px;line-height:1px;font-size:1px;">'
+                '&nbsp;</td></tr>')
     return (
         '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
         'style="border-collapse:collapse;font-size:12.5px;">'
@@ -1609,7 +1632,8 @@ def generate_email():  # pylint: disable=too-many-locals
     cited = sum(1 for r in RECORDS if 'jrc_citation_count' in r)
     citation_rows.append(("DOIs with citation fields", f"{cited:,}"))
     citation_rows.append(("DOIs with increased citation count",
-                          html_pill(EMAIL_GREEN_BG, EMAIL_GREEN, f'{COUNT["increased"]:,}')))
+                          html_pill(EMAIL_GREEN_BG, EMAIL_GREEN, f'{COUNT["increased"]:,}',
+                                    align='right')))
     citation_rows.append(("DOIs matched", f"{COUNT['matched']:,}"))
     citation_rows.append(("DOIs updated (errors)",
                           f"{COUNT['written']:,} ({COUNT['write_error']:,})"))
