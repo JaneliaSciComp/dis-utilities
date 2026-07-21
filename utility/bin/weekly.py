@@ -9,7 +9,7 @@
     - Sends citations email to the user that ran the program
 """
 
-__version__ = '3.0.0'
+__version__ = '3.0.1'
 
 import argparse
 from datetime import datetime
@@ -122,12 +122,13 @@ def generate_email(citations):
     '''
     msg = JRC.get_run_data(__file__, __version__)
     user = os.getlogin()
-    email = f"{user}@janelia.hhmi.org"
+    email = [f"{user}@janelia.hhmi.org", "regesters@janelia.hhmi.org"]
     msg += "<br><br>"
     msg += f"<pre>{citations}</pre>"
     try:
         LOGGER.info(f"Sending email to {email}")
-        JRC.send_email(msg, DIS['sender'], email, "Citations for DOIs", mime='html')
+        JRC.send_email(msg, DIS['sender'], email, "Citations for DOIs",
+                       mime='html')
     except Exception as err:
         LOGGER.error(err)
 
