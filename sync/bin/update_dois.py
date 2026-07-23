@@ -7,7 +7,7 @@
            to DIS MongoDB.
 """
 
-__version__ = '22.3.0'
+__version__ = '22.4.0'
 
 import argparse
 import collections
@@ -53,6 +53,12 @@ MISSING = {}
 NO_AUTHOR = {}
 TO_BE_PROCESSED = []
 MAX_DOI_TRIES = 3
+# Crossref bulk (paginated) query rate-limit handling: retry a transient HTTP
+# 429 with exponential backoff and pace pages, so a single rate limit doesn't
+# abort the whole run (see crossref_query_with_retry / get_dois_from_crossref).
+CROSSREF_QUERY_TRIES = 4
+CROSSREF_RETRY_BASE = 5   # seconds; backoff is base * 2**(attempt-1)
+CROSSREF_PAGE_DELAY = 1   # seconds between successive pages
 # General
 ARG = CONFIG = DISCONFIG = EXISTING = LOGGER = REST = START_TIME = None
 PROJECT = {}
@@ -169,6 +175,40 @@ def get_dis_dois_from_mongo():
     return result
 
 
+def crossref_query_with_retry(suffix, timeout=30):
+    ''' Call Crossref for a paginated bulk query, using the polite pool (mailto)
+        and retrying a transient HTTP 429 (rate limit) with exponential backoff.
+        A bulk-pagination burst can trip a 429; a short wait clears it, so this
+        no longer aborts the whole run on the first rate limit. Any non-429
+        error, or 429s past CROSSREF_QUERY_TRIES, is still fatal.
+        Keyword arguments:
+          suffix: Crossref query string (appended to the works base URL)
+          timeout: GET timeout
+        Returns:
+          Response JSON
+    '''
+    # Polite pool: Crossref grants higher, steadier limits when the caller's
+    # email rides along as a ?mailto= query param (a bare mailto header, which
+    # jrc_common sends, is ignored). Use the configured sender if available.
+    if 'mailto=' not in suffix and DISCONFIG.get('sender'):
+        suffix += f"&mailto={DISCONFIG['sender']}"
+    attempt = 0
+    while True:
+        try:
+            return JRC.call_crossref(suffix, timeout=timeout)
+        except Exception as err:
+            arg = err.args[0] if err.args else None
+            status = arg.get('Status') if isinstance(arg, dict) else None
+            if status == '429' and attempt < CROSSREF_QUERY_TRIES:
+                attempt += 1
+                wait = CROSSREF_RETRY_BASE * (2 ** (attempt - 1))
+                LOGGER.warning(f"Crossref rate limit (429); waiting {wait}s, "
+                               f"retry {attempt}/{CROSSREF_QUERY_TRIES}")
+                sleep(wait)
+                continue
+            terminate_program(err)
+
+
 def get_dois_from_crossref(flt="janelia"):
     ''' Get DOIs from Crossref
         Keyword arguments:
@@ -182,13 +222,8 @@ def get_dois_from_crossref(flt="janelia"):
     complete = False
     parts = 0
     while not complete:
-        try:
-            if parts:
-                resp = JRC.call_crossref(f"{suffix}&offset={parts*1000}", timeout=30)
-            else:
-                resp = JRC.call_crossref(suffix, timeout=30)
-        except Exception as err:
-            terminate_program(err)
+        query = f"{suffix}&offset={parts*1000}" if parts else suffix
+        resp = crossref_query_with_retry(query, timeout=30)
         recs = resp['message']['items']
         if not recs:
             break
@@ -203,6 +238,8 @@ def get_dois_from_crossref(flt="janelia"):
             CROSSREF[doi] = {"message": rec}
         if len(dlist) >= resp['message']['total-results']:
             complete = True
+        else:
+            sleep(CROSSREF_PAGE_DELAY)   # pace pages to stay under the burst limit
     LOGGER.info(f"Got {len(dlist):,} DOIs from Crossref in {parts} part(s)")
     return dlist
 
