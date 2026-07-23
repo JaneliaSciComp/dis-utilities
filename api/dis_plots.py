@@ -8,8 +8,8 @@ from math import ceil, pi
 import numpy as np
 from bokeh.colors import named as _bokeh_named
 from bokeh.models import (BasicTicker, ColorBar, CustomJS, HoverTool, LabelSet, LinearAxis,
-                          LinearColorMapper, ColumnDataSource, NumeralTickFormatter, Range1d,
-                          TapTool)
+                          LinearColorMapper, ColumnDataSource, NumeralTickFormatter,
+                          PrintfTickFormatter, Range1d, TapTool)
 from bokeh.embed import components
 from bokeh.palettes import all_palettes, plasma, Turbo256
 from bokeh.plotting import figure
@@ -812,6 +812,162 @@ def hbar_chart(data, title, value_label="Value", width=650, height=450,  # pylin
         tooltips.append(("% of total", "@pct{0.0}%"))
     p.add_tools(HoverTool(renderers=[bars], tooltips=tooltips))
     _make_clickable(p, source, labels, nav, renderers=[bars])
+    return components(p)
+
+
+def hbar_stacked_chart(data, segments, title, value_label="Value", width=650, height=450,  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+                       colors=None, value_format="0,0", show_pct=True, nav=None,
+                       normalize=False, sort=True):
+    ''' Create a horizontal stacked bar chart - same footprint/legibility as
+        hbar_chart (long category labels stay on the y-axis, not rotated on an
+        x-axis), but each bar splits into a per-segment colored stack (e.g.
+        Internal vs External) instead of one solid color.
+        Keyword arguments:
+          data: dict of {label: {segment: value, ...}} - a label's total is the
+                sum of its segment values; a label missing a segment defaults
+                that segment to 0
+          segments: ordered list of segment names - stack order (bottom of each
+                    bar first) and legend order; color is assigned by this
+                    list's position, not per-label, so it stays fixed across bars
+          title: chart title
+          value_label: label for the bar's total in the hover tooltip
+          width: figure width in pixels (optional)
+          height: figure height in pixels (optional)
+          colors: list of colors, one per segment (optional; defaults to the
+                  same get_colors_by_count palette hbar_chart uses)
+          value_format: NumeralJS format for absolute values in the tooltip
+                        (default "0,0")
+          show_pct: include each segment's percent of that bar's own total in
+                    the hover tooltip (default True; always shown when normalize)
+          nav: dict mapping label -> nav target (see _make_clickable) -
+               clicking any segment of a bar navigates the same place
+          normalize: if True, plot each bar as its segments' share of that bar's
+                     own total (every bar fills to 100%), so composition is
+                     comparable across bars of very different absolute size
+                     (e.g. citations vs views); the x-axis becomes a percent
+                     scale and the tooltip still shows absolute values.
+          sort: if True (default) order bars by descending total; if False keep
+                the insertion order of `data` (for a fixed, caller-chosen row
+                order that magnitude shouldn't reshuffle).
+        Returns:
+          Figure components (chartscript, chartdiv)
+    '''
+    totals = {label: sum(vals.get(seg, 0) for seg in segments) for label, vals in data.items()}
+    labels = sorted(totals, key=totals.get, reverse=True) if sort else list(data)
+    if not labels:
+        return components(figure(title=title, width=width, height=height,
+                                 toolbar_location=None,
+                                 background_fill_color="ghostwhite"))
+    colors = colors or get_colors_by_count(len(segments))
+    cds_data = {"label": labels, "total": [float(totals[label]) for label in labels]}
+    for seg in segments:
+        abs_vals = [float(data[label].get(seg, 0)) for label in labels]
+        pcts = [(abs_vals[i] / totals[label] * 100) if totals[label] else 0
+                for i, label in enumerate(labels)]
+        cds_data[f"{seg}_abs"] = abs_vals
+        cds_data[f"{seg}_pct"] = pcts
+        # The column hbar_stack actually plots: shares (0-100) when normalized,
+        # absolute values otherwise. Tooltip reads the _abs/_pct columns either way.
+        cds_data[seg] = pcts if normalize else abs_vals
+    source = ColumnDataSource(cds_data)
+    xmax = 100 if normalize else (max(cds_data["total"]) * 1.05 if cds_data["total"] else 1)
+    # Bokeh places the first categorical factor at the bottom of the y-axis, so
+    # reverse the order to put the first/largest bar at the top.
+    p = figure(y_range=list(reversed(labels)), title=title, width=width,
+              height=height, toolbar_location=None,
+              background_fill_color="ghostwhite", x_range=(0, xmax))
+    bar_renderers = p.hbar_stack(segments, y="label", height=0.8, color=colors,
+                                 source=source, legend_label=segments)
+    tooltips = [("", "@label")]
+    for seg in segments:
+        seg_tt = f"@{seg}_abs{{{value_format}}}"
+        if show_pct or normalize:
+            seg_tt += f" (@{seg}_pct{{0.0}}%)"
+        tooltips.append((seg, seg_tt))
+    tooltips.append((value_label, f"@total{{{value_format}}}"))
+    p.add_tools(HoverTool(renderers=bar_renderers, tooltips=tooltips))
+    # Normalized axis is a 0-100 percent scale: PrintfTickFormatter appends a
+    # literal %, unlike NumeralTickFormatter's "%" which would multiply by 100.
+    p.xaxis.formatter = (PrintfTickFormatter(format="%d%%") if normalize
+                         else NumeralTickFormatter(format=value_format))
+    p.ygrid.grid_line_color = None
+    p.yaxis.major_label_text_font_size = "7pt"
+    p.legend.location = 'bottom_right'
+    p.legend.orientation = 'horizontal'
+    p.legend.background_fill_alpha = 0.7
+    _make_clickable(p, source, labels, nav, renderers=bar_renderers)
+    return components(p)
+
+
+def lorenz_chart(values, title, width=520, height=320, color=None,  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+                 x_label="Share of works (most-cited first)",
+                 y_label="Cumulative share of citations"):
+    ''' Lorenz-style cumulative concentration curve: how much of a total is held
+        by the top-ranked items. `values` are per-item magnitudes (e.g. per-work
+        citation counts); they're sorted descending internally, then plotted as
+        (cumulative % of items, cumulative % of the total). A dashed diagonal
+        marks a perfectly even distribution, so the area between the curve and
+        the diagonal is the concentration - the more the curve bows toward the
+        top-left, the more a few items dominate.
+        Keyword arguments:
+          values: iterable of per-item magnitudes
+          title: chart title
+          width: figure width in pixels
+          height: figure height in pixels
+          color: curve color (default HHMI teal; the diagonal is always gray)
+          x_label: x-axis label
+          y_label: y-axis label
+        Returns:
+          Figure components (chartscript, chartdiv)
+    '''
+    vals = sorted((v for v in values if v and v > 0), reverse=True)
+    n = len(vals)
+    total = sum(vals)
+    if not n or not total:
+        return components(figure(title=title, width=width, height=height,
+                                 toolbar_location=None,
+                                 background_fill_color="ghostwhite"))
+    work_pct = [0.0]
+    cite_pct = [0.0]
+    cum = 0
+    for i, val in enumerate(vals, start=1):
+        cum += val
+        work_pct.append(i / n * 100)
+        cite_pct.append(cum / total * 100)
+    # Downsample for rendering: a Lorenz curve is smooth, so ~400 points draw
+    # identically to thousands while keeping the embedded payload small. Keep
+    # the steep leading segment (the top works) dense and thin the flat tail.
+    max_pts = 400
+    if len(work_pct) > max_pts:
+        head = 120
+        keep = set(range(head))
+        keep.update(range(head, len(work_pct), max(1, (len(work_pct) - head) // (max_pts - head))))
+        keep.add(len(work_pct) - 1)
+        idx = sorted(keep)
+        work_pct = [work_pct[i] for i in idx]
+        cite_pct = [cite_pct[i] for i in idx]
+    color = color or "#028d96"
+    source = ColumnDataSource({"work_pct": work_pct, "cite_pct": cite_pct})
+    p = figure(title=title, width=width, height=height, toolbar_location=None,
+               background_fill_color="ghostwhite", x_range=(0, 100), y_range=(0, 100))
+    p.line([0, 100], [0, 100], line_color="#888888", line_width=1.5,
+           line_dash="dashed", legend_label="Even distribution")
+    curve = p.line("work_pct", "cite_pct", source=source, line_color=color,
+                   line_width=2.5, legend_label="Actual")
+    # Use a literal Unicode arrow, not the &rarr; entity: Bokeh's tuple-form
+    # tooltip HTML-escapes literal text, so an entity would show verbatim.
+    p.add_tools(HoverTool(renderers=[curve], mode="vline",
+                          tooltips=[("Concentration",
+                                     "Top @work_pct{0.0}% of works → "
+                                     "@cite_pct{0.0}% of citations")]))
+    # PrintfTickFormatter (literal %%), NOT NumeralTickFormatter's "%" which
+    # multiplies the value by 100 (would render a 100 axis as "10000%").
+    p.xaxis.formatter = PrintfTickFormatter(format="%d%%")
+    p.yaxis.formatter = PrintfTickFormatter(format="%d%%")
+    p.xaxis.axis_label = x_label
+    p.yaxis.axis_label = y_label
+    p.legend.location = "bottom_right"
+    p.legend.background_fill_alpha = 0.7
     return components(p)
 
 
