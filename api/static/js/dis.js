@@ -44,16 +44,24 @@ function hiddenClasses(tid) {
   return rowFilters[tid];
 }
 
+// Shared tag-chip filter state: table id -> the single required "tag-<slug>"
+// class currently selected (or undefined if no tag chip is active). A row
+// must carry this class (in addition to clearing the hiddenClasses check
+// above) to stay visible - see filterByTag().
+const requiredTag = {};
+
 // Recompute row visibility in table tid from its hide set, then refresh the
 // visible-row counter (span id counter, if given) and any per-class counters
 // the page provides as elements with data-filter-count="<row class>".
 function applyRowFilters(tid, counter) {
   const hidden = hiddenClasses(tid);
+  const required = requiredTag[tid];
   const classCounts = {};
   let visible = 0;
   $('#' + tid + ' > tbody > tr').each(function () {
     const classes = (this.className || '').split(/\s+/).filter(Boolean);
-    const show = !classes.some(cls => hidden.has(cls));
+    const show = !classes.some(cls => hidden.has(cls)) &&
+                 (!required || classes.includes(required));
     $(this).toggle(show);
     if (show) {
       visible += 1;
@@ -67,6 +75,23 @@ function applyRowFilters(tid, counter) {
     const cls = $(this).attr('data-filter-count');
     $(this).text((classCounts[cls] || 0).toLocaleString());
   });
+}
+
+// Tag-chip filter: clicking a chip shows only rows carrying its tag-<slug>
+// class; clicking the active chip again clears the filter. Composes with
+// toggler()/cycle_filter() via applyRowFilters(), so it works alongside the
+// version/internal-external/journal-preprint filters on the same table.
+function filterByTag(tid, chipEl, counter) {
+  const cls = $(chipEl).data('tagclass');
+  const wasActive = requiredTag[tid] === cls;
+  $(chipEl).closest('p').find('.tag-chip').removeClass('active');
+  if (wasActive) {
+    delete requiredTag[tid];
+  } else {
+    requiredTag[tid] = cls;
+    $(chipEl).addClass('active');
+  }
+  applyRowFilters(tid, counter);
 }
 
 // Toggle a set of rows (class fid) in table tid, updating the visible-row

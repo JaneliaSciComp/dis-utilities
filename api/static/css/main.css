@@ -11,6 +11,8 @@
   /* Page chrome */
   --page-bg:      #222;
   --muted-border: #666;
+  /* Acknowledgement-tag curator color (see curator_display()) */
+  --curator-iris: lime;
 }
 
 .oa_bronze {color: #CD7F32}
@@ -483,6 +485,31 @@ hr {border-color: var(--muted-border);
    background-color: #0000b0;
 }
 
+.tag-chip {
+  display: inline-block;
+  margin: 3px 4px 3px 0;
+  padding: 2px 10px;
+  border-radius: 12px;
+  font-size: 10.5pt;
+  cursor: pointer;
+  user-select: none;
+  background-color: var(--cell-bg);
+  color: var(--cell-fg);
+  border: 1px solid var(--muted-border);
+}
+.tag-chip:hover {
+  border-color: var(--table-accent);
+}
+.tag-chip.active {
+  background-color: var(--table-accent);
+  color: #fff;
+  border-color: var(--table-accent);
+}
+.tag-chip-count {
+  opacity: .7;
+  margin-left: 3px;
+}
+
 /* General */
 body {
   font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
@@ -533,6 +560,11 @@ a:hover, a:active {
   color: #ccc;
   background: #336;
 }
+
+/* IRIS-curated acknowledgement tag (standard_ack_table's Tags column) - same
+   specificity as a:link/a:hover above, so this must stay declared after them
+   to win the tie. Human-curated tags get no override (standard link color). */
+a.tag-iris { color: var(--curator-iris); }
 
 /* Info link */
 .infolink:before

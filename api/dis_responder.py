@@ -1643,14 +1643,31 @@ def standard_ack_table(rows, ack, is_regex=False, show_count=True):
           cnt: number of DOIs
           oacnt: number of Open Access
     '''
-    header = ['Published', 'DOI', 'Acknowledgements']
+    # Materialize once: pre-scanned below (doi_types) to decide the initial
+    # journal/preprint-vs-other filter state, so `rows` must survive two passes.
+    rows = list(rows)
+    # If the caller already restricted rows to a single doi_type (e.g.
+    # /acksregexui's ?doi_type=internal|external), a promised count (e.g. a
+    # /dois_tag_ack/ack click-through) should match what's visible on load -
+    # so don't also hide 'other' rows by default in that case. Also drives the
+    # Internal/External cycle button further down (see cyclebtn).
+    doi_types = {row.get('doi_type', 'internal') for row in rows}
+    restricted = len(doi_types) == 1
+    header = ['Published', 'DOI', 'Acknowledgements', 'Tags']
     # data-initial-hide/data-counter: default the view to journal-articles/preprints
     # only (hide 'other' rows on load); the type cycle button below reveals all types.
+    initial_hide = "" if restricted else "data-initial-hide='other' "
     html = "<table id='dois' class='tablesorter standard-scroll' " \
-           + "data-initial-hide='other' data-counter='totalrows'><thead><tr>" \
+           + f"{initial_hide}data-counter='totalrows'><thead><tr>" \
            + ''.join([f"<th>{itm}</th>" for itm in header]) + "</tr></thead><tbody>"
     fileoutput = ""
     cnt = oacnt = 0
+    tag_counts = collections.Counter()
+    # Tag name -> CSS class, assigned in first-seen order. An index rather than
+    # a slugified name, so two names that only differ in punctuation/spacing/
+    # case (e.g. "Cryo-EM Facility" vs "Cryo EM Facility") can never collide
+    # onto the same class and cross-contaminate the chip filter below.
+    tag_class = {}
     for row in rows:
         if 'jrc_is_oa' in row and row['jrc_is_oa']:
             oacnt += 1
@@ -1662,36 +1679,91 @@ def standard_ack_table(rows, ack, is_regex=False, show_count=True):
         row['link'] = doi_link(row['doi'])
         row['jrc_ack2'] = row['jrc_acknowledgements'].replace('\n', '<br>')
         row['jrc_ack2'] = highlight_subtext(row['jrc_ack2'], ack, is_regex=is_regex)
+        # dedupe by name (keeping the last tag object seen), in case a row
+        # somehow carries the same tag name twice
+        tags = list({tag['name']: tag for tag in row.get('jrc_acknowledge') or []}.values())
+        tag_names = [tag['name'] for tag in tags]
+        # IRIS-curated tags render lime (see curator_display()); human-curated
+        # tags get no override, so they fall back to the standard link color.
+        row['jrc_ack_tags'] = ", ".join(
+            (f"<a class='tag-iris' href='/tag/{escape(tag['name'])}'>{escape(tag['name'])}</a>"
+             if tag.get('curator') == 'IRIS'
+             else f"<a href='/tag/{escape(tag['name'])}'>{escape(tag['name'])}</a>")
+            for tag in tags)
+        tag_counts.update(tag_names)
+        for name in tag_names:
+            if name not in tag_class:
+                tag_class[name] = f'tagidx-{len(tag_class)}'
         # 'jp' (journal-article/preprint) vs 'other' drives the type cycle button;
         # mirrors the JOURNAL_ARTICLE query filter the endpoints used to apply.
         is_jp = row.get('type') == 'journal-article' or row.get('subtype') == 'preprint' \
                 or (row.get('types') or {}).get('resourceTypeGeneral') == 'Preprint'
-        cls = [row.get('doi_type', 'internal'), 'jp' if is_jp else 'other']
+        doi_type = row.get('doi_type', 'internal')
+        cls = [doi_type, 'jp' if is_jp else 'other']
         if version:
             cls.append('ver')
+        # tagidx-N classes let the chip bar below filter rows client-side by tag
+        cls.extend(tag_class[name] for name in tag_names)
         html += f"<tr class=\'{' '.join(cls)}\'><td>" \
-            + dloop(row, ['published', 'link', 'jrc_ack2'], "</td><td>") + "</td></tr>"
+            + dloop(row, ['published', 'link', 'jrc_ack2', 'jrc_ack_tags'], "</td><td>") \
+            + "</td></tr>"
         cnt += 1
         row['jrc_acknowledgements'] = row['jrc_acknowledgements'].replace('\n', ' ')
-        fileoutput += dloop(row, ['published', 'doi', 'jrc_acknowledgements']) + "\n"
+        row['jrc_ack_tags_plain'] = ", ".join(tag_names)
+        fileoutput += dloop(row, ['published', 'doi', 'jrc_acknowledgements',
+                                  'jrc_ack_tags_plain']) + "\n"
     html += '</tbody></table>'
+    chipbar = tagkey = ""
+    if tag_counts:
+        chips = [f"<span class='tag-chip' data-tagclass='{tag_class[name]}' "
+                 "onclick=\"filterByTag('dois', this, 'totalrows');\">"
+                 f"{escape(name)} <span class='tag-chip-count'>{count}</span></span>"
+                 for name, count in sorted(tag_counts.items(),
+                                           key=lambda kv: (-kv[1], kv[0].lower()))]
+        chipbar = "<p><b>Filter by tag:</b> " + "".join(chips) + "</p>"
+        # Reuses the same tag-iris class/href-less anchor the Tags column links
+        # get, so the key can never drift out of sync with the actual colors.
+        tagkey = "<p style='font-size: 10pt'><b>Tag color key:</b> " \
+                 "<a class='tag-iris' href='javascript:void(0);' " \
+                 "onclick='return false;'>IRIS-tagged</a> &middot; " \
+                 "<a href='javascript:void(0);' onclick='return false;'>" \
+                 "Human-curated</a></p>"
     counter = "" if not show_count \
               else f"<p>Number of DOIs: <span id='totalrows'>{cnt:,}</span></p>"
-    cyclebtn = "<button class=\"btn btn-outline-info\" " \
-               + "onclick=\"cycle_filter(this, 'dois', 'internal', 'external', " \
-               + "'Internal', 'External', 'totalrows');\">" \
-               + "Showing Internal &amp; External</button>&nbsp;"
-    # data-state='1' matches the table's data-initial-hide='other': the page loads
-    # showing journal-articles/preprints only; cycling reveals Other, then all types.
-    typebtn = "<button class=\"btn btn-outline-info\" data-state=\"1\" " \
-              + "onclick=\"cycle_filter(this, 'dois', 'jp', 'other', " \
-              + "'Journal/preprint', 'Other', 'totalrows');\">" \
-              + "Showing Journal/preprint only</button>&nbsp;"
+    if len(doi_types) > 1:
+        cyclebtn = "<button class=\"btn btn-outline-info\" " \
+                   + "onclick=\"cycle_filter(this, 'dois', 'internal', 'external', " \
+                   + "'Internal', 'External', 'totalrows');\">" \
+                   + "Showing Internal &amp; External</button>&nbsp;"
+    elif doi_types:
+        # Caller restricted the query to one collection (e.g. /acksregexui's
+        # ?doi_type=internal|external) - the other type never appears in
+        # `rows` at all, so toggling is meaningless here. A plain-text label
+        # (not a disabled button) makes clear this is a state, not a control
+        # that happens to be unavailable right now.
+        only_type = next(iter(doi_types)).capitalize()
+        cyclebtn = f"<span style='color: gray'>Showing {only_type} only</span>&nbsp;"
+    else:
+        cyclebtn = ""
+    # data-state must match the table's initial_hide above: state 1 (hide
+    # 'other') for the normal default, state 0 (hide nothing) when restricted
+    # - the button stays fully operable either way, just starting from
+    # whichever state matches what's actually visible on load.
+    if restricted:
+        typebtn = "<button class=\"btn btn-outline-info\" data-state=\"0\" " \
+                  + "onclick=\"cycle_filter(this, 'dois', 'jp', 'other', " \
+                  + "'Journal/preprint', 'Other', 'totalrows');\">" \
+                  + "Showing Journal/preprint &amp; Other</button>&nbsp;"
+    else:
+        typebtn = "<button class=\"btn btn-outline-info\" data-state=\"1\" " \
+                  + "onclick=\"cycle_filter(this, 'dois', 'jp', 'other', " \
+                  + "'Journal/preprint', 'Other', 'totalrows');\">" \
+                  + "Showing Journal/preprint only</button>&nbsp;"
     cbutton = "<button id='verbtn' class=\"btn btn-outline-warning\" " \
               + "onclick=\"toggler('dois', 'ver', 'totalrows');\">" \
               + "Filter versioned DOIs</button>&nbsp;"
     html = counter + cyclebtn + typebtn + cbutton \
-           + create_downloadable('standard', header, fileoutput) + html
+           + create_downloadable('standard', header, fileoutput) + chipbar + tagkey + html
     return html, cnt, oacnt
 
 
@@ -6701,6 +6773,345 @@ def citation_metrics(source='datacite'):
                                          navbar=generate_navbar('DOIs')))
 
 
+# Per-publisher usage fields aggregated by /source_metrics. Common subset
+# reported: views (present on all four) + downloads (figshare/Zenodo/eLife;
+# protocols.io has none, so it contributes 0 to downloads).
+SOURCE_METRIC_USAGE_FIELDS = ("jrc_figshare_counts", "jrc_zenodo_counts",
+                              "jrc_protocolsio_counts", "jrc_elife_counts")
+
+
+def citation_impact_indices(counts):
+    ''' Compute h-index, i10-index, i100-index from a list of per-work citation
+        counts (classic scholarly-impact measures). Callers pass version-deduped
+        counts so one work isn't counted several times. h = largest h such that
+        h works are each cited >= h times; i10/i100 = works cited >= 10/100 times.
+        Keyword arguments:
+          counts: iterable of per-work citation counts
+        Returns:
+          dict with keys h_index, i10, i100
+    '''
+    ordered = sorted((c for c in counts if c and c > 0), reverse=True)
+    h_index = 0
+    for idx, cnt in enumerate(ordered, start=1):
+        if cnt >= idx:
+            h_index = idx
+        else:
+            break
+    return {"h_index": h_index,
+            "i10": sum(1 for c in ordered if c >= 10),
+            "i100": sum(1 for c in ordered if c >= 100)}
+
+
+def citation_distribution_prose(mean, median, pct_ge_100):
+    ''' Describe a citation distribution's skew and depth in words that track
+        the actual numbers, so the prose stays honest if the data shifts (e.g.
+        the heavy-tailed whole corpus vs. a sparse single year where few works
+        have accrued many citations). Returns (skew, depth) fragments; `depth`
+        carries the sentence's terminal punctuation - the "broad depth" clause
+        (leading comma) when the >=100-citation share justifies it, else just
+        "." (rather than asserting broad depth regardless, as static text would).
+        Keyword arguments:
+          mean: mean citations per work
+          median: median citations per work
+          pct_ge_100: percent of works cited at least 100 times
+        Returns:
+          (skew_phrase, depth_clause) tuple of strings
+    '''
+    ratio = mean / median if median else 0
+    if ratio >= 3:
+        skew = "a strongly right-skewed, heavy-tailed distribution"
+    elif ratio >= 1.5:
+        skew = "a right-skewed distribution"
+    else:
+        skew = "a fairly even distribution"
+    if pct_ge_100 >= 10:
+        depth = ", so the top-end concentration coexists with broad depth."
+    else:
+        depth = "."
+    return skew, depth
+
+
+@app.route('/source_metrics/<string:year>')
+@app.route('/source_metrics')
+def source_metrics(year='All'):  # pylint: disable=too-many-locals
+    ''' Combined citation + usage metrics for all Janelia DOIs, split by
+        registrar source (Crossref vs DataCite) and deliberately NOT scoped to
+        any single publisher (eLife/Zenodo/figshare/protocols.io) - fills the
+        gap the per-publisher *_stats endpoints leave. dois collection only:
+        usage data exists only there, and this parallels citation_metrics'
+        scope. Citations are uniform (jrc_citation_count); usage rolls up the
+        common views+downloads subset across the per-publisher count fields
+        (Crossref usage = eLife + protocols.io; DataCite = figshare + Zenodo).
+    '''
+    coll = DB['dis'].dois
+    ymatch = {}
+    if year != 'All':
+        ymatch["jrc_publishing_date"] = {"$regex": "^" + year}
+    cite = {}   # source -> citation metrics
+    use = {}    # source -> usage metrics
+    # h5-index = h-index over works from the last 5 COMPLETE calendar years (a
+    # recency lens, less dominated by old landmark papers - the measure Google
+    # Scholar Metrics uses). Only meaningful for the all-years view; a
+    # year-filtered report is already single-year, so h5 is omitted there.
+    h5_range = None
+    if year == 'All':
+        cur_year = datetime.now().year
+        h5_range = (cur_year - 5, cur_year - 1)
+    # Pooled per-work data for the Combined column: median and the impact
+    # indices are NOT additive, so Combined is computed over the pooled set,
+    # not by summing the per-source columns.
+    pooled_counts = []          # every cited DOI's count (combined total/median)
+    pooled_nonver_works = []    # (count, pub_year) per non-versioned work
+    try:
+        for obtained in ("Crossref", "DataCite"):
+            # Cited universe matches citation_metrics: DOIs carrying citation
+            # sources. jrc_citation_count is the deduplicated union total.
+            cmatch = {"jrc_obtained_from": obtained,
+                      "jrc_citation_sources": {"$exists": True}}
+            cmatch.update(ymatch)
+            rows = list(coll.find(cmatch, {"doi": 1, "relation": 1,
+                                           "jrc_citation_count": 1,
+                                           "jrc_publishing_date": 1}))
+            counts = [r.get('jrc_citation_count', 0) or 0 for r in rows]
+            # Indices use non-versioned works only (a .v1/.v2 series is one work);
+            # DL.is_version needs doi + relation, both projected above. Keep each
+            # work's publishing year alongside its count for the h5 window.
+            nonver_works = []
+            for row in rows:
+                if DL.is_version(row):
+                    continue
+                yname = (row.get('jrc_publishing_date') or '')[:4]
+                nonver_works.append((row.get('jrc_citation_count', 0) or 0,
+                                     int(yname) if yname.isdigit() else None))
+            nonver = [c for c, _ in nonver_works]
+            amatch = {"jrc_obtained_from": obtained}
+            amatch.update(ymatch)
+            all_dois = coll.count_documents(amatch)
+            cite[obtained] = {"dois": len(counts), "all": all_dois,
+                              "reach": len(counts) / all_dois * 100 if all_dois else 0,
+                              "total": sum(counts),
+                              "median": statistics.median(counts) if counts else 0,
+                              **citation_impact_indices(nonver)}
+            if h5_range:
+                h5c = [c for c, y in nonver_works if y and h5_range[0] <= y <= h5_range[1]]
+                cite[obtained]['h5'] = citation_impact_indices(h5c)['h_index']
+            pooled_counts.extend(counts)
+            pooled_nonver_works.extend(nonver_works)
+            # Usage: sum views+downloads across whichever per-publisher count
+            # field each DOI carries (protocols.io has no downloads -> adds 0).
+            umatch = {"jrc_obtained_from": obtained,
+                      "$or": [{f: {"$exists": True}} for f in SOURCE_METRIC_USAGE_FIELDS]}
+            umatch.update(ymatch)
+            uviews = udowns = udois = 0
+            for doc in coll.find(umatch, {f: 1 for f in SOURCE_METRIC_USAGE_FIELDS}):
+                udois += 1
+                for field in SOURCE_METRIC_USAGE_FIELDS:
+                    cnts = doc.get(field) or {}
+                    uviews += cnts.get('views', 0)
+                    udowns += cnts.get('downloads', 0)
+            use[obtained] = {"dois": udois, "views": uviews, "downloads": udowns,
+                             "dpv": udowns / uviews * 100 if uviews else 0,
+                             "vpd": uviews / udois if udois else 0,
+                             "dpd": udowns / udois if udois else 0}
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get source metrics " \
+                                                    + "from dois collection"),
+                               message=error_message(err))
+    # Combined column (pooled, not per-source sums - see pooled_* above)
+    pooled_nonver = [c for c, _ in pooled_nonver_works]
+    c_all = cite['Crossref']['all'] + cite['DataCite']['all']
+    c_dois = cite['Crossref']['dois'] + cite['DataCite']['dois']
+    cite['Combined'] = {"dois": c_dois, "all": c_all,
+                        "reach": c_dois / c_all * 100 if c_all else 0,
+                        "total": sum(pooled_counts),
+                        "median": statistics.median(pooled_counts) if pooled_counts else 0,
+                        **citation_impact_indices(pooled_nonver)}
+    if h5_range:
+        h5c = [c for c, y in pooled_nonver_works if y and h5_range[0] <= y <= h5_range[1]]
+        cite['Combined']['h5'] = citation_impact_indices(h5c)['h_index']
+    u_views = use['Crossref']['views'] + use['DataCite']['views']
+    u_downs = use['Crossref']['downloads'] + use['DataCite']['downloads']
+    u_dois = use['Crossref']['dois'] + use['DataCite']['dois']
+    use['Combined'] = {"dois": u_dois, "views": u_views, "downloads": u_downs,
+                       "dpv": u_downs / u_views * 100 if u_views else 0,
+                       "vpd": u_views / u_dois if u_dois else 0,
+                       "dpd": u_downs / u_dois if u_dois else 0}
+    if request.args.get('fmt') == 'json':
+        result = initialize_result()
+        result['data'] = {"citations": cite, "usage": use}
+        result['rest']['source'] = 'mongo'
+        result['rest']['row_count'] = cite['Combined']['dois'] + use['Combined']['dois']
+        return generate_response(result)
+    # ----- headline stat cards, grouped (h-index is the marquee combined impact
+    # number). The Citations/Usage labels make the two-row split intentional -
+    # they're two different populations, not one dashboard of six numbers. -----
+    grp_label = ("font-size:0.8em; color:#a8c4e0; text-transform:uppercase; "
+                 "letter-spacing:0.05em; font-weight:bold; margin-bottom:5px;")
+    cards = f"<div style='{grp_label}'>Citations</div>" \
+            + stat_cards([("DOIs cited", f"{cite['Combined']['dois']:,}"),
+                          ("Total citations", f"{cite['Combined']['total']:,}"),
+                          ("h-index", f"{cite['Combined']['h_index']:,}")],
+                         div_id='src-cite-stats')
+    cards += f"<div style='{grp_label}'>Usage</div>" \
+             + stat_cards([("DOIs with usage", f"{use['Combined']['dois']:,}"),
+                           ("Total views", f"{use['Combined']['views']:,}"),
+                           ("Total downloads", f"{use['Combined']['downloads']:,}")],
+                          div_id='src-use-stats')
+    intro = "<div style='font-size:0.9em; color:#a8c4e0; max-width:640px; " \
+            + "margin:-8px 0 16px 0'>All Janelia DOIs, split by registration " \
+            + "source (Crossref vs. DataCite) regardless of publisher. Citations " \
+            + "are the deduplicated union count; usage is the common views + " \
+            + "downloads subset summed across figshare/Zenodo (DataCite) and " \
+            + "eLife/protocols.io (Crossref). Impact indices (h/i10/i100) count " \
+            + "each work once (versions merged). The citation and usage " \
+            + "populations are largely different DOIs, so each has its own " \
+            + "denominator.</div>"
+
+    def mrow(label, data, key, kind='int'):
+        ''' One 3-column (Combined/Crossref/DataCite) metric row, formatted. '''
+        cells = [label]
+        for col in ('Combined', 'Crossref', 'DataCite'):
+            val = data[col][key]
+            if kind == 'pct':
+                cells.append(f"{val:,.1f}%")
+            elif kind == 'median':
+                cells.append(f"{val:,.0f}" if float(val).is_integer() else f"{val:,.1f}")
+            elif kind == 'round':
+                cells.append(f"{val:,.0f}")
+            else:
+                cells.append(f"{val:,}")
+        return cells
+    # ----- citations by source -----
+    crows = [mrow("DOIs cited", cite, 'dois'),
+             mrow("Reach (% of DOIs)", cite, 'reach', 'pct'),
+             mrow("Citations", cite, 'total'),
+             mrow("Median / DOI", cite, 'median', 'median'),
+             mrow("h-index", cite, 'h_index')]
+    if h5_range:
+        crows.append(mrow(f"h5-index ({h5_range[0]}–{h5_range[1]})", cite, 'h5'))
+    crows.append(mrow("i10-index", cite, 'i10'))
+    crows.append(mrow("i100-index", cite, 'i100'))
+    chtml = "<h4>Citations by source</h4>"
+    chtml += render_table(['Metric', 'Combined', 'Crossref', 'DataCite'], crows,
+                          table_id='src-cite', css='tablesorter numbers-scroll')
+    h5_note = ("<b>h5-index</b>: the h-index over just the last 5 complete years - "
+               "a recency lens, less dominated by older landmark works. "
+               if h5_range else "")
+    chtml += "<div style='font-size:0.9em; color:#a8c4e0; max-width:620px'>" \
+             + "<b>h-index</b>: the largest number <i>h</i> of works that have each " \
+             + "been cited at least <i>h</i> times (an h-index of 367 means 367 " \
+             + "works were each cited &ge;367 times). " \
+             + h5_note \
+             + "<b>i10-index</b> / <b>i100-index</b>: the number of works cited at " \
+             + "least 10 / 100 times. Each counts a work once (versions merged), " \
+             + "and is computed over the pooled works, so Combined is not the sum " \
+             + "of the columns.<br>Per-source detail: " \
+             + "<a href='/citation_metrics/crossref'>Crossref metrics</a> &middot; " \
+             + "<a href='/citation_metrics/datacite'>DataCite metrics</a></div>"
+    # ----- citation concentration (how much of the total rides on the top works;
+    # combined + version-merged - a whole-corpus shape metric, not per-source) -----
+    conc_sorted = sorted((c for c in pooled_nonver if c > 0), reverse=True)
+    conc_total = sum(conc_sorted)
+    conc_n = len(conc_sorted)
+
+    def top_share(k):
+        ''' Percent of all citations held by the k most-cited works. '''
+        k = max(1, min(k, conc_n))
+        return sum(conc_sorted[:k]) / conc_total * 100 if conc_total else 0
+    one_pct = max(1, round(conc_n * 0.01))
+    ten_pct = max(1, round(conc_n * 0.10))
+    conc_pts = [("Top work", 1), ("Top 10 works", 10),
+                (f"Top 1% ({one_pct:,} works)", one_pct),
+                (f"Top 10% ({ten_pct:,} works)", ten_pct)]
+    # Shape context for the concentration numbers: mean-vs-median makes the
+    # right-skew explicit, and the ">=100 citations" share is a breadth
+    # counterweight (concentration at the top coexists with broad depth).
+    conc_mean = conc_total / conc_n if conc_n else 0
+    conc_median = statistics.median(conc_sorted) if conc_sorted else 0
+    conc_med_str = f"{conc_median:,.0f}" if float(conc_median).is_integer() \
+                   else f"{conc_median:,.1f}"
+    n100 = sum(1 for c in conc_sorted if c >= 100)
+    pct100 = n100 / conc_n * 100 if conc_n else 0
+    # Prose tracks the actual numbers (see citation_distribution_prose) so it
+    # stays honest for a sparse single year, not just the heavy-tailed corpus.
+    skew_phrase, depth_clause = citation_distribution_prose(conc_mean, conc_median, pct100)
+    conchtml = "<h4>Citation concentration</h4>"
+    conchtml += "<div style='font-size:0.95em; max-width:620px; margin-bottom:8px'>" \
+                + f"Over <b>{conc_n:,}</b> cited works (versions merged, " \
+                + ("all years" if year == 'All' else str(year)) + "): " \
+                + f"mean <b>{conc_mean:,.0f}</b> vs. median <b>{conc_med_str}</b> " \
+                + f"citations/work - <i>{skew_phrase}</i>. " \
+                + f"<b>{n100:,}</b> works (<b>{pct100:.1f}%</b>) are cited " \
+                + f"&ge;100 times{depth_clause}</div>"
+    conchtml += render_table(['Most-cited works', 'Share of all citations'],
+                             [[label, f"{top_share(k):.1f}%"] for label, k in conc_pts],
+                             table_id='src-conc', css='tablesorter numberlast-scroll')
+    conchtml += "<div style='font-size:0.9em; color:#a8c4e0; max-width:620px'>" \
+                + "A high top-work share means overall impact leans on a few " \
+                + "landmark papers rather than being spread evenly.</div>"
+    # ----- usage by source -----
+    uhtml = "<h4>Usage by source</h4>"
+    uhtml += render_table(['Metric', 'Combined', 'Crossref', 'DataCite'],
+                          [mrow("DOIs with usage", use, 'dois'),
+                           mrow("Views", use, 'views'),
+                           mrow("Downloads", use, 'downloads'),
+                           mrow("Downloads / view", use, 'dpv', 'pct'),
+                           mrow("Views / DOI", use, 'vpd', 'round'),
+                           mrow("Downloads / DOI", use, 'dpd', 'round')],
+                          table_id='src-use', css='tablesorter numbers-scroll')
+    uhtml += "<div style='font-size:0.9em; color:#a8c4e0'>Crossref usage = eLife " \
+             + "+ protocols.io; DataCite usage = figshare + Zenodo. Downloads " \
+             + "exclude protocols.io (no downloads metric); views include it.</div>"
+    # ----- share-by-source chart (percent-stacked: composition regardless of
+    # the very different absolute magnitudes of citations vs views vs downloads) -----
+    share_data = {"Citations": {"Crossref": cite['Crossref']['total'],
+                                "DataCite": cite['DataCite']['total']},
+                  "Views": {"Crossref": use['Crossref']['views'],
+                            "DataCite": use['DataCite']['views']},
+                  "Downloads": {"Crossref": use['Crossref']['downloads'],
+                                "DataCite": use['DataCite']['downloads']}}
+    share_script, share_div = DP.hbar_stacked_chart(
+        share_data, ['Crossref', 'DataCite'], "Share by source",
+        value_label="Total", value_format="0,0", colors=DP.SOURCE_PALETTE,
+        normalize=True, sort=False, width=520, height=320)
+    # ----- Lorenz-style concentration curve (visualizes the concentration
+    # section: the top-N-share table rows are points on this curve) -----
+    lorenz_script, lorenz_div = DP.lorenz_chart(
+        conc_sorted, "Citation concentration", width=520, height=320)
+    # The curve hugs the top-left (bows above the diagonal) because works are
+    # ranked most-cited first; without this key that high shape reads as odd.
+    lorenz_div += "<div style='font-size:0.85em; color:#a8c4e0; max-width:520px; " \
+                  + "margin-top:4px'>How to read: each point pairs a top share of " \
+                  + "works (horizontal) with the share of all citations they hold " \
+                  + f"(vertical) - e.g. the top 10% of works hold {top_share(ten_pct):.0f}% " \
+                  + "of citations. The curve stays well above the dashed &ldquo;even&rdquo; " \
+                  + "line because a few works hold most of the citations - that gap is " \
+                  + "the concentration.</div>"
+    # All chart divs go inline beside their section (flexrow); their scripts are
+    # accumulated into the template's chartscript slot (see bokeh.html) - a div
+    # is hydrated by its script wherever the script sits on the page.
+    chartscript = share_script + lorenz_script
+
+    def flexrow(section_html, chart_div):
+        ''' Pair a section and its chart side by side. '''
+        return "<div class='flexrow' style='margin-bottom: 24px'>" \
+               + f"<div class='flexcol'>{section_html}</div>" \
+               + "<div class='flexcol' style='margin: 10px 0 0 20px'>" \
+               + f"{chart_div}</div></div>"
+    title = "Impact by source"
+    if year != 'All':
+        title += f" ({year})"
+    html = year_pulldown('source_metrics') + "<br><br>" + cards + intro \
+           + flexrow(chtml, share_div) + flexrow(conchtml, lorenz_div) + uhtml
+    endpoint_access()
+    return make_response(render_template('bokeh.html', urlroot=request.url_root,
+                                         title=title, html=html,
+                                         chartscript=chartscript, chartdiv='',
+                                         chartscript2='', chartdiv2='',
+                                         navbar=generate_navbar('DOIs')))
+
+
 # figshare DOIs are DataCite-registered with one of these publisher strings
 FIGSHARE_PUBLISHERS = ["Janelia Research Campus", "Figshare", "figshare"]
 # Strip trailing "specifier" tokens from a figshare title to derive a groupable
@@ -8266,18 +8677,23 @@ def elife_stats(year='All'):  # pylint: disable=too-many-locals,too-many-branche
                           [[k, f"{v:,}"] for k, v in usage.items()],
                           table_id='eli-usage', css='tablesorter numberlast-scroll')
     # ----- DOIs & usage by publishing year -----
+    # A specific year is already the query filter (elife_match), so every doc
+    # shares that one year - a by-year breakdown would be a single, redundant
+    # row/bar. Only build it for the all-years view.
     ydata = {'Year': [], 'DOIs': [], 'Views': []}
-    ytrows = []
-    for yname in sorted(by_year):
-        rec = by_year[yname]
-        ytrows.append([yname, f"{rec['dois']:,}", f"{rec['views']:,}",
-                       f"{rec['downloads']:,}", f"{rec['citations']:,}"])
-        ydata['Year'].append(yname)
-        ydata['DOIs'].append(rec['dois'])
-        ydata['Views'].append(rec['views'])
-    yhtml = "<h4>DOIs &amp; usage by publishing year</h4>"
-    yhtml += render_table(['Year', 'DOIs', 'Views', 'Downloads', 'Citations'],
-                          ytrows, table_id='eli-years', css='tablesorter numberlast-scroll')
+    yhtml = ''
+    if year == 'All':
+        ytrows = []
+        for yname in sorted(by_year):
+            rec = by_year[yname]
+            ytrows.append([yname, f"{rec['dois']:,}", f"{rec['views']:,}",
+                           f"{rec['downloads']:,}", f"{rec['citations']:,}"])
+            ydata['Year'].append(yname)
+            ydata['DOIs'].append(rec['dois'])
+            ydata['Views'].append(rec['views'])
+        yhtml = "<h4>DOIs &amp; usage by publishing year</h4>"
+        yhtml += render_table(['Year', 'DOIs', 'Views', 'Downloads', 'Citations'],
+                              ytrows, table_id='eli-years', css='tablesorter numberlast-scroll')
     # ----- DOIs by type (journal article vs. Reviewed Preprint) -----
     type_data = dict(by_type)
     thtml = "<h4>DOIs by type</h4>"
@@ -8341,8 +8757,10 @@ def elife_stats(year='All'):  # pylint: disable=too-many-locals,too-many-branche
     title = "eLife metrics"
     if year != 'All':
         title += f" (year={year})"
-    html = year_pulldown('elife_stats') + "<br><br>" + cards + intro \
-           + flexrow(uhtml, usage_div) + flexrow(yhtml, year_div) + flexrow(thtml, type_div)
+    html = year_pulldown('elife_stats') + "<br><br>" + cards + intro + flexrow(uhtml, usage_div)
+    if yhtml:
+        html += flexrow(yhtml, year_div)
+    html += flexrow(thtml, type_div)
     if shtml:
         html += flexrow(shtml, src_div)
     endpoint_access()
@@ -12275,27 +12693,49 @@ def ror(rorid=None):
 
 @app.route('/dois_tag_ack/<string:tagtype>')
 def show_tag_ack(tagtype):
-    ''' Show tags or acknowledgements with counts
+    ''' Show tags or acknowledgements with counts. For tagtype="ack" only,
+        every tag row also breaks down by source collection (Internal = dois,
+        External = external_dois - both are queried and combined) and by
+        curator (IRIS = machine-tagged, Human = anything else). tagtype="tag"
+        omits both breakdowns - jrc_tag never appears on external_dois at all
+        (so Internal/External would be uninformative - always 100% Internal)
+        and has no curator concept. tagtype="tag" instead breaks down by
+        jrc_obtained_from (Crossref/DataCite); tagtype="ack" omits that split -
+        external_dois carries no jrc_obtained_from at all, so for ack it was
+        redundant with (and less complete than) the Internal/External columns.
+        ack's Internal/External counts link to /acksregexui/<tag>?doi_type=...
+        (the search_regex vocabulary jrc_tag entities aren't part of).
         Keyword arguments:
           tagtype: "tag" or "ack"
     '''
     tag_config = {
         'tag': {'mongo': 'jrc_tag', 'nav': 'jrc_tag.name',
                 'label': 'Tag', 'errmsg': 'tags', 'title': 'DOI tags',
-                'navbar': 'Tag/affiliation'},
+                'navbar': 'Tag/affiliation', 'has_curator': False,
+                'has_source_split': True, 'has_doi_type_split': False,
+                'doi_type_link': False},
         'ack': {'mongo': 'jrc_acknowledge', 'nav': 'jrc_acknowledge.name',
                 'label': 'Acknowledgement', 'errmsg': 'acknowledgements',
-                'title': 'DOI acknowledgements', 'navbar': 'Acknowledgements'},
+                'title': 'DOI acknowledgements', 'navbar': 'Acknowledgements',
+                'has_curator': True, 'has_source_split': False,
+                'has_doi_type_split': True, 'doi_type_link': True},
     }
     if tagtype not in tag_config:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Invalid tag type"),
                                message=f"tagtype must be one of: {', '.join(tag_config)}")
     cfg = tag_config[tagtype]
+    group_id = {"tag": f"${cfg['mongo']}.name"}
+    project = {"_id": 0, f"{cfg['mongo']}.name": 1}
+    if cfg['has_source_split']:
+        group_id["source"] = "$jrc_obtained_from"
+        project["jrc_obtained_from"] = 1
+    if cfg['has_curator']:
+        group_id["curator"] = f"${cfg['mongo']}.curator"
+        project[f"{cfg['mongo']}.curator"] = 1
     payload = [{"$unwind": f"${cfg['mongo']}"},
-               {"$project": {"_id": 0, f"{cfg['mongo']}.name": 1, "jrc_obtained_from": 1}},
-               {"$group": {"_id": {"tag": f"${cfg['mongo']}.name", "source": "$jrc_obtained_from"},
-                           "count": {"$sum": 1}}},
+               {"$project": project},
+               {"$group": {"_id": group_id, "count": {"$sum": 1}}},
                {"$sort": {"_id.tag": 1}}
               ]
     try:
@@ -12304,23 +12744,48 @@ def show_tag_ack(tagtype):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get supervisory orgs"),
                                message=error_message(err))
-    try:
-        rows = DB['dis'].dois.aggregate(payload)
-    except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning(f"Could not get {cfg['errmsg']} " \
-                                                    + f"for {tagtype} from dois collection"),
-                               message=error_message(err))
+    # Human-curated ack tags can carry any name a curator typed (see
+    # utility/bin/update_tags.py --acknowledge), with no requirement that it
+    # already exist in search_regex - unlike IRIS tags, whose names always
+    # come from there. /acksregexui 404s on a key with no search_regex
+    # document, so only link tags that actually have one.
+    regex_keys = set(DB['dis'].search_regex.distinct('key')) if cfg['doi_type_link'] else set()
+    # Internal (dois) and external (external_dois) DOIs are queried and
+    # combined here - the source collection is not a jrc_obtained_from value,
+    # so it can only be told apart by which collection each count came from.
+    source_cols = SOURCES if cfg['has_source_split'] else []
+    extra_cols = ['Internal', 'External'] if cfg['has_doi_type_split'] else []
+    if cfg['has_curator']:
+        extra_cols += ['IRIS', 'Human']
+    tags = {}
+    for coll_name, doi_type_col in (('dois', 'Internal'), ('external_dois', 'External')):
+        try:
+            rows = DB['dis'][coll_name].aggregate(payload)
+        except Exception as err:
+            return render_template('error.html', urlroot=request.url_root,
+                                   title=render_warning(f"Could not get {cfg['errmsg']} " \
+                                                        + f"for {tagtype} from {coll_name} " \
+                                                        + "collection"),
+                                   message=error_message(err))
+        for row in rows:
+            tag = row['_id'].get('tag')
+            count = row['count']
+            entry = tags.setdefault(tag, {})
+            if cfg['has_source_split']:
+                # external_dois records carry no jrc_obtained_from at all (that
+                # field is dois-only), so $group omits the "source" key
+                # entirely for them rather than setting it to null.
+                source = row['_id'].get('source')
+                if source:
+                    entry[source] = entry.get(source, 0) + count
+            entry[doi_type_col] = entry.get(doi_type_col, 0) + count
+            if cfg['has_curator']:
+                curator_col = 'IRIS' if row['_id'].get('curator') == 'IRIS' else 'Human'
+                entry[curator_col] = entry.get(curator_col, 0) + count
     trows = []
     row_classes = []
-    tags = {}
-    total = {src: 0 for src in SOURCES}
+    total = {col: 0 for col in source_cols + extra_cols}
     active = 0
-    for row in rows:
-        if row['_id']['tag'] not in tags:
-            tags[row['_id']['tag']] = {}
-        if row['_id']['source'] not in tags[row['_id']['tag']]:
-            tags[row['_id']['tag']][row['_id']['source']] = row['count']
     for tag, val in tags.items():
         link = f"<a href='/tag/{escape(tag)}'>{tag}</a>"
         rclass = 'other'
@@ -12334,7 +12799,7 @@ def show_tag_ack(tagtype):
         else:
             org = "<span style='color: red;'>No</span>"
         cells = [safe(link), safe(org)]
-        for source in SOURCES:
+        for source in source_cols:
             if source in val:
                 onclick = f"onclick='nav_post(\"{cfg['nav']}\",\"{tag}\",\"{source}\")'"
                 link = f"<a href='#' {onclick}>{val[source]:,}</a>"
@@ -12342,21 +12807,66 @@ def show_tag_ack(tagtype):
             else:
                 link = ""
             cells.append(safe(link))
+        for col in extra_cols:
+            count = val.get(col, 0)
+            if (cfg['doi_type_link'] and col in ('Internal', 'External') and count
+                    and tag in regex_keys):
+                doi_type_param = col.lower()
+                href = f"/acksregexui/{quote(tag, safe='')}?doi_type={doi_type_param}"
+                cell_html = f"<a href='{href}'>{count:,}</a>"
+            else:
+                cell_html = f"{count:,}" if count else ""
+            cells.append(safe(cell_html))
+            total[col] += count
         trows.append(cells)
         row_classes.append(rclass)
-    footer = [fcell('TOTAL', colspan=2)] + [fcell(f"{total[source]:,}", align='center')
-                                            for source in SOURCES]
-    html = render_table([cfg['label'], 'SupOrg', 'Crossref', 'DataCite'], trows,
+    footer = [fcell('TOTAL', colspan=2)] + [fcell(f"{total[col]:,}", align='center')
+                                            for col in source_cols + extra_cols]
+    html = render_table([cfg['label'], 'SupOrg'] + source_cols + extra_cols, trows,
                         table_id='types', css='tablesorter numbers-scroll',
                         row_classes=row_classes, footer=footer)
     cbutton = "<button class=\"btn btn-outline-warning\" " \
               + "onclick=\"$('.other').toggle();\">Filter for active SupOrgs</button>"
-    cards = stat_cards([(cfg['label'] + 's', f"{len(tags):,}"),
-                        ("Active SupOrgs", f"{active:,}"),
-                        ("Crossref", f"{total['Crossref']:,}"),
-                        ("DataCite", f"{total['DataCite']:,}")],
-                       div_id='tagack-stats')
-    html = cards + cbutton + html
+    stat_items = [(cfg['label'] + 's', f"{len(tags):,}"), ("Active SupOrgs", f"{active:,}")]
+    if cfg['has_source_split']:
+        stat_items += [("Crossref", f"{total['Crossref']:,}"),
+                       ("DataCite", f"{total['DataCite']:,}")]
+    else:
+        stat_items += [("Internal", f"{total['Internal']:,}"),
+                       ("External", f"{total['External']:,}")]
+    cards = stat_cards(stat_items, div_id='tagack-stats')
+    chart_html = ""
+    if tagtype == 'ack' and tags:
+        # Total (Internal + External) per entity ranks the top-N; the table
+        # itself sorts alphabetically, so this is the only place volume is
+        # visible at a glance. Internal/External stay split (not summed) so
+        # the stacked chart below can show each bar's composition, not just
+        # its total.
+        chart_totals = {tag: val.get('Internal', 0) + val.get('External', 0)
+                        for tag, val in tags.items()}
+        top_n = 15
+        top_tags = sorted(chart_totals, key=chart_totals.get, reverse=True)[:top_n]
+        chart_data = {tag: {'Internal': tags[tag].get('Internal', 0),
+                            'External': tags[tag].get('External', 0)} for tag in top_tags}
+        chart_title = "Top acknowledged entities"
+        if len(chart_totals) > top_n:
+            chart_title += f" (top {top_n} of {len(chart_totals):,})"
+        # /tag/<name> (not /acksregexui) - it queries by the same exact
+        # jrc_acknowledge.name match this chart's counts come from, so the
+        # count clicked always matches the count shown on arrival.
+        nav = {tag: f"/tag/{quote(tag, safe='')}" for tag in chart_data}
+        chartscript, chartdiv = DP.hbar_stacked_chart(chart_data, ['Internal', 'External'],
+                                                      chart_title, value_label="DOIs",
+                                                      value_format="0,0", nav=nav)
+        # general.html (unlike custom.html) doesn't load the Bokeh JS library -
+        # embed the CDN script inline here rather than adding it to the shared
+        # template for every other page that never charts.
+        chart_html = ('<script src="https://cdn.bokeh.org/bokeh/release/bokeh-3.5.0.min.js">'
+                     '</script>' + chartdiv + chartscript)
+    table_col = f"<div style='flex:1;min-width:0;'>{cbutton}{html}</div>"
+    chart_col = f"<div style='flex:0 0 auto;'>{chart_html}</div>" if chart_html else ""
+    html = cards + "<div style='display:flex;gap:2rem;align-items:flex-start;'>" \
+           + table_col + chart_col + "</div>"
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=cfg['title'], html=html,
@@ -13008,6 +13518,11 @@ def show_acks_regex_search():
 @app.route('/acksregexui/<string:group>')
 def show_doi_by_ack_regex_ui(group):
     ''' Show DOIs with acknowledgements matching a group's configured regex
+        Keyword arguments:
+          group: search_regex key
+        Query arguments:
+          doi_type: optional "internal" or "external" - restrict to just the
+                    dois or external_dois collection instead of both
     '''
     # Regexes live in the search_regex collection (single source of truth, shared with
     # the tag_janelia_acks.py tagger); group is the document key.
@@ -13022,35 +13537,42 @@ def show_doi_by_ack_regex_ui(group):
                                title=render_warning("No search regex", 'warning'),
                                message=f"No search regex is configured for {group}")
     regex = entry['regex']
+    # Optional ?doi_type=internal|external restricts to just that collection
+    # (e.g. from a /dois_tag_ack/ack click-through) - any other value, or no
+    # param at all, keeps the default union-of-both behavior.
+    doi_type = request.args.get('doi_type')
     union = []
     # Search all DOI types; the type cycle button in standard_ack_table defaults
     # the view to journal-articles/preprints and lets the user reveal the rest.
     payload = {}
     payload["jrc_acknowledgements"] = {"$regex": regex, "$options" : "i"}
-    try:
-        rows = DB['dis'].dois.find(payload).sort("jrc_publishing_date", -1)
-    except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get DOIs from dois collection"),
-                               message=error_message(err))
     internal = 0
-    for row in rows:
-        row['doi_type'] = 'internal'
-        union.append(row)
-        internal += 1
+    if doi_type != 'external':
+        try:
+            rows = DB['dis'].dois.find(payload).sort("jrc_publishing_date", -1)
+        except Exception as err:
+            return render_template('error.html', urlroot=request.url_root,
+                                   title=render_warning("Could not get DOIs from dois " \
+                                                        + "collection"),
+                                   message=error_message(err))
+        for row in rows:
+            row['doi_type'] = 'internal'
+            union.append(row)
+            internal += 1
     # External DOIs
     external = 0
-    try:
-        rows = DB['dis'].external_dois.find(payload).sort("jrc_publishing_date", -1)
-    except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get DOIs from external_dois " \
-                                                    + "collection"),
-                               message=error_message(err))
-    for row in rows:
-        row['doi_type'] = 'external'
-        union.append(row)
-        external += 1
+    if doi_type != 'internal':
+        try:
+            rows = DB['dis'].external_dois.find(payload).sort("jrc_publishing_date", -1)
+        except Exception as err:
+            return render_template('error.html', urlroot=request.url_root,
+                                   title=render_warning("Could not get DOIs from external_dois " \
+                                                        + "collection"),
+                                   message=error_message(err))
+        for row in rows:
+            row['doi_type'] = 'external'
+            union.append(row)
+            external += 1
     union.sort(key=lambda x: x.get("jrc_publishing_date", ""), reverse=True)
     # show_count=False: the count is shown in the card below (with id 'totalrows',
     # which the version/internal-external filters update)
@@ -13064,10 +13586,13 @@ def show_doi_by_ack_regex_ui(group):
         html = f"<p><i>Acknowledgements matching {entry['description']} " \
                + "(case-insensitive)</i></p>" + html
     title = f"DOIs with acknowledgements for <span style='color:#51b447 !important'>{group}</span>"
+    if doi_type in ('internal', 'external'):
+        title += f" ({doi_type.capitalize()} only)"
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
                                          navbar=generate_navbar('Acknowledgements')))
+
 
 @app.route('/acks_no_janelia_refs')
 def acks_no_janelia_refs():
@@ -13075,13 +13600,21 @@ def acks_no_janelia_refs():
         in their reference list. Fetches all external_dois that have both
         jrc_acknowledgements and reference fields, then excludes any whose
         reference list contains at least one DOI present in the dois collection.
+        Query arguments:
+          year: optional publishing year (from the year pulldown); defaults to
+                the current year, or "All" for no year filter
     '''
+    year = request.args.get('year')
+    if not year:
+        year = str(datetime.now().year)
     ext_coll = DB['dis'].external_dois
     doi_coll = DB['dis'].dois
     proj = {"_id": 0, "doi": 1, "jrc_acknowledgements": 1, "reference": 1,
             "jrc_publishing_date": 1}
     match = {"jrc_acknowledgements": {"$exists": True},
              "reference": {"$exists": True}}
+    if year != 'All':
+        match["jrc_publishing_date"] = {"$regex": "^" + year}
     try:
         docs = list(ext_coll.find(match, proj))
     except Exception as err:
@@ -13109,8 +13642,13 @@ def acks_no_janelia_refs():
         fileoutput += f"{doc['doi']}\t{published}\t{ack}\n"
     rows.sort(key=lambda r: r[1], reverse=True)
     title = "Janelia acknowledgements without Janelia references"
+    if year != 'All':
+        title += f" ({year})"
+    # Defaults to the current year (not "All"), so pass the button value explicitly.
+    selected = "(all years)" if year == 'All' else year
+    pulldown = year_pulldown('acks_no_janelia_refs', query=True, selected=selected)
     if not rows:
-        html = render_warning("No matching DOIs found", 'warning')
+        html = pulldown + "<br><br>" + render_warning("No matching DOIs found", 'warning')
         endpoint_access()
         return make_response(render_template('general.html', urlroot=request.url_root,
                                              title=title, html=html,
@@ -13124,7 +13662,9 @@ def acks_no_janelia_refs():
                          table_id='acks-no-refs', css='tablesorter standard-scroll')
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title=title, html=cards + download + "<br><br>" + table,
+                                         title=title,
+                                         html=pulldown + "<br><br>" + cards + download \
+                                              + "<br><br>" + table,
                                          navbar=generate_navbar('Acknowledgements')))
 
 
