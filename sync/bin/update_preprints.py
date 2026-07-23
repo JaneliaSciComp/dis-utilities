@@ -68,13 +68,14 @@
     reason when one is available, in place of a title.
 """
 
-__version__ = '2.0.0'
+__version__ = '2.1.0'
 
 import argparse
 import collections
 from datetime import datetime
 import html
 from operator import attrgetter
+import os
 import sys
 import pandas as pd
 from pymongo.collation import Collation, CollationStrength
@@ -934,9 +935,46 @@ def write_to_database():
             COUNT['dois_unchanged'] += 1
 
 
+def clear_shared_output(file_name):
+    ''' Remove a pre-existing preprints_* output file so a different user can
+        recreate it. weekly.py may be run by different people, and a file left
+        by the previous run is owned by whoever ran it with a default umask
+        (owner-writable only); truncating it for a new write then fails with a
+        permission error. Removing it first succeeds when the working directory
+        is group-writable. A missing file, or a remove we aren't allowed to do,
+        is ignored - the subsequent write surfaces any genuine problem.
+        Keyword arguments:
+          file_name: output file to clear
+        Returns:
+          None
+    '''
+    try:
+        os.remove(file_name)
+    except FileNotFoundError:
+        pass
+    except OSError as err:
+        LOGGER.warning(f"Could not remove existing {file_name}: {err}")
+
+
+def make_shared_writable(file_name):
+    ''' Leave a written preprints_* output file group/world-writable (0666) so
+        the next user's weekly run can overwrite it directly.
+        Keyword arguments:
+          file_name: output file to make writable
+        Returns:
+          None
+    '''
+    try:
+        os.chmod(file_name, 0o666)
+    except OSError as err:
+        LOGGER.warning(f"Could not make {file_name} group-writable: {err}")
+
+
 def write_output_files():
     ''' Write audit, title-match, needs-curation, missing-DOI, and zero-candidate
-        output files
+        output files. Each is cleared then left group/world-writable so a
+        different user can overwrite the previous run's file (see
+        clear_shared_output / make_shared_writable).
         Keyword arguments:
           None
         Returns:
@@ -944,32 +982,42 @@ def write_output_files():
     '''
     if AUDIT:
         file_name = "preprints_audit.txt"
+        clear_shared_output(file_name)
         with open(file_name, 'w', encoding='utf-8') as ostream:
             for line in AUDIT:
                 ostream.write(f"{line}\n")
+        make_shared_writable(file_name)
         LOGGER.warning(f"Audit written to {file_name}")
     if MATCH['DOI']:
         file_name = "preprints_title_matches.xlsx"
+        clear_shared_output(file_name)
         df = pd.DataFrame.from_dict(MATCH)
         df.to_excel(file_name, index=False)
+        make_shared_writable(file_name)
         LOGGER.warning(f"Title matches written to {file_name}")
     if CURATE['Preprint DOI']:
         file_name = "preprints_needs_curation.xlsx"
+        clear_shared_output(file_name)
         df = pd.DataFrame.from_dict(CURATE)
         df.to_excel(file_name, index=False)
+        make_shared_writable(file_name)
         LOGGER.warning(f"Pairs needing curation written to {file_name}")
     if MISSING:
         file_name = "preprints_missing_dois.txt"
+        clear_shared_output(file_name)
         with open(file_name, 'w', encoding='utf-8') as ostream:
             for line in MISSING:
                 ostream.write(f"{line}\n")
+        make_shared_writable(file_name)
         LOGGER.warning(f"Missing DOIs written to {file_name}")
     zero_candidates = zero_candidate_preprints()
     if zero_candidates:
         file_name = "preprints_zero_candidates.txt"
+        clear_shared_output(file_name)
         with open(file_name, 'w', encoding='utf-8') as ostream:
             for doi in zero_candidates:
                 ostream.write(f"{doi}\n")
+        make_shared_writable(file_name)
         LOGGER.warning(f"Zero-candidate preprints written to {file_name}")
 
 
