@@ -47,20 +47,27 @@ HIGH-LEVEL FLOW
      supervisory-organization name->code map and the entity regexes from search_regex.
 2. For each acknowledgement record from the database (dois and external_dois):
    - Flatten its acknowledgement value to a single string (ack_to_text).
-   - If the text references neither "Janelia" nor the "JFRC" abbreviation
-     (case-insensitive), skip it.
-   - Otherwise run every search_regex pattern (find_acknowledged) for the matched
+   - Decide whether the record is even worth searching for entities:
+     - External (external_dois) records: skip unless the text references
+       "Janelia" or the "JFRC" abbreviation (case-insensitive) - a bare
+       entity-name match there (e.g. "FlyLight") could plausibly refer to an
+       unrelated, same-named thing at another institution (e.g. a "FlyLight"
+       project at Harvard), so an explicit Janelia/JFRC mention is required.
+     - Internal (dois, Janelia-authored) records: never skipped on this basis
+       - a bare entity-name match is unambiguous when the authors are Janelia
+       themselves, so every search_regex pattern is tried regardless of
+       whether "Janelia"/"JFRC" is separately mentioned.
+   - Run every search_regex pattern (find_acknowledged) for the matched
      entity names, and MERGE them into the DOI's existing jrc_acknowledge list:
      existing tags are preserved and never modified, removed, or overwritten.
      A detected entity that already has an IRIS-curated tag of the same name is
      NOT re-added (it was added by an earlier run of this program - just
      idempotent reprocessing, not reported). A detected entity that already has
      only a non-IRIS (human-curated) tag of the same name is counted per-entity
-     for the "Human Curated" report column AND still gets a new, separate
-     IRIS-curated tag appended alongside the human tag (the human tag itself is
-     never touched) - so an entity can show up in both the "New" and "Human
-     Curated" report columns in the same run. Each genuinely new tag is
-     appended as a tag object
+     for the "Human Curated" report column, but likewise gets NO new IRIS tag
+     appended - once a human has curated a name, IRIS never adds a second,
+     separate record for it. Each genuinely new tag (a name with no existing
+     tag at all) is appended as a tag object
      (see TAG OBJECTS below).
 3. Database update (--write only)
    - For each DOI that gained at least one new tag, set jrc_acknowledge on its
@@ -131,7 +138,7 @@ from tqdm import tqdm
 import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
 
-__version__ = '1.5.0'
+__version__ = '1.6.0'
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation,line-too-long
 
@@ -257,9 +264,24 @@ def ack_to_text(ack):
     return ' '.join(parts)
 
 
-def find_acknowledged(text):
-    ''' Return sorted list of Janelia entities identified in ack text '''
-    if not JANELIA_GATE.search(text):
+def find_acknowledged(text, require_gate=True):
+    ''' Return sorted list of Janelia entities identified in ack text.
+        Keyword arguments:
+          text: flattened acknowledgement text
+          require_gate: if True, an explicit "Janelia"/"JFRC" mention
+                        (JANELIA_GATE) is required before any entity regex is
+                        even tried. Callers should pass False only for
+                        Janelia-authored (dois collection) records: there, a
+                        bare entity-name match (e.g. "FlyLight") is
+                        unambiguous since the authors themselves are Janelia.
+                        For external_dois records, keep this True - a bare
+                        entity-name match could plausibly refer to an
+                        unrelated, same-named thing at another institution
+                        (e.g. a "FlyLight" project at Harvard).
+        Returns:
+          sorted list of matched entity keys
+    '''
+    if require_gate and not JANELIA_GATE.search(text):
         return []
     found = set()
     for key, regex in COMPILED:
@@ -288,16 +310,13 @@ def build_tags(existing, names):
         supervisory-organization record ({code, active} dict) for a "suporg" tag,
         else None; curator is CURATOR ("IRIS"), marking it machine-generated;
         updated is the current timestamp.
-        A detected entity whose name already has an IRIS-curated tag is left
-        as-is and NOT re-added - it was added by an earlier run of this same
-        program, so re-detecting it this run is just idempotent reprocessing,
-        not newsworthy (not added to `already_tagged` either).
-        A detected entity whose name has only non-IRIS (human-curated) tag(s)
-        - possibly with a different type/code than a fresh detection would
-        produce, which is fine, they're independent entries - gets counted in
-        `already_tagged` for the caller to report AND still gets a new,
-        separate IRIS-curated tag appended (the human tag is never touched),
-        so its name can also appear in `added` for the same call.
+        A detected entity whose name already has ANY existing tag - IRIS-curated
+        or human-curated - is left as-is and NOT re-added. An IRIS-curated match
+        is just idempotent reprocessing from an earlier run (not newsworthy, not
+        added to `already_tagged`). A human-curated match IS added to
+        `already_tagged` for the caller to report, but still gets no new IRIS
+        tag appended alongside it - once a human has curated a name, IRIS never
+        adds a second, separate record for it.
         Keyword arguments:
           existing: current jrc_acknowledge list (list of dicts), may be empty
           names: detected entity names (list of str)
@@ -311,7 +330,7 @@ def build_tags(existing, names):
         matches = [tag for tag in merged if tag.get('name') == name]
         if any(tag.get('curator') != CURATOR for tag in matches):
             already_tagged.append(name)
-        if any(tag.get('curator') == CURATOR for tag in matches):
+        if matches:
             continue
         code = get_suporg_code(name)
         candidate = {"name": name, "code": code,
@@ -460,6 +479,9 @@ def report(rows):
     print(f"Records with Janelia/JFRC:     {COUNT['janelia']:,}")
     print(f"  Tagged with specific entity: {COUNT['tagged']:,}")
     print(f"  No entity identified:        {COUNT['untagged']:,}")
+    if COUNT['entity_only']:
+        print(f"Internal, entity match only "
+              f"(no Janelia/JFRC mention): {COUNT['entity_only']:,}")
     if COUNT['already_tagged']:
         print(f"Human-curated matches:         {COUNT['already_tagged']:,}")
     action = "DOIs updated:" if ARG.WRITE else "DOIs to update (dry run):"
@@ -622,7 +644,7 @@ def generate_email(rows):
         terminate_program(err)
 
 
-def processing():
+def processing():  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
     ''' Tag acknowledgement records and optionally update the database
         Keyword arguments:
           None
@@ -640,11 +662,19 @@ def processing():
     for rec in tqdm(load_records(), total=sum(totals.values()),
                     desc="Tagging acknowledgements"):
         collection = rec['collection']
-        COUNT['read_internal' if collection == 'dois' else 'read_external'] += 1
-        if not JANELIA_GATE.search(rec['text']):
+        is_internal = collection == 'dois'
+        COUNT['read_internal' if is_internal else 'read_external'] += 1
+        gated = bool(JANELIA_GATE.search(rec['text']))
+        # Internal (Janelia-authored) records don't need the explicit
+        # Janelia/JFRC mention - a bare entity-name match is unambiguous
+        # there. External records still require it (see find_acknowledged).
+        names = find_acknowledged(rec['text'], require_gate=not is_internal)
+        if not gated and not names:
             continue
-        COUNT['janelia'] += 1
-        names = find_acknowledged(rec['text'])
+        if gated:
+            COUNT['janelia'] += 1
+        else:
+            COUNT['entity_only'] += 1
         doi = rec['doi']
         merged, added, already_tagged = build_tags(rec['existing'], names)
         for name in added:
