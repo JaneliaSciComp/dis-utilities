@@ -98,10 +98,13 @@ ENTITIES = [
         r"\bFly\s*Light\b",
     ]),
     ("GENIE Project", [
-        r"\bGENIE\s+(?:Project|Program|[Tt]eam)",
+        # ")?" tolerates the acronym in parens, e.g. "...Effector (GENIE) Project"
+        r"\bGENIE\)?\s+(?:Project|Program|[Tt]eam)",
         r"\bGINIE\s+(?:Project|Program)",
-        r"Genetically[-\s]Encoded\s+Neuronal\s+Indicator[s]?\s+and\s+Effector",
-        r"Genetically\s+Encoded\s+(?:Calcium\s+Indicator|Neuronal\s+Indicator)",
+        # "[-\s]+" (not a bare "[-\s]") tolerates a hyphen-and-space typo like
+        # "Genetically- Encoded", not just a lone hyphen or lone space
+        r"Genetically[-\s]+Encoded\s+Neuronal\s+Indicator[s]?\s+and\s+Effector",
+        r"Genetically[-\s]+Encoded\s+(?:Calcium\s+Indicator|Neuronal\s+Indicator)",
         r"\bGECI\s+[Pp]roject\b",
     ]),
     ("MouseLight Project", [
