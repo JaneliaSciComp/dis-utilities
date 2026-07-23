@@ -48,7 +48,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.0.0"
+__version__ = "120.1.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -6781,14 +6781,17 @@ SOURCE_METRIC_USAGE_FIELDS = ("jrc_figshare_counts", "jrc_zenodo_counts",
 
 
 def citation_impact_indices(counts):
-    ''' Compute h-index, i10-index, i100-index from a list of per-work citation
+    ''' Compute h-, g-, i10- and i100-index from a list of per-work citation
         counts (classic scholarly-impact measures). Callers pass version-deduped
         counts so one work isn't counted several times. h = largest h such that
-        h works are each cited >= h times; i10/i100 = works cited >= 10/100 times.
+        h works are each cited >= h times; g = largest g such that the top g
+        works have >= g^2 citations between them (Egghe; keeps crediting the
+        most-cited works beyond the h-core, so g >= h); i10/i100 = works cited
+        >= 10/100 times.
         Keyword arguments:
           counts: iterable of per-work citation counts
         Returns:
-          dict with keys h_index, i10, i100
+          dict with keys h_index, g_index, i10, i100
     '''
     ordered = sorted((c for c in counts if c and c > 0), reverse=True)
     h_index = 0
@@ -6797,7 +6800,17 @@ def citation_impact_indices(counts):
             h_index = idx
         else:
             break
-    return {"h_index": h_index,
+    # g-index: largest g where cumulative citations of the top g works >= g^2.
+    # Capped at the actual work count (no fictitious zero-citation padding).
+    g_index = 0
+    cumulative = 0
+    for idx, cnt in enumerate(ordered, start=1):
+        cumulative += cnt
+        if cumulative >= idx * idx:
+            g_index = idx
+        else:
+            break
+    return {"h_index": h_index, "g_index": g_index,
             "i10": sum(1 for c in ordered if c >= 10),
             "i100": sum(1 for c in ordered if c >= 100)}
 
@@ -6987,7 +7000,8 @@ def source_metrics(year='All'):  # pylint: disable=too-many-locals
              mrow("Reach (% of DOIs)", cite, 'reach', 'pct'),
              mrow("Citations", cite, 'total'),
              mrow("Median / DOI", cite, 'median', 'median'),
-             mrow("h-index", cite, 'h_index')]
+             mrow("h-index", cite, 'h_index'),
+             mrow("g-index", cite, 'g_index')]
     if h5_range:
         crows.append(mrow(f"h5-index ({h5_range[0]}–{h5_range[1]})", cite, 'h5'))
     crows.append(mrow("i10-index", cite, 'i10'))
@@ -7002,6 +7016,10 @@ def source_metrics(year='All'):  # pylint: disable=too-many-locals
              + "<b>h-index</b>: the largest number <i>h</i> of works that have each " \
              + "been cited at least <i>h</i> times (an h-index of 367 means 367 " \
              + "works were each cited &ge;367 times). " \
+             + "<b>g-index</b>: the largest <i>g</i> whose top <i>g</i> works have " \
+             + "<i>g</i>&sup2; citations between them - like the h-index but it keeps " \
+             + "crediting the most-cited works, so it runs higher (a g near twice the " \
+             + "h reflects a few very highly-cited papers). " \
              + h5_note \
              + "<b>i10-index</b> / <b>i100-index</b>: the number of works cited at " \
              + "least 10 / 100 times. Each counts a work once (versions merged), " \
