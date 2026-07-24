@@ -88,9 +88,11 @@ HIGH-LEVEL FLOW
 8. Storage (fetch_and_store_doi / _store_arxiv_doi)
    - fetch_and_store_doi looks up CrossRef metadata (skips DataCite DOIs), runs
      the Janelia-author guard, and upserts a record into external_dois with doi,
-     jrc_acknowledgements, jrc_publishing_date, and (for PMC) jrc_pmc.
+     jrc_acknowledgements, jrc_ack_source (the source's display label - eLife/
+     Elsevier/PMC), jrc_publishing_date, and (for PMC) jrc_pmc.
    - _store_arxiv_doi upserts the arXiv DataCite DOI directly with doi,
-     jrc_acknowledgements, and the OpenAlex publication date.
+     jrc_acknowledgements, jrc_ack_source ('arXiv'), and the OpenAlex
+     publication date.
    - Both register each written DOI in the in-memory DOI cache, so a DOI written
      by one source is never written again by a later source in the same run.
 9. Output
@@ -138,7 +140,7 @@ NOTES
   parameter, i.e. filtered by when the article was added to PubMed Central.
 '''
 
-__version__ = '1.9.1'
+__version__ = '1.10.0'
 
 import argparse
 import collections
@@ -1097,7 +1099,8 @@ def _store_arxiv_doi(doi, ack, pub_date):
     if doi in DOI:
         COUNT['openalex_in_database'] += 1
         return
-    payload = {'doi': doi, 'jrc_acknowledgements': ack}
+    payload = {'doi': doi, 'jrc_acknowledgements': ack,
+               'jrc_ack_source': SOURCES['openalex']['label']}
     if pub_date:
         payload['jrc_publishing_date'] = pub_date
     if ARG.WRITE:
@@ -1129,7 +1132,8 @@ def fetch_and_store_doi(doi, ack, source, pmcid=None):
         Returns:
           True if the record was processed, False if it should be skipped
     '''
-    payload = {'doi': doi, 'jrc_acknowledgements': ack}
+    payload = {'doi': doi, 'jrc_acknowledgements': ack,
+               'jrc_ack_source': SOURCES.get(source, {}).get('label', source)}
     if pmcid:
         payload['jrc_pmc'] = pmcid
     try:

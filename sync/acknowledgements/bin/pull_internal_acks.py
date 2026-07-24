@@ -59,7 +59,8 @@ HIGH-LEVEL FLOW
      section.
 6. Database update (--write mode)
    - For each collected record, performs a MongoDB update_one setting
-     `jrc_acknowledgements` on the matching DOI document.
+     `jrc_acknowledgements` and `jrc_ack_source` (the source's display label -
+     eLife/Elsevier/PMC/arXiv) on the matching DOI document.
 7. Output
    - Prints a per-source summary of counts.
    - Writes internal_acks.json with all collected acknowledgement records.
@@ -94,7 +95,7 @@ from tqdm import tqdm
 import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
 
-__version__ = '1.4.0'
+__version__ = '1.5.0'
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation,no-member
 
@@ -545,7 +546,8 @@ def processing():
             LOGGER.warning(f"Weird format for {row['doi']}")
             continue
         operations.append(UpdateOne({"doi": row['doi']},
-                                    {"$set": {"jrc_acknowledgements": row['ack']}}))
+                                    {"$set": {"jrc_acknowledgements": row['ack'],
+                                              "jrc_ack_source": row['source']}}))
     COUNT['updated'] = len(operations)
     if ARG.WRITE and operations:
         # Unordered so one failed update doesn't block the rest of the batch.
