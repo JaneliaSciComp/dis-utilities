@@ -48,7 +48,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.1.0"
+__version__ = "120.2.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -4260,24 +4260,31 @@ def doi_tabs(doi, row, rowext, data, authors):
     acktext = asrc = ""
     if row.get('jrc_acknowledgements'):
         acktext = row['jrc_acknowledgements'].replace('\n', '<br>')
+        asrc = row.get('jrc_ack_source', '')
     elif rowext and rowext.get('jrc_acknowledgements'):
         acktext = rowext['jrc_acknowledgements'].replace('\n', '<br>')
+        asrc = rowext.get('jrc_ack_source', '')
     elif row and not row.get('jrc_inserted', False):
-        # If this DOI isn't in our database, look for acknowledgements
+        # If this DOI isn't in our database, look for acknowledgements (this also
+        # returns the source)
         try:
             acktext, asrc = DL.get_acknowledgements(doi)
         except Exception:
             pass
     if acktext:
         if not asrc:
+            # No stored jrc_ack_source (source outside the eLife/Elsevier/PMC/arXiv
+            # pipeline, or a record predating the field): infer by the same
+            # precedence the pull pipeline uses, and show NO source rather than
+            # guess when nothing matches.
             if 'elife' in doi:
                 asrc = 'eLife'
+            elif doi.startswith('10.1016/'):
+                asrc = 'Elsevier'
             elif row.get('jrc_pmc') or (rowext and rowext.get('jrc_pmc')):
                 asrc = 'PMC'
             elif 'arxiv' in doi:
                 asrc = 'arXiv'
-            else:
-                asrc = 'Elsevier'
         highlight = ""
         try:
             highlight = DL.highlight_acknowledgments(acktext, DB['dis'])
@@ -4290,7 +4297,8 @@ def doi_tabs(doi, row, rowext, data, authors):
         ahtml += f"<h4 style='margin-top:22px;'>Acknowledgements</h4><div class='abstract'>{acktext}"
         if asrc:
             ahtml += "<br><span style='font-size:10pt;background-color:#777;" \
-                     + f"color:aqua;'>Source: {asrc}</span></div>"
+                     + f"color:aqua;'>Source: {asrc}</span>"
+        ahtml += "</div>"
         if highlight:
             ahtml += "<br><span style='color:goldenrod'><i class='fa-solid fa-warning'></i>" \
                      + " Acknowledgment highlighting is an experimental feature</span>"
