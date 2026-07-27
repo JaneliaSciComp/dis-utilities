@@ -95,7 +95,7 @@ from tqdm import tqdm
 import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
 
-__version__ = '1.5.0'
+__version__ = '1.5.1'
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation,no-member
 
@@ -307,14 +307,17 @@ def add_arxiv_internal_acks(internal, error):
 
 
 def doiurl(doi):
-    ''' Format a DOI as a DIS UI link
+    ''' Format a DOI as a DIS UI link. The DOI is HTML-escaped for both the URL
+        attribute and the anchor text - legacy SICI DOIs contain <, >, & and would
+        otherwise corrupt the surrounding email markup.
         Keyword arguments:
           doi: DOI to format
         Returns:
           HTML anchor
     '''
-    return (f"<a href='https://dis.int.janelia.org/doiui/{doi}' "
-            f"style='color:{EMAIL_BLUE};text-decoration:none;'>{doi}</a>")
+    esc = html.escape(doi)
+    return (f"<a href='https://dis.int.janelia.org/doiui/{esc}' "
+            f"style='color:{EMAIL_BLUE};text-decoration:none;'>{esc}</a>")
 
 
 def html_kpi_card(value, label, tone='neutral', width='20%'):
