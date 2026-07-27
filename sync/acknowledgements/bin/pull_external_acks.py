@@ -140,12 +140,13 @@ NOTES
   parameter, i.e. filtered by when the article was added to PubMed Central.
 '''
 
-__version__ = '1.10.0'
+__version__ = '1.10.2'
 
 import argparse
 import collections
 from datetime import datetime, timedelta
 from email.utils import parsedate_to_datetime
+import html
 import json
 from operator import attrgetter
 import os
@@ -194,7 +195,6 @@ INTERNAL_RECORDS = []
 TOTALS = {}
 # OpenAlex full-text discovery of arXiv preprints
 OPENALEX_API = "https://api.openalex.org/works"
-OPENALEX_MAILTO = "svirskasr@janelia.hhmi.org"
 # OpenAlex source id for arXiv (Cornell University)
 OPENALEX_ARXIV_SOURCE = "S4306400194"
 OPENALEX_PAGE_SIZE = 200
@@ -253,9 +253,9 @@ def initialize_program():
         Returns:
           None
     '''
-    for key in ("ELSEVIER_API_KEY", "NCBI_API_KEY"):
+    for key in ("ELSEVIER_API_KEY", "NCBI_API_KEY", "OPENALEX_EMAIL"):
         if key not in os.environ:
-            terminate_program(f"Missing API key - set in {key} environment variable")
+            terminate_program(f"Missing required environment variable: {key}")
     try:
         dbconfig = JRC.get_config("databases")
     except Exception as err:
@@ -303,14 +303,17 @@ def initialize_program():
 
 
 def doiurl(doi):
-    ''' Format a DOI as a DIS UI link
+    ''' Format a DOI as a DIS UI link. The DOI is HTML-escaped for both the URL
+        attribute and the anchor text - legacy SICI DOIs contain <, >, & and would
+        otherwise corrupt the surrounding email markup.
         Keyword arguments:
           doi: DOI to format
         Returns:
           HTML anchor
     '''
-    return (f"<a href='https://dis.int.janelia.org/doiui/{doi}' "
-            f"style='color:{EMAIL_BLUE};text-decoration:none;'>{doi}</a>")
+    esc = html.escape(doi)
+    return (f"<a href='https://dis.int.janelia.org/doiui/{esc}' "
+            f"style='color:{EMAIL_BLUE};text-decoration:none;'>{esc}</a>")
 
 
 def html_kpi_card(value, label, tone='neutral', width='25%'):
@@ -432,6 +435,12 @@ def html_funnel_card(key):
     rows.append(("No acknowledgement text", f"{COUNT[f'{key}_no_ack']:,}"))
     rows.append((f"'{ARG.TERM}' absent from acknowledgement",
                 f"{COUNT[f'{key}_term_absent']:,}"))
+    # Per-source count newly persisted to to_ignore this run. Surfaced per source
+    # (not just the top-line KPI) so a single flaky source ignore-listing a batch of
+    # real acks is visible here rather than hiding in the summed total.
+    if COUNT[f'{key}_ack_doi_ignored']:
+        rows.append(("&#8627; newly ignore-listed (to_ignore)",
+                    f"{COUNT[f'{key}_ack_doi_ignored']:,}"))
     if key != 'openalex':
         rows.append(("Metadata not found", f"{COUNT[f'{key}_notfound']:,}"))
     rows.append(("Janelia-authored (diverted)", f"{COUNT[f'{key}_janelia_authored']:,}"))
@@ -503,7 +512,8 @@ def html_diverted_table(records):
         label = SOURCES.get(rec['source'], {}).get('label', rec['source'])
         reason = 'Author check failed' if rec['excluded_reason'] == 'author check failed' \
                  else 'Janelia author(s)'
-        authors = ', '.join(rec.get('janelia_authors') or []) or '&mdash;'
+        authors = ', '.join(html.escape(a) for a in (rec.get('janelia_authors') or [])) \
+                  or '&mdash;'
         rows.append(
             f'<tr{bgattr} style="{bg}"><td style="padding:6px 10px;{r_l}">'
             f'{doiurl(rec["doi"])}</td>'
@@ -955,7 +965,7 @@ def search_openalex():
     total = None
     while cursor:
         params = {'filter': flt, 'per-page': OPENALEX_PAGE_SIZE, 'cursor': cursor,
-                  'mailto': OPENALEX_MAILTO,
+                  'mailto': os.environ['OPENALEX_EMAIL'],
                   'select': 'id,doi,title,publication_date,locations'}
         if os.environ.get('OPENALEX_API_KEY'):
             params['api_key'] = os.environ['OPENALEX_API_KEY']
