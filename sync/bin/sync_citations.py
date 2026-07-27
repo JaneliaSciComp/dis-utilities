@@ -25,10 +25,14 @@
 
     FIELDS WRITTEN  (with --write, only for DOIs with a non-zero citation count;
     uncited DOIs get no jrc_ fields, per the DB convention)
-        jrc_citation_count    max(native registrar count, size of citing-DOI
-                              union). The bare count is kept as a floor because a
-                              citing work may expose no DOI, so jrc_citing_dois can
-                              be shorter than this count.
+        jrc_citation_count    high-water mark of max(native registrar count, WoS,
+                              size of citing-DOI union); never decreases below the
+                              prior run's value (see combine_counts - observed
+                              decreases are source coverage noise, e.g. Crossref
+                              is-referenced-by-count drift, not real de-citations).
+                              The bare count is a floor because a citing work may
+                              expose no DOI, so jrc_citing_dois can be shorter than
+                              this count.
         jrc_citing_dois       sorted, lowercased union of identifiable citing DOIs
                               (only when --citing-dois is given; off by default;
                               --source datacite only).
@@ -177,7 +181,7 @@
         (falling back to the native citationCount).
 '''
 
-__version__ = '1.11.2'
+__version__ = '1.12.0'
 
 import argparse
 import collections
@@ -372,7 +376,7 @@ THREAD = threading.local()
 # OpenAlex budget-exhaustion 429s carry a Retry-After up to ~7h (budget resets at
 # midnight UTC); without a cap every worker would sleep for hours and the run would
 # appear hung. Capping lets the attempt fail fast so the run degrades to the other
-# sources (combine_counts preserves any previously-stored count) instead of freezing.
+# sources (combine_counts holds the stored high-water mark) instead of freezing.
 RETRY_AFTER_MAX = 120
 # HTML run-summary email palette/layout (generate_email and its html_* helpers).
 # Colors pair a status with an icon/label, not color alone, for colorblind
@@ -1054,20 +1058,24 @@ def fetch_doi(row):
 def combine_counts(res, graphql, source='datacite'):
     ''' Pure citation-combination logic (no I/O, no shared state) - unit-testable.
         Builds the deduped union of identifiable citing DOIs across the available
-        sources, applies the native registrar count as a bare floor, and protects a
-        previously-stored higher count from a transient source error.
+        sources, applies the native registrar count and WoS as bare floors, and
+        enforces a HIGH-WATER MARK: the result never regresses below the count
+        stored on a prior run (rationale at the floor computation below - observed
+        decreases are source coverage noise, not real de-citations).
         Keyword arguments:
           res: result dict from fetch_doi()
           graphql: whether DataCite GraphQL citing DOIs are in play (ARG.GRAPHQL)
           source: registrar key for the sources breakdown (datacite or crossref)
         Returns:
           dict with:
-            combined   final citation count (max of the floor and the union size)
+            combined   final citation count = max(bare-count floors, union size,
+                       previously-stored count) - i.e. a non-decreasing high-water mark
             previous   count stored on the prior run (0 if none)
             citing     sorted list of unique citing DOIs
             sources    {<source>, openalex, scholexplorer[, wos]} per-source counts
             errored    True if any enabled citing-DOI source failed
-            preserved  True if a stored higher count was kept despite an error
+            preserved  True if the stored high-water mark held (this run's fresh
+                       count came in lower, from an error or coverage noise)
             oa_n/sx_n/dc_n/wos_n  per-source counts (None on error/disabled), for reporting
     '''
     native = res['native']
@@ -1097,17 +1105,29 @@ def combine_counts(res, graphql, source='datacite'):
     if errored or oa_unchanged:
         union.update(filter(None, (normalize_doi(cd) for cd in res['existing_dois'])))
     citing = sorted(union)
-    # WoS contributes a bare count (no DOIs), used as an additional floor
+    # WoS contributes a bare count (no DOIs), used as an additional floor.
     wos_n = res.get('wos')      # int, 0, or None (disabled/error)
-    # The registrar (and WoS when available) contribute counts but no DOIs; keep
-    # the max of all bare counts as the floor.
-    floor = max(native, wos_n or 0)
-    combined = max(floor, len(citing))
-    # Don't let a transient source error regress a previously-stored higher count
-    preserved = False
-    if errored and isinstance(existing, int) and existing > combined:
-        combined = existing
-        preserved = True
+    # Best count this run can justify from the live sources: the max of the bare
+    # registrar/WoS counts and the size of the deduped citing-DOI union.
+    fresh = max(native, wos_n or 0, len(citing))
+    # jrc_citation_count is a HIGH-WATER MARK: it never regresses below the count
+    # stored on a prior run. WHY: the downward moves we would otherwise write are
+    # not real de-citations - they are source COVERAGE noise. In --source crossref
+    # the registrar floor is Crossref's is-referenced-by-count, which drifts DOWN
+    # when a publisher's deposited references lapse, haven't been re-indexed yet, or
+    # the field is withheld (Crossref itself notes its counts track voluntary
+    # publisher deposits/coverage, not a settled truth); DataCite, OpenAlex, and
+    # Scholexplorer each have their own coverage churn. Citations are effectively
+    # monotonic, so overwriting a solid stored count with a transiently smaller one
+    # lowers BOTH accuracy and stability - the opposite of the intent - and makes an
+    # institutional impact total tick backward on noise. So we keep the most
+    # complete evidence ever seen. (A genuine correction - a retracted citing work
+    # removed, a true dedup - is a rare minority and deliberately will NOT lower the
+    # count here; a "current true count" would need a separate, non-monotonic metric.)
+    combined = max(fresh, previous)
+    # True when the stored high-water mark held because this run's fresh count came
+    # in lower (a source error, or - more commonly - coverage noise).
+    preserved = combined > fresh
     # Per-source counts; the registrar's is a bare count, openalex/scholexplorer
     # are identifiable citing-DOI counts (for datacite, the GraphQL citing-DOI
     # count when available, falling back to the REST citationCount).
@@ -1621,7 +1641,7 @@ def generate_email():  # pylint: disable=too-many-locals
     ])
 
     citation_rows = [("OpenAlex unchanged (skipped)", f"{COUNT['openalex_unchanged']:,}"),
-                     ("Counts preserved (source error)", f"{COUNT['preserved']:,}")]
+                     ("Counts held at high-water mark", f"{COUNT['preserved']:,}")]
     if ARG.SOURCE == 'crossref' and ARG.WOS:
         citation_rows.append(("WoS lookups OK (errors)",
                               f"{COUNT['wos_found']:,} ({COUNT['wos_error']:,})"))
@@ -1847,7 +1867,7 @@ def processing():  # pylint: disable=too-many-locals,too-many-statements
         + dc_line
         + (usage_lines if ARG.SOURCE == 'crossref' else "")
         + f"Fetch errors (DOIs skipped):        {COUNT['fetch_error']:,}\n"
-        + f"Counts preserved (source error):    {COUNT['preserved']:,}\n"
+        + f"Counts held at high-water mark:      {COUNT['preserved']:,}\n"
         + (usage_lines if ARG.SOURCE == 'datacite' else "")
         + f"DOIs with citation fields:          {cited:,}\n"
         + field_lines
