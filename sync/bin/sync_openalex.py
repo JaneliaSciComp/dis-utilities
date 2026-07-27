@@ -16,7 +16,7 @@
     with sync_openalex.json attached.
 """
 
-__version__ = '4.2.0'
+__version__ = '4.2.1'
 
 import argparse
 import collections
@@ -312,9 +312,10 @@ def html_kpi_card(value, label, tone='neutral'):
               'neutral': (EMAIL_GRAY_BG, EMAIL_GRAY)}[tone]
     return (f'<td width="25%" align="center" valign="top" bgcolor="{bg}" '
             f'style="padding:14px 6px;background-color:{bg};border-radius:8px;">'
-            f'<div style="font-size:24px;font-weight:700;color:{fg};">{value}</div>'
-            f'<div style="font-size:10.5px;color:{EMAIL_GRAY};text-transform:uppercase;'
-            f'letter-spacing:.04em;margin-top:2px;">{label}</div>'
+            f'<span style="font-size:24px;font-weight:700;color:{fg};'
+            f'line-height:1.2;">{value}</span><br>'
+            f'<span style="font-size:10.5px;color:{EMAIL_GRAY};text-transform:uppercase;'
+            f'letter-spacing:.04em;">{label}</span>'
             f'</td>')
 
 
