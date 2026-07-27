@@ -18,6 +18,15 @@ INPUTS
                searches to the last N days. Omit to search all available records.
     --source   Restrict processing to a single source (elife, elsevier, pmc, or
                arxiv). Omit to process all sources.
+    --doi      Process a single explicit DOI instead of the source searches: fetch
+               its acknowledgements, verify the term is present, apply the
+               Janelia-author guard, and upsert it into external_dois (for manually
+               adding a known external DOI). Ignores --source/--days; prints the
+               per-DOI outcome and sends no run-summary email.
+    --force    With --doi: store in external_dois even if the Janelia-author guard
+               would divert it (for a manually vetted external DOI - e.g. one that
+               only thanks a Janelia facility, where the guard's name-only fallback
+               false-matches a Janelia employee).
     --write    Actually update the database (default: dry-run).
     --verbose  Increase logging verbosity.
     --debug    Maximum logging verbosity.
@@ -140,7 +149,7 @@ NOTES
   parameter, i.e. filtered by when the article was added to PubMed Central.
 '''
 
-__version__ = '1.10.2'
+__version__ = '1.11.0'
 
 import argparse
 import collections
@@ -268,6 +277,11 @@ def initialize_program():
             DB[source] = JRC.connect_database(dbo)
         except Exception as err:
             terminate_program(err)
+    if ARG.DOI:
+        # Single-DOI mode force-processes one DOI, so the whole-collection
+        # de-dup/ignore caches aren't needed - skip loading them (the Janelia-author
+        # guard just runs the live author check for the one DOI).
+        return
     # DOI is used only for presence tests (de-duplication); the document body is
     # never read back, so project just the doi field to keep the cache small.
     for coll in ('dois', 'external_dois'):
@@ -334,9 +348,10 @@ def html_kpi_card(value, label, tone='neutral', width='25%'):
               'neutral': (EMAIL_GRAY_BG, EMAIL_GRAY)}[tone]
     return (f'<td width="{width}" align="center" valign="top" bgcolor="{bg}" '
             f'style="padding:14px 6px;background-color:{bg};border-radius:8px;">'
-            f'<div style="font-size:24px;font-weight:700;color:{fg};">{value}</div>'
-            f'<div style="font-size:10.5px;color:{EMAIL_GRAY};text-transform:uppercase;'
-            f'letter-spacing:.04em;margin-top:2px;">{label}</div>'
+            f'<span style="font-size:24px;font-weight:700;color:{fg};'
+            f'line-height:1.2;">{value}</span><br>'
+            f'<span style="font-size:10.5px;color:{EMAIL_GRAY};text-transform:uppercase;'
+            f'letter-spacing:.04em;">{label}</span>'
             f'</td>')
 
 
@@ -1246,6 +1261,142 @@ def _process_ack(doi, ack, source, write_ignore=False):
     fetch_and_store_doi(doi, ack, source)
 
 
+def _source_key_for(doi, label):
+    ''' Best-effort source key ('elife'/'elsevier'/'pmc'/'openalex') for a DOI,
+        from the acknowledgement-source label when known, else the DOI prefix. The
+        key drives the jrc_ack_source display label and the per-source counters.
+        Keyword arguments:
+          doi: DOI string
+          label: source label returned by DL.get_acknowledgements, or None
+        Returns:
+          a source key string
+    '''
+    if label:
+        return {SOURCES[k]['label']: k for k in SOURCE_ORDER}.get(label, label)
+    low = doi.lower()
+    if '10.7554/elife' in low:
+        return 'elife'
+    if low.startswith('10.1016/'):
+        return 'elsevier'
+    if 'arxiv' in low or '10.48550' in low:
+        return 'openalex'
+    return 'elsevier'
+
+
+def _flatten_jats_text(node):
+    ''' Recursively collect all text from a JATS xmltodict subtree into one string,
+        including nested inline elements (xref, italic, sup, ...). Attribute keys
+        ('@...') are skipped. Unlike the shallow #text extractors, this loses no
+        nested acknowledgement text (e.g. a funder name or a term inside an xref).
+        Keyword arguments:
+          node: dict, list, str, or None from xmltodict
+        Returns:
+          Flattened text string
+    '''
+    if node is None:
+        return ''
+    if isinstance(node, str):
+        return node
+    if isinstance(node, list):
+        return ' '.join(_flatten_jats_text(n) for n in node)
+    if isinstance(node, dict):
+        return ' '.join(_flatten_jats_text(v) for k, v in node.items()
+                        if not k.startswith('@'))
+    return str(node)
+
+
+def _pmc_ack_via_efetch(doi):
+    ''' Resolve a DOI to its PMC article via esearch/efetch and return the FULL
+        acknowledgement text (recursively flattened), the reliable path
+        scan_fulltext_sections.py uses. Preferred over doi_common for PMC-indexed
+        DOIs: its Elsevier branch drops nested ack text and its OAI-PMH PMC path
+        lags fresh articles.
+        Keyword arguments:
+          doi: DOI string
+        Returns:
+          (ack_text, 'PMC') if found, else (None, None)
+    '''
+    base = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
+    key = os.environ.get('NCBI_API_KEY')
+    try:
+        params = {"db": "pmc", "term": f"{doi}[DOI]", "retmode": "json"}
+        if key:
+            params["api_key"] = key
+        idlist = _request_with_retry('GET', f"{base}esearch.fcgi", params=params)\
+            .json().get("esearchresult", {}).get("idlist", [])
+    except Exception as err:
+        LOGGER.debug(f"PMC esearch failed for {doi}: {err}")
+        return None, None
+    if not idlist:
+        return None, None
+    try:
+        articles = _fetch_pmc_batch(base, [idlist[0]], key)
+    except Exception as err:
+        LOGGER.debug(f"PMC efetch failed for {doi}: {err}")
+        return None, None
+    for article in articles:
+        ack = (article.get('back') or {}).get('ack')
+        if ack:
+            text = _flatten_jats_text(ack).strip()
+            if text:
+                return text, 'PMC'
+    return None, None
+
+
+def _process_single_doi():
+    ''' Process one user-specified DOI (--doi): fetch its acknowledgements, verify
+        the term is present, apply the Janelia-author guard, and upsert it into
+        external_dois. For manually adding a known external DOI; reports the outcome
+        rather than the bulk per-source summary, and sends no run-summary email.
+        Keyword arguments:
+          None
+        Returns:
+          None
+    '''
+    doi = ARG.DOI.strip().lower()
+    LOGGER.info(f"Processing single DOI {doi}")
+    # PMC full-text (efetch JATS) is the most reliable ack source and the one
+    # scan_fulltext_sections.py uses, so try it first. doi_common.get_acknowledgements
+    # is the fallback for non-PMC DOIs - its Elsevier branch drops nested ack text
+    # and its OAI-PMH PMC path lags fresh articles.
+    ack, label = _pmc_ack_via_efetch(doi)
+    if not ack:
+        try:
+            result = DL.get_acknowledgements(doi)
+        except Exception as err:
+            LOGGER.error(f"Could not fetch acknowledgements for {doi}: {err}")
+            print(f"{doi}: acknowledgement fetch failed - not added (see log)")
+            return
+        ack = result[0] if isinstance(result, tuple) else result
+        label = result[1] if isinstance(result, tuple) and len(result) > 1 else None
+    source = _source_key_for(doi, label)
+    if not ack:
+        print(f"{doi}: no acknowledgement text found - not added")
+        return
+    if ARG.TERM.lower() not in ack.lower():
+        print(f"{doi}: '{ARG.TERM}' not present in acknowledgements - not added")
+        return
+    if ARG.FORCE:
+        # Skip the Janelia-author guard for a manually-vetted external DOI. Reuses
+        # the "known non-Janelia" skip path (IGNORE) so fetch_and_store_doi stores
+        # it instead of diverting - useful when the guard's name-only fallback
+        # false-matches a Janelia employee (e.g. the affiliation XML was missing).
+        IGNORE.add(doi)
+        LOGGER.info(f"--force: bypassing Janelia-author guard for {doi}")
+    n_internal = len(INTERNAL_RECORDS)
+    stored = fetch_and_store_doi(doi, ack, source)
+    label_disp = SOURCES.get(source, {}).get('label', source)
+    if stored:
+        verb = "Added to" if ARG.WRITE else "Would add to (dry run)"
+        forced = " [author guard forced]" if ARG.FORCE else ""
+        print(f"{doi}: {verb} external_dois (source: {label_disp}){forced}")
+    elif len(INTERNAL_RECORDS) > n_internal:
+        print(f"{doi}: diverted - (potentially) Janelia-authored; not stored in external_dois. "
+              "Re-run with --force to store anyway if this is a name-match false positive.")
+    else:
+        print(f"{doi}: not added (DataCite DOI, metadata not found, or write error - see log)")
+
+
 def _progress(generator, desc, source):
     ''' Iterate a paging generator under a tqdm bar, filling in the total once known
         and showing live written/skipped counts as the postfix.
@@ -1467,6 +1618,9 @@ def processing():
         Returns:
           None
     '''
+    if ARG.DOI:
+        _process_single_doi()
+        return
     sources = {'elife': _process_elife_articles,
                'elsevier': _process_elsevier_articles,
                'pmc': _process_pmc_articles,
@@ -1566,6 +1720,15 @@ if __name__ == '__main__':
     PARSER.add_argument('--source', dest='SOURCE', action='store',
                         choices=['elife', 'elsevier', 'pmc', 'arxiv'], default=None,
                         help='Restrict processing to a single source [all]')
+    PARSER.add_argument('--doi', dest='DOI', action='store', default=None,
+                        help='Process a single DOI (fetch its acknowledgements, vet, '
+                             'and add it to external_dois) instead of running the '
+                             'source searches; ignores --source/--days')
+    PARSER.add_argument('--force', dest='FORCE', action='store_true', default=False,
+                        help='With --doi: store in external_dois even if the '
+                             'Janelia-author guard would divert it - for a manually '
+                             'vetted external DOI (e.g. one that only thanks a Janelia '
+                             'facility, where a name-only author match is a false positive)')
     PARSER.add_argument('--write', dest='WRITE', action='store_true',
                         default=False, help='Flag, Update database')
     PARSER.add_argument('--verbose', dest='VERBOSE', action='store_true',
