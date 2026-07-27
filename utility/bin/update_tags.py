@@ -2,7 +2,7 @@
     Update tags for selected DOIs
 """
 
-__version__ = '8.0.0'
+__version__ = '9.0.0'
 
 import argparse
 import collections
@@ -117,6 +117,40 @@ def get_dois():
         dois.append(row['doi'])
     return dois
 
+CURRENT_AFFILIATIONS = {}
+
+def get_current_affiliations(auth):
+    """ Get the current affiliations for an author
+        Keyword arguments:
+          auth: author record
+        Returns:
+          list of current affiliations
+    """
+    eid = auth.get('employeeId')
+    if not eid:
+        return []
+    if eid in CURRENT_AFFILIATIONS:
+        return CURRENT_AFFILIATIONS[eid]
+    try:
+        person = JRC.call_people_by_id(eid)
+    except Exception as err:
+        # A People-service hiccup must not abort the whole tagging run. Degrade to
+        # "no current affiliations" for this author (so only Lab tags auto-apply),
+        # and don't cache the failure so a later author can still succeed if the
+        # service recovers.
+        LOGGER.warning(f"Could not fetch People record for {eid}: {err}")
+        return []
+    if not person:
+        return []
+    # affiliations may be absent OR present-but-null; guard so .append below is safe.
+    affiliations = person.get('affiliations') or []
+    for team in person.get('managedTeams') or []:
+        name = team.get('supOrgName')
+        if name and name not in affiliations:
+            affiliations.append(name)
+    CURRENT_AFFILIATIONS[eid] = affiliations
+    return affiliations
+
 
 def append_tags(auth, janelians, atags):
     """ Update "janelians" and "atags" lists
@@ -136,8 +170,18 @@ def append_tags(auth, janelians, atags):
         for tag in auth['managedTeams']:
             if tag.get('supOrgSubType') != 'Lab' and tag.get('supOrgName') not in atags:
                 atags.append(tag.get('supOrgName'))
+    current_affiliations = []
+    if ARG.AUTO:
+        current_affiliations = get_current_affiliations(auth)
     for tag in auth.get('tags', []):
-        if tag not in atags and tag in DIS['default_tags']:
+        if tag in atags:
+            continue
+        if ARG.AUTO:
+            # A Lab affiliation always applies; any other affiliation only
+            # applies if it's an active supervisory organization
+            if tag.endswith(' Lab') or (tag in current_affiliations and is_active_suporg(tag)):
+                atags.append(tag)
+        elif tag in DIS['default_tags']:
             atags.append(tag)
     if 'name' in auth:
         if auth['name'] not in PROJECT:
@@ -159,11 +203,10 @@ def get_tags(authors):
     janelians = []
     tagauth = {}
     for auth in authors:
-        if ARG.AUTO:
-            if not auth.get('group') and not auth.get('managedTeams') and not auth.get('tags'):
-                continue
         atags = []
         append_tags(auth, janelians, atags)
+        if ARG.AUTO and not atags:
+            continue
         for tag in atags:
             if tag == 'Group Leader/Lab Head':
                 continue
@@ -197,8 +240,11 @@ def get_tag_choices(tags, tagauth, rec):
         alert = ""
         if tag not in SUPORG:
             if ARG.AUTO:
-                continue
-            alert = f" {Fore.RED}{Back.BLACK}(not a supervisory organization){Style.RESET_ALL}"
+                # A Lab tag always applies, even without a suporg record
+                if not tag.endswith(' Lab'):
+                    continue
+            else:
+                alert = f" {Fore.RED}{Back.BLACK}(not a supervisory organization){Style.RESET_ALL}"
         newtag = f"{tag} ({', '.join(tagauth[tag])}) {alert}"
         if tag in tagnames:
             current.append(newtag)
@@ -216,6 +262,16 @@ def get_suporg_code(name):
     if name in SUPORG:
         return SUPORG[name]
     return None
+
+
+def is_active_suporg(name):
+    ''' Determine if a name is an active supervisory organization
+        Keyword arguments:
+          name: name of the organization
+        Returns:
+          True if name is in the suporg collection and marked active
+    '''
+    return bool(SUPORG.get(name, {}).get('active'))
 
 
 def add_non_author_tags(payload):
