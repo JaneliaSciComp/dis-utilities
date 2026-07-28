@@ -12,6 +12,14 @@ Sources queried, in order:
 - arXiv        – via the arXiv HTML render (then e-print TeX source) for DataCite
                 arXiv DOIs (10.48550/arxiv.*), handled inside
                 doi_common.get_acknowledgements
+- Europe PMC   – catch-all fallback: for any article-like DOI still without
+                acknowledgements (including non-PMC-registered publishers - PNAS,
+                Science, Nature, etc. - that never got a jrc_pmc), searches Europe
+                PMC's open-access subset by DOI and parses the <ack> from its
+                downloadable full-text JATS (fullTextXML). Scoped to article-like
+                Crossref types (journal-article, posted-content, book-chapter,
+                proceedings-article) so the DataCite dataset pool that Europe PMC
+                does not carry is not scanned
 
 INPUTS
 ------
@@ -20,8 +28,8 @@ INPUTS
     - Collection `dois`      : source of DOI records; updated with acknowledgements.
 - Command-line flags:
     --doi DOI  Restrict processing to a single DOI (across all sources).
-    --source   Restrict processing to a single source (elife, elsevier, pmc, or
-               arxiv). Omit to process all sources.
+    --source   Restrict processing to a single source (elife, elsevier, pmc,
+               arxiv, or europepmc). Omit to process all sources.
     --write    Actually update the database (default: dry-run).
     --verbose  Increase logging verbosity.
     --debug    Maximum logging verbosity.
@@ -57,18 +65,28 @@ HIGH-LEVEL FLOW
    - Calls doi_common.get_acknowledgements, which downloads the paper from arXiv
      (HTML render, then e-print TeX source) and extracts the Acknowledgements
      section.
-6. Database update (--write mode)
+6. Europe PMC pass (add_europepmc_internal_acks)
+   - Runs last, as a catch-all: queries `dois` for every article-like record
+     (EPMC_ELIGIBLE_TYPES) still lacking `jrc_acknowledgements` (skipping any
+     already resolved earlier this run), searches Europe PMC's open-access subset
+     by DOI, and for a PMCID-bearing OA hit fetches its full-text JATS
+     (fullTextXML) and parses the <back><ack>.
+   - Covers DOIs the prefix-based passes miss - notably non-PMC-registered
+     publishers whose open-access copy still lands in the Europe PMC OA subset.
+     Skips the DataCite dataset/software pool, which Europe PMC does not carry.
+7. Database update (--write mode)
    - For each collected record, performs a MongoDB update_one setting
      `jrc_acknowledgements` and `jrc_ack_source` (the source's display label -
      eLife/Elsevier/PMC/arXiv) on the matching DOI document.
-7. Output
+8. Output
    - Prints a per-source summary of counts.
    - Writes internal_acks.json with all collected acknowledgement records.
    - Writes internal_ack_errors.json if any source calls raised exceptions.
    - Sends a summary email whenever records were found (--write or not):
      a header banner (run data, mode, DRY RUN/WRITE badge), KPI stat tiles per
-     source plus an error tile, one card per source (eLife/Elsevier/PMC/arXiv)
-     listing its DOIs (linked to the DIS UI, with a PMCID column for PMC), and
+     source plus an error tile, one card per source
+     (eLife/Elsevier/PMC/arXiv/Europe PMC) listing its DOIs (linked to the DIS
+     UI, with a PMCID column for the PMC and Europe PMC sources), and
      an Errors table when any source call raised. Built entirely from inline
      styles/tables (no <style> block) for compatibility with older email clients,
      matching the convention used by sync_citations.py.
@@ -89,13 +107,15 @@ from operator import attrgetter
 import os
 import sys
 import time
+import requests
 from pymongo import UpdateOne
 from pymongo.errors import BulkWriteError
 from tqdm import tqdm
+import xmltodict
 import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
 
-__version__ = '1.5.1'
+__version__ = '1.6.0'
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation,no-member
 
@@ -107,7 +127,20 @@ COUNT = collections.defaultdict(lambda: 0, {})
 ARG = DIS = LOGGER = None
 # Display order for the "source" label stored on each internal-DOI record
 # (add_elife_internal_acks etc.), used to group the run-summary email.
-SOURCE_LABELS = ('eLife', 'Elsevier', 'PMC', 'arXiv')
+SOURCE_LABELS = ('eLife', 'Elsevier', 'PMC', 'arXiv', 'Europe PMC')
+# Europe PMC REST endpoints (add_europepmc_internal_acks). fullTextXML is served
+# only for PMCID-bearing open-access articles, so the by-DOI search is filtered
+# to OPEN_ACCESS:Y.
+EPMC_REST = "https://www.ebi.ac.uk/europepmc/webservices/rest/"
+EPMC_SEARCH = EPMC_REST + "search"
+POLITE_HEADERS = {'User-Agent': 'janelia-dis/pull_internal_acks'}
+# Crossref `type` values the Europe PMC pass will try. Europe PMC indexes journal
+# articles, preprints, chapters and proceedings - not datasets/software, so this
+# deliberately skips the large DataCite deposit pool (figshare/Zenodo etc., stored
+# with type unset) that Europe PMC never carries, sparing thousands of dead
+# lookups.
+EPMC_ELIGIBLE_TYPES = ('journal-article', 'posted-content',
+                       'proceedings-article', 'book-chapter')
 # HTML run-summary email palette/layout (generate_email and its html_* helpers).
 # Mirrors sync_citations.py's email convention: inline styles only (no <style>
 # block/classes), colors paired with an icon/label (not color alone) for
@@ -306,6 +339,105 @@ def add_arxiv_internal_acks(internal, error):
                              "source": "arXiv"})
 
 
+def _europepmc_request(url, params=None, retries=3):
+    ''' Europe PMC HTTP GET with a small retry on transient (429/5xx/connection)
+        errors.
+        Keyword arguments:
+          url: request URL
+          params: optional query-parameter dict
+          retries: maximum number of attempts
+        Returns:
+          requests.Response (raises on repeated failure or a non-transient status)
+    '''
+    for attempt in range(retries):
+        try:
+            resp = requests.get(url, params=params, headers=POLITE_HEADERS, timeout=30)
+        except requests.RequestException:
+            if attempt < retries - 1:
+                time.sleep(2 ** attempt)
+                continue
+            raise
+        if (resp.status_code == 429 or resp.status_code >= 500) and attempt < retries - 1:
+            time.sleep(2 ** attempt)
+            continue
+        resp.raise_for_status()
+        return resp
+    raise RuntimeError(f"Europe PMC request to {url} failed after {retries} retries")
+
+
+def _europepmc_ack(doi):
+    ''' Fetch an acknowledgement for a single DOI from Europe PMC's open-access
+        full-text XML. Europe PMC serves downloadable JATS (fullTextXML) only for
+        PMCID-bearing open-access articles, so the search is filtered to
+        OPEN_ACCESS:Y and a hit without a PMCID is skipped. The <back><ack> is
+        parsed with the same recursive flattener doi_common uses for NCBI PMC.
+        Keyword arguments:
+          doi: DOI to look up (lower-case)
+        Returns:
+          (ack_text, pmcid) - ack_text is None when there is no OA full text or
+          no <ack>; pmcid is None when the DOI is not in the EPMC OA subset
+    '''
+    params = {"query": f'DOI:"{doi}" AND OPEN_ACCESS:Y',
+              "format": "json", "resultType": "lite", "pageSize": 1}
+    hits = _europepmc_request(EPMC_SEARCH, params=params).json() \
+               .get("resultList", {}).get("result", [])
+    if not hits:
+        return None, None
+    pmcid = hits[0].get("pmcid")
+    if not pmcid:
+        return None, None
+    resp = _europepmc_request(f"{EPMC_REST}{pmcid}/fullTextXML")
+    article = xmltodict.parse(resp.content).get("article") or {}
+    ack = (article.get("back") or {}).get("ack")
+    if not ack:
+        return None, pmcid
+    return (DL._parse_pmc_ack(ack) or None), pmcid
+
+
+def add_europepmc_internal_acks(internal, error):
+    ''' Add Europe PMC acknowledgements to the internal DOIs. Runs last, as a
+        catch-all over the article-like DOIs (EPMC_ELIGIBLE_TYPES) still lacking
+        an acknowledgement (skipping any already resolved earlier this run), so it
+        recovers DOIs the prefix-based passes miss - notably non-PMC-registered
+        publishers whose open-access copy still lands in the Europe PMC OA subset.
+        Datasets/software (the DataCite deposit pool) are excluded, since Europe
+        PMC does not carry them.
+        Keyword arguments:
+          internal: list of internal DOIs (appended to)
+          error: list of error records (appended to)
+        Returns:
+          None
+    '''
+    already = {row['doi'] for row in internal}
+    payload = {"jrc_acknowledgements": {"$exists": False},
+               "type": {"$in": list(EPMC_ELIGIBLE_TYPES)}}
+    payload = restrict_to_doi(payload)
+    try:
+        cnt = DB['dis'].dois.count_documents(payload)
+        if cnt < 1:
+            return
+        LOGGER.info(f"Found {cnt:,} article-like DOIs without acknowledgements to "
+                    f"try via Europe PMC")
+        rows = DB['dis'].dois.find(payload, {"doi": 1})
+    except Exception as err:
+        terminate_program(err)
+    for row in tqdm(rows, total=cnt, desc="Finding Europe PMC acknowledgements"):
+        if row['doi'] in already:
+            continue
+        time.sleep(0.2)
+        try:
+            ack, pmcid = _europepmc_ack(row['doi'])
+        except Exception as err:
+            error.append({"doi": row['doi'], "source": "europepmc", "error": str(err)})
+            continue
+        if ack:
+            COUNT['europepmc_add'] += 1
+            internal.append({"pmcid": pmcid,
+                             "doi": row['doi'],
+                             "ack": ack,
+                             "source": "Europe PMC"})
+
+
 def doiurl(doi):
     ''' Format a DOI as a DIS UI link. The DOI is HTML-escaped for both the URL
         attribute and the anchor text - legacy SICI DOIs contain <, >, & and would
@@ -325,6 +457,10 @@ def html_kpi_card(value, label, tone='neutral', width='20%'):
         A single <td> carries the box look directly (bgcolor attribute +
         background-color, no nested table) - Outlook's Word rendering engine
         chokes on a percentage-width table nested inside a percentage-width <td>.
+        The value/label stack is two inline <span>s split by a <br>, NOT block
+        <div>s: Outlook's Word engine leaks a block element's closing tag inside a
+        styled cell as literal text (the value tile showed "0</div>"), whereas
+        inline spans render cleanly.
         Keyword arguments:
           value: display value (already formatted, e.g. "3")
           label: caption under the value
@@ -338,9 +474,10 @@ def html_kpi_card(value, label, tone='neutral', width='20%'):
               'neutral': (EMAIL_GRAY_BG, EMAIL_GRAY)}[tone]
     return (f'<td width="{width}" align="center" valign="top" bgcolor="{bg}" '
             f'style="padding:14px 6px;background-color:{bg};border-radius:8px;">'
-            f'<div style="font-size:24px;font-weight:700;color:{fg};">{value}</div>'
-            f'<div style="font-size:10.5px;color:{EMAIL_GRAY};text-transform:uppercase;'
-            f'letter-spacing:.04em;margin-top:2px;">{label}</div>'
+            f'<span style="font-size:24px;font-weight:700;color:{fg};'
+            f'line-height:1.2;">{value}</span><br>'
+            f'<span style="font-size:10.5px;color:{EMAIL_GRAY};text-transform:uppercase;'
+            f'letter-spacing:.04em;">{label}</span>'
             f'</td>')
 
 
@@ -377,7 +514,7 @@ def html_source_card(label, records):
     ''' Build one "acknowledgements found" card for a single source: a header
         with a count pill, followed by a zebra-striped table of DOIs (each
         linked to its DIS UI page), with a PMCID column when the source's
-        records carry one (PMC only).
+        records carry one (the PMC and Europe PMC sources).
         Keyword arguments:
           label: display label (e.g. "eLife")
           records: list of internal-DOI records for this source
@@ -536,10 +673,13 @@ def processing():
     '''
     internal = []
     error = []
+    # Europe PMC runs last on purpose: it is a catch-all over every remaining
+    # DOI and dedupes against what the earlier passes already resolved this run.
     sources = {'elife': lambda: add_elife_internal_acks(internal, error),
                'elsevier': lambda: add_elsevier_internal_acks(internal, error),
                'pmc': lambda: add_pmc_internal_acks(internal, error),
-               'arxiv': lambda: add_arxiv_internal_acks(internal, error)}
+               'arxiv': lambda: add_arxiv_internal_acks(internal, error),
+               'europepmc': lambda: add_europepmc_internal_acks(internal, error)}
     for source, handler in sources.items():
         if ARG.SOURCE in (None, source):
             handler()
@@ -576,6 +716,8 @@ def processing():
         print(f"PMC DOIs added:      {COUNT['pmc_add']:,}")
     if ARG.SOURCE in (None, 'arxiv'):
         print(f"arXiv DOIs added:    {COUNT['arxiv_add']:,}")
+    if ARG.SOURCE in (None, 'europepmc'):
+        print(f"Europe PMC DOIs added: {COUNT['europepmc_add']:,}")
     print(f"DOIs updated:        {COUNT['updated']:,}")
     if COUNT['write_errors']:
         print(f"DOIs failed to update: {COUNT['write_errors']:,}")
@@ -596,7 +738,8 @@ if __name__ == '__main__':
     PARSER.add_argument('--doi', dest='DOI', default=None,
                         help='Restrict processing to a single DOI')
     PARSER.add_argument('--source', dest='SOURCE', action='store',
-                        choices=['elife', 'elsevier', 'pmc', 'arxiv'], default=None,
+                        choices=['elife', 'elsevier', 'pmc', 'arxiv', 'europepmc'],
+                        default=None,
                         help='Restrict processing to a single source [all]')
     PARSER.add_argument('--write', dest='WRITE', action='store_true',
                         default=False, help='Flag, Update database')
