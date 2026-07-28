@@ -12,21 +12,33 @@ dis config. Results are paged in batches of 200.
 DOIs already present in the MongoDB dois collection, or listed in the
 external_dois or to_ignore collections, are excluded from output.
 
+Records whose prism:coverDate is in the future are treated as not-yet-published
+(Elsevier assigns an ahead-of-print article to a forthcoming issue with a future
+cover date): they are held back rather than flagged as ready, excluded from
+elsevier_ready.txt, and reported in their own email section. No state is kept -
+once the cover date has passed such a DOI flows into the ready set on a later run.
+
 Output files (written to the current working directory):
-    elsevier_ready.txt   DOIs not yet in the database, ready for processing.
+    elsevier_ready.txt   DOIs not yet in the database, ready for processing
+                         (future-cover-date DOIs are excluded). When a run has no
+                         ready DOIs, any stale elsevier_ready.txt is deleted so a
+                         downstream consumer never re-reads an earlier run's output.
 
 An HTML summary email is sent when --test or --write is supplied.
 """
 
-__version__ = '2.1.0'
+__version__ = '2.4.1'
 
 import argparse
 import collections
+import datetime
+import os
 from operator import attrgetter
 import sys
 import traceback
 from tqdm import tqdm
 import jrc_common.jrc_common as JRC
+import jrc_email.jrc_email as JE
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation
 
@@ -101,10 +113,12 @@ def get_janelia_works():
         Keyword arguments:
           None
         Returns:
-          List of works
+          dict mapping DOI (lower-case) -> Elsevier cover date (prism:coverDate)
     '''
     suffix = "metadata/article?query=aff%28janelia%29&httpAccept=application/json&count=200"
-    rows = set()
+    rows = {}
+    total = None
+    seen = 0
     part = 1
     while True:
         try:
@@ -113,80 +127,113 @@ def get_janelia_works():
             terminate_program(err)
         if 'search-results' not in resp:
             terminate_program(f"Unexpected Elsevier response: {resp}")
-        for row in resp['search-results'].get('entry', []):
+        results = resp['search-results']
+        if total is None:
+            try:
+                total = int(results.get('opensearch:totalResults'))
+            except (TypeError, ValueError):
+                total = None
+        entries = results.get('entry', [])
+        seen += len(entries)
+        for row in entries:
             if 'prism:coverDate' in row and 'prism:doi' in row \
                and row['prism:coverDate'] >= DISCONFIG['min_publishing_date']:
-                rows.add(row['prism:doi'].lower())
+                # Retain the cover date so processing() can hold back articles with
+                # a future (not-yet-published) cover date.
+                rows[row['prism:doi'].lower()] = row['prism:coverDate']
         print(f"Got part {part}: found {len(rows)} works")
         part += 1
         suffix = None
-        if 'link' in resp['search-results']:
-            for link in resp['search-results']['link']:
-                if link['@ref'] == 'next':
-                    suffix = link['@href'].replace('https://api.elsevier.com/content/', '')
+        for link in results.get('link', []):
+            if link['@ref'] == 'next':
+                suffix = link['@href'].replace('https://api.elsevier.com/content/', '')
         if not suffix:
             break
+    # Elsevier stops issuing a 'next' link once its deep-paging cap is reached; if
+    # we paged fewer entries than the reported total, results beyond the cap were
+    # silently dropped - surface that rather than let it read as full coverage.
+    if total is not None and seen < total:
+        LOGGER.warning(f"Elsevier returned {seen:,} of {total:,} results before paging "
+                       f"stopped - {total - seen:,} were not retrieved (deep-paging cap). "
+                       "Narrow the query (e.g. a later min_publishing_date) to capture them.")
     LOGGER.debug(f"Found {len(rows)} works")
-    return list(rows)
+    return rows
 
 
-def doiurl(doi):
-    ''' Format a DOI as a URL
+def generate_email(to_process, not_published):
+    ''' Generate and send the HTML run-summary email (built with jrc_email): a
+        header banner, a KPI stat-tile row, a "Ready to Process" card, and (when
+        any) a highlighted "Not Yet Published" card for DOIs held back on a future
+        cover date. Nothing is sent when there are neither ready nor held-back DOIs.
         Keyword arguments:
-          doi: DOI to format
-        Returns:
-          Formatted DOI
-    '''
-    return f"&nbsp;&nbsp;<a href='https://dis.int.janelia.org/doiui/{doi}'>{doi}</a><br>"
-
-
-def text_to_html_table(text):
-    ''' Convert text to an HTML table
-        Keyword arguments:
-          text: text to convert
-        Returns:
-          HTML table
-    '''
-    rows = []
-    for line in text.strip().splitlines():
-        if ":" in line:
-            label, value = line.rsplit(":", 1)
-            rows.append((label.strip(), value.strip()))
-    html = ['<table>']
-    for label, value in rows:
-        html.append(f'  <tr><td>{label}:</td><td>{value}</td></tr>')
-    html.append('</table>')
-    return "\n".join(html)
-
-
-def generate_email(summary, to_process):
-    ''' Generate and send an email
-        Keyword arguments:
-          summary: summary of the results
-          to_process: list of DOIs to process
+          to_process: list of DOIs ready to be added
+          not_published: list of (DOI, cover date) held back as not yet published
         Returns:
           None
     '''
-    msg = ""
-    if to_process:
-        msg += "<br>The following DOIs will be added to the database:<br>"
-        for doi in to_process:
-            msg += doiurl(doi)
-        msg += "<br>"
-    if msg:
-        msg = JRC.get_run_data(__file__, __version__) + "<br><br>" \
-            + text_to_html_table(summary) + "<br>" + msg
-    else:
+    if not to_process and not not_published:
         return
+    run_data = JRC.get_run_data(__file__, __version__).strip()
+    # Receivers (the full list) are notified only on a real --write run that has
+    # something ready to add; --test runs, and held-back-only runs (nothing ready,
+    # just not-yet-published), go to the developer. The mode badge follows the
+    # actual recipient so it never overstates who was notified.
+    to_receivers = ARG.WRITE and not ARG.TEST and bool(to_process)
+    mode_label = 'LIVE' if to_receivers else 'TEST'
+    mode_tone = 'good' if to_receivers else 'warn'
+    kpis = ''.join([
+        JE.kpi_card(f"{COUNT['read']:,}", "Read from Elsevier"),
+        JE.kpi_card(f"{COUNT['in_dois']:,}", "Already in DB"),
+        JE.kpi_card(f"{COUNT['ignored']:,}", "To ignore"),
+        JE.kpi_card(f"{COUNT['not_published']:,}", "Not yet published",
+                    'warn' if not_published else 'neutral'),
+        JE.kpi_card(f"{len(to_process):,}", "Ready to process",
+                    'good' if to_process else 'neutral'),
+    ])
+    ready_body = (JE.doi_card("Ready to Process", [(doi, None) for doi in to_process], 'good')
+                  if to_process else
+                  f'<div style="color:{JE.GRAY};font-size:13px;">'
+                  'No new DOIs are ready to process.</div>')
+    body = JE.body_row(JE.section_header(f"&#10003; Ready to Process ({len(to_process):,})")
+                       + ready_body)
+    if not_published:
+        held = (JE.section_header(f"&#128197; Not Yet Published ({len(not_published):,})")
+                + f'<div style="color:{JE.GRAY};font-size:12px;margin:-4px 0 10px 0;">'
+                'Elsevier assigned these to a forthcoming issue with a future cover date; '
+                'they were held back and NOT added, and will be picked up automatically once '
+                'the cover date has passed.</div>'
+                + JE.doi_card("Not Yet Published",
+                              [(doi, cover) for doi, cover in not_published],
+                              'warn', second_header='Cover date'))
+        body += JE.body_row(held, '6px 28px 4px 28px')
+    msg = JE.render(os.path.basename(__file__), __version__, run_data,
+                    mode_label, mode_tone, kpis, body)
     try:
-        email = DISCONFIG['developer'] if ARG.TEST else DISCONFIG['receivers']
+        email = DISCONFIG['receivers'] if to_receivers else DISCONFIG['developer']
         LOGGER.info(f"Sending email to {email}")
-        opts = {'mime': 'html'}
-        JRC.send_email(msg, DISCONFIG['sender'], email, "Elsevier DOI sync", **opts)
+        JRC.send_email(msg, DISCONFIG['sender'], email, "Elsevier DOI sync", mime='html')
     except Exception as err:
         print(str(err))
         traceback.print_exc()
         terminate_program(err)
+
+
+def remove_output(path):
+    ''' Delete a stale output file when the current run produced nothing for it, so
+        a downstream consumer never re-reads a previous run's results. A missing
+        file is fine; a real removal error is logged but not fatal.
+        Keyword arguments:
+          path: output file path
+        Returns:
+          None
+    '''
+    try:
+        os.remove(path)
+        LOGGER.info(f"No output for {path}; removed stale file")
+    except FileNotFoundError:
+        pass
+    except OSError as err:
+        LOGGER.warning(f"Could not remove stale output file {path}: {err}")
 
 
 def processing():
@@ -196,30 +243,44 @@ def processing():
         Returns:
           None
     '''
-    dois = get_janelia_works()
-    COUNT['read'] = len(dois)
+    works = get_janelia_works()
+    COUNT['read'] = len(works)
+    today = datetime.date.today().isoformat()
     to_process = []
-    for doi in tqdm(dois, desc="Processing DOIs"):
+    not_published = []
+    for doi, cover in tqdm(works.items(), desc="Processing DOIs"):
         if doi in DOI_CACHE:
             if DOI_CACHE[doi] == 'dois':
                 COUNT['in_dois'] += 1
             else:
                 COUNT['ignored'] += 1
             continue
+        # A cover date in the future means Elsevier has assigned the article to a
+        # forthcoming issue but it is not actually published yet - hold it back
+        # rather than flag it as ready. It will flow into the ready set on a later
+        # run once the cover date has passed (it stays absent from the DB until then).
+        if cover and cover > today:
+            not_published.append((doi, cover))
+            COUNT['not_published'] += 1
+            continue
         to_process.append(doi)
+    not_published.sort(key=lambda item: item[1])
     if to_process:
         with open('elsevier_ready.txt', 'w', encoding='utf-8') as fileout:
             for doi in to_process:
                 fileout.write(doi + '\n')
+    else:
+        remove_output('elsevier_ready.txt')
     summary = (
         f"DOIs read from Elsevier:   {COUNT['read']:,}\n"
         f"DOIs already in database:  {COUNT['in_dois']:,}\n"
         f"DOIs to ignore:            {COUNT['ignored']:,}\n"
+        f"DOIs not yet published:    {COUNT['not_published']:,}\n"
         f"DOIs ready for processing: {len(to_process):,}"
     )
     print(summary)
     if ARG.TEST or ARG.WRITE:
-        generate_email(summary, to_process)
+        generate_email(to_process, not_published)
 # -----------------------------------------------------------------------------
 
 if __name__ == '__main__':
