@@ -38,16 +38,18 @@ An HTML summary email is sent when --test or --write is supplied.
 import argparse
 import collections
 import configparser
+import os
 from operator import attrgetter
 import sys
 import time
 import traceback
 import requests
 import jrc_common.jrc_common as JRC
+import jrc_email.jrc_email as JE
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation,duplicate-code
 
-__version__ = '1.0.0'
+__version__ = '1.1.0'
 
 # Database
 DB = {}
@@ -206,67 +208,53 @@ def pull_single_group(dois, institution=None, group=None):
     LOGGER.info(f"Checked {checked:,} DOIs from figshare in {parts} part(s)")
 
 
-def doiurl(doi, mode='doi'):
-    ''' Format a DOI as an HTML link
-        Keyword arguments:
-          doi: DOI to format
-          mode: 'figshare' for raw figshare link, otherwise standard doiui link
-        Returns:
-          Formatted HTML anchor tag
-    '''
-    if mode == 'figshare':
-        return f"&nbsp;&nbsp;<a href='https://dis.int.janelia.org/raw/figshare/{doi}'>{doi}</a><br>"
-    return f"&nbsp;&nbsp;<a href='https://dis.int.janelia.org/doiui/{doi}'>{doi}</a><br>"
-
-
-def text_to_html_table(text):
-    ''' Convert colon-delimited text lines to an HTML table
-        Keyword arguments:
-          text: text to convert
-        Returns:
-          HTML table string
-    '''
-    rows = []
-    for line in text.strip().splitlines():
-        if ":" in line:
-            label, value = line.rsplit(":", 1)
-            rows.append((label.strip(), value.strip()))
-    html = ['<table>']
-    for label, value in rows:
-        html.append(f'  <tr><td>{label}:</td><td>{value}</td></tr>')
-    html.append('</table>')
-    return "\n".join(html)
-
-
 def generate_email(ready, no_datacite, summary):
-    ''' Generate and send a summary email
+    ''' Generate and send the HTML run-summary email (jrc_email house style): a
+        header banner, a KPI stat-tile row, a "Ready for Processing" card, and -
+        when any - a "Not in DataCite" card (whose links go to the raw figshare
+        record, since those DOIs are not yet in DataCite). Recipient is the
+        developer for --test and the receivers list otherwise.
         Keyword arguments:
           ready: list of DOIs ready for processing
           no_datacite: list of DOIs not found in DataCite
-          summary: plain-text run summary
+          summary: text summary (printed to the console; not used in the email body)
         Returns:
           None
     '''
-    msg = ""
-    if ready:
-        msg += "<br>The following DOIs are ready for processing:<br>"
-        for doi in ready:
-            msg += doiurl(doi)
-        msg += "<br>"
-    if no_datacite:
-        msg += "<br>The following DOIs are not in DataCite:<br>"
-        for doi in no_datacite:
-            msg += doiurl(doi, mode='figshare')
-        msg += "<br>"
-    if not msg:
+    if not ready and not no_datacite:
         return
-    msg = JRC.get_run_data(__file__, __version__) + "<br><br>" \
-        + text_to_html_table(summary) + "<br>" + msg
+    run_data = JRC.get_run_data(__file__, __version__).strip()
+    mode_label = 'TEST' if ARG.TEST else 'LIVE'
+    mode_tone = 'warn' if ARG.TEST else 'good'
+    kpis = ''.join([
+        JE.kpi_card(f"{COUNT['checked']:,}", "Read from figshare"),
+        JE.kpi_card(f"{COUNT['janelia']:,}", "Janelia DOIs"),
+        JE.kpi_card(f"{COUNT['in_dois']:,}", "Already in DB"),
+        JE.kpi_card(f"{len(no_datacite):,}", "Not in DataCite",
+                    'warn' if no_datacite else 'neutral'),
+        JE.kpi_card(f"{len(ready):,}", "Ready to process",
+                    'good' if ready else 'neutral'),
+    ])
+    ready_body = (JE.doi_card("Ready for Processing", [(d, None) for d in ready], 'good')
+                  if ready else
+                  f'<div style="color:{JE.GRAY};font-size:13px;">'
+                  'No new DOIs are ready for processing.</div>')
+    body = JE.body_row(JE.section_header(f"&#10003; Ready for Processing ({len(ready):,})")
+                       + ready_body)
+    if no_datacite:
+        card = (JE.section_header(f"&#9888; Not in DataCite ({len(no_datacite):,})")
+                + f'<div style="color:{JE.GRAY};font-size:12px;margin:-4px 0 10px 0;">'
+                'These figshare DOIs are not yet registered in DataCite (links go to the '
+                'raw figshare record) - not ready to ingest.</div>'
+                + JE.doi_card("Not in DataCite", [(d, None) for d in no_datacite], 'warn',
+                              icon='&#9888;', base='https://dis.int.janelia.org/raw/figshare/'))
+        body += JE.body_row(card, '6px 28px 4px 28px')
+    msg = JE.render(os.path.basename(__file__), __version__, run_data,
+                    mode_label, mode_tone, kpis, body)
     try:
         email = DISCONFIG['developer'] if ARG.TEST else DISCONFIG['receivers']
         LOGGER.info(f"Sending email to {email}")
-        opts = {'mime': 'html'}
-        JRC.send_email(msg, DISCONFIG['sender'], email, "figshare DOI sync", **opts)
+        JRC.send_email(msg, DISCONFIG['sender'], email, "figshare DOI sync", mime='html')
     except Exception as err:
         print(str(err))
         traceback.print_exc()
