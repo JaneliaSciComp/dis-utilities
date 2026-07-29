@@ -71,9 +71,11 @@ ENTITIES = [
         r"Transgenic\s+(?:Core\s+)?(?:Facility|Team|Services?).*?(?:Janelia|HHMI)",
         r"\bCaiying\s+Guo\b.*?(?:Janelia|HHMI)",  # heads the facility
     ]),
-    ("Instrument Design and Fabrication", [
-        r"Janelia\s+Instrument\s+Design\s+and\s+Fabrication",
+    ("Janelia Experimental Technology (jET)", [
+        r"Janelia Experimental Technology",
         r"ID&F",
+        r"Instrument Design & Fabrication",
+        r"Janelia\s+Instrument\s+Design\s+and\s+Fabrication",
     ]),
     ("Invertebrate Shared Research", [
         r"Invertebrate\s+Shared\s+Research",
@@ -85,7 +87,7 @@ ENTITIES = [
         r"Quantitative\s+Genomics\s+(?:Core|Resource)",
     ]),
     ("Viral Tools", [
-        r"(?:Janelia Viral Core|Viral Tools core laboratory \(HHMI Janelia|Viral Tools Core Facility|Janelia Viral Tools facility|Janelia Viral Tools Facility|Janelia Farm Viral Core facility)",
+        r"(?:Janelia Viral Core|Viral Tools core laboratory \(HHMI Janelia|Viral Tools Core Facility|Janelia Viral Tools|Janelia Research Campus Viral Tools|JRC Viral Tools|Janelia Farm Viral Core facility)",
     ]),
     # ── Named projects ────────────────────────────────────────────────────────
     ("FlyEM Project", [
@@ -300,7 +302,7 @@ DESC = {
     "Gene Targeting and Transgenic Facility": "The Gene Targeting and Transgenic "
                         "Facility/Core at Janelia/HHMI (incl. its transgenic core/services, "
                         "headed by Caiying Guo).",
-    "Instrument Design and Fabrication": "The Janelia Instrument Design and Fabrication group.",
+    "Janelia Experimental Technology (jET)": "Janelia Experimental Technology (jET); formerly Instrument Design and Fabrication (ID&F).",
     "Invertebrate Shared Research": "Invertebrate Shared Research",
     "Project Technical Resources": "Project Technical Resources",
     "Quantitative Genomics Core": "The Quantitative Genomics Core/Resource.",
