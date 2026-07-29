@@ -23,6 +23,7 @@ An HTML summary email is sent when --test or --write is supplied.
 import argparse
 import collections
 import json
+import os
 from operator import attrgetter
 import re
 import sys
@@ -32,10 +33,11 @@ import requests
 from tqdm import tqdm
 import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
+import jrc_email.jrc_email as JE
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation
 
-__version__ = '1.0.0'
+__version__ = '1.1.0'
 
 # Database
 DB = {}
@@ -237,64 +239,52 @@ def parse_authors(doi, msg, ready, review):
     return False
 
 
-def doiurl(doi):
-    ''' Format a DOI as an HTML link
-        Keyword arguments:
-          doi: DOI to format
-        Returns:
-          Formatted HTML anchor tag
-    '''
-    return f"&nbsp;&nbsp;<a href='https://dis.int.janelia.org/doiui/{doi}'>{doi}</a><br>"
-
-
-def text_to_html_table(text):
-    ''' Convert colon-delimited text lines to an HTML table
-        Keyword arguments:
-          text: text to convert
-        Returns:
-          HTML table string
-    '''
-    rows = []
-    for line in text.strip().splitlines():
-        if ":" in line:
-            label, value = line.rsplit(":", 1)
-            rows.append((label.strip(), value.strip()))
-    html = ['<table>']
-    for label, value in rows:
-        html.append(f'  <tr><td>{label}:</td><td>{value}</td></tr>')
-    html.append('</table>')
-    return "\n".join(html)
-
-
 def generate_email(ready, review, summary):
-    ''' Generate and send a summary email
+    ''' Generate and send the HTML run-summary email (jrc_email house style): a
+        header banner, a KPI stat-tile row, a "Ready for Processing" card, and -
+        when any - a "Requiring Review" card. Recipient is the developer for --test
+        and the receivers list otherwise.
         Keyword arguments:
           ready: list of DOIs ready for processing
           review: list of DOIs requiring review
-          summary: plain-text run summary
+          summary: text summary (printed to the console; not used in the email body)
         Returns:
           None
     '''
-    msg = ""
-    if ready:
-        msg += "<br>The following DOIs are ready for processing:<br>"
-        for doi in ready:
-            msg += doiurl(doi)
-        msg += "<br>"
-    if review:
-        msg += "<br>The following DOIs require review:<br>"
-        for doi in review:
-            msg += doiurl(doi)
-        msg += "<br>"
-    if not msg:
+    if not ready and not review:
         return
-    msg = JRC.get_run_data(__file__, __version__) + "<br><br>" \
-        + text_to_html_table(summary) + "<br>" + msg
+    run_data = JRC.get_run_data(__file__, __version__).strip()
+    mode_label = 'TEST' if ARG.TEST else 'LIVE'
+    mode_tone = 'warn' if ARG.TEST else 'good'
+    kpis = ''.join([
+        JE.kpi_card(f"{COUNT['read']:,}", "Read from arXiv"),
+        JE.kpi_card(f"{COUNT['in_dois']:,}", "Already in DB"),
+        JE.kpi_card(f"{COUNT['no_datacite']:,}", "Not in DataCite"),
+        JE.kpi_card(f"{len(review):,}", "Requiring review",
+                    'warn' if review else 'neutral'),
+        JE.kpi_card(f"{len(ready):,}", "Ready to process",
+                    'good' if ready else 'neutral'),
+    ])
+    ready_body = (JE.doi_card("Ready for Processing", [(d, None) for d in ready], 'good')
+                  if ready else
+                  f'<div style="color:{JE.GRAY};font-size:13px;">'
+                  'No new DOIs are ready for processing.</div>')
+    body = JE.body_row(JE.section_header(f"&#10003; Ready for Processing ({len(ready):,})")
+                       + ready_body)
+    if review:
+        card = (JE.section_header(f"&#9888; Requiring Review ({len(review):,})")
+                + f'<div style="color:{JE.GRAY};font-size:12px;margin:-4px 0 10px 0;">'
+                'A Janelia author could not be confirmed automatically - review before '
+                'ingesting.</div>'
+                + JE.doi_card("Requiring Review", [(d, None) for d in review], 'warn',
+                              icon='&#9888;'))
+        body += JE.body_row(card, '6px 28px 4px 28px')
+    msg = JE.render(os.path.basename(__file__), __version__, run_data,
+                    mode_label, mode_tone, kpis, body)
     try:
         email = DISCONFIG['developer'] if ARG.TEST else DISCONFIG['receivers']
         LOGGER.info(f"Sending email to {email}")
-        opts = {'mime': 'html'}
-        JRC.send_email(msg, DISCONFIG['sender'], email, "arXiv DOI sync", **opts)
+        JRC.send_email(msg, DISCONFIG['sender'], email, "arXiv DOI sync", mime='html')
     except Exception as err:
         print(str(err))
         traceback.print_exc()

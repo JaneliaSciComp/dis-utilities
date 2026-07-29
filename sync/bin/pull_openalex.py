@@ -4,7 +4,7 @@
     - 
 '''
 
-__version__ = '2.2.0'
+__version__ = '2.3.0'
 
 import argparse
 import collections
@@ -18,6 +18,7 @@ import requests
 from tqdm import tqdm
 import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
+import jrc_email.jrc_email as JE
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,logging-fstring-interpolation
 
@@ -249,28 +250,44 @@ def generate_emails():
         Returns:
           None
     '''
-    msg = ""
-    if MESSAGE['ready']:
-        msg += "<br>The following DOIs will be added to the database:<br>"
-        for itm in MESSAGE['ready']:
-            msg += f"  {itm}<br>"
-        msg += "\n"
-    if msg:
-        msg = JRC.get_run_data(__file__, __version__) + "<br>" + msg
-    else:
+    if not OUTPUT['ready'] and not OUTPUT['review']:
         return
-    if MESSAGE['review']:
-        msg += "<br>The following DOIs should be reviewed:<br>"
-        for itm in MESSAGE['review']:
-            msg += f"  {itm}<br>"
-        msg += "\n"
+    run_data = JRC.get_run_data(__file__, __version__).strip()
+    mode_label = 'TEST' if ARG.TEST else 'LIVE'
+    mode_tone = 'warn' if ARG.TEST else 'good'
+    ready = [(doi, OUTPUT['ready'][doi][0]) for doi in sorted(OUTPUT['ready'])]
+    review = [(doi, OUTPUT['review'][doi][0]) for doi in sorted(OUTPUT['review'])]
+    kpis = ''.join([
+        JE.kpi_card(f"{COUNT['dois']:,}", "Found in OpenAlex"),
+        JE.kpi_card(f"{COUNT['in_database']:,}", "Already in DB"),
+        JE.kpi_card(f"{COUNT['no_author']:,}", "No Janelia author"),
+        JE.kpi_card(f"{len(review):,}", "Requiring review",
+                    'warn' if review else 'neutral'),
+        JE.kpi_card(f"{len(ready):,}", "Ready to add",
+                    'good' if ready else 'neutral'),
+    ])
+    ready_body = (JE.doi_card("Ready to Add", ready, 'good', second_header='Janelia author')
+                  if ready else
+                  f'<div style="color:{JE.GRAY};font-size:13px;">'
+                  'No new DOIs are ready to add.</div>')
+    body = JE.body_row(JE.section_header(f"&#10003; Ready to Add ({len(ready):,})")
+                       + ready_body)
+    if review:
+        card = (JE.section_header(f"&#9888; Requiring Review ({len(review):,})")
+                + f'<div style="color:{JE.GRAY};font-size:12px;margin:-4px 0 10px 0;">'
+                'A Janelia author could not be confirmed by ORCID or the People collection '
+                '- review before ingesting.</div>'
+                + JE.doi_card("Requiring Review", review, 'warn', second_header='Author',
+                              icon='&#9888;'))
+        body += JE.body_row(card, '6px 28px 4px 28px')
+    msg = JE.render(os.path.basename(__file__), __version__, run_data,
+                    mode_label, mode_tone, kpis, body)
     with open('openalex_status.html', 'w', encoding='utf-8') as fileout:
         fileout.write(msg)
     try:
         email = DISCONFIG['developer'] if ARG.TEST else DISCONFIG['receivers']
         LOGGER.info(f"Sending email to {email}")
-        opts = {'mime': 'html'}
-        JRC.send_email(msg, DISCONFIG['sender'], email, "Lab head DOI sync", **opts)
+        JRC.send_email(msg, DISCONFIG['sender'], email, "Lab head DOI sync", mime='html')
     except Exception as err:
         print(str(err))
         traceback.print_exc()

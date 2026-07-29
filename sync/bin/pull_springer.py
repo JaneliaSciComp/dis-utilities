@@ -50,9 +50,10 @@ from operator import attrgetter
 import requests
 import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
+import jrc_email.jrc_email as JE
 
 
-__version__ = '1.1.0'
+__version__ = '1.2.0'
 
 # Global variables
 ARG = DISCONFIG = LOGGER = None
@@ -385,65 +386,52 @@ def janelia_authors(doi, msg):
     return janelians
 
 
-def doiurl(doi):
-    ''' Format a DOI as a URL
-        Keyword arguments:
-          doi: DOI to format
-        Returns:
-          Formatted DOI
-    '''
-    return f"&nbsp;&nbsp;<a href='https://dis.int.janelia.org/doiui/{doi}'>{doi}</a><br>"
-
-
-def text_to_html_table(text):
-    ''' Convert text to an HTML table
-        Keyword arguments:
-          text: text to convert
-        Returns:
-          HTML table
-    '''
-    rows = []
-    for line in text.strip().splitlines():
-        if ":" in line:
-            label, value = line.rsplit(":", 1)
-            rows.append((label.strip(), value.strip()))
-    html = ['<table>']
-    for label, value in rows:
-        html.append(f'  <tr><td>{label}:</td><td>{value}</td></tr>')
-    html.append('</table>')
-    return "\n".join(html)
-
-
 def generate_email(ready, review, summary):
-    ''' Generate and send an email
+    ''' Generate and send the HTML run-summary email (jrc_email house style): a
+        header banner, a KPI stat-tile row, a "Ready for Processing" card, and -
+        when any - a "Requiring Review" card. Recipient is the developer for --test
+        and the receivers list otherwise.
         Keyword arguments:
           ready: list of records ready for processing
           review: list of records requiring manual review
-          summary: summary of the results
+          summary: text summary (printed to the console; not used in the email body)
         Returns:
           None
     '''
-    msg = ""
-    if ready:
-        msg += "<br>The following DOIs are ready for processing:<br>"
-        for rec in ready:
-            msg += doiurl(rec['doi'])
-        msg += "<br>"
-    if review:
-        msg += "<br>The following DOIs require review:<br>"
-        for rec in review:
-            msg += doiurl(rec['doi'])
-        msg += "<br>"
-    if msg:
-        msg = JRC.get_run_data(__file__, __version__) + "<br><br>" \
-            + text_to_html_table(summary) + "<br>" + msg
-    else:
+    if not ready and not review:
         return
+    run_data = JRC.get_run_data(__file__, __version__).strip()
+    mode_label = 'TEST' if ARG.TEST else 'LIVE'
+    mode_tone = 'warn' if ARG.TEST else 'good'
+    kpis = ''.join([
+        JE.kpi_card(f"{COUNT['total']:,}", "Read from Springer"),
+        JE.kpi_card(f"{COUNT['skipped_db']:,}", "Already in DB"),
+        JE.kpi_card(f"{COUNT['noauthors']:,}", "No Janelia authors"),
+        JE.kpi_card(f"{len(review):,}", "Requiring review",
+                    'warn' if review else 'neutral'),
+        JE.kpi_card(f"{len(ready):,}", "Ready to process",
+                    'good' if ready else 'neutral'),
+    ])
+    ready_body = (JE.doi_card("Ready for Processing", [(rec['doi'], None) for rec in ready], 'good')
+                  if ready else
+                  f'<div style="color:{JE.GRAY};font-size:13px;">'
+                  'No new DOIs are ready for processing.</div>')
+    body = JE.body_row(JE.section_header(f"&#10003; Ready for Processing ({len(ready):,})")
+                       + ready_body)
+    if review:
+        card = (JE.section_header(f"&#9888; Requiring Review ({len(review):,})")
+                + f'<div style="color:{JE.GRAY};font-size:12px;margin:-4px 0 10px 0;">'
+                'Janelia authorship matched only by name (not ORCID or asserted affiliation) '
+                '- review before ingesting.</div>'
+                + JE.doi_card("Requiring Review", [(rec['doi'], None) for rec in review], 'warn',
+                              icon='&#9888;'))
+        body += JE.body_row(card, '6px 28px 4px 28px')
+    msg = JE.render(os.path.basename(__file__), __version__, run_data,
+                    mode_label, mode_tone, kpis, body)
     try:
         email = DISCONFIG['developer'] if ARG.TEST else DISCONFIG['receivers']
         LOGGER.info(f"Sending email to {email}")
-        opts = {'mime': 'html'}
-        JRC.send_email(msg, DISCONFIG['sender'], email, "Springer DOI sync", **opts)
+        JRC.send_email(msg, DISCONFIG['sender'], email, "Springer DOI sync", mime='html')
     except Exception as err:
         print(str(err))
         traceback.print_exc()
@@ -492,6 +480,7 @@ def processing():
             ready.append(out)
         else:
             review.append(out)
+    COUNT['noauthors'] = len(noauthors)
     summary = f"DOIs read from Springer:        {COUNT['total']:,}\n" \
               + f"Skipped (no DOI):               {COUNT['no_doi']:,}\n" \
               + f"Skipped (duplicate in results): {COUNT['skipped_dup']:,}\n" \

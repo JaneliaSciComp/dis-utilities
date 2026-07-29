@@ -6,7 +6,7 @@
     - The lab head (or any other author) has a Janelia affiliation
 '''
 
-__version__ = '6.1.0'
+__version__ = '6.2.0'
 
 import argparse
 import collections
@@ -20,6 +20,7 @@ import requests
 from tqdm import tqdm
 import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
+import jrc_email.jrc_email as JE
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,logging-fstring-interpolation
 
@@ -303,30 +304,54 @@ def generate_emails():
         Returns:
           None
     '''
-    msg = ""
-    if MESSAGE['sent']:
-        msg += "<br>The following DOIs will be added to the database:<br>"
-        for itm in MESSAGE['sent']:
-            msg += f"  {itm}<br>"
-        msg += "\n"
-    if MESSAGE['no_institutions']:
-        msg += "<br>The following DOIs have no institutions:<br>"
-        for itm in MESSAGE['no_institutions']:
-            msg += f"  {itm}<br>"
-        msg += "\n"
-    if MESSAGE['institution_mismatch']:
-        msg += "<br>The following DOIs have an institution mismatch (also see attached file):<br>"
-        for itm in MESSAGE['institution_mismatch']:
-            msg += f"  {itm}<br>"
-    if msg:
-        msg = JRC.get_run_data(__file__, __version__) + "<br>" + msg
-    else:
+    if not (OUTPUT['sent'] or OUTPUT['no_institutions'] or OUTPUT['institution_mismatch']):
         return
+    run_data = JRC.get_run_data(__file__, __version__).strip()
+    mode_label = 'TEST' if ARG.TEST else 'LIVE'
+    mode_tone = 'warn' if ARG.TEST else 'good'
+    sent = [(doi, OUTPUT['sent'][doi][0]) for doi in sorted(OUTPUT['sent'])]
+    noinst = [(doi, OUTPUT['no_institutions'][doi][0])
+              for doi in sorted(OUTPUT['no_institutions'])]
+    mismatch = [(doi, OUTPUT['institution_mismatch'][doi][0])
+                for doi in sorted(OUTPUT['institution_mismatch'])]
+    kpis = ''.join([
+        JE.kpi_card(f"{COUNT['dois']:,}", "Found in OpenAlex"),
+        JE.kpi_card(f"{COUNT['in_database']:,}", "Already in DB"),
+        JE.kpi_card(f"{len(noinst):,}", "No institutions"),
+        JE.kpi_card(f"{len(mismatch):,}", "Inst. mismatch",
+                    'warn' if mismatch else 'neutral'),
+        JE.kpi_card(f"{len(sent):,}", "Ready to add",
+                    'good' if sent else 'neutral'),
+    ])
+    ready_body = (JE.doi_card("Ready to Add", sent, 'good', second_header='Janelia author')
+                  if sent else
+                  f'<div style="color:{JE.GRAY};font-size:13px;">'
+                  'No new DOIs are ready to add.</div>')
+    body = JE.body_row(JE.section_header(f"&#10003; Ready to Add ({len(sent):,})")
+                       + ready_body)
+    if noinst:
+        card = (JE.section_header(f"&#9888; No Institutions ({len(noinst):,})")
+                + f'<div style="color:{JE.GRAY};font-size:12px;margin:-4px 0 10px 0;">'
+                'OpenAlex lists no institution for the matched author - review before '
+                'ingesting.</div>'
+                + JE.doi_card("No Institutions", noinst, 'warn', second_header='Author',
+                              icon='&#9888;'))
+        body += JE.body_row(card, '6px 28px 4px 28px')
+    if mismatch:
+        card = (JE.section_header(f"&#9888; Institution Mismatch ({len(mismatch):,})")
+                + f'<div style="color:{JE.GRAY};font-size:12px;margin:-4px 0 10px 0;">'
+                'OpenAlex placed the matched author at a non-Janelia institution (see the '
+                'attached TSV) - review before ingesting.</div>'
+                + JE.doi_card("Institution Mismatch", mismatch, 'warn', second_header='Author',
+                              icon='&#9888;'))
+        body += JE.body_row(card, '6px 28px 4px 28px')
+    msg = JE.render(os.path.basename(__file__), __version__, run_data,
+                    mode_label, mode_tone, kpis, body)
     try:
         email = DISCONFIG['developer'] if ARG.TEST else DISCONFIG['receivers']
         LOGGER.info(f"Sending email to {email}")
         opts = {'mime': 'html'}
-        if MESSAGE['institution_mismatch']:
+        if OUTPUT['institution_mismatch']:
             opts['attachment'] = 'openalex_institution_mismatch.tsv'
         JRC.send_email(msg, DISCONFIG['sender'], email, "Lab head DOI sync", **opts)
     except Exception as err:

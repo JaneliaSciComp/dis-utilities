@@ -1,5 +1,10 @@
 ''' pull_zenodo.py
     Sync works from Zenodo.
+
+    Finds Zenodo records matching the search term whose creators have a Janelia
+    affiliation or a known Janelian ORCID, writes the new DOIs to zenodo_ready.txt,
+    and sends an HTML run-summary email (jrc_email house style) on --test (to the
+    developer) or --write (to the receivers list).
 '''
 
 import argparse
@@ -12,8 +17,9 @@ from time import sleep
 import traceback
 import requests
 import jrc_common.jrc_common as JRC
+import jrc_email.jrc_email as JE
 
-__version__ = '1.3.0'
+__version__ = '1.4.0'
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,logging-fstring-interpolation
 
@@ -162,70 +168,55 @@ def get_dois():
     return dois
 
 
-def doimsg(doi):
-    ''' Format a DOI as an HTML link
-        Keyword arguments:
-          doi: DOI
-        Returns:
-          Formatted DOI
-    '''
-    if not doi:
-        return ""
-    doi = doi.lower()
-    return f"&nbsp;&nbsp;<a href='https://dis.int.janelia.org/doiui/{doi}'>{doi}</a><br>"
-
-
-def text_to_html_table(text):
-    ''' Convert text to an HTML table
-        Keyword arguments:
-          text: text to convert
-        Returns:
-          HTML table
-    '''
-    rows = []
-    for line in text.strip().splitlines():
-        if ":" in line:
-            label, value = line.rsplit(":", 1)
-            rows.append((label.strip(), value.strip()))
-    html = ['<table>']
-    for label, value in rows:
-        html.append(f'  <tr><td>{label}:</td><td>{value}</td></tr>')
-    html.append('</table>')
-    return "\n".join(html)
-
-
 def generate_email(summary, ready, nojanelia):
-    ''' Generate and send an email
+    ''' Generate and send the HTML run-summary email (jrc_email house style): a
+        header banner, a KPI stat-tile row, a "Ready to Add" card, and - when any -
+        a "No Janelia Affiliation" review card. Recipient is the developer for
+        --test and the receivers list otherwise; a --write run with nothing ready
+        sends nothing.
         Keyword arguments:
-          summary: summary of the results
+          summary: text summary (printed to the console; not used in the email body)
           ready: list of DOIs ready for processing
-          nojanelia: list of Zenodo records with no Janelian authors
+          nojanelia: list of Zenodo records with no Janelian author
         Returns:
           None
     '''
-    msg = ""
     if not ready and ARG.WRITE:
         return
-    if ready:
-        msg += "<br>The following DOIs will be added to the database:<br>"
-        for doi in ready:
-            msg += doimsg(doi)
-        msg += "<br>"
-    if nojanelia:
-        msg += "<br>The following DOIs have no Janelian authors:<br>"
-        for hit in nojanelia:
-            msg += doimsg(hit.get('doi', ''))
-        msg += "<br>"
-    if msg:
-        msg = JRC.get_run_data(__file__, __version__) + "<br><br>" \
-            + text_to_html_table(summary) + "<br>" + msg
-    else:
+    if not ready and not nojanelia:
         return
+    run_data = JRC.get_run_data(__file__, __version__).strip()
+    mode_label = 'TEST' if ARG.TEST else 'LIVE'
+    mode_tone = 'warn' if ARG.TEST else 'good'
+    review = [(hit.get('doi', '').lower(), None) for hit in nojanelia if hit.get('doi')]
+    kpis = ''.join([
+        JE.kpi_card(f"{COUNT['read']:,}", "In Zenodo"),
+        JE.kpi_card(f"{COUNT['already']:,}", "Already in DB"),
+        JE.kpi_card(f"{COUNT['ignored']:,}", "To ignore"),
+        JE.kpi_card(f"{len(nojanelia):,}", "No Janelia affil.",
+                    'warn' if nojanelia else 'neutral'),
+        JE.kpi_card(f"{len(ready):,}", "Ready to add",
+                    'good' if ready else 'neutral'),
+    ])
+    ready_body = (JE.doi_card("Ready to Add", [(doi, None) for doi in ready], 'good')
+                  if ready else
+                  f'<div style="color:{JE.GRAY};font-size:13px;">'
+                  'No new DOIs are ready to add.</div>')
+    body = JE.body_row(JE.section_header(f"&#10003; Ready to Add ({len(ready):,})")
+                       + ready_body)
+    if review:
+        card = (JE.section_header(f"&#9888; No Janelia Affiliation ({len(review):,})")
+                + f'<div style="color:{JE.GRAY};font-size:12px;margin:-4px 0 10px 0;">'
+                'Matched the Zenodo search but no creator had a Janelia affiliation or a '
+                'known Janelian ORCID - review before ingesting.</div>'
+                + JE.doi_card("No Janelia Affiliation", review, 'warn', icon='&#9888;'))
+        body += JE.body_row(card, '6px 28px 4px 28px')
+    msg = JE.render(os.path.basename(__file__), __version__, run_data,
+                    mode_label, mode_tone, kpis, body)
     try:
         email = DISCONFIG['developer'] if ARG.TEST else DISCONFIG['receivers']
         LOGGER.info(f"Sending email to {email}")
-        opts = {'mime': 'html'}
-        JRC.send_email(msg, DISCONFIG['sender'], email, "Zenodo DOI sync", **opts)
+        JRC.send_email(msg, DISCONFIG['sender'], email, "Zenodo DOI sync", mime='html')
     except Exception as err:
         print(str(err))
         traceback.print_exc()
