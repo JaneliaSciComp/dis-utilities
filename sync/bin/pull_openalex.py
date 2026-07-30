@@ -4,7 +4,7 @@
     - 
 '''
 
-__version__ = '2.3.0'
+__version__ = '2.3.1'
 
 import argparse
 import collections
@@ -324,7 +324,7 @@ def processing():
             IGNORE.append(doi)
             COUNT['in_database'] += 1
             continue
-        if 'publication_date' in row and row['publication_date'] < '2006-04-01':
+        if 'publication_date' in row and row['publication_date'] < DISCONFIG['min_publishing_date']:
             COUNT['too_early'] += 1
             continue
         if not janelia_author(row, doi):
