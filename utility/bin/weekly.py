@@ -9,7 +9,7 @@
     - Sends citations email to the user that ran the program
 """
 
-__version__ = '3.0.1'
+__version__ = '3.0.2'
 
 import argparse
 from datetime import datetime
@@ -180,6 +180,10 @@ def processing():
     elif ARG.FILE:
         with open(ARG.FILE, 'r', encoding='ascii') as stream:
             input_dois = [line.strip() for line in stream.readlines()]
+    # DOIs are case-insensitive: lowercase, drop blanks, and de-duplicate
+    # (preserving order) so the same DOI isn't checked or written twice.
+    input_dois = list(dict.fromkeys(
+        d for d in (doi.strip().lower() for doi in input_dois) if d))
     for doi in input_dois:
         if not DL.get_doi_record(doi, DB['dis']['dois']):
             new.append(doi)
