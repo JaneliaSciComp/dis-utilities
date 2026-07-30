@@ -48,7 +48,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.2.0"
+__version__ = "120.3.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -1647,8 +1647,8 @@ def standard_ack_table(rows, ack, is_regex=False, show_count=True):
     # journal/preprint-vs-other filter state, so `rows` must survive two passes.
     rows = list(rows)
     # If the caller already restricted rows to a single doi_type (e.g.
-    # /acksregexui's ?doi_type=internal|external), a promised count (e.g. a
-    # /dois_tag_ack/ack click-through) should match what's visible on load -
+    # /acksregexui's ?doi_type=internal|external), a promised count (e.g. an
+    # acknowledgement-coverage click-through) should match what's visible on load -
     # so don't also hide 'other' rows by default in that case. Also drives the
     # Internal/External cycle button further down (see cyclebtn).
     doi_types = {row.get('doi_type', 'internal') for row in rows}
@@ -3573,10 +3573,16 @@ def show_acknowledgements(which="journal"):
     return generate_response(result)
 
 
-@app.route('/acknowledgement_stats/<int:limit>')
-@app.route('/acknowledgement_stats')
-def show_acknowledgement_stats(limit=10):
-    ''' Show acknowledgement statistics for dois and external_dois collections
+def _build_ack_metrics(limit=10):
+    ''' Build the "Stored acknowledgements" tab content for the acknowledgement
+        metrics page - the acknowledgement corpus stats for the dois and
+        external_dois collections: summary cards, top-journal tables, and the
+        by-type pie charts (the year/heatmap views live on the "By year" tab).
+        Returns (html, chartscript, chartdiv) for a tab.
+        Keyword arguments:
+          limit: top-N limit for the journal tables
+        Returns:
+          (html, chartscript, chartdiv) tuple
     '''
     ack_filter = {"jrc_acknowledgements": {"$exists": True}}
     # Type breakdown - internal DOIs
@@ -3622,41 +3628,6 @@ def show_acknowledgement_stats(limit=10):
     for row in rows:
         label = row['_id'] if row['_id'] else 'Unknown'
         ext_type_data[label] = row['count']
-    # Type breakdown by source (Crossref vs. DataCite), combined across dois and external_dois
-    source_pipeline = [
-        {"$match": ack_filter},
-        {"$group": {
-            "_id": {
-                "label": {
-                    "$cond": [
-                        {"$ifNull": ["$type", False]},
-                        "$type",
-                        {"$ifNull": ["$types.resourceTypeGeneral", "Unknown"]}
-                    ]
-                },
-                "source": {
-                    "$cond": [
-                        {"$and": [{"$not": [{"$ifNull": ["$type", False]}]},
-                                  {"$ifNull": ["$types.resourceTypeGeneral", False]}]},
-                        "DataCite", "Crossref"
-                    ]
-                }
-            },
-            "count": {"$sum": 1}
-        }}
-    ]
-    try:
-        combined_type_data = {}
-        for coll in (DB['dis'].dois, DB['dis'].external_dois):
-            for row in coll.aggregate(source_pipeline):
-                label = row['_id']['label'] if row['_id']['label'] else 'Unknown'
-                combined_type_data.setdefault(label, {"Crossref": 0, "DataCite": 0})
-                combined_type_data[label][row['_id']['source']] += row['count']
-    except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get acknowledgement type data" \
-                                                    + " by source"),
-                               message=error_message(err))
     # Collection totals for percentage calculation, broken down by jrc_obtained_from for dois
     try:
         dois_all = DB['dis'].dois.count_documents({})
@@ -3673,71 +3644,6 @@ def show_acknowledgement_stats(limit=10):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get collection totals"),
                                message=error_message(err))
-    # Year trend
-    year_pipeline = [
-        {"$match": {**ack_filter, "jrc_publishing_date": {"$exists": True}}},
-        {"$group": {"_id": {"$substr": ["$jrc_publishing_date", 0, 4]}, "count": {"$sum": 1}}},
-        {"$sort": {"_id": 1}}
-    ]
-    try:
-        int_years = {row['_id']: row['count']
-                     for row in DB['dis'].dois.aggregate(year_pipeline)}
-        ext_years = {row['_id']: row['count']
-                     for row in DB['dis'].external_dois.aggregate(year_pipeline)}
-    except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get acknowledgement year data"),
-                               message=error_message(err))
-    all_year_keys = sorted(set(int_years) | set(ext_years))
-    year_data = {
-        "years": all_year_keys,
-        "Internal DOIs": [int_years.get(yr, 0) for yr in all_year_keys],
-        "External DOIs": [ext_years.get(yr, 0) for yr in all_year_keys],
-    }
-    # Year × type heat map (internal + external combined)
-    heatmap_pipeline = [
-        {"$match": {**ack_filter, "jrc_publishing_date": {"$exists": True}}},
-        {"$group": {
-            "_id": {
-                "year": {"$substr": ["$jrc_publishing_date", 0, 4]},
-                "type": {
-                    "$cond": [
-                        {"$ifNull": ["$type", False]},
-                        "$type",
-                        {"$ifNull": ["$types.resourceTypeGeneral", "Unknown"]}
-                    ]
-                }
-            },
-            "count": {"$sum": 1}
-        }}
-    ]
-    heatmap_pipeline_ext = [
-        {"$match": {**ack_filter, "jrc_publishing_date": {"$exists": True}}},
-        {"$group": {
-            "_id": {
-                "year": {"$substr": ["$jrc_publishing_date", 0, 4]},
-                "type": {"$ifNull": ["$type", "Unknown"]}
-            },
-            "count": {"$sum": 1}
-        }}
-    ]
-    try:
-        hm_counts = {}
-        for row in DB['dis'].dois.aggregate(heatmap_pipeline):
-            key = (row['_id']['year'], row['_id']['type'])
-            hm_counts[key] = hm_counts.get(key, 0) + row['count']
-        for row in DB['dis'].external_dois.aggregate(heatmap_pipeline_ext):
-            key = (row['_id']['year'], row['_id']['type'])
-            hm_counts[key] = hm_counts.get(key, 0) + row['count']
-    except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get acknowledgement heat map data"),
-                               message=error_message(err))
-    heatmap_data = {"Year": [], "Type": [], "Count": []}
-    for (year, typ), count in hm_counts.items():
-        heatmap_data["Year"].append(year)
-        heatmap_data["Type"].append(typ)
-        heatmap_data["Count"].append(count)
     # Top journals (internal and external DOIs separately)
     journal_pipeline = [
         {"$match": {**ack_filter, "jrc_journal": {"$exists": True}}},
@@ -3768,17 +3674,10 @@ def show_acknowledgement_stats(limit=10):
     # Every external_dois record has acknowledgements, so a percentage
     # would always read 100% - just show the count.
     cardlist.append(("External DOIs", f"{ext_total:,}"))
-    # Layout: header + summary cards, then the by-type table and top-journal
-    # tables (the template's title is left empty for this).
+    # Summary cards, then the top-journal tables (type distribution is shown by
+    # the pie charts, so no separate by-type table).
     summary = stat_cards(cardlist, div_id='ack-summary')
-    html = f"<h2>Acknowledgement metrics</h2>{summary}"
-    combined_types = render_table(
-        ['Type', 'Crossref', 'DataCite'],
-        [[typ, f"{cnts['Crossref']:,}", f"{cnts['DataCite']:,}"] for typ, cnts
-         in sorted(combined_type_data.items(),
-                   key=lambda item: item[1]['Crossref'] + item[1]['DataCite'], reverse=True)],
-        table_id='ack_types', css='tablesorter numbers-scroll')
-    html += f"<h4>DOIs by type</h4>{combined_types}"
+    html = summary
     jcols = ""
     if int_journals:
         jtable = render_table(['Journal', 'Count'], [[j, f"{c:,}"] for j, c in int_journals],
@@ -3810,27 +3709,357 @@ def show_acknowledgement_stats(limit=10):
         chartscript += s
         pie_divs += f"<div class='flexcol'>{d}</div>"
     chartdiv = f"<div class='flexrow'>{pie_divs}</div><br>"
-    if all_year_keys:
-        s, d = DP.stacked_bar_chart(year_data, "DOIs with acknowledgements by year",
-                                    xaxis="years",
+    return html, chartscript, chartdiv
+
+
+def _build_ack_sources():
+    ''' Build the "Sources" tab: the jrc_ack_source distribution (PMC, eLife,
+        Elsevier, arXiv, Europe PMC, Manual, ...) split by Internal (dois) vs
+        External (external_dois). A "(source not recorded)" row accounts for
+        acknowledgement text stored before source tracking, so the totals reconcile
+        with the coverage numbers on this page. Returns (html, chartscript, chartdiv).
+        Keyword arguments:
+          None
+        Returns:
+          (html, chartscript, chartdiv) tuple
+    '''
+    sources = {}                              # source label -> {'Internal', 'External'}
+    tot = {'Internal': 0, 'External': 0}      # named-source totals per collection
+    unrec = {'Internal': 0, 'External': 0}    # ack text with no jrc_ack_source
+    for coll_name, col in (('dois', 'Internal'), ('external_dois', 'External')):
+        coll = DB['dis'][coll_name]
+        for row in coll.aggregate([{"$match": {"jrc_ack_source": {"$exists": True}}},
+                                   {"$group": {"_id": "$jrc_ack_source",
+                                               "count": {"$sum": 1}}}]):
+            src = row['_id']
+            sources.setdefault(src, {'Internal': 0, 'External': 0})[col] += row['count']
+            tot[col] += row['count']
+        unrec[col] = coll.count_documents({"jrc_acknowledgements": {"$exists": True},
+                                           "jrc_ack_source": {"$exists": False}})
+    grand_int = tot['Internal'] + unrec['Internal']
+    grand_ext = tot['External'] + unrec['External']
+    src_cards = stat_cards([("Internal", f"{grand_int:,}"),
+                            ("External", f"{grand_ext:,}"),
+                            ("Total", f"{grand_int + grand_ext:,}")], div_id='src-stats')
+    order = sorted(sources, key=lambda s: sources[s]['Internal'] + sources[s]['External'],
+                   reverse=True)
+    trows = []
+    for src in order:
+        i, e = sources[src]['Internal'], sources[src]['External']
+        trows.append([escape(str(src)), f"{i:,}", f"{e:,}", f"{i + e:,}"])
+    if unrec['Internal'] or unrec['External']:
+        i, e = unrec['Internal'], unrec['External']
+        trows.append([safe("<span style='color:#a8c4e0;'>(source not recorded)</span>"),
+                      f"{i:,}", f"{e:,}", f"{i + e:,}"])
+    footer = [fcell('TOTAL'), fcell(f"{grand_int:,}", align='center'),
+              fcell(f"{grand_ext:,}", align='center'),
+              fcell(f"{grand_int + grand_ext:,}", align='center')]
+    src_table = render_table(['Source', 'Internal', 'External', 'Total'], trows,
+                             table_id='acksources', css='tablesorter numbers-scroll',
+                             footer=footer, width=500)
+    caption = ("<div style='color:#a8c4e0;font-size:0.82em;margin:6px 0 8px 0;'>"
+               "Where each stored acknowledgement was fetched from (jrc_ack_source), "
+               "for Internal DOIs (dois) and External DOIs (external_dois). "
+               "&ldquo;(source not recorded)&rdquo; = acknowledgement text stored "
+               "before source tracking.</div>")
+    html = src_cards + caption + src_table
+    chartscript = chartdiv = ""
+    chart_data = {src: {'Internal': sources[src]['Internal'],
+                        'External': sources[src]['External']} for src in order}
+    if chart_data:
+        chartscript, chartdiv = DP.hbar_stacked_chart(
+            chart_data, ['Internal', 'External'], "Acknowledgement sources",
+            value_label="DOIs", value_format="0,0")
+    return html, chartscript, chartdiv
+
+
+def _build_ack_byyear():
+    ''' Build the "By year" tab: the temporal view of the acknowledgement corpus,
+        keyed on jrc_publishing_date year -
+          1. Acknowledgements by year (Internal vs External)
+          2. Internal DOI tagging coverage by year (Tagged vs Untagged)
+          3. Acknowledgement sources by year (jrc_ack_source, both collections)
+          4. DOIs with acknowledgements by year x type (heat map)
+        Returns (html, chartscript, chartdiv) for the tab.
+        Keyword arguments:
+          None
+        Returns:
+          (html, chartscript, chartdiv) tuple
+    '''
+    yr = {"$substr": ["$jrc_publishing_date", 0, 4]}
+    have_date = {"jrc_acknowledgements": {"$exists": True},
+                 "jrc_publishing_date": {"$exists": True}}
+    chartscript = chartdiv = ""
+    # 1. Acknowledgements by year: Internal vs External
+    yp = [{"$match": have_date}, {"$group": {"_id": yr, "count": {"$sum": 1}}},
+          {"$sort": {"_id": 1}}]
+    int_years = {r['_id']: r['count'] for r in DB['dis'].dois.aggregate(yp)}
+    ext_years = {r['_id']: r['count'] for r in DB['dis'].external_dois.aggregate(yp)}
+    years = sorted(set(int_years) | set(ext_years))
+    if years:
+        data = {"years": years,
+                "Internal DOIs": [int_years.get(y, 0) for y in years],
+                "External DOIs": [ext_years.get(y, 0) for y in years]}
+        s, d = DP.stacked_bar_chart(data, "Acknowledgements by year", xaxis="years",
                                     yaxis=["Internal DOIs", "External DOIs"],
-                                    colors=DP.SOURCE_PALETTE,
-                                    orient=pi/4, width=1000, height=350)
+                                    colors=DP.SOURCE_PALETTE, orient=pi / 4,
+                                    width=1000, height=350)
         chartscript += s
-        chartdiv += d
+        chartdiv += d + "<br>"
+    # 2. Internal DOI tagging coverage by year: Tagged vs Untagged
+    cov = [r for r in DB['dis'].dois.aggregate([
+        {"$match": have_date},
+        {"$project": {"yr": yr, "tagged": {"$cond": [{"$gt": [
+            {"$size": {"$ifNull": ["$jrc_acknowledge", []]}}, 0]}, 1, 0]}}},
+        {"$group": {"_id": "$yr", "all": {"$sum": 1}, "tagged": {"$sum": "$tagged"}}},
+        {"$sort": {"_id": 1}}]) if r['_id']]
+    if cov:
+        data = {"years": [r['_id'] for r in cov],
+                "Tagged": [r['tagged'] for r in cov],
+                "Untagged": [r['all'] - r['tagged'] for r in cov]}
+        # Distinct vivid palette (green/purple) so tagging coverage is not visually
+        # conflated with the blue/orange Internal/External split in the chart above.
+        s, d = DP.stacked_bar_chart(data, "Internal DOI tagging coverage by year",
+                                    xaxis="years", yaxis=["Tagged", "Untagged"],
+                                    colors=["#2ca02c", "#9c27b0"], orient=pi / 4,
+                                    width=1000, height=350)
+        chartscript += s
+        chartdiv += d + "<br>"
+    # 3. Acknowledgement sources by year (both collections)
+    src_year = {}
+    totals = {}
+    sp = [{"$match": {"jrc_ack_source": {"$exists": True},
+                      "jrc_publishing_date": {"$exists": True}}},
+          {"$group": {"_id": {"yr": yr, "src": "$jrc_ack_source"}, "count": {"$sum": 1}}}]
+    for coll_name in ('dois', 'external_dois'):
+        for r in DB['dis'][coll_name].aggregate(sp):
+            y, sname = r['_id']['yr'], r['_id']['src']
+            src_year.setdefault(y, {})
+            src_year[y][sname] = src_year[y].get(sname, 0) + r['count']
+            totals[sname] = totals.get(sname, 0) + r['count']
+    if src_year:
+        syears = sorted(src_year)
+        src_order = sorted(totals, key=totals.get, reverse=True)
+        data = {"years": syears}
+        for sname in src_order:
+            data[sname] = [src_year[y].get(sname, 0) for y in syears]
+        s, d = DP.stacked_bar_chart(data, "Acknowledgement sources by year",
+                                    xaxis="years", yaxis=src_order,
+                                    colors=DP.get_colors_by_count(len(src_order)),
+                                    orient=pi / 4, width=1000, height=350)
+        chartscript += s
+        chartdiv += d + "<br>"
+    # 4. Year x type heat map (both collections)
+    hm = {}
+    for r in DB['dis'].dois.aggregate([
+            {"$match": have_date},
+            {"$group": {"_id": {"year": yr, "type": {"$cond": [
+                {"$ifNull": ["$type", False]}, "$type",
+                {"$ifNull": ["$types.resourceTypeGeneral", "Unknown"]}]}},
+                "count": {"$sum": 1}}}]):
+        k = (r['_id']['year'], r['_id']['type'])
+        hm[k] = hm.get(k, 0) + r['count']
+    for r in DB['dis'].external_dois.aggregate([
+            {"$match": have_date},
+            {"$group": {"_id": {"year": yr, "type": {"$ifNull": ["$type", "Unknown"]}},
+                        "count": {"$sum": 1}}}]):
+        k = (r['_id']['year'], r['_id']['type'])
+        hm[k] = hm.get(k, 0) + r['count']
+    heatmap_data = {"Year": [], "Type": [], "Count": []}
+    for (year, typ), count in hm.items():
+        heatmap_data["Year"].append(year)
+        heatmap_data["Type"].append(typ)
+        heatmap_data["Count"].append(count)
     if heatmap_data["Count"]:
         s, d = DP.heat_map(heatmap_data, "DOIs with acknowledgements by year/type",
                            "Year", "Type", "Count", value_format="0,0",
                            width=1000, col_totals="Total")
         chartscript += s
         chartdiv += d
+    caption = ("<div style='color:#a8c4e0;font-size:0.82em;margin-bottom:10px;'>"
+               "The acknowledgement corpus by publishing year: volume, tagging "
+               "coverage, source mix, and type composition.</div>")
+    return caption, chartscript, chartdiv
+
+
+@app.route('/acknowledgement_metrics/<int:limit>')
+@app.route('/acknowledgement_metrics')
+def show_acknowledgement_metrics(limit=10):
+    ''' Acknowledgement metrics - a tabbed page over the acknowledgement corpus:
+        the Stored acknowledgements tab (by type/year/journal), the Sources tab
+        (jrc_ack_source split Internal vs External), and the Tags tab (tagging
+        coverage and per-tag counts).
+        Replaces the former /acknowledgement_stats and /dois_tag_ack/ack pages.
+        Keyword arguments:
+          limit: top-N limit for the Metrics-tab journal tables
+    '''
+    # Entities: aggregate jrc_acknowledge over dois (Internal) + external_dois (External)
+    payload = [{"$unwind": "$jrc_acknowledge"},
+               {"$project": {"_id": 0, "jrc_acknowledge.name": 1, "jrc_acknowledge.curator": 1}},
+               {"$group": {"_id": {"tag": "$jrc_acknowledge.name",
+                                   "curator": "$jrc_acknowledge.curator"},
+                           "count": {"$sum": 1}}},
+               {"$sort": {"_id.tag": 1}}]
+    try:
+        orgs = DL.get_supervisory_orgs(DB['dis'].suporg)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get supervisory orgs"),
+                               message=error_message(err))
+    regex_keys = set(DB['dis'].search_regex.distinct('key'))
+    tags = {}
+    for coll_name, doi_type_col in (('dois', 'Internal'), ('external_dois', 'External')):
+        try:
+            rows = DB['dis'][coll_name].aggregate(payload)
+        except Exception as err:
+            return render_template('error.html', urlroot=request.url_root,
+                                   title=render_warning(f"Could not get acknowledgements from "
+                                                        f"{coll_name}"),
+                                   message=error_message(err))
+        for row in rows:
+            tag = row['_id'].get('tag')
+            entry = tags.setdefault(tag, {})
+            entry[doi_type_col] = entry.get(doi_type_col, 0) + row['count']
+            curator_col = 'IRIS' if row['_id'].get('curator') == 'IRIS' else 'Human'
+            entry[curator_col] = entry.get(curator_col, 0) + row['count']
+    cols = ['Internal', 'External', 'IRIS', 'Human']
+    trows = []
+    row_classes = []
+    total = {c: 0 for c in cols}
+    active = 0
+    for tag, val in tags.items():
+        rclass = 'other'
+        if tag in orgs:
+            if 'active' in orgs[tag]:
+                org = "<span style='color: lime;'>Yes</span>"
+                rclass = 'active'
+                active += 1
+            else:
+                org = "<span style='color: yellow;'>Inactive</span>"
+        else:
+            org = "<span style='color: red;'>No</span>"
+        cells = [safe(f"<a href='/tag/{escape(tag)}'>{tag}</a>"), safe(org)]
+        for col in cols:
+            count = val.get(col, 0)
+            if col in ('Internal', 'External') and count and tag in regex_keys:
+                href = f"/acksregexui/{quote(tag, safe='')}?doi_type={col.lower()}"
+                cell_html = f"<a href='{href}'>{count:,}</a>"
+            else:
+                cell_html = f"{count:,}" if count else ""
+            cells.append(safe(cell_html))
+            total[col] += count
+        trows.append(cells)
+        row_classes.append(rclass)
+    footer = [fcell('TOTAL', colspan=2)] + [fcell(f"{total[c]:,}", align='center') for c in cols]
+    entity_table = render_table(['Acknowledgement', 'SupOrg'] + cols, trows,
+                                table_id='types', css='tablesorter numbers-scroll',
+                                row_classes=row_classes, footer=footer)
+    cbutton = "<button class=\"btn btn-outline-warning\" " \
+              + "onclick=\"$('.other').toggle();\">Filter for active SupOrgs</button>"
+    ent_cards = stat_cards([("Acknowledgements", f"{len(tags):,}"),
+                            ("Active SupOrgs", f"{active:,}")], div_id='ent-stats')
+    ent_chartscript = ent_chartdiv = ""
+    if tags:
+        chart_totals = {t: v.get('Internal', 0) + v.get('External', 0) for t, v in tags.items()}
+        top_n = 15
+        top_tags = sorted(chart_totals, key=chart_totals.get, reverse=True)[:top_n]
+        chart_data = {t: {'Internal': tags[t].get('Internal', 0),
+                          'External': tags[t].get('External', 0)} for t in top_tags}
+        ctitle = "Top acknowledged entities"
+        if len(chart_totals) > top_n:
+            ctitle += f" (top {top_n} of {len(chart_totals):,})"
+        nav = {t: f"/tag/{quote(t, safe='')}" for t in chart_data}
+        ent_chartscript, ent_chartdiv = DP.hbar_stacked_chart(
+            chart_data, ['Internal', 'External'], ctitle, value_label="DOIs",
+            value_format="0,0", nav=nav)
+    # Coverage 2x2 (shared header, above the tabs) - the bridge between corpus and entities
+    base = {"jrc_acknowledgements": {"$exists": True}}
+    tagged_query = {**base, "jrc_acknowledge.0": {"$exists": True}}
+    cov = {}
+    try:
+        for coll_name, label in (('dois', 'Internal'), ('external_dois', 'External')):
+            ctot = DB['dis'][coll_name].count_documents(base)
+            ctag = DB['dis'][coll_name].count_documents(tagged_query)
+            cov[label] = (ctag, ctot - ctag, ctot)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not compute acknowledgement coverage"),
+                               message=error_message(err))
+    def pct(num, den):
+        return f"{num / den * 100:.1f}%" if den else "0.0%"
+    cov_rows = [[label, f"{t:,} ({pct(t, tot)})", f"{u:,} ({pct(u, tot)})", f"{tot:,}"]
+                for label, (t, u, tot) in cov.items()]
+    gt = sum(v[0] for v in cov.values())
+    gu = sum(v[1] for v in cov.values())
+    gg = sum(v[2] for v in cov.values())
+    cov_footer = [fcell('TOTAL'), fcell(f"{gt:,} ({pct(gt, gg)})", align='center'),
+                  fcell(f"{gu:,} ({pct(gu, gg)})", align='center'),
+                  fcell(f"{gg:,}", align='center')]
+    cov_table = render_table(['Collection', 'Tagged', 'Untagged', 'Total'], cov_rows,
+                             table_id='ackcoverage', css='tablesorter numbers-scroll',
+                             footer=cov_footer, width=460)
+    coverage_html = ("<h5 style='margin:14px 0 6px 0;'>Acknowledgement tagging coverage</h5>"
+                     "<div style='color:#a8c4e0;font-size:0.82em;margin-bottom:8px;'>"
+                     "Internal = DOIs with acknowledgement text; External = all external_dois. "
+                     "&ldquo;Tagged&rdquo; = at least one tagged entity.</div>" + cov_table)
+    # Tagging gaps: acknowledgements that name "Janelia" but carry no entity tag -
+    # likely missed attributions worth reviewing for entity/regex coverage.
+    gap_query = {"jrc_acknowledgements": {"$regex": "janelia", "$options": "i"},
+                 "jrc_acknowledge.0": {"$exists": False}}
+    try:
+        gap_int = DB['dis'].dois.count_documents(gap_query)
+        gap_ext = DB['dis'].external_dois.count_documents(gap_query)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not compute tagging gaps"),
+                               message=error_message(err))
+    if gap_int or gap_ext:
+        coverage_html += (
+            "<div style='margin:10px 0 4px 0;padding:8px 12px;border-left:4px solid "
+            "#f0ad4e;background:rgba(240,173,78,0.08);font-size:0.9em;'>"
+            f"<b>Tagging gaps:</b> {gap_int:,} Internal and {gap_ext:,} External "
+            "acknowledgements name &ldquo;Janelia&rdquo; but have no entity tag &ndash; "
+            "likely missed attributions to review for entity/regex coverage.</div>")
+    # Tab builders: Stored (corpus stats), By year (temporal), Sources (jrc_ack_source)
+    m_html, m_chartscript, m_chartdiv = _build_ack_metrics(limit)
+    by_html, by_chartscript, by_chartdiv = _build_ack_byyear()
+    s_html, s_chartscript, s_chartdiv = _build_ack_sources()
+    # Tabs
+    active_tab = request.args.get('tab')
+    if active_tab not in ('metrics', 'byyear', 'sources', 'tags'):
+        active_tab = 'metrics'
+    metrics_body = m_html + m_chartdiv
+    byyear_body = by_html + by_chartdiv
+    sources_body = s_html + s_chartdiv
+    tags_body = ent_cards + f"<div>{cbutton}{entity_table}</div>" + ent_chartdiv
+    def tab_button(key, label, is_active):
+        return ('<li class="nav-item" role="presentation">'
+                f'<button class="nav-link{" active" if is_active else ""}" id="{key}-tab" '
+                f'data-toggle="tab" data-target="#{key}" type="button" role="tab" '
+                f'aria-controls="{key}" aria-selected="{"true" if is_active else "false"}">'
+                f'{label}</button></li>')
+    def tab_pane(key, body, is_active):
+        cls = "tab-pane fade show active" if is_active else "tab-pane fade"
+        return (f'<div class="{cls}" id="{key}" role="tabpanel" '
+                f'aria-labelledby="{key}-tab"><br>{body}</div>')
+    tabs = ('<ul class="nav nav-tabs" role="tablist">'
+            + tab_button('metrics', 'Stored acknowledgements', active_tab == 'metrics')
+            + tab_button('byyear', 'By year', active_tab == 'byyear')
+            + tab_button('sources', 'Sources', active_tab == 'sources')
+            + tab_button('tags', 'Tags', active_tab == 'tags')
+            + '</ul><div class="tab-content">'
+            + tab_pane('metrics', metrics_body, active_tab == 'metrics')
+            + tab_pane('byyear', byyear_body, active_tab == 'byyear')
+            + tab_pane('sources', sources_body, active_tab == 'sources')
+            + tab_pane('tags', tags_body, active_tab == 'tags')
+            + '</div>')
+    bokeh_cdn = '<script src="https://cdn.bokeh.org/bokeh/release/bokeh-3.5.0.min.js"></script>'
+    html = (coverage_html + tabs + bokeh_cdn + m_chartscript + by_chartscript
+            + s_chartscript + ent_chartscript)
     endpoint_access()
-    return make_response(render_template('bokeh.html', urlroot=request.url_root,
-                                         title="",
-                                         html=html, html2="",
-                                         chartscript=chartscript, chartdiv=chartdiv,
-                                         chartscript2="", chartdiv2="",
-                                         navbar=generate_navbar('Tag/affiliation')))
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="Acknowledgement metrics", html=html,
+                                         navbar=generate_navbar('Acknowledgements')))
 
 # ******************************************************************************
 # * UI endpoints (general)                                                     *
@@ -12719,20 +12948,11 @@ def ror(rorid=None):
 
 @app.route('/dois_tag_ack/<string:tagtype>')
 def show_tag_ack(tagtype):
-    ''' Show tags or acknowledgements with counts. For tagtype="ack" only,
-        every tag row also breaks down by source collection (Internal = dois,
-        External = external_dois - both are queried and combined) and by
-        curator (IRIS = machine-tagged, Human = anything else). tagtype="tag"
-        omits both breakdowns - jrc_tag never appears on external_dois at all
-        (so Internal/External would be uninformative - always 100% Internal)
-        and has no curator concept. tagtype="tag" instead breaks down by
-        jrc_obtained_from (Crossref/DataCite); tagtype="ack" omits that split -
-        external_dois carries no jrc_obtained_from at all, so for ack it was
-        redundant with (and less complete than) the Internal/External columns.
-        ack's Internal/External counts link to /acksregexui/<tag>?doi_type=...
-        (the search_regex vocabulary jrc_tag entities aren't part of).
+    ''' Show DOI tags (jrc_tag) with counts, broken down by jrc_obtained_from
+        (Crossref/DataCite). Acknowledgements now live on the tabbed metrics page
+        at /acknowledgement_metrics (this route is tag-only).
         Keyword arguments:
-          tagtype: "tag" or "ack"
+          tagtype: must be "tag"
     '''
     tag_config = {
         'tag': {'mongo': 'jrc_tag', 'nav': 'jrc_tag.name',
@@ -12740,11 +12960,6 @@ def show_tag_ack(tagtype):
                 'navbar': 'Tag/affiliation', 'has_curator': False,
                 'has_source_split': True, 'has_doi_type_split': False,
                 'doi_type_link': False},
-        'ack': {'mongo': 'jrc_acknowledge', 'nav': 'jrc_acknowledge.name',
-                'label': 'Acknowledgement', 'errmsg': 'acknowledgements',
-                'title': 'DOI acknowledgements', 'navbar': 'Acknowledgements',
-                'has_curator': True, 'has_source_split': False,
-                'has_doi_type_split': True, 'doi_type_link': True},
     }
     if tagtype not in tag_config:
         return render_template('error.html', urlroot=request.url_root,
@@ -12861,38 +13076,7 @@ def show_tag_ack(tagtype):
         stat_items += [("Internal", f"{total['Internal']:,}"),
                        ("External", f"{total['External']:,}")]
     cards = stat_cards(stat_items, div_id='tagack-stats')
-    chart_html = ""
-    if tagtype == 'ack' and tags:
-        # Total (Internal + External) per entity ranks the top-N; the table
-        # itself sorts alphabetically, so this is the only place volume is
-        # visible at a glance. Internal/External stay split (not summed) so
-        # the stacked chart below can show each bar's composition, not just
-        # its total.
-        chart_totals = {tag: val.get('Internal', 0) + val.get('External', 0)
-                        for tag, val in tags.items()}
-        top_n = 15
-        top_tags = sorted(chart_totals, key=chart_totals.get, reverse=True)[:top_n]
-        chart_data = {tag: {'Internal': tags[tag].get('Internal', 0),
-                            'External': tags[tag].get('External', 0)} for tag in top_tags}
-        chart_title = "Top acknowledged entities"
-        if len(chart_totals) > top_n:
-            chart_title += f" (top {top_n} of {len(chart_totals):,})"
-        # /tag/<name> (not /acksregexui) - it queries by the same exact
-        # jrc_acknowledge.name match this chart's counts come from, so the
-        # count clicked always matches the count shown on arrival.
-        nav = {tag: f"/tag/{quote(tag, safe='')}" for tag in chart_data}
-        chartscript, chartdiv = DP.hbar_stacked_chart(chart_data, ['Internal', 'External'],
-                                                      chart_title, value_label="DOIs",
-                                                      value_format="0,0", nav=nav)
-        # general.html (unlike custom.html) doesn't load the Bokeh JS library -
-        # embed the CDN script inline here rather than adding it to the shared
-        # template for every other page that never charts.
-        chart_html = ('<script src="https://cdn.bokeh.org/bokeh/release/bokeh-3.5.0.min.js">'
-                     '</script>' + chartdiv + chartscript)
-    table_col = f"<div style='flex:1;min-width:0;'>{cbutton}{html}</div>"
-    chart_col = f"<div style='flex:0 0 auto;'>{chart_html}</div>" if chart_html else ""
-    html = cards + "<div style='display:flex;gap:2rem;align-items:flex-start;'>" \
-           + table_col + chart_col + "</div>"
+    html = cards + f"<div>{cbutton}{html}</div>"
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=cfg['title'], html=html,
@@ -13564,7 +13748,7 @@ def show_doi_by_ack_regex_ui(group):
                                message=f"No search regex is configured for {group}")
     regex = entry['regex']
     # Optional ?doi_type=internal|external restricts to just that collection
-    # (e.g. from a /dois_tag_ack/ack click-through) - any other value, or no
+    # (e.g. from an acknowledgement-coverage click-through) - any other value, or no
     # param at all, keeps the default union-of-both behavior.
     doi_type = request.args.get('doi_type')
     union = []
