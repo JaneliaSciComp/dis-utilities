@@ -1,20 +1,86 @@
 """ weekly.py
-    Weekly processing for Crossref DOIs.
-    This program:
-    - Adds DOI(s) to the database (new DOIs only)
-    - Auto-assigns Janelia authors to DOIs
-    - Auto-updates affiliation tags
-    - Adds newsletter date (for DOIs that don't already have one)
-    - Generates citations
-    - Sends citations email to the user that ran the program
+
+    PURPOSE
+    -------
+    Weekly ingestion-and-enrichment pipeline for Crossref DOIs. Given one DOI or a
+    file of DOIs, it adds any that are new to the DIS database, runs the standard
+    enrichment steps over the batch (Janelia author assignment, affiliation
+    tagging, newsletter dating), generates citations, and emails them to the
+    operator. weekly.py is a thin orchestrator: each step is an existing
+    utility/sync script run as a subprocess, so this program only decides what to
+    run and on which DOIs.
+
+    NEW vs. EXISTING DOIs
+    ---------------------
+    Every input DOI is looked up in the `dois` collection:
+      - not found -> "new": written to new_dois_<timestamp>.txt and, only with
+                     --write, also included in the batch that gets enriched.
+      - found     -> already in the database: included in the batch as-is.
+    So without --write, new DOIs are reported but neither loaded nor enriched;
+    with --write they are loaded (update_dois then update_preprints) and then
+    enriched alongside the existing ones.
+
+    INPUTS
+    ------
+    - DIS configuration (JRC.get_config): "databases" (the dis MongoDB manifold,
+      opened for write) and "dis" (for the email sender address).
+    - Command-line flags:
+        --doi DOI    A single DOI to process.
+        --file FILE  A text file of DOIs, one per line.
+                     (--doi and --file are mutually exclusive; exactly one is
+                     required.)
+        --manifold   MongoDB manifold, dev or prod [prod].
+        --write      Actually write. Passed through to every sub-step except
+                     get_citation.py; without it the whole run is a dry run and
+                     new DOIs are excluded from enrichment.
+        --verbose / --debug  Logging verbosity (also passed to the sub-steps).
+
+    Input DOIs are normalized first: lowercased (DOIs are case-insensitive),
+    stripped of blank lines, and de-duplicated while preserving order.
+
+    WORKING DIRECTORY
+    -----------------
+    Run this from utility/bin: the sub-steps are invoked via relative paths
+    (../../sync/bin, ../../utility/bin) and the timestamped output files are
+    written to the current directory.
+
+    HIGH-LEVEL FLOW
+    ---------------
+    1. Read and normalize the input DOIs; split into "new" (absent from `dois`)
+       and the batch to process; abort if there is nothing to process.
+    2. Write new_dois_<timestamp>.txt (if any new) and all_dois_<timestamp>.txt.
+    3. If there are new DOIs, load them: sync/bin/update_dois.py --file
+       new_dois_*, then sync/bin/update_preprints.py.
+    4. Enrich the batch (all_dois_*), in order:
+         - utility/bin/assign_authors.py --auto    (assign Janelia authors)
+         - utility/bin/update_tags.py    --auto    (update affiliation tags)
+         - utility/bin/add_newsletter.py --ignore  (add the newsletter date)
+         - utility/bin/get_citation.py             (generate citations)
+    5. If citations were produced, email them (HTML) to the operator
+       (<login>@janelia.hhmi.org) and regesters@janelia.hhmi.org.
+
+    OUTPUT
+    ------
+    - new_dois_<timestamp>.txt and all_dois_<timestamp>.txt in the working
+      directory, plus each sub-step's console output.
+    - A citations email to the operator and the registration list.
+
+    EXAMPLES
+    --------
+      # Dry run against prod for one DOI (reports new/existing and runs the
+      # sub-steps in dry-run mode; new DOIs are not added)
+      weekly.py --doi 10.1234/example
+
+      # Full weekly run from a file, writing to the database
+      weekly.py --file this_week.txt --write
 """
 
-__version__ = '3.0.1'
+__version__ = '3.0.3'
 
 import argparse
 from datetime import datetime
 from operator import attrgetter
-import os
+import getpass
 import subprocess
 import sys
 import jrc_common.jrc_common as JRC
@@ -121,7 +187,7 @@ def generate_email(citations):
           None
     '''
     msg = JRC.get_run_data(__file__, __version__)
-    user = os.getlogin()
+    user = getpass.getuser()
     email = [f"{user}@janelia.hhmi.org", "regesters@janelia.hhmi.org"]
     msg += "<br><br>"
     msg += f"<pre>{citations}</pre>"
@@ -136,8 +202,7 @@ def generate_email(citations):
 def doi_processing(file):
     ''' Additional DOI processing
         Keyword arguments:
-          file: name of file contining DOIs
-          new: list of new DOIs
+          file: name of file containing DOIs
         Returns:
           None
     '''
@@ -178,8 +243,12 @@ def processing():
     if ARG.DOI:
         input_dois = [ARG.DOI]
     elif ARG.FILE:
-        with open(ARG.FILE, 'r', encoding='ascii') as stream:
+        with open(ARG.FILE, 'r', encoding='utf-8') as stream:
             input_dois = [line.strip() for line in stream.readlines()]
+    # DOIs are case-insensitive: lowercase, drop blanks, and de-duplicate
+    # (preserving order) so the same DOI isn't checked or written twice.
+    input_dois = list(dict.fromkeys(
+        d for d in (doi.strip().lower() for doi in input_dois) if d))
     for doi in input_dois:
         if not DL.get_doi_record(doi, DB['dis']['dois']):
             new.append(doi)
@@ -187,23 +256,26 @@ def processing():
                 dois.append(doi)
         else:
             dois.append(doi)
-    if not dois:
+    if not dois and not new:
         terminate_program("No DOIs to process")
     timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
     if new:
         new_file = f"new_dois_{timestamp}.txt"
-        with open(new_file, 'w', encoding='ascii') as output:
+        with open(new_file, 'w', encoding='utf-8') as output:
             for doi in new:
                 output.write(f"{doi}\n")
-    all_file = f"all_dois_{timestamp}.txt"
-    with open(all_file, 'w', encoding='ascii') as output:
-        for doi in dois:
-            output.write(f"{doi}\n")
     print(f"New DOIs:      {len(new)}")
     print(f"Existing DOIs: {len(dois)}")
     if new:
         load_new_dois(new_file)
-    doi_processing(all_file)
+    # Enrichment runs only when there is a batch to process; a dry run of
+    # all-new DOIs still reports and loads them above but has nothing to enrich.
+    if dois:
+        all_file = f"all_dois_{timestamp}.txt"
+        with open(all_file, 'w', encoding='utf-8') as output:
+            for doi in dois:
+                output.write(f"{doi}\n")
+        doi_processing(all_file)
 
 # -----------------------------------------------------------------------------
 
