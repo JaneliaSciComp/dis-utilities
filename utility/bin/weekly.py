@@ -75,12 +75,12 @@
       weekly.py --file this_week.txt --write
 """
 
-__version__ = '3.0.2'
+__version__ = '3.0.3'
 
 import argparse
 from datetime import datetime
 from operator import attrgetter
-import os
+import getpass
 import subprocess
 import sys
 import jrc_common.jrc_common as JRC
@@ -187,7 +187,7 @@ def generate_email(citations):
           None
     '''
     msg = JRC.get_run_data(__file__, __version__)
-    user = os.getlogin()
+    user = getpass.getuser()
     email = [f"{user}@janelia.hhmi.org", "regesters@janelia.hhmi.org"]
     msg += "<br><br>"
     msg += f"<pre>{citations}</pre>"
@@ -202,8 +202,7 @@ def generate_email(citations):
 def doi_processing(file):
     ''' Additional DOI processing
         Keyword arguments:
-          file: name of file contining DOIs
-          new: list of new DOIs
+          file: name of file containing DOIs
         Returns:
           None
     '''
@@ -244,7 +243,7 @@ def processing():
     if ARG.DOI:
         input_dois = [ARG.DOI]
     elif ARG.FILE:
-        with open(ARG.FILE, 'r', encoding='ascii') as stream:
+        with open(ARG.FILE, 'r', encoding='utf-8') as stream:
             input_dois = [line.strip() for line in stream.readlines()]
     # DOIs are case-insensitive: lowercase, drop blanks, and de-duplicate
     # (preserving order) so the same DOI isn't checked or written twice.
@@ -257,23 +256,26 @@ def processing():
                 dois.append(doi)
         else:
             dois.append(doi)
-    if not dois:
+    if not dois and not new:
         terminate_program("No DOIs to process")
     timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
     if new:
         new_file = f"new_dois_{timestamp}.txt"
-        with open(new_file, 'w', encoding='ascii') as output:
+        with open(new_file, 'w', encoding='utf-8') as output:
             for doi in new:
                 output.write(f"{doi}\n")
-    all_file = f"all_dois_{timestamp}.txt"
-    with open(all_file, 'w', encoding='ascii') as output:
-        for doi in dois:
-            output.write(f"{doi}\n")
     print(f"New DOIs:      {len(new)}")
     print(f"Existing DOIs: {len(dois)}")
     if new:
         load_new_dois(new_file)
-    doi_processing(all_file)
+    # Enrichment runs only when there is a batch to process; a dry run of
+    # all-new DOIs still reports and loads them above but has nothing to enrich.
+    if dois:
+        all_file = f"all_dois_{timestamp}.txt"
+        with open(all_file, 'w', encoding='utf-8') as output:
+            for doi in dois:
+                output.write(f"{doi}\n")
+        doi_processing(all_file)
 
 # -----------------------------------------------------------------------------
 
