@@ -2,19 +2,22 @@
     Update tags for selected DOIs
 """
 
-__version__ = '9.0.0'
+__version__ = '9.1.0'
 
 import argparse
 import collections
 from datetime import datetime, timedelta
 import json
 from operator import attrgetter
+import os
 import sys
 from colorama import Fore, Back, Style
 import inquirer
 from inquirer.themes import BlueComposure
+from tqdm import tqdm
 import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
+import jrc_email.jrc_email as JE
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation, logging-not-lazy, too-many-branches
 
@@ -361,9 +364,14 @@ def tag_single_doi(rec, jrc_term):
         result = coll.update_one({"doi": rec['doi']}, {"$set": {jrc_term: new_tag}})
         if hasattr(result, 'matched_count') and result.matched_count:
             COUNT['updated'] += 1
+            if jrc_term == 'jrc_tag':
+                COUNT['tags_added'] += 1
     else:
-        print(f"{rec['doi']}\n{json.dumps(new_tag, indent=2)}")
+        if ARG.VERBOSE:
+            print(f"{rec['doi']}\n{json.dumps(new_tag, indent=2)}")
         COUNT['updated'] += 1
+        if jrc_term == 'jrc_tag':
+            COUNT['tags_added'] += 1
 
 
 def update_single_doi(rec):
@@ -387,10 +395,6 @@ def update_single_doi(rec):
             ans = {'checklist': []}
         for key in tagd:
             ans['checklist'].append(key)
-        if tags:
-            doi = rec['doi']
-            MSG.append(f"Updated <a href='https://dis.int.janelia.org/doiui/{doi}'>{doi}</a> " \
-                       + f"with tags: {', '.join(tags)}")
         ans['newsletter'] = 'No'
     else:
         print(f"DOI: {rec['doi']}")
@@ -428,6 +432,16 @@ def update_single_doi(rec):
     COUNT['selected'] += 1
     if not payload:
         return
+    # Tally tags newly added to this DOI (present in the new jrc_tag list but not
+    # already on the record); for --auto, note the new ones in the email line too.
+    added = []
+    if 'jrc_tag' in payload:
+        existing_names = {etag['name'] for etag in rec.get('jrc_tag', [])}
+        added = [tag['name'] for tag in payload['jrc_tag']
+                 if tag['name'] not in existing_names]
+    COUNT['tags_added'] += len(added)
+    if ARG.AUTO and added:
+        MSG.append((rec['doi'], ", ".join(added)))
     if ARG.WRITE:
         coll = DB['dis'].dois
         #if not tags:
@@ -436,22 +450,39 @@ def update_single_doi(rec):
         if hasattr(result, 'matched_count') and result.matched_count:
             COUNT['updated'] += 1
     else:
-        print(f"*************** {rec['doi']} ***************\n{json.dumps(payload, indent=2)}")
+        if ARG.VERBOSE:
+            print(f"*************** {rec['doi']} ***************\n{json.dumps(payload, indent=2)}")
         COUNT['updated'] += 1
 
 
 def send_email():
-    ''' Send an email summary
+    ''' Send the HTML run-summary email in the jrc_email house style: a header
+        banner, a KPI stat-tile row, and a card listing each auto-tagged DOI with
+        the tag(s) that were added to it. Recipient is the developer for --test,
+        the receivers list otherwise.
         Keyword arguments:
           None
         Returns:
           None
     '''
-    text = "The following DOIs were automatically updated with tags:<br><br>"
-    text += "<br>".join(MSG)
-    subject = "Automatically tagged DOIs"
+    run_data = JRC.get_run_data(__file__, __version__).strip()
+    mode_label = 'TEST' if ARG.TEST else 'LIVE'
+    mode_tone = 'warn' if ARG.TEST else 'good'
+    kpis = ''.join([
+        JE.kpi_card(f"{COUNT['specified']:,}", "DOIs read", width='25%'),
+        JE.kpi_card(f"{COUNT['selected']:,}", "Selected", width='25%'),
+        JE.kpi_card(f"{COUNT['updated']:,}", "Updated", 'good', '25%'),
+        JE.kpi_card(f"{COUNT['tags_added']:,}", "New tags", 'good', '25%'),
+    ])
+    body = ""
+    if MSG:
+        body = JE.body_row(
+            JE.section_header(f"&#127991; Tags added ({COUNT['tags_added']:,})")
+            + JE.doi_card("Auto-tagged DOIs", MSG, 'good', second_header='Tag(s) added'))
+    msg = JE.render(os.path.basename(__file__), __version__, run_data,
+                    mode_label, mode_tone, kpis, body)
     email = DIS['developer'] if ARG.TEST else DIS['receivers']
-    JRC.send_email(text, DIS['sender'], email, subject, mime='html')
+    JRC.send_email(msg, DIS['sender'], email, "Automatically tagged DOIs", mime='html')
 
 
 def update_tags():
@@ -466,7 +497,7 @@ def update_tags():
     if not dois:
         terminate_program("No DOIs were found")
     coll = DB['dis'].dois
-    for odoi in dois:
+    for odoi in tqdm(dois):
         COUNT['specified'] += 1
         doi = odoi.lower().strip()
         try:
@@ -486,6 +517,7 @@ def update_tags():
         print(f"DOIs not found:           {COUNT['notfound']}")
     print(f"DOIs selected for update: {COUNT['selected']}")
     print(f"DOIs updated:             {COUNT['updated']}")
+    print(f"New tags added:           {COUNT['tags_added']}")
     if ARG.AUTO and COUNT['updated'] and (ARG.TEST or ARG.WRITE):
         send_email()
     if not ARG.WRITE and not ARG.AUTO:
