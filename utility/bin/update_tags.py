@@ -2,7 +2,7 @@
     Update tags for selected DOIs
 """
 
-__version__ = '9.1.0'
+__version__ = '9.1.1'
 
 import argparse
 import collections
@@ -180,9 +180,11 @@ def append_tags(auth, janelians, atags):
         if tag in atags:
             continue
         if ARG.AUTO:
-            # A Lab affiliation always applies; any other affiliation only
-            # applies if it's an active supervisory organization
-            if tag.endswith(' Lab') or (tag in current_affiliations and is_active_suporg(tag)):
+            # An affiliation tag auto-applies only if it is a current, active
+            # supervisory organization. A Lab is NOT applied from an author's
+            # affiliation list - a lab is tagged only when an author's own group
+            # is that lab (added above via auth['group']).
+            if tag in current_affiliations and is_active_suporg(tag):
                 atags.append(tag)
         elif tag in DIS['default_tags']:
             atags.append(tag)
