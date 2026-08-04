@@ -101,7 +101,6 @@ DEPENDENCIES
 
 import argparse
 import collections
-import html
 import json
 from operator import attrgetter
 import os
@@ -114,8 +113,9 @@ from tqdm import tqdm
 import xmltodict
 import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
+import jrc_email.jrc_email as JE
 
-__version__ = '1.6.0'
+__version__ = '1.6.1'
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation,no-member
 
@@ -141,22 +141,7 @@ POLITE_HEADERS = {'User-Agent': 'janelia-dis/pull_internal_acks'}
 # lookups.
 EPMC_ELIGIBLE_TYPES = ('journal-article', 'posted-content',
                        'proceedings-article', 'book-chapter')
-# HTML run-summary email palette/layout (generate_email and its html_* helpers).
-# Mirrors sync_citations.py's email convention: inline styles only (no <style>
-# block/classes), colors paired with an icon/label (not color alone) for
-# colorblind accessibility, for reliable rendering across email clients
-# including older Outlook.
-EMAIL_NAVY = '#1f3a5f'
-EMAIL_GREEN = '#1c7c3f'
-EMAIL_GREEN_BG = '#eefaf1'
-EMAIL_RED = '#c0392b'
-EMAIL_RED_BG = '#fdecea'
-EMAIL_AMBER = '#d68a1f'
-EMAIL_GRAY = '#5b6b7c'
-EMAIL_GRAY_BG = '#f2f4f6'
-EMAIL_STRIPE_BG = '#f7f9fb'
-EMAIL_BORDER = '#eef1f4'
-EMAIL_BLUE = '#2f7fd1'
+
 
 def terminate_program(msg=None):
     ''' Terminate the program gracefully
@@ -438,158 +423,6 @@ def add_europepmc_internal_acks(internal, error):
                              "source": "Europe PMC"})
 
 
-def doiurl(doi):
-    ''' Format a DOI as a DIS UI link. The DOI is HTML-escaped for both the URL
-        attribute and the anchor text - legacy SICI DOIs contain <, >, & and would
-        otherwise corrupt the surrounding email markup.
-        Keyword arguments:
-          doi: DOI to format
-        Returns:
-          HTML anchor
-    '''
-    esc = html.escape(doi)
-    return (f"<a href='https://dis.int.janelia.org/doiui/{esc}' "
-            f"style='color:{EMAIL_BLUE};text-decoration:none;'>{esc}</a>")
-
-
-def html_kpi_card(value, label, tone='neutral', width='20%'):
-    ''' Build one KPI stat tile for the run-summary email's header row.
-        A single <td> carries the box look directly (bgcolor attribute +
-        background-color, no nested table) - Outlook's Word rendering engine
-        chokes on a percentage-width table nested inside a percentage-width <td>.
-        The value/label stack is two inline <span>s split by a <br>, NOT block
-        <div>s: Outlook's Word engine leaks a block element's closing tag inside a
-        styled cell as literal text (the value tile showed "0</div>"), whereas
-        inline spans render cleanly.
-        Keyword arguments:
-          value: display value (already formatted, e.g. "3")
-          label: caption under the value
-          tone: 'neutral', 'good', or 'bad' - selects the tile's color scheme
-          width: tile width as a percentage string (tune to the tile count)
-        Returns:
-          HTML for one table cell
-    '''
-    bg, fg = {'good': (EMAIL_GREEN_BG, EMAIL_GREEN),
-              'bad': (EMAIL_RED_BG, EMAIL_RED),
-              'neutral': (EMAIL_GRAY_BG, EMAIL_GRAY)}[tone]
-    return (f'<td width="{width}" align="center" valign="top" bgcolor="{bg}" '
-            f'style="padding:14px 6px;background-color:{bg};border-radius:8px;">'
-            f'<span style="font-size:24px;font-weight:700;color:{fg};'
-            f'line-height:1.2;">{value}</span><br>'
-            f'<span style="font-size:10.5px;color:{EMAIL_GRAY};text-transform:uppercase;'
-            f'letter-spacing:.04em;">{label}</span>'
-            f'</td>')
-
-
-def html_section_header(title):
-    ''' Build a section header bar for the run-summary email
-        Keyword arguments:
-          title: section title (may include an HTML entity icon prefix)
-        Returns:
-          HTML div block
-    '''
-    return (f'<div style="font-size:14px;font-weight:700;color:{EMAIL_NAVY};'
-            f'border-bottom:2px solid {EMAIL_BORDER};padding-bottom:7px;'
-            f'margin-bottom:10px;">{title}</div>')
-
-
-def html_pill(bg, fg, text):
-    ''' Build a small colored status badge as an auto-width single-cell table
-        (bgcolor attribute + background-color CSS), not a <span> - Outlook's
-        Word engine does not honor background-color on inline elements. Only
-        safe where the badge is the sole content of its table cell.
-        Keyword arguments:
-          bg: background color
-          fg: text color
-          text: pill text (may include an HTML entity icon prefix)
-        Returns:
-          HTML for a single-cell table sized to its content
-    '''
-    return (f'<table role="presentation" cellpadding="0" cellspacing="0"><tr>'
-            f'<td bgcolor="{bg}" style="background-color:{bg};color:{fg};padding:2px 10px;'
-            f'border-radius:10px;font-size:11.5px;font-weight:600;">{text}</td></tr></table>')
-
-
-def html_source_card(label, records):
-    ''' Build one "acknowledgements found" card for a single source: a header
-        with a count pill, followed by a zebra-striped table of DOIs (each
-        linked to its DIS UI page), with a PMCID column when the source's
-        records carry one (the PMC and Europe PMC sources).
-        Keyword arguments:
-          label: display label (e.g. "eLife")
-          records: list of internal-DOI records for this source
-        Returns:
-          HTML card block
-    '''
-    has_pmcid = any(rec.get('pmcid') for rec in records)
-    rows = []
-    for i, rec in enumerate(records):
-        striped = i % 2 == 0
-        bgattr = f' bgcolor="{EMAIL_STRIPE_BG}"' if striped else ''
-        bg = f'background-color:{EMAIL_STRIPE_BG};' if striped else ''
-        if has_pmcid:
-            doi_radius = 'border-radius:6px 0 0 6px;' if bg else ''
-            pmcid_radius = 'border-radius:0 6px 6px 0;' if bg else ''
-            pmcid_html = (f'<td style="padding:6px 10px;{pmcid_radius}color:{EMAIL_GRAY};" '
-                          f'align="right">{rec["pmcid"]}</td>')
-        else:
-            doi_radius = 'border-radius:6px;' if bg else ''
-            pmcid_html = ''
-        rows.append(f'<tr{bgattr} style="{bg}">'
-                    f'<td style="padding:6px 10px;{doi_radius}">{doiurl(rec["doi"])}</td>'
-                    f'{pmcid_html}</tr>')
-    header = ('<td style="padding:5px 10px;">DOI</td>'
-              + ('<td style="padding:5px 10px;" align="right">PMCID</td>' if has_pmcid else ''))
-    table = ('<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
-             'style="border-collapse:collapse;font-size:12.5px;">'
-             f'<tr style="color:{EMAIL_GRAY};font-size:10.5px;text-transform:uppercase;'
-             f'letter-spacing:.03em;">{header}</tr>' + "".join(rows) + '</table>')
-    # Header row is two <td>s directly in the outer table (not a nested
-    # width="100%" table inside one <td>) - Outlook's Word engine chokes on
-    # that nesting. The body row below spans both with colspan="2".
-    return (
-        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
-        f'style="border:1px solid {EMAIL_BORDER};border-radius:8px;margin-bottom:14px;'
-        'border-collapse:separate;">'
-        f'<tr><td bgcolor="{EMAIL_STRIPE_BG}" style="background-color:{EMAIL_STRIPE_BG};'
-        f'padding:10px 16px;border-radius:8px 0 0 0;font-weight:700;color:{EMAIL_NAVY};'
-        f'font-size:13.5px;">{label}</td>'
-        f'<td bgcolor="{EMAIL_STRIPE_BG}" align="right" style="background-color:'
-        f'{EMAIL_STRIPE_BG};padding:10px 16px;border-radius:0 8px 0 0;">'
-        + html_pill(EMAIL_GREEN_BG, EMAIL_GREEN, f'&#10003; {len(records):,}') + '</td></tr>'
-        f'<tr><td colspan="2" style="padding:4px 16px 10px 16px;">{table}</td></tr></table>')
-
-
-def html_error_table(error):
-    ''' Build the Errors table for the run-summary email
-        Keyword arguments:
-          error: list of error records (doi, source, error)
-        Returns:
-          HTML table block
-    '''
-    rows = []
-    for i, err in enumerate(error):
-        striped = i % 2 == 0
-        bgattr = f' bgcolor="{EMAIL_STRIPE_BG}"' if striped else ''
-        bg = f'background-color:{EMAIL_STRIPE_BG};' if striped else ''
-        r_l = 'border-radius:6px 0 0 6px;' if bg else ''
-        r_r = 'border-radius:0 6px 6px 0;' if bg else ''
-        rows.append(
-            f'<tr{bgattr} style="{bg}"><td style="padding:6px 10px;{r_l}">'
-            f'{doiurl(err["doi"])}</td>'
-            f'<td style="padding:6px 10px;">{err["source"]}</td>'
-            f'<td style="padding:6px 10px;{r_r}color:{EMAIL_RED};">'
-            f'{html.escape(str(err["error"]))}</td></tr>')
-    return (
-        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
-        'style="border-collapse:collapse;font-size:12.5px;">'
-        f'<tr style="color:{EMAIL_GRAY};font-size:10.5px;text-transform:uppercase;'
-        'letter-spacing:.03em;"><td style="padding:6px 10px;">DOI</td>'
-        '<td style="padding:6px 10px;">Source</td>'
-        '<td style="padding:6px 10px;">Error</td></tr>'
-        + "".join(rows) + '</table>')
-
-
 def generate_email(internal, error):
     ''' Generate and send the HTML run-summary email, grouping DOIs by source
         (eLife/Elsevier/PMC/arXiv) into cards rather than one flat list.
@@ -600,68 +433,39 @@ def generate_email(internal, error):
           None
     '''
     run_data = JRC.get_run_data(__file__, __version__).strip()
-    mode_badge_bg = EMAIL_GREEN if ARG.WRITE else EMAIL_AMBER
     mode_label = 'WRITE' if ARG.WRITE else 'DRY RUN'
-
+    mode_tone = 'good' if ARG.WRITE else 'warn'
     by_source = collections.defaultdict(list)
     for rec in internal:
         by_source[rec['source']].append(rec)
-
-    kpis = ''.join(html_kpi_card(f"{len(by_source.get(label, [])):,}", f"{label} added",
-                                 'good' if by_source.get(label) else 'neutral')
+    kpis = ''.join(JE.kpi_card(f"{len(by_source.get(label, [])):,}", f"{label} added",
+                               'good' if by_source.get(label) else 'neutral')
                    for label in SOURCE_LABELS)
-    kpis += html_kpi_card(f"{len(error):,}", "Errors", 'bad' if error else 'neutral')
-
-    cards = ''.join(html_source_card(label, by_source[label])
-                    for label in SOURCE_LABELS if by_source.get(label))
-    found_section = (
-        html_section_header(f"&#128209; Acknowledgements Found ({len(internal):,})")
-        + (cards if cards else f'<div style="color:{EMAIL_GRAY};font-size:13px;">'
-                                'No new acknowledgements were found.</div>'))
-
-    error_row = ''
+    kpis += JE.kpi_card(f"{len(error):,}", "Errors", 'bad' if error else 'neutral')
+    # Found section: one DOI card per source (PMCID column for the sources that
+    # carry one, e.g. PMC and Europe PMC).
+    found = JE.section_header(f"&#128209; Acknowledgements Found ({len(internal):,})")
+    if internal:
+        for label in SOURCE_LABELS:
+            recs = by_source.get(label)
+            if not recs:
+                continue
+            has_pmcid = any(rec.get('pmcid') for rec in recs)
+            entries = [(rec['doi'], rec.get('pmcid')) for rec in recs]
+            found += JE.doi_card(label, entries, 'good',
+                                 second_header='PMCID' if has_pmcid else None)
+    else:
+        found += ('<div style="color:#5b6b7c;font-size:13px;">'
+                  'No new acknowledgements were found.</div>')
+    body = JE.body_row(found)
     if error:
-        error_row = (
-            f'<tr><td style="padding:16px 28px 6px 28px;">'
-            + html_section_header(f"&#9888; Errors ({len(error):,})")
-            + html_error_table(error) + '</td></tr>')
-
-    msg = (
-        f'<div style="font-family:-apple-system,\'Segoe UI\',Roboto,Helvetica,Arial,sans-serif;'
-        f'background-color:#eef1f4;padding:8px 0;">'
-        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>'
-        '<td align="center" style="padding:8px 14px 32px 14px;">'
-        '<table role="presentation" width="720" cellpadding="0" cellspacing="0" '
-        'bgcolor="#ffffff" '
-        f'style="max-width:720px;width:100%;background-color:#ffffff;border-radius:10px;'
-        f'border:1px solid {EMAIL_BORDER};overflow:hidden;">'
-        f'<tr><td bgcolor="{EMAIL_NAVY}" style="background-color:{EMAIL_NAVY};'
-        f'padding:22px 28px;">'
-        f'<div style="color:#ffffff;font-size:19px;font-weight:600;">'
-        f'{os.path.basename(__file__)}&nbsp;'
-        f'<span style="font-weight:400;opacity:.7;font-size:14px;">v{__version__}</span></div>'
-        f'<div style="color:#c9d6e6;font-size:12.5px;margin-top:6px;">{run_data} &middot; '
-        f'<span style="background-color:{mode_badge_bg};color:#fff;border-radius:10px;'
-        f'padding:1px 9px;font-size:11px;font-weight:600;letter-spacing:.03em;">'
-        f'{mode_label}</span></div></td></tr>'
-        f'<tr><td style="padding:22px 22px 6px 22px;">'
-        # cellspacing (not CSS margin, which <td> mostly ignores) puts a real gap
-        # between the KPI tiles; Outlook's Word engine honors this old-school
-        # HTML attribute far more reliably than CSS spacing tricks.
-        f'<table role="presentation" width="100%" cellpadding="0" cellspacing="6"><tr>'
-        f'{kpis}</tr></table></td></tr>'
-        f'<tr><td style="padding:18px 28px 4px 28px;">{found_section}</td></tr>'
-        f'{error_row}'
-        f'<tr><td bgcolor="{EMAIL_STRIPE_BG}" style="padding:18px 28px;'
-        f'background-color:{EMAIL_STRIPE_BG};color:{EMAIL_GRAY};'
-        f'font-size:11px;text-align:center;border-top:1px solid {EMAIL_BORDER};">'
-        'Generated by pull_internal_acks.py &middot; Data and Information Services &middot; '
-        'Janelia Research Campus</td></tr>'
-        '</table></td></tr></table></div>')
-
+        err_entries = [(e['doi'], f"{e['source']}: {e['error']}") for e in error]
+        body += JE.body_row(JE.section_header(f"&#9888; Errors ({len(error):,})")
+                            + JE.doi_card("Errors", err_entries, 'bad', second_header='Detail'))
+    msg = JE.render(os.path.basename(__file__), __version__, run_data,
+                    mode_label, mode_tone, kpis, body)
     email = DIS['developer']
-    subject = "Acknowledgements updated for DOIs"
-    JRC.send_email(msg, DIS['sender'], email, subject, mime='html')
+    JRC.send_email(msg, DIS['sender'], email, "Acknowledgements updated for DOIs", mime='html')
 
 
 def processing():
