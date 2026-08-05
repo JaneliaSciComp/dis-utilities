@@ -19,7 +19,7 @@ COUNT = collections.defaultdict(lambda: 0, {})
 ARG = DISCONFIG = LOGGER = None
 LICENSE = {}
 
-__version__ = '2.1.0'
+__version__ = '2.1.1'
 
 def terminate_program(msg=None):
     ''' Terminate the program gracefully
@@ -192,6 +192,6 @@ if __name__ == '__main__':
     DISCONFIG = JRC.simplenamespace_to_dict(JRC.get_config("dis"))
     initialize_program()
     processing()
-    if ARG.TEST or ARG.WRITE:
+    if ARG.TEST or (ARG.WRITE and COUNT['updated']):
         generate_email()
     terminate_program()

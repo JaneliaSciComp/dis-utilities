@@ -2,7 +2,7 @@
     Update links to full-text files for DOIs. PDFs are preferred.
 '''
 
-__version__ = '2.1.0'
+__version__ = '2.1.1'
 
 import argparse
 import collections
@@ -257,7 +257,7 @@ def processing():
     print(f"DOIs updated:    {COUNT['updated']:,}")
     print(f"PDFs downloaded: {COUNT['downloaded']:,}")
     print(f"DOIs not found:  {COUNT['not_found']:,}")
-    if ARG.TEST or ARG.WRITE:
+    if ARG.TEST or (ARG.WRITE and COUNT['updated']):
         generate_email()
 
 # -----------------------------------------------------------------------------
