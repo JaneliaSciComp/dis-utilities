@@ -137,8 +137,9 @@ from pymongo import UpdateOne
 from tqdm import tqdm
 import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
+import jrc_email.jrc_email as JE
 
-__version__ = '1.6.1'
+__version__ = '1.6.2'
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation,line-too-long
 
@@ -159,21 +160,9 @@ COLLECTIONS = ('dois', 'external_dois')
 CURATOR = 'IRIS'
 # Global variables
 ARG = DISCONFIG = LOGGER = None
-# HTML run-summary email palette/layout (generate_email and its html_* helpers).
-# Mirrors sync_citations.py's email convention: inline styles only (no <style>
-# block/classes), colors paired with an icon/label (not color alone) for
-# colorblind accessibility, for reliable rendering across email clients
-# including older Outlook.
-EMAIL_NAVY = '#1f3a5f'
-EMAIL_GREEN = '#1c7c3f'
-EMAIL_GREEN_BG = '#eefaf1'
-EMAIL_RED = '#c0392b'
-EMAIL_RED_BG = '#fdecea'
-EMAIL_AMBER = '#d68a1f'
+# Muted gray for the kept html_entity_table; jrc_email supplies the rest of the
+# run-summary email's styling (banner, KPI tiles, section header, footer).
 EMAIL_GRAY = '#5b6b7c'
-EMAIL_GRAY_BG = '#f2f4f6'
-EMAIL_STRIPE_BG = '#f7f9fb'
-EMAIL_BORDER = '#eef1f4'
 
 
 def terminate_program(msg=None):
@@ -500,43 +489,6 @@ def report(rows):
             print(f"  {entity:<38} {new_str:>6} {already_str:>14}")
 
 
-def html_kpi_card(value, label, tone='neutral', width='33%'):
-    ''' Build one KPI stat tile for the run-summary email's header row.
-        A single <td> carries the box look directly (bgcolor attribute +
-        background-color, no nested table) - Outlook's Word rendering engine
-        chokes on a percentage-width table nested inside a percentage-width <td>.
-        Keyword arguments:
-          value: display value (already formatted, e.g. "3")
-          label: caption under the value
-          tone: 'neutral', 'good', or 'bad' - selects the tile's color scheme
-          width: tile width as a percentage string (tune to the tile count)
-        Returns:
-          HTML for one table cell
-    '''
-    bg, fg = {'good': (EMAIL_GREEN_BG, EMAIL_GREEN),
-              'bad': (EMAIL_RED_BG, EMAIL_RED),
-              'neutral': (EMAIL_GRAY_BG, EMAIL_GRAY)}[tone]
-    return (f'<td width="{width}" align="center" valign="top" bgcolor="{bg}" '
-            f'style="padding:14px 6px;background-color:{bg};border-radius:8px;">'
-            f'<span style="font-size:24px;font-weight:700;color:{fg};'
-            f'line-height:1.2;">{value}</span><br>'
-            f'<span style="font-size:10.5px;color:{EMAIL_GRAY};text-transform:uppercase;'
-            f'letter-spacing:.04em;">{label}</span>'
-            f'</td>')
-
-
-def html_section_header(title):
-    ''' Build a section header bar for the run-summary email
-        Keyword arguments:
-          title: section title (may include an HTML entity icon prefix)
-        Returns:
-          HTML div block
-    '''
-    return (f'<div style="font-size:14px;font-weight:700;color:{EMAIL_NAVY};'
-            f'border-bottom:2px solid {EMAIL_BORDER};padding-bottom:7px;'
-            f'margin-bottom:10px;">{title}</div>')
-
-
 def html_entity_table(rows):
     ''' Build the combined Entity/New/Human Curated HTML table for the
         run-summary email, mirroring report()'s console table (zero counts
@@ -584,56 +536,25 @@ def generate_email(rows):
           None
     '''
     run_data = JRC.get_run_data(__file__, __version__).strip()
-    mode_badge_bg = EMAIL_GREEN if ARG.WRITE else EMAIL_AMBER
+    if ARG.DOI:
+        run_data += f" &middot; doi: {ARG.DOI}"
     mode_label = 'WRITE' if ARG.WRITE else 'DRY RUN'
-    restrict = f" &middot; doi: {ARG.DOI}" if ARG.DOI else ""
-
+    mode_tone = 'good' if ARG.WRITE else 'warn'
     snapshot_total = COUNT['snapshot_internal'] + COUNT['snapshot_external']
     written_total = COUNT['written_internal'] + COUNT['written_external']
     kpis = ''.join([
-        html_kpi_card(f"{COUNT['updated']:,}", "DOIs updated",
-                      'good' if COUNT['updated'] else 'neutral', width='25%'),
-        html_kpi_card(f"{snapshot_total:,}", "Records tagged", 'neutral', width='25%'),
-        html_kpi_card(f"{written_total:,}", "Records written", 'neutral', width='25%'),
-        html_kpi_card(f"{COUNT['already_tagged']:,}", "Human curated", 'neutral', width='25%'),
+        JE.kpi_card(f"{COUNT['updated']:,}", "DOIs updated",
+                    'good' if COUNT['updated'] else 'neutral', '25%'),
+        JE.kpi_card(f"{snapshot_total:,}", "Records tagged", 'neutral', '25%'),
+        JE.kpi_card(f"{written_total:,}", "Records written", 'neutral', '25%'),
+        JE.kpi_card(f"{COUNT['already_tagged']:,}", "Human curated", 'neutral', '25%'),
     ])
-
     entity_section = (
-        html_section_header(f"&#127991; Acknowledgement Tagging ({len(rows):,})")
+        JE.section_header(f"&#127991; Acknowledgement Tagging ({len(rows):,})")
         + (html_entity_table(rows) if rows else f'<div style="color:{EMAIL_GRAY};'
                                                  'font-size:13px;">No entities matched.</div>'))
-
-    msg = (
-        f'<div style="font-family:-apple-system,\'Segoe UI\',Roboto,Helvetica,Arial,sans-serif;'
-        f'background-color:#eef1f4;padding:8px 0;">'
-        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>'
-        '<td align="center" style="padding:8px 14px 32px 14px;">'
-        '<table role="presentation" width="720" cellpadding="0" cellspacing="0" '
-        'bgcolor="#ffffff" '
-        f'style="max-width:720px;width:100%;background-color:#ffffff;border-radius:10px;'
-        f'border:1px solid {EMAIL_BORDER};overflow:hidden;">'
-        f'<tr><td bgcolor="{EMAIL_NAVY}" style="background-color:{EMAIL_NAVY};'
-        f'padding:22px 28px;">'
-        f'<div style="color:#ffffff;font-size:19px;font-weight:600;">'
-        f'{os.path.basename(__file__)}&nbsp;'
-        f'<span style="font-weight:400;opacity:.7;font-size:14px;">v{__version__}</span></div>'
-        f'<div style="color:#c9d6e6;font-size:12.5px;margin-top:6px;">{run_data}{restrict}'
-        f' &middot; <span style="background-color:{mode_badge_bg};color:#fff;'
-        f'border-radius:10px;padding:1px 9px;font-size:11px;font-weight:600;'
-        f'letter-spacing:.03em;">{mode_label}</span></div></td></tr>'
-        f'<tr><td style="padding:22px 22px 6px 22px;">'
-        # cellspacing (not CSS margin, which <td> mostly ignores) puts a real gap
-        # between the KPI tiles; Outlook's Word engine honors this old-school
-        # HTML attribute far more reliably than CSS spacing tricks.
-        f'<table role="presentation" width="100%" cellpadding="0" cellspacing="6"><tr>'
-        f'{kpis}</tr></table></td></tr>'
-        f'<tr><td style="padding:18px 28px 4px 28px;">{entity_section}</td></tr>'
-        f'<tr><td bgcolor="{EMAIL_STRIPE_BG}" style="padding:18px 28px;'
-        f'background-color:{EMAIL_STRIPE_BG};color:{EMAIL_GRAY};'
-        f'font-size:11px;text-align:center;border-top:1px solid {EMAIL_BORDER};">'
-        'Generated by tag_janelia_acks.py &middot; Data and Information Services &middot; '
-        'Janelia Research Campus</td></tr>'
-        '</table></td></tr></table></div>')
+    msg = JE.render(os.path.basename(__file__), __version__, run_data,
+                    mode_label, mode_tone, kpis, JE.body_row(entity_section))
 
     try:
         LOGGER.info(f"Sending email to {DISCONFIG['developer']}")

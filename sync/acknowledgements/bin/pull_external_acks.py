@@ -149,7 +149,7 @@ NOTES
   parameter, i.e. filtered by when the article was added to PubMed Central.
 '''
 
-__version__ = '1.11.0'
+__version__ = '1.11.1'
 
 import argparse
 import collections
@@ -170,6 +170,7 @@ import xmltodict
 from tqdm import tqdm
 import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
+import jrc_email.jrc_email as JE
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,logging-fstring-interpolation
 
@@ -232,11 +233,7 @@ SOURCE_ORDER = ('elife', 'elsevier', 'pmc', 'openalex')
 EMAIL_NAVY = '#1f3a5f'
 EMAIL_GREEN = '#1c7c3f'
 EMAIL_GREEN_BG = '#eefaf1'
-EMAIL_RED = '#c0392b'
-EMAIL_RED_BG = '#fdecea'
-EMAIL_AMBER = '#d68a1f'
 EMAIL_GRAY = '#5b6b7c'
-EMAIL_GRAY_BG = '#f2f4f6'
 EMAIL_STRIPE_BG = '#f7f9fb'
 EMAIL_BORDER = '#eef1f4'
 EMAIL_BLUE = '#2f7fd1'
@@ -328,43 +325,6 @@ def doiurl(doi):
     esc = html.escape(doi)
     return (f"<a href='https://dis.int.janelia.org/doiui/{esc}' "
             f"style='color:{EMAIL_BLUE};text-decoration:none;'>{esc}</a>")
-
-
-def html_kpi_card(value, label, tone='neutral', width='25%'):
-    ''' Build one KPI stat tile for the run-summary email's header row.
-        A single <td> carries the box look directly (bgcolor attribute +
-        background-color, no nested table) - Outlook's Word rendering engine
-        chokes on a percentage-width table nested inside a percentage-width <td>.
-        Keyword arguments:
-          value: display value (already formatted, e.g. "3")
-          label: caption under the value
-          tone: 'neutral', 'good', or 'bad' - selects the tile's color scheme
-          width: tile width as a percentage string (tune to the tile count)
-        Returns:
-          HTML for one table cell
-    '''
-    bg, fg = {'good': (EMAIL_GREEN_BG, EMAIL_GREEN),
-              'bad': (EMAIL_RED_BG, EMAIL_RED),
-              'neutral': (EMAIL_GRAY_BG, EMAIL_GRAY)}[tone]
-    return (f'<td width="{width}" align="center" valign="top" bgcolor="{bg}" '
-            f'style="padding:14px 6px;background-color:{bg};border-radius:8px;">'
-            f'<span style="font-size:24px;font-weight:700;color:{fg};'
-            f'line-height:1.2;">{value}</span><br>'
-            f'<span style="font-size:10.5px;color:{EMAIL_GRAY};text-transform:uppercase;'
-            f'letter-spacing:.04em;">{label}</span>'
-            f'</td>')
-
-
-def html_section_header(title):
-    ''' Build a section header bar for the run-summary email
-        Keyword arguments:
-          title: section title (may include an HTML entity icon prefix)
-        Returns:
-          HTML div block
-    '''
-    return (f'<div style="font-size:14px;font-weight:700;color:{EMAIL_NAVY};'
-            f'border-bottom:2px solid {EMAIL_BORDER};padding-bottom:7px;'
-            f'margin-bottom:10px;">{title}</div>')
 
 
 def html_metric_rows(rows):
@@ -469,44 +429,6 @@ def html_funnel_card(key):
     return html_card_shell(SOURCES[key]['label'], pill, html_metric_rows(rows))
 
 
-def html_source_card(label, records):
-    ''' Build one "DOIs added" card for a single source: a header with a count
-        pill, followed by a zebra-striped table of DOIs (each linked to its DIS
-        UI page), with a PMCID column when the source's records carry one
-        (PMC only).
-        Keyword arguments:
-          label: display label (e.g. "eLife")
-          records: list of RECORDS entries for this source
-        Returns:
-          HTML card block
-    '''
-    has_pmcid = any(rec.get('pmcid') for rec in records)
-    rows = []
-    for i, rec in enumerate(records):
-        striped = i % 2 == 0
-        bgattr = f' bgcolor="{EMAIL_STRIPE_BG}"' if striped else ''
-        bg = f'background-color:{EMAIL_STRIPE_BG};' if striped else ''
-        if has_pmcid:
-            doi_radius = 'border-radius:6px 0 0 6px;' if bg else ''
-            pmcid_radius = 'border-radius:0 6px 6px 0;' if bg else ''
-            pmcid_html = (f'<td style="padding:6px 10px;{pmcid_radius}color:{EMAIL_GRAY};" '
-                          f'align="right">{rec["pmcid"]}</td>')
-        else:
-            doi_radius = 'border-radius:6px;' if bg else ''
-            pmcid_html = ''
-        rows.append(f'<tr{bgattr} style="{bg}">'
-                    f'<td style="padding:6px 10px;{doi_radius}">{doiurl(rec["doi"])}</td>'
-                    f'{pmcid_html}</tr>')
-    header = ('<td style="padding:5px 10px;">DOI</td>'
-              + ('<td style="padding:5px 10px;" align="right">PMCID</td>' if has_pmcid else ''))
-    table = ('<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
-             'style="border-collapse:collapse;font-size:12.5px;">'
-             f'<tr style="color:{EMAIL_GRAY};font-size:10.5px;text-transform:uppercase;'
-             f'letter-spacing:.03em;">{header}</tr>' + "".join(rows) + '</table>')
-    pill = html_pill(EMAIL_GREEN_BG, EMAIL_GREEN, f'&#10003; {len(records):,}')
-    return html_card_shell(label, pill, table)
-
-
 def html_diverted_table(records):
     ''' Build the Janelia-authored (not stored) table for the run-summary email:
         DOIs that acknowledge the search term but were diverted rather than
@@ -547,12 +469,12 @@ def html_diverted_table(records):
 
 
 def generate_email():
-    ''' Generate and send the HTML run-summary email. Built directly from the
-        module-level COUNT/RECORDS/INTERNAL_RECORDS/ARG state (same convention as
-        sync_citations.py) rather than re-parsing a plain-text summary. Grouped
-        into a Source Funnel section (read -> written, per source), a DOIs Added
-        section (per-source card of new DOIs), and a Janelia-authored review
-        section (diverted DOIs needing a human look), instead of one flat list.
+    ''' Generate and send the HTML run-summary email (jrc_email house style),
+        built directly from the module-level COUNT/RECORDS/INTERNAL_RECORDS/ARG
+        state. Grouped into a Source Funnel section (read -> written, per source),
+        a DOIs Added section (per-source card of new DOIs), and a Janelia-authored
+        review section (diverted DOIs needing a human look). The per-source funnel
+        cards and the diverted table have no jrc_email primitive and stay bespoke.
         Keyword arguments:
           None
         Returns:
@@ -560,79 +482,45 @@ def generate_email():
     '''
     active = [key for key in SOURCE_ORDER if ARG.SOURCE in (None, SOURCES[key]['restrict'])]
     run_data = JRC.get_run_data(__file__, __version__).strip()
-    mode_badge_bg = EMAIL_GREEN if ARG.WRITE else EMAIL_AMBER
-    mode_label = 'WRITE' if ARG.WRITE else 'DRY RUN'
-    restrict = f" &middot; term: '{ARG.TERM}'"
+    run_data += f" &middot; term: '{ARG.TERM}'"
     if ARG.DAYS:
-        restrict += f" &middot; last {ARG.DAYS:,} days"
-
+        run_data += f" &middot; last {ARG.DAYS:,} days"
+    mode_label = 'WRITE' if ARG.WRITE else 'DRY RUN'
+    mode_tone = 'good' if ARG.WRITE else 'warn'
     write_failed = sum(COUNT[f'{key}_write_failed'] for key in SOURCE_ORDER)
     ack_ignored = sum(COUNT[f'{key}_ack_doi_ignored'] for key in SOURCE_ORDER)
     kpis = ''.join([
-        html_kpi_card(f"{len(RECORDS):,}", "DOIs added",
-                      'good' if RECORDS else 'neutral'),
-        html_kpi_card(f"{len(INTERNAL_RECORDS):,}", "Janelia-authored (diverted)",
-                      'neutral' if INTERNAL_RECORDS else 'neutral'),
-        html_kpi_card(f"{write_failed:,}", "Write failures",
-                      'bad' if write_failed else 'neutral'),
-        html_kpi_card(f"{ack_ignored:,}", "Ack ignore-listed", 'neutral'),
+        JE.kpi_card(f"{len(RECORDS):,}", "DOIs added", 'good' if RECORDS else 'neutral'),
+        JE.kpi_card(f"{len(INTERNAL_RECORDS):,}", "Janelia-authored (diverted)", 'neutral'),
+        JE.kpi_card(f"{write_failed:,}", "Write failures", 'bad' if write_failed else 'neutral'),
+        JE.kpi_card(f"{ack_ignored:,}", "Ack ignore-listed", 'neutral'),
     ])
-
-    funnel_section = (html_section_header("&#128200; Source Funnel")
+    funnel_section = (JE.section_header("&#128200; Source Funnel")
                       + "".join(html_funnel_card(key) for key in active))
-
     by_source = collections.defaultdict(list)
     for rec in RECORDS:
         by_source[rec['source']].append(rec)
-    added_cards = ''.join(html_source_card(SOURCES[key]['label'], by_source[key])
-                          for key in active if by_source.get(key))
+    added_cards = ""
+    for key in active:
+        recs = by_source.get(key)
+        if not recs:
+            continue
+        has_pmcid = any(rec.get('pmcid') for rec in recs)
+        entries = [(rec['doi'], rec.get('pmcid')) for rec in recs]
+        added_cards += JE.doi_card(SOURCES[key]['label'], entries, 'good',
+                                   second_header='PMCID' if has_pmcid else None)
     added_section = (
-        html_section_header(f"&#128209; DOIs Added ({len(RECORDS):,})")
+        JE.section_header(f"&#128209; DOIs Added ({len(RECORDS):,})")
         + (added_cards if added_cards else f'<div style="color:{EMAIL_GRAY};font-size:13px;">'
                                             'No new DOIs were added.</div>'))
-
-    diverted_row = ''
+    body = JE.body_row(funnel_section) + JE.body_row(added_section)
     if INTERNAL_RECORDS:
-        diverted_row = (
-            f'<tr><td style="padding:16px 28px 4px 28px;">'
-            + html_section_header(
+        body += JE.body_row(
+            JE.section_header(
                 f"&#9888; Janelia-authored - Not Stored ({len(INTERNAL_RECORDS):,})")
-            + html_diverted_table(INTERNAL_RECORDS) + '</td></tr>')
-
-    msg = (
-        f'<div style="font-family:-apple-system,\'Segoe UI\',Roboto,Helvetica,Arial,sans-serif;'
-        f'background-color:#eef1f4;padding:8px 0;">'
-        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>'
-        '<td align="center" style="padding:8px 14px 32px 14px;">'
-        '<table role="presentation" width="720" cellpadding="0" cellspacing="0" '
-        'bgcolor="#ffffff" '
-        f'style="max-width:720px;width:100%;background-color:#ffffff;border-radius:10px;'
-        f'border:1px solid {EMAIL_BORDER};overflow:hidden;">'
-        f'<tr><td bgcolor="{EMAIL_NAVY}" style="background-color:{EMAIL_NAVY};'
-        f'padding:22px 28px;">'
-        f'<div style="color:#ffffff;font-size:19px;font-weight:600;">'
-        f'{os.path.basename(__file__)}&nbsp;'
-        f'<span style="font-weight:400;opacity:.7;font-size:14px;">v{__version__}</span></div>'
-        f'<div style="color:#c9d6e6;font-size:12.5px;margin-top:6px;">{run_data}{restrict}'
-        f' &middot; <span style="background-color:{mode_badge_bg};color:#fff;'
-        f'border-radius:10px;padding:1px 9px;font-size:11px;font-weight:600;'
-        f'letter-spacing:.03em;">{mode_label}</span></div></td></tr>'
-        f'<tr><td style="padding:22px 22px 6px 22px;">'
-        # cellspacing (not CSS margin, which <td> mostly ignores) puts a real gap
-        # between the KPI tiles; Outlook's Word engine honors this old-school
-        # HTML attribute far more reliably than CSS spacing tricks.
-        f'<table role="presentation" width="100%" cellpadding="0" cellspacing="6"><tr>'
-        f'{kpis}</tr></table></td></tr>'
-        f'<tr><td style="padding:18px 28px 4px 28px;">{funnel_section}</td></tr>'
-        f'<tr><td style="padding:16px 28px 4px 28px;">{added_section}</td></tr>'
-        f'{diverted_row}'
-        f'<tr><td bgcolor="{EMAIL_STRIPE_BG}" style="padding:18px 28px;'
-        f'background-color:{EMAIL_STRIPE_BG};color:{EMAIL_GRAY};'
-        f'font-size:11px;text-align:center;border-top:1px solid {EMAIL_BORDER};">'
-        'Generated by pull_external_acks.py &middot; Data and Information Services &middot; '
-        'Janelia Research Campus</td></tr>'
-        '</table></td></tr></table></div>')
-
+            + html_diverted_table(INTERNAL_RECORDS))
+    msg = JE.render(os.path.basename(__file__), __version__, run_data,
+                    mode_label, mode_tone, kpis, body)
     try:
         email = DISCONFIG['developer']
         LOGGER.info(f"Sending email to {email}")
