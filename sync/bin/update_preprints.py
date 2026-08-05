@@ -68,7 +68,7 @@
     reason when one is available, in place of a title.
 """
 
-__version__ = '2.1.0'
+__version__ = '2.1.1'
 
 import argparse
 import collections
@@ -83,6 +83,7 @@ from rapidfuzz import fuzz, utils
 from tqdm import tqdm
 import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
+import jrc_email.jrc_email as JE
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation
 
@@ -1249,13 +1250,14 @@ def generate_email():
     pairs.sort(key=lambda pair: not pair[2])  # brand-new relations (True) first
     cards = "".join(new_pair_card(doi_a, doi_b, brand_new) for doi_a, doi_b, brand_new in pairs)
     brand_new_count = sum(1 for *_, brand_new in pairs if brand_new)
-    summary = "<p><strong>New matches:</strong> " + f"{len(pairs):,}" \
-              + f" ({brand_new_count:,} new relations, " \
-              + f"{len(pairs) - brand_new_count:,} additions)" \
-              + " &nbsp;|&nbsp; <strong>DOIs flagged for update:</strong> " \
-              + f"{COUNT['dois_flagged_for_update']:,}" \
-              + " &nbsp;|&nbsp; <strong>DOIs changed:</strong> " \
-              + f"{COUNT['dois_would_change']:,}</p>"
+    kpis = ''.join([
+        JE.kpi_card(f"{len(pairs):,}", "New matches", 'good' if pairs else 'neutral', '20%'),
+        JE.kpi_card(f"{brand_new_count:,}", "New relations",
+                    'good' if brand_new_count else 'neutral', '20%'),
+        JE.kpi_card(f"{len(pairs) - brand_new_count:,}", "Additions", 'neutral', '20%'),
+        JE.kpi_card(f"{COUNT['dois_flagged_for_update']:,}", "DOIs flagged", 'neutral', '20%'),
+        JE.kpi_card(f"{COUNT['dois_would_change']:,}", "DOIs changed", 'neutral', '20%'),
+    ])
     unknown_note = ""
     if COUNT['dois_unknown_current_value']:
         unknown_note = "<p style='color:#c0392b; font-size:13px; margin:0 0 12px 0;'>" \
@@ -1266,9 +1268,12 @@ def generate_email():
     missing_html = missing_doi_groups_html()
     separator = "<div style='margin:24px 0 10px 0; font-size:20px; font-weight:bold;'>" \
                 + "New/updated relations</div>" if missing_html and cards else ""
-    email_html = "<div style='font-family:Arial,Helvetica,sans-serif; color:#222;'>" \
-                 + JRC.get_run_data(__file__, __version__) + "<br><br>" \
-                 + summary + unknown_note + missing_html + separator + cards + "</div>"
+    run_data = JRC.get_run_data(__file__, __version__).strip()
+    mode_label = 'TEST' if ARG.TEST else 'LIVE'
+    mode_tone = 'warn' if ARG.TEST else 'good'
+    body = JE.body_row(unknown_note + missing_html + separator + cards)
+    email_html = JE.render(os.path.basename(__file__), __version__, run_data,
+                           mode_label, mode_tone, kpis, body)
     try:
         email = DISCONFIG['developer'] if ARG.TEST else DISCONFIG['receivers']
         LOGGER.info(f"Sending email to {email}")
