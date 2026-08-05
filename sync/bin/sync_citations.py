@@ -181,7 +181,7 @@
         (falling back to the native citationCount).
 '''
 
-__version__ = '1.12.1'
+__version__ = '1.12.2'
 
 import argparse
 import collections
@@ -200,6 +200,7 @@ from pymongo.errors import BulkWriteError
 import requests
 from tqdm import tqdm
 import jrc_common.jrc_common as JRC
+import jrc_email.jrc_email as JE
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,logging-fstring-interpolation
 
@@ -388,7 +389,6 @@ EMAIL_GREEN = '#1c7c3f'
 EMAIL_GREEN_BG = '#eefaf1'
 EMAIL_RED = '#c0392b'
 EMAIL_RED_BG = '#fdecea'
-EMAIL_AMBER = '#d68a1f'
 EMAIL_GRAY = '#5b6b7c'
 EMAIL_GRAY_BG = '#f2f4f6'
 EMAIL_STRIPE_BG = '#f7f9fb'
@@ -1371,32 +1371,6 @@ def doiurl(doi):
             f"style='color:{EMAIL_BLUE};text-decoration:none;'>{doi}</a>")
 
 
-def html_kpi_card(value, label, tone='neutral'):
-    ''' Build one KPI stat tile for the run-summary email's header row.
-        A single <td> carries the box look directly (bgcolor attribute +
-        background-color, no nested table) - Outlook's Word rendering engine
-        chokes on a percentage-width table nested inside a percentage-width
-        <td> (this one used to nest a width="100%" table inside width="25%"),
-        sometimes dumping raw markup as visible text instead of rendering it.
-        Keyword arguments:
-          value: display value (already formatted, e.g. "52" or "33/0")
-          label: caption under the value
-          tone: 'neutral', 'good', or 'bad' - selects the tile's color scheme
-        Returns:
-          HTML for one table cell
-    '''
-    bg, fg = {'good': (EMAIL_GREEN_BG, EMAIL_GREEN),
-              'bad': (EMAIL_RED_BG, EMAIL_RED),
-              'neutral': (EMAIL_GRAY_BG, EMAIL_GRAY)}[tone]
-    return (f'<td width="25%" align="center" valign="top" bgcolor="{bg}" '
-            f'style="padding:14px 6px;background-color:{bg};border-radius:8px;">'
-            f'<span style="font-size:24px;font-weight:700;color:{fg};'
-            f'line-height:1.2;">{value}</span><br>'
-            f'<span style="font-size:10.5px;color:{EMAIL_GRAY};text-transform:uppercase;'
-            f'letter-spacing:.04em;">{label}</span>'
-            f'</td>')
-
-
 def html_section_header(title):
     ''' Build a section header bar. Table-based (not a bare <div>) so it never
         sits as a naked div immediately before a sibling <table> in the same
@@ -1476,8 +1450,8 @@ def html_pill(bg, fg, text, align=None):
     ''' Build a small colored status badge as an auto-width single-cell table
         (bgcolor attribute + background-color CSS), not a <span> - Outlook's
         Word engine does not honor background-color on inline elements, and
-        <span> has no bgcolor attribute to fall back on (see html_kpi_card for
-        the same issue on block elements). Only safe where the badge is the
+        <span> has no bgcolor attribute to fall back on (the same issue affects
+        block elements). Only safe where the badge is the
         sole content of its table cell: an auto-width table still renders as a
         block, so it cannot sit inline mid-sentence next to other text.
         Keyword arguments:
@@ -1529,9 +1503,8 @@ def html_usage_card(label, ok, err, attrs, prefix):
              '<td style="padding:6px 4px;" align="right">Changed</td><td></td></tr>'
              + "".join(rows) + '</table>')
     # Header row is two <td>s directly in the outer table (not a nested
-    # width="100%" table inside one <td>) - see html_kpi_card for why: Outlook's
-    # Word engine chokes on that nesting. The body row below spans both with
-    # colspan="2".
+    # width="100%" table inside one <td>) - Outlook's Word engine chokes on that
+    # nesting. The body row below spans both with colspan="2".
     return (
         '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
         f'style="border:1px solid {EMAIL_BORDER};border-radius:8px;margin-bottom:14px;'
@@ -1628,17 +1601,18 @@ def generate_email():  # pylint: disable=too-many-locals
     label = PUBLISHERS[ARG.PUBLISHER]['label'] if ARG.PUBLISHER else SOURCES[ARG.SOURCE]['label']
     restrict = f' (--publisher {ARG.PUBLISHER})' if ARG.PUBLISHER else ''
     run_data = JRC.get_run_data(__file__, __version__).strip()
-    mode_badge_bg = EMAIL_GREEN if ARG.WRITE else EMAIL_AMBER
+    run_data = f"{run_data} &middot; {label} mode{restrict} &middot; manifold: {ARG.MANIFOLD}"
     mode_label = 'WRITE' if ARG.WRITE else 'DRY RUN'
+    mode_tone = 'good' if ARG.WRITE else 'warn'
 
     kpis = ''.join([
-        html_kpi_card(f"{COUNT['read']:,}", f"{label} DOIs processed"),
-        html_kpi_card(f"{COUNT['openalex_found']:,}/{COUNT['openalex_error']:,}",
-                      "OpenAlex OK/err", 'bad' if COUNT['openalex_error'] else 'good'),
-        html_kpi_card(f"{COUNT['scholex_found']:,}/{COUNT['scholex_error']:,}",
-                      "ScholeXplorer OK/err", 'bad' if COUNT['scholex_error'] else 'good'),
-        html_kpi_card(f"{COUNT['fetch_error']:,}", "Fetch errors",
-                      'bad' if COUNT['fetch_error'] else 'neutral'),
+        JE.kpi_card(f"{COUNT['read']:,}", f"{label} DOIs processed", width='25%'),
+        JE.kpi_card(f"{COUNT['openalex_found']:,}/{COUNT['openalex_error']:,}",
+                    "OpenAlex OK/err", 'bad' if COUNT['openalex_error'] else 'good', '25%'),
+        JE.kpi_card(f"{COUNT['scholex_found']:,}/{COUNT['scholex_error']:,}",
+                    "ScholeXplorer OK/err", 'bad' if COUNT['scholex_error'] else 'good', '25%'),
+        JE.kpi_card(f"{COUNT['fetch_error']:,}", "Fetch errors",
+                    'bad' if COUNT['fetch_error'] else 'neutral', '25%'),
     ])
 
     citation_rows = [("OpenAlex unchanged (skipped)", f"{COUNT['openalex_unchanged']:,}"),
@@ -1681,40 +1655,11 @@ def generate_email():  # pylint: disable=too-many-locals
     hits_section = (html_section_header(f"&#11014; Citation Increases ({len(HITS):,})")
                     + html_citation_increases())
 
-    msg = (
-        f'<div style="font-family:-apple-system,\'Segoe UI\',Roboto,Helvetica,Arial,sans-serif;'
-        f'background-color:#eef1f4;padding:8px 0;">'
-        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>'
-        '<td align="center" style="padding:8px 14px 32px 14px;">'
-        '<table role="presentation" width="720" cellpadding="0" cellspacing="0" '
-        'bgcolor="#ffffff" '
-        f'style="max-width:720px;width:100%;background-color:#ffffff;border-radius:10px;'
-        f'border:1px solid {EMAIL_BORDER};overflow:hidden;">'
-        f'<tr><td bgcolor="{EMAIL_NAVY}" style="background-color:{EMAIL_NAVY};'
-        f'padding:22px 28px;">'
-        f'<div style="color:#ffffff;font-size:19px;font-weight:600;">'
-        f'{os.path.basename(__file__)}&nbsp;'
-        f'<span style="font-weight:400;opacity:.7;font-size:14px;">v{__version__}</span></div>'
-        f'<div style="color:#c9d6e6;font-size:12.5px;margin-top:6px;">{run_data} &middot; '
-        f'{label} mode{restrict} &middot; '
-        f'<span style="background-color:{mode_badge_bg};color:#fff;border-radius:10px;'
-        f'padding:1px 9px;font-size:11px;font-weight:600;letter-spacing:.03em;">'
-        f'{mode_label}</span> &middot; manifold: {ARG.MANIFOLD}</div></td></tr>'
-        f'<tr><td style="padding:22px 22px 6px 22px;">'
-        # cellspacing (not CSS margin, which <td> mostly ignores) puts a real gap
-        # between the KPI tiles; Outlook's Word engine honors this old-school
-        # HTML attribute far more reliably than CSS spacing tricks.
-        f'<table role="presentation" width="100%" cellpadding="0" cellspacing="6"><tr>'
-        f'{kpis}</tr></table></td></tr>'
-        f'<tr><td style="padding:18px 28px 4px 28px;">{citation_section}</td></tr>'
-        f'<tr><td style="padding:20px 28px 4px 28px;">{usage_section}</td></tr>'
-        f'<tr><td style="padding:16px 28px 6px 28px;">{hits_section}</td></tr>'
-        f'<tr><td bgcolor="{EMAIL_STRIPE_BG}" style="padding:18px 28px;'
-        f'background-color:{EMAIL_STRIPE_BG};color:{EMAIL_GRAY};'
-        f'font-size:11px;text-align:center;border-top:1px solid {EMAIL_BORDER};">'
-        'Generated by sync_citations.py &middot; Data and Information Services &middot; '
-        'Janelia Research Campus</td></tr>'
-        '</table></td></tr></table></div>')
+    body = (JE.body_row(citation_section, '18px 28px 4px 28px')
+            + JE.body_row(usage_section, '20px 28px 4px 28px')
+            + JE.body_row(hits_section, '16px 28px 6px 28px'))
+    msg = JE.render(os.path.basename(__file__), __version__, run_data,
+                    mode_label, mode_tone, kpis, body)
 
     try:
         if ARG.TEST:

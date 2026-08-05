@@ -36,7 +36,7 @@ With Changes table listing every updated author (linked to their /userui/
 record) with a plain-English diff of exactly what changed on their record.
 """
 
-__version__ = '6.3.2'
+__version__ = '6.3.3'
 
 import argparse
 import collections
@@ -50,6 +50,7 @@ import traceback
 import requests
 from tqdm import tqdm
 import jrc_common.jrc_common as JRC
+import jrc_email.jrc_email as JE
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation,logging-not-lazy
 
@@ -62,21 +63,11 @@ ARG = DIS = LOGGER = None
 IGNORE = {}
 TIMEOUT = (requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout,
            requests.exceptions.Timeout)
-# HTML run-summary email palette (generate_email and its html_* helpers). Mirrors
-# sync_citations.py/tag_janelia_acks.py's email convention: inline styles only (no
-# <style> block/classes) for reliable rendering across email clients including
-# older Outlook.
+# Palette for the bespoke run-summary email tables (html_metric_rows and
+# html_changes_table); the banner/KPI/section-header shell comes from jrc_email.
 EMAIL_NAVY = '#1f3a5f'
-EMAIL_GREEN = '#1c7c3f'
-EMAIL_GREEN_BG = '#eefaf1'
-EMAIL_RED = '#c0392b'
-EMAIL_RED_BG = '#fdecea'
-EMAIL_AMBER = '#d68a1f'
-EMAIL_AMBER_BG = '#fdf3e0'
 EMAIL_GRAY = '#5b6b7c'
-EMAIL_GRAY_BG = '#f2f4f6'
 EMAIL_STRIPE_BG = '#f7f9fb'
-EMAIL_BORDER = '#eef1f4'
 
 def terminate_program(msg=None):
     ''' Terminate the program gracefully
@@ -418,57 +409,9 @@ def record_updates(idresp, row):
     return dirty
 
 
-def html_kpi_card(value, label, tone='neutral'):
-    ''' Build one KPI stat tile for the run-summary email's header row.
-        A single <td> carries the box look directly (bgcolor attribute +
-        background-color, no nested table) - Outlook's Word rendering engine
-        chokes on a percentage-width table nested inside a percentage-width <td>.
-        Keyword arguments:
-          value: display value (already formatted, e.g. "3")
-          label: caption under the value
-          tone: 'neutral', 'good', 'amber', or 'bad' - selects the tile's
-                color scheme
-        Returns:
-          HTML for one table cell
-    '''
-    bg, fg = {'good': (EMAIL_GREEN_BG, EMAIL_GREEN),
-              'bad': (EMAIL_RED_BG, EMAIL_RED),
-              'amber': (EMAIL_AMBER_BG, EMAIL_AMBER),
-              'neutral': (EMAIL_GRAY_BG, EMAIL_GRAY)}[tone]
-    return (f'<td width="25%" align="center" valign="top" bgcolor="{bg}" '
-            f'style="padding:14px 6px;background-color:{bg};border-radius:8px;">'
-            f'<span style="font-size:24px;font-weight:700;color:{fg};'
-            f'line-height:1.2;">{value}</span><br>'
-            f'<span style="font-size:10.5px;color:{EMAIL_GRAY};text-transform:uppercase;'
-            f'letter-spacing:.04em;">{label}</span>'
-            f'</td>')
-
-
-def html_section_header(title):
-    ''' Build a section header bar for the run-summary email. Table-based
-        (not a bare <div>) so it never sits as a naked div immediately before
-        a sibling <table> inside the same <td> - Outlook's Word rendering
-        engine can misparse that div-then-table boundary and leak a stray
-        closing tag as literal visible text (only masked when the sibling
-        content happens to be a <div> too, e.g. an empty-state message
-        instead of a real table).  The spacer row substitutes for CSS
-        margin-bottom, which <td> doesn't honor.
-        Keyword arguments:
-          title: section title (may include an HTML entity icon prefix)
-        Returns:
-          HTML table block
-    '''
-    return ('<table role="presentation" width="100%" cellpadding="0" cellspacing="0">'
-            f'<tr><td style="font-size:14px;font-weight:700;color:{EMAIL_NAVY};'
-            f'border-bottom:2px solid {EMAIL_BORDER};padding-bottom:7px;">'
-            f'{title}</td></tr>'
-            '<tr><td style="height:10px;line-height:10px;font-size:1px;">&nbsp;</td></tr>'
-            '</table>')
-
-
 def html_metric_rows(rows):
     ''' Build a zebra-striped label/value table for the run-summary email.
-        No margin-top on the table itself (html_section_header's trailing
+        No margin-top on the table itself (the section header's trailing
         spacer row already provides that gap) - confirmed via a real Outlook
         test that a <table> carrying its own margin-top, sitting immediately
         after a sibling table's </table>, leaks a stray closing tag as
@@ -537,29 +480,27 @@ def html_changes_table(changes_log):
 def generate_email(changes_log):
     ''' Generate and send the HTML run-summary email: a header banner (run
         data, DRY RUN/WRITE badge), KPI stat tiles, a change-type breakdown,
-        and the Authors with changes table. Built entirely from inline
-        styles/tables (no <style> block) for compatibility with older email
-        clients, matching the convention used by sync_citations.py and the
-        acknowledgement sync scripts.
+        and the Authors with changes table. The banner/KPI/section-header shell
+        is built with the shared jrc_email library; the Change Breakdown and
+        Authors-with-changes tables remain bespoke inline helpers.
         Keyword arguments:
           changes_log: list of {name, userId, changes} dicts from update_orcid()
         Returns:
           None
     '''
-    run_data = JRC.get_run_data(__file__, __version__).strip()
-    mode_badge_bg = EMAIL_GREEN if ARG.WRITE else EMAIL_AMBER
+    run_data = (JRC.get_run_data(__file__, __version__).strip()
+                + f" &middot; manifold: {ARG.MANIFOLD}")
     mode_label = 'WRITE' if ARG.WRITE else 'DRY RUN'
-
+    mode_tone = 'good' if ARG.WRITE else 'warn'
     kpis = ''.join([
-        html_kpi_card(f"{COUNT['orcid']:,}", "Authors read"),
-        html_kpi_card(f"{COUNT['updated']:,}", "Authors updated",
-                      'good' if COUNT['updated'] else 'neutral'),
-        html_kpi_card(f"{COUNT['written']:,}", "Authors written",
-                      'good' if COUNT['written'] else 'neutral'),
-        html_kpi_card(f"{COUNT['alumni']:,}", "Former employees",
-                      'amber' if COUNT['alumni'] else 'neutral'),
+        JE.kpi_card(f"{COUNT['orcid']:,}", "Authors read", width='25%'),
+        JE.kpi_card(f"{COUNT['updated']:,}", "Authors updated",
+                    'good' if COUNT['updated'] else 'neutral', '25%'),
+        JE.kpi_card(f"{COUNT['written']:,}", "Authors written",
+                    'good' if COUNT['written'] else 'neutral', '25%'),
+        JE.kpi_card(f"{COUNT['alumni']:,}", "Former employees",
+                    'warn' if COUNT['alumni'] else 'neutral', '25%'),
     ])
-
     breakdown_rows = [
         ("Names updated", f"{COUNT['name']:,}"),
         ("Affiliations updated", f"{COUNT['affiliations']:,}"),
@@ -569,47 +510,13 @@ def generate_email(changes_log):
         ("Set to former employee", f"{COUNT['alumni']:,}"),
         ("No People record (skipped)", f"{COUNT['no_people_record']:,}"),
     ]
-    breakdown_section = (html_section_header("&#128202; Change Breakdown")
-                         + html_metric_rows(breakdown_rows))
-
-    changes_section = (html_section_header(f"&#128100; Authors With Changes "
-                                           f"({len(changes_log):,})")
-                       + html_changes_table(changes_log))
-
-    msg = (
-        f'<div style="font-family:-apple-system,\'Segoe UI\',Roboto,Helvetica,Arial,sans-serif;'
-        f'background-color:#eef1f4;padding:8px 0;">'
-        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>'
-        '<td align="center" style="padding:8px 14px 32px 14px;">'
-        '<table role="presentation" width="720" cellpadding="0" cellspacing="0" '
-        'bgcolor="#ffffff" '
-        f'style="max-width:720px;width:100%;background-color:#ffffff;border-radius:10px;'
-        f'border:1px solid {EMAIL_BORDER};overflow:hidden;">'
-        f'<tr><td bgcolor="{EMAIL_NAVY}" style="background-color:{EMAIL_NAVY};'
-        f'padding:22px 28px;">'
-        f'<div style="color:#ffffff;font-size:19px;font-weight:600;">'
-        f'{os.path.basename(__file__)}&nbsp;'
-        f'<span style="font-weight:400;opacity:.7;font-size:14px;">v{__version__}</span></div>'
-        f'<div style="color:#c9d6e6;font-size:12.5px;margin-top:6px;">{run_data} &middot; '
-        f'manifold: {ARG.MANIFOLD} &middot; '
-        f'<span style="background-color:{mode_badge_bg};color:#fff;border-radius:10px;'
-        f'padding:1px 9px;font-size:11px;font-weight:600;letter-spacing:.03em;">'
-        f'{mode_label}</span></div></td></tr>'
-        f'<tr><td style="padding:22px 22px 6px 22px;">'
-        # cellspacing (not CSS margin, which <td> mostly ignores) puts a real gap
-        # between the KPI tiles; Outlook's Word engine honors this old-school
-        # HTML attribute far more reliably than CSS spacing tricks.
-        f'<table role="presentation" width="100%" cellpadding="0" cellspacing="6"><tr>'
-        f'{kpis}</tr></table></td></tr>'
-        f'<tr><td style="padding:18px 28px 4px 28px;">{breakdown_section}</td></tr>'
-        f'<tr><td style="padding:20px 28px 4px 28px;">{changes_section}</td></tr>'
-        f'<tr><td bgcolor="{EMAIL_STRIPE_BG}" style="padding:18px 28px;'
-        f'background-color:{EMAIL_STRIPE_BG};color:{EMAIL_GRAY};'
-        f'font-size:11px;text-align:center;border-top:1px solid {EMAIL_BORDER};">'
-        'Generated by update_janelians_from_people.py &middot; Data and Information Services '
-        '&middot; Janelia Research Campus</td></tr>'
-        '</table></td></tr></table></div>')
-
+    breakdown = (JE.section_header("&#128202; Change Breakdown")
+                 + html_metric_rows(breakdown_rows))
+    changes = (JE.section_header(f"&#128100; Authors With Changes ({len(changes_log):,})")
+               + html_changes_table(changes_log))
+    body = JE.body_row(breakdown) + JE.body_row(changes)
+    msg = JE.render(os.path.basename(__file__), __version__, run_data,
+                    mode_label, mode_tone, kpis, body)
     subject = "Janelians updated from People system"
     email = DIS['developer'] if ARG.TEST else DIS['receivers']
     filename = 'people_orcid_updates.json'

@@ -10,7 +10,7 @@
     linked to orcid.org).
 '''
 
-__version__ = '2.1.2'
+__version__ = '2.1.3'
 
 import argparse
 import collections
@@ -27,6 +27,7 @@ import requests
 from tqdm import tqdm
 import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
+import jrc_email.jrc_email as JE
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation
 
@@ -51,20 +52,13 @@ TIMEOUT = (requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout,
 ADDED = []
 OUTPUT = {"name_error": [], "name_multi_records": [], "name_not_found": [], "orcid_exists": [],
           "orcid_mismatch": [], "orcid_added": []}
-# HTML run-summary email palette (generate_email and its html_* helpers). Mirrors
-# the sibling sync scripts: inline styles only (no <style> block/classes) for
-# reliable rendering across email clients including older Outlook.
+# Palette for the bespoke email tables (html_metric_rows, html_added_table) that
+# jrc_email does not cover; the run-summary shell, KPI tiles and section headers
+# now come from jrc_email. Inline styles only, for reliable rendering in older
+# Outlook.
 EMAIL_NAVY = '#1f3a5f'
-EMAIL_GREEN = '#1c7c3f'
-EMAIL_GREEN_BG = '#eefaf1'
-EMAIL_RED = '#c0392b'
-EMAIL_RED_BG = '#fdecea'
-EMAIL_AMBER = '#d68a1f'
-EMAIL_AMBER_BG = '#fdf3e0'
 EMAIL_GRAY = '#5b6b7c'
-EMAIL_GRAY_BG = '#f2f4f6'
 EMAIL_STRIPE_BG = '#f7f9fb'
-EMAIL_BORDER = '#eef1f4'
 
 def terminate_program(msg=None):
     ''' Terminate the program gracefully
@@ -314,61 +308,17 @@ def process_orcid(oid):
     check_orcid(oid, name, family, given)
 
 
-def html_kpi_card(value, label, tone='neutral'):
-    ''' Build one KPI stat tile for the run-summary email's header row. A single
-        <td> carries the box look directly (bgcolor + background-color, no nested
-        table) - Outlook's Word engine chokes on a percentage-width table nested
-        in a percentage-width <td>.
-        Keyword arguments:
-          value: display value (already formatted)
-          label: caption under the value
-          tone: 'neutral', 'good', 'amber', or 'bad' - selects the color scheme
-        Returns:
-          HTML for one table cell
-    '''
-    bg, fg = {'good': (EMAIL_GREEN_BG, EMAIL_GREEN),
-              'bad': (EMAIL_RED_BG, EMAIL_RED),
-              'amber': (EMAIL_AMBER_BG, EMAIL_AMBER),
-              'neutral': (EMAIL_GRAY_BG, EMAIL_GRAY)}[tone]
-    return (f'<td width="25%" align="center" valign="top" bgcolor="{bg}" '
-            f'style="padding:14px 6px;background-color:{bg};border-radius:8px;">'
-            f'<span style="font-size:24px;font-weight:700;color:{fg};'
-            f'line-height:1.2;">{value}</span><br>'
-            f'<span style="font-size:10.5px;color:{EMAIL_GRAY};text-transform:uppercase;'
-            f'letter-spacing:.04em;">{label}</span>'
-            f'</td>')
-
-
-def html_section_header(title):
-    ''' Build a section header bar. Table-based (not a bare <div>) so it never
-        sits as a naked div immediately before a sibling <table> in the same
-        <td> - Outlook's Word engine can misparse that boundary and leak a stray
-        closing tag as literal text. The spacer row substitutes for CSS
-        margin-bottom, which <td> doesn't honor.
-        Keyword arguments:
-          title: section title (may include an HTML entity icon prefix)
-        Returns:
-          HTML table block
-    '''
-    return ('<table role="presentation" width="100%" cellpadding="0" cellspacing="0">'
-            f'<tr><td style="font-size:14px;font-weight:700;color:{EMAIL_NAVY};'
-            f'border-bottom:2px solid {EMAIL_BORDER};padding-bottom:7px;">'
-            f'{title}</td></tr>'
-            '<tr><td style="height:10px;line-height:10px;font-size:1px;">&nbsp;</td></tr>'
-            '</table>')
-
-
 def html_metric_rows(rows):
     ''' Build a zebra-striped label/value table. No per-cell border-radius:
         Outlook's Word engine can leak a cell's opening tag as literal text in
         tables that repeat the same complex inline style across many rows, so
         cells use only plain background-color striping. Also no margin-top on
-        the table itself (html_section_header's trailing spacer row already
-        provides that gap) - confirmed via a real Outlook test that a <table>
-        carrying its own margin-top, sitting immediately after a sibling
-        table's </table>, leaks a stray closing tag as literal visible text.
-        A trailing spacer row absorbs the last-row-before-</table> boundary
-        (see html_section_header).
+        the table itself (the jrc_email section header above already provides
+        that gap via its margin-bottom) - confirmed via a real Outlook test that
+        a <table> carrying its own margin-top, sitting immediately after a
+        sibling table's </table>, leaks a stray closing tag as literal visible
+        text. A trailing spacer row absorbs the last-row-before-</table>
+        boundary.
         Keyword arguments:
           rows: list of (label, value) pairs
         Returns:
@@ -434,15 +384,16 @@ def generate_email(dois, fname):
           None
     '''
     run_data = JRC.get_run_data(__file__, __version__).strip()
-    mode_badge_bg = EMAIL_GREEN if ARG.WRITE else EMAIL_AMBER
+    run_data += f" &middot; institution: {ARG.INSTITUTION} &middot; manifold: {ARG.MANIFOLD}"
     mode_label = 'WRITE' if ARG.WRITE else 'DRY RUN'
+    mode_tone = 'good' if ARG.WRITE else 'warn'
     kpis = ''.join([
-        html_kpi_card(f"{COUNT['read']:,}", "ORCIDs read"),
-        html_kpi_card(f"{COUNT['considered']:,}", "Considered"),
-        html_kpi_card(f"{len(OUTPUT['orcid_added']):,}", "Added",
-                      'good' if OUTPUT['orcid_added'] else 'neutral'),
-        html_kpi_card(f"{len(OUTPUT['orcid_mismatch']):,}", "Mismatches",
-                      'amber' if OUTPUT['orcid_mismatch'] else 'neutral'),
+        JE.kpi_card(f"{COUNT['read']:,}", "ORCIDs read", width='25%'),
+        JE.kpi_card(f"{COUNT['considered']:,}", "Considered", width='25%'),
+        JE.kpi_card(f"{len(OUTPUT['orcid_added']):,}", "Added",
+                    'good' if OUTPUT['orcid_added'] else 'neutral', '25%'),
+        JE.kpi_card(f"{len(OUTPUT['orcid_mismatch']):,}", "Mismatches",
+                    'warn' if OUTPUT['orcid_mismatch'] else 'neutral', '25%'),
     ])
     breakdown_rows = [
         ("Already have ORCID", f"{len(OUTPUT['orcid_exists']):,}"),
@@ -456,38 +407,14 @@ def generate_email(dois, fname):
     ]
     if dois:
         breakdown_rows.append(("DOIs to update", f"{len(dois):,}"))
-    breakdown_section = (html_section_header("&#128202; Change Breakdown")
-                         + html_metric_rows(breakdown_rows))
-    added_section = (html_section_header(f"&#9989; ORCIDs Added ({len(ADDED):,})")
-                     + html_added_table(ADDED))
-    msg = (
-        f'<div style="font-family:-apple-system,\'Segoe UI\',Roboto,Helvetica,Arial,sans-serif;'
-        f'background-color:#eef1f4;padding:8px 0;">'
-        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>'
-        '<td align="center" style="padding:8px 14px 32px 14px;">'
-        '<table role="presentation" width="720" cellpadding="0" cellspacing="0" bgcolor="#ffffff" '
-        f'style="max-width:720px;width:100%;background-color:#ffffff;border-radius:10px;'
-        f'border:1px solid {EMAIL_BORDER};overflow:hidden;">'
-        f'<tr><td bgcolor="{EMAIL_NAVY}" style="background-color:{EMAIL_NAVY};padding:22px 28px;">'
-        f'<div style="color:#ffffff;font-size:19px;font-weight:600;">'
-        f'{os.path.basename(__file__)}&nbsp;'
-        f'<span style="font-weight:400;opacity:.7;font-size:14px;">v{__version__}</span></div>'
-        f'<div style="color:#c9d6e6;font-size:12.5px;margin-top:6px;">{run_data} &middot; '
-        f'institution: {ARG.INSTITUTION} &middot; manifold: {ARG.MANIFOLD} &middot; '
-        f'<span style="background-color:{mode_badge_bg};color:#fff;border-radius:10px;'
-        f'padding:1px 9px;font-size:11px;font-weight:600;letter-spacing:.03em;">'
-        f'{mode_label}</span></div></td></tr>'
-        f'<tr><td style="padding:22px 22px 6px 22px;">'
-        f'<table role="presentation" width="100%" cellpadding="0" cellspacing="6"><tr>'
-        f'{kpis}</tr></table></td></tr>'
-        f'<tr><td style="padding:18px 28px 4px 28px;">{breakdown_section}</td></tr>'
-        f'<tr><td style="padding:20px 28px 4px 28px;">{added_section}</td></tr>'
-        f'<tr><td bgcolor="{EMAIL_STRIPE_BG}" style="padding:18px 28px;'
-        f'background-color:{EMAIL_STRIPE_BG};color:{EMAIL_GRAY};'
-        f'font-size:11px;text-align:center;border-top:1px solid {EMAIL_BORDER};">'
-        'Generated by apply_orcids.py &middot; Data and Information Services '
-        '&middot; Janelia Research Campus</td></tr>'
-        '</table></td></tr></table></div>')
+    # Bespoke tables (metric rows, Author/ORCID list) that jrc_email doesn't
+    # cover, wrapped in jrc_email section headers + body rows.
+    body = JE.body_row(JE.section_header("&#128202; Change Breakdown")
+                       + html_metric_rows(breakdown_rows))
+    body += JE.body_row(JE.section_header(f"&#9989; ORCIDs Added ({len(ADDED):,})")
+                        + html_added_table(ADDED))
+    msg = JE.render(os.path.basename(__file__), __version__, run_data,
+                    mode_label, mode_tone, kpis, body)
     subject = "ORCIDs added to orcid collection"
     email = DIS['developer'] if ARG.TEST else DIS['receivers']
     attach = fname if (dois and os.path.exists(fname)) else None
