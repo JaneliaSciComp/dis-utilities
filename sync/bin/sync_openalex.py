@@ -16,7 +16,7 @@
     with sync_openalex.json attached.
 """
 
-__version__ = '4.2.1'
+__version__ = '4.2.2'
 
 import argparse
 import collections
@@ -31,6 +31,7 @@ import traceback
 from tqdm import tqdm
 import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
+import jrc_email.jrc_email as JE
 import dis_license_lib as DISL
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation,logging-not-lazy,duplicate-code
@@ -44,20 +45,9 @@ COUNT = collections.defaultdict(lambda: 0, {})
 # Unique raw license strings that couldn't be mapped ("Unknown ... license"),
 # excluding bare URLs (http/https...), for triage - shown in the console and email.
 UNKNOWN_LICENSES = set()
-# HTML run-summary email palette (generate_email and its html_* helpers). Mirrors
-# the sibling sync scripts: inline styles only (no <style> block/classes) for
-# reliable rendering across email clients including older Outlook.
-EMAIL_NAVY = '#1f3a5f'
-EMAIL_GREEN = '#1c7c3f'
-EMAIL_GREEN_BG = '#eefaf1'
-EMAIL_RED = '#c0392b'
-EMAIL_RED_BG = '#fdecea'
-EMAIL_AMBER = '#d68a1f'
-EMAIL_AMBER_BG = '#fdf3e0'
-EMAIL_GRAY = '#5b6b7c'
-EMAIL_GRAY_BG = '#f2f4f6'
+# Row-striping color for the metric/license tables (the only inline email helpers
+# retained; the banner/KPI/section shell now comes from jrc_email).
 EMAIL_STRIPE_BG = '#f7f9fb'
-EMAIL_BORDER = '#eef1f4'
 
 def terminate_program(msg=None):
     ''' Terminate the program gracefully
@@ -294,56 +284,12 @@ def show_counts():
     return msg
 
 
-def html_kpi_card(value, label, tone='neutral'):
-    ''' Build one KPI stat tile for the run-summary email's header row. A single
-        <td> carries the box look directly (bgcolor + background-color, no nested
-        table) - Outlook's Word engine chokes on a percentage-width table nested
-        in a percentage-width <td>.
-        Keyword arguments:
-          value: display value (already formatted)
-          label: caption under the value
-          tone: 'neutral', 'good', 'amber', or 'bad' - selects the color scheme
-        Returns:
-          HTML for one table cell
-    '''
-    bg, fg = {'good': (EMAIL_GREEN_BG, EMAIL_GREEN),
-              'bad': (EMAIL_RED_BG, EMAIL_RED),
-              'amber': (EMAIL_AMBER_BG, EMAIL_AMBER),
-              'neutral': (EMAIL_GRAY_BG, EMAIL_GRAY)}[tone]
-    return (f'<td width="25%" align="center" valign="top" bgcolor="{bg}" '
-            f'style="padding:14px 6px;background-color:{bg};border-radius:8px;">'
-            f'<span style="font-size:24px;font-weight:700;color:{fg};'
-            f'line-height:1.2;">{value}</span><br>'
-            f'<span style="font-size:10.5px;color:{EMAIL_GRAY};text-transform:uppercase;'
-            f'letter-spacing:.04em;">{label}</span>'
-            f'</td>')
-
-
-def html_section_header(title):
-    ''' Build a section header bar. Table-based (not a bare <div>) so it never
-        sits as a naked div immediately before a sibling <table> in the same <td>
-        - Outlook's Word engine can misparse that boundary and leak a stray
-        closing tag as literal text. The spacer row substitutes for CSS
-        margin-bottom, which <td> doesn't honor.
-        Keyword arguments:
-          title: section title (may include an HTML entity icon prefix)
-        Returns:
-          HTML table block
-    '''
-    return ('<table role="presentation" width="100%" cellpadding="0" cellspacing="0">'
-            f'<tr><td style="font-size:14px;font-weight:700;color:{EMAIL_NAVY};'
-            f'border-bottom:2px solid {EMAIL_BORDER};padding-bottom:7px;">'
-            f'{title}</td></tr>'
-            '<tr><td style="height:10px;line-height:10px;font-size:1px;">&nbsp;</td></tr>'
-            '</table>')
-
-
 def html_metric_rows(rows):
     ''' Build a zebra-striped label/value table. No per-cell border-radius:
         Outlook's Word engine can leak a cell's opening tag as literal text in
         tables repeating the same complex inline style across many rows, so cells
         use plain background-color striping. A trailing spacer row absorbs the
-        last-row-before-</table> boundary (see html_section_header).
+        last-row-before-</table> boundary.
         Keyword arguments:
           rows: list of (label, value) pairs
         Returns:
@@ -384,12 +330,11 @@ def html_license_list(licenses):
 
 
 def generate_email(pass1, pass2, unknown_licenses):
-    ''' Generate and send the HTML run-summary email: a header banner (run data,
-        DRY RUN/WRITE badge), KPI stat tiles, two Change Breakdown tables (one
-        for the OA/license pass and one for the OA-status-override pass), and -
-        when any were found - an Unmapped Licenses list. Built entirely from
-        inline styles/tables (no <style> block) for compatibility with older
-        email clients, matching the sibling sync scripts.
+    ''' Generate and send the HTML run-summary email (jrc_email house style): a
+        header banner (run data, manifold/restrict, DRY RUN/WRITE badge), KPI stat
+        tiles, two Change Breakdown tables (OA/license and OA-status-override), and
+        - when any were found - an Unmapped Licenses list. The metric and license
+        tables are kept as inline helpers (jrc_email has no equivalent for them).
         Keyword arguments:
           pass1: counts snapshot from the OA/license pass
           pass2: counts snapshot from the OA-status-override pass
@@ -398,8 +343,6 @@ def generate_email(pass1, pass2, unknown_licenses):
           None
     '''
     run_data = JRC.get_run_data(__file__, __version__).strip()
-    mode_badge_bg = EMAIL_GREEN if ARG.WRITE else EMAIL_AMBER
-    mode_label = 'WRITE' if ARG.WRITE else 'DRY RUN'
     if ARG.DOI:
         restrict = f' &middot; doi: {ARG.DOI}'
     elif ARG.FILE:
@@ -408,14 +351,17 @@ def generate_email(pass1, pass2, unknown_licenses):
         restrict = ' &middot; --new'
     else:
         restrict = ''
+    run_data = f"{run_data} &middot; manifold: {ARG.MANIFOLD}{restrict}"
+    mode_label = 'WRITE' if ARG.WRITE else 'DRY RUN'
+    mode_tone = 'good' if ARG.WRITE else 'warn'
     kpis = ''.join([
-        html_kpi_card(f"{pass1.get('dois', 0):,}", "DOIs read"),
-        html_kpi_card(f"{pass1.get('updated', 0):,}", "OA/license set",
-                      'good' if pass1.get('updated') else 'neutral'),
-        html_kpi_card(f"{pass2.get('updated', 0):,}", "OA overrides",
-                      'good' if pass2.get('updated') else 'neutral'),
-        html_kpi_card(f"{pass1.get('notfound', 0):,}", "Not in OpenAlex",
-                      'amber' if pass1.get('notfound') else 'neutral'),
+        JE.kpi_card(f"{pass1.get('dois', 0):,}", "DOIs read", width='25%'),
+        JE.kpi_card(f"{pass1.get('updated', 0):,}", "OA/license set",
+                    'good' if pass1.get('updated') else 'neutral', '25%'),
+        JE.kpi_card(f"{pass2.get('updated', 0):,}", "OA overrides",
+                    'good' if pass2.get('updated') else 'neutral', '25%'),
+        JE.kpi_card(f"{pass1.get('notfound', 0):,}", "Not in OpenAlex",
+                    'warn' if pass1.get('notfound') else 'neutral', '25%'),
     ])
     oa_rows = [
         ("DOIs read", f"{pass1.get('dois', 0):,}"),
@@ -433,46 +379,16 @@ def generate_email(pass1, pass2, unknown_licenses):
         ("DOIs read", f"{pass2.get('dois', 0):,}"),
         ("Closed &rarr; hybrid overrides", f"{pass2.get('updated', 0):,}"),
     ]
-    oa_section = (html_section_header("&#128220; Open Access / License")
-                  + html_metric_rows(oa_rows))
-    override_section = (html_section_header("&#128260; OA Status Override")
+    body = JE.body_row(JE.section_header("&#128220; Open Access / License")
+                       + html_metric_rows(oa_rows))
+    body += JE.body_row(JE.section_header("&#128260; OA Status Override")
                         + html_metric_rows(override_rows))
-    unknown_block = ''
     if unknown_licenses:
-        unknown_block = (
-            '<tr><td style="padding:20px 28px 4px 28px;">'
-            + html_section_header(f"&#10067; Unmapped Licenses ({len(unknown_licenses):,})")
-            + html_license_list(unknown_licenses)
-            + '</td></tr>')
-    msg = (
-        f'<div style="font-family:-apple-system,\'Segoe UI\',Roboto,Helvetica,Arial,sans-serif;'
-        f'background-color:#eef1f4;padding:8px 0;">'
-        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>'
-        '<td align="center" style="padding:8px 14px 32px 14px;">'
-        '<table role="presentation" width="720" cellpadding="0" cellspacing="0" bgcolor="#ffffff" '
-        f'style="max-width:720px;width:100%;background-color:#ffffff;border-radius:10px;'
-        f'border:1px solid {EMAIL_BORDER};overflow:hidden;">'
-        f'<tr><td bgcolor="{EMAIL_NAVY}" style="background-color:{EMAIL_NAVY};padding:22px 28px;">'
-        f'<div style="color:#ffffff;font-size:19px;font-weight:600;">'
-        f'{os.path.basename(__file__)}&nbsp;'
-        f'<span style="font-weight:400;opacity:.7;font-size:14px;">v{__version__}</span></div>'
-        f'<div style="color:#c9d6e6;font-size:12.5px;margin-top:6px;">{run_data} &middot; '
-        f'manifold: {ARG.MANIFOLD}{restrict} &middot; '
-        f'<span style="background-color:{mode_badge_bg};color:#fff;border-radius:10px;'
-        f'padding:1px 9px;font-size:11px;font-weight:600;letter-spacing:.03em;">'
-        f'{mode_label}</span></div></td></tr>'
-        f'<tr><td style="padding:22px 22px 6px 22px;">'
-        f'<table role="presentation" width="100%" cellpadding="0" cellspacing="6"><tr>'
-        f'{kpis}</tr></table></td></tr>'
-        f'<tr><td style="padding:18px 28px 4px 28px;">{oa_section}</td></tr>'
-        f'<tr><td style="padding:20px 28px 4px 28px;">{override_section}</td></tr>'
-        f'{unknown_block}'
-        f'<tr><td bgcolor="{EMAIL_STRIPE_BG}" style="padding:18px 28px;'
-        f'background-color:{EMAIL_STRIPE_BG};color:{EMAIL_GRAY};'
-        f'font-size:11px;text-align:center;border-top:1px solid {EMAIL_BORDER};">'
-        'Generated by sync_openalex.py &middot; Data and Information Services '
-        '&middot; Janelia Research Campus</td></tr>'
-        '</table></td></tr></table></div>')
+        body += JE.body_row(
+            JE.section_header(f"&#10067; Unmapped Licenses ({len(unknown_licenses):,})")
+            + html_license_list(unknown_licenses))
+    msg = JE.render(os.path.basename(__file__), __version__, run_data,
+                    mode_label, mode_tone, kpis, body)
     subject = "OpenAlex OA/license sync"
     email = DISCONFIG['developer'] if ARG.TEST else DISCONFIG['receivers']
     attach = 'sync_openalex.json' if os.path.exists('sync_openalex.json') else None

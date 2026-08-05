@@ -12,7 +12,7 @@
     their organization is on the ignore list.
 '''
 
-__version__ = '7.3.2'
+__version__ = '7.3.3'
 
 import argparse
 import collections
@@ -26,6 +26,7 @@ import traceback
 import requests
 from tqdm import tqdm
 import jrc_common.jrc_common as JRC
+import jrc_email.jrc_email as JE
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation,logging-not-lazy
 
@@ -39,21 +40,12 @@ IGNORE = {}
 # People API timeouts that @retry (in jrc_common) exhausts and re-raises
 TIMEOUT = (requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout,
            requests.exceptions.Timeout)
-# HTML run-summary email palette (generate_email and its html_* helpers). Mirrors
-# update_janelians_from_people.py/sync_citations.py's email convention: inline
-# styles only (no <style> block/classes) for reliable rendering across email
-# clients including older Outlook.
+# Palette for the retained bespoke email tables (html_metric_rows /
+# html_people_table). The run-summary shell, KPI tiles and section headers now
+# come from jrc_email; inline styles only, for older-Outlook compatibility.
 EMAIL_NAVY = '#1f3a5f'
-EMAIL_GREEN = '#1c7c3f'
-EMAIL_GREEN_BG = '#eefaf1'
-EMAIL_RED = '#c0392b'
-EMAIL_RED_BG = '#fdecea'
-EMAIL_AMBER = '#d68a1f'
-EMAIL_AMBER_BG = '#fdf3e0'
 EMAIL_GRAY = '#5b6b7c'
-EMAIL_GRAY_BG = '#f2f4f6'
 EMAIL_STRIPE_BG = '#f7f9fb'
-EMAIL_BORDER = '#eef1f4'
 
 def terminate_program(msg=None):
     ''' Terminate the program gracefully
@@ -312,52 +304,6 @@ def set_alumni(person, orcid, email_entries, orcid_uid):
         terminate_program(err)
 
 
-def html_kpi_card(value, label, tone='neutral'):
-    ''' Build one KPI stat tile for the run-summary email's header row.
-        A single <td> carries the box look directly (bgcolor attribute +
-        background-color, no nested table) - Outlook's Word rendering engine
-        chokes on a percentage-width table nested inside a percentage-width <td>.
-        Keyword arguments:
-          value: display value (already formatted, e.g. "3")
-          label: caption under the value
-          tone: 'neutral', 'good', 'amber', or 'bad' - selects the tile's
-                color scheme
-        Returns:
-          HTML for one table cell
-    '''
-    bg, fg = {'good': (EMAIL_GREEN_BG, EMAIL_GREEN),
-              'bad': (EMAIL_RED_BG, EMAIL_RED),
-              'amber': (EMAIL_AMBER_BG, EMAIL_AMBER),
-              'neutral': (EMAIL_GRAY_BG, EMAIL_GRAY)}[tone]
-    return (f'<td width="25%" align="center" valign="top" bgcolor="{bg}" '
-            f'style="padding:14px 6px;background-color:{bg};border-radius:8px;">'
-            f'<span style="font-size:24px;font-weight:700;color:{fg};'
-            f'line-height:1.2;">{value}</span><br>'
-            f'<span style="font-size:10.5px;color:{EMAIL_GRAY};text-transform:uppercase;'
-            f'letter-spacing:.04em;">{label}</span>'
-            f'</td>')
-
-
-def html_section_header(title):
-    ''' Build a section header bar for the run-summary email. Table-based
-        (not a bare <div>) so it never sits as a naked div immediately before
-        a sibling <table> inside the same <td> - Outlook's Word rendering
-        engine can misparse that div-then-table boundary and leak a stray
-        closing tag as literal visible text. The spacer row substitutes for
-        CSS margin-bottom, which <td> doesn't honor.
-        Keyword arguments:
-          title: section title (may include an HTML entity icon prefix)
-        Returns:
-          HTML table block
-    '''
-    return ('<table role="presentation" width="100%" cellpadding="0" cellspacing="0">'
-            f'<tr><td style="font-size:14px;font-weight:700;color:{EMAIL_NAVY};'
-            f'border-bottom:2px solid {EMAIL_BORDER};padding-bottom:7px;">'
-            f'{title}</td></tr>'
-            '<tr><td style="height:10px;line-height:10px;font-size:1px;">&nbsp;</td></tr>'
-            '</table>')
-
-
 def html_metric_rows(rows):
     ''' Build a zebra-striped label/value table for the run-summary email.
         Deliberately no per-cell border-radius: Outlook's Word rendering
@@ -366,13 +312,11 @@ def html_metric_rows(rows):
         (confirmed via a real Outlook test - a trailing spacer row alone did
         not fix it), so cells here use only plain background-color striping,
         which Word handles reliably. Also no margin-top on the table itself
-        (html_section_header's trailing spacer row already provides that
-        gap) - confirmed via a real Outlook test that a <table> carrying its
-        own margin-top, sitting immediately after a sibling table's
-        </table>, leaks a stray closing tag as literal visible text. A
-        trailing throwaway spacer row is kept anyway as cheap insurance
-        against the last-row-before-</table> boundary (see
-        html_section_header).
+        (the section header above already provides that gap) - confirmed via a
+        real Outlook test that a <table> carrying its own margin-top, sitting
+        immediately after a sibling table's </table>, leaks a stray closing tag
+        as literal visible text. A trailing throwaway spacer row is kept anyway
+        as cheap insurance against the last-row-before-</table> boundary.
         Keyword arguments:
           rows: list of (label, value_html) pairs
         Returns:
@@ -403,7 +347,7 @@ def html_people_table(entries, empty_message):
         tag as literal visible text in a large, highly-repetitive table like
         this one (Skipped can run to hundreds of rows). A trailing throwaway
         spacer row is kept as cheap insurance against the last-row-before-
-        </table> boundary (see html_section_header).
+        </table> boundary (see html_metric_rows).
         Keyword arguments:
           entries: list of {name, userId, detail} dicts
           empty_message: message to show when entries is empty
@@ -441,9 +385,8 @@ def generate_email(email_entries, new_fname=None):
         Organizations table (org name -> count, sorted by count descending)
         for people skipped due to an ignore-listed organization - listed by
         org rather than by name since that bucket can run to hundreds of
-        people. Built entirely from inline styles/tables (no <style> block)
-        for compatibility with older email clients, matching the convention
-        used by update_janelians_from_people.py and sync_citations.py.
+        people. Rendered in the jrc_email house style; the breakdown and people
+        tables are bespoke (jrc_email has no metric-row or name/detail table).
         Keyword arguments:
           email_entries: {new, boomerang, alumni, skipped} -> list of
                          {name, userId, detail} dicts, and skipped_orgs ->
@@ -454,20 +397,19 @@ def generate_email(email_entries, new_fname=None):
         Returns:
           None
     '''
-    run_data = JRC.get_run_data(__file__, __version__).strip()
-    mode_badge_bg = EMAIL_GREEN if ARG.WRITE else EMAIL_AMBER
+    run_data = (JRC.get_run_data(__file__, __version__).strip()
+                + f" &middot; manifold: {ARG.MANIFOLD}")
     mode_label = 'WRITE' if ARG.WRITE else 'DRY RUN'
-
+    mode_tone = 'good' if ARG.WRITE else 'warn'
     kpis = ''.join([
-        html_kpi_card(f"{COUNT['people']:,}", "Records read"),
-        html_kpi_card(f"{COUNT['new']:,}", "New employees",
-                      'good' if COUNT['new'] else 'neutral'),
-        html_kpi_card(f"{COUNT['boomerang']:,}", "Boomerangs",
-                      'amber' if COUNT['boomerang'] else 'neutral'),
-        html_kpi_card(f"{COUNT['set_alumni']:,}", "Alumni set",
-                      'amber' if COUNT['set_alumni'] else 'neutral'),
+        JE.kpi_card(f"{COUNT['people']:,}", "Records read", width='25%'),
+        JE.kpi_card(f"{COUNT['new']:,}", "New employees",
+                    'good' if COUNT['new'] else 'neutral', '25%'),
+        JE.kpi_card(f"{COUNT['boomerang']:,}", "Boomerangs",
+                    'warn' if COUNT['boomerang'] else 'neutral', '25%'),
+        JE.kpi_card(f"{COUNT['set_alumni']:,}", "Alumni set",
+                    'warn' if COUNT['set_alumni'] else 'neutral', '25%'),
     ])
-
     breakdown_rows = [
         ("Already active", f"{COUNT['already_active']:,}"),
         ("Skipped (no People record)", f"{COUNT['skipped_no_record']:,}"),
@@ -482,67 +424,31 @@ def generate_email(email_entries, new_fname=None):
         ("Records inserted", f"{COUNT['insert']:,}"),
         ("Records updated", f"{COUNT['update']:,}"),
     ]
-    breakdown_section = (html_section_header("&#128202; Change Breakdown")
-                         + html_metric_rows(breakdown_rows))
-
-    new_section = (html_section_header(f"&#128100; New Employees "
-                                       f"({len(email_entries['new']):,})")
-                  + html_people_table(email_entries['new'], "No new employees were added."))
-    boomerang_section = (html_section_header(f"&#128257; Boomerangs "
-                                             f"({len(email_entries['boomerang']):,})")
-                        + html_people_table(email_entries['boomerang'], "No boomerangs."))
-    alumni_section = (html_section_header(f"&#127891; Alumni Set "
-                                          f"({len(email_entries['alumni']):,})")
-                      + html_people_table(email_entries['alumni'], "No one was set to alumni."))
-    skipped_section = (html_section_header(f"&#9940; Skipped "
-                                           f"({len(email_entries['skipped']):,})")
-                      + html_people_table(email_entries['skipped'], "Nobody was skipped."))
+    body = JE.body_row(JE.section_header("&#128202; Change Breakdown")
+                       + html_metric_rows(breakdown_rows))
+    body += JE.body_row(
+        JE.section_header(f"&#128100; New Employees ({len(email_entries['new']):,})")
+        + html_people_table(email_entries['new'], "No new employees were added."))
+    body += JE.body_row(
+        JE.section_header(f"&#128257; Boomerangs ({len(email_entries['boomerang']):,})")
+        + html_people_table(email_entries['boomerang'], "No boomerangs."))
+    body += JE.body_row(
+        JE.section_header(f"&#127891; Alumni Set ({len(email_entries['alumni']):,})")
+        + html_people_table(email_entries['alumni'], "No one was set to alumni."))
+    body += JE.body_row(
+        JE.section_header(f"&#9940; Skipped ({len(email_entries['skipped']):,})")
+        + html_people_table(email_entries['skipped'], "Nobody was skipped."))
     ignored_orgs = sorted(email_entries['skipped_orgs'].items(), key=lambda kv: -kv[1])
-    ignored_org_section = (
-        html_section_header(f"&#127970; Ignored Organizations ({len(ignored_orgs):,})")
-        + (html_metric_rows([(html.escape(org), f"{cnt:,}") for org, cnt in ignored_orgs])
-           if ignored_orgs
-           else f'<div style="color:{EMAIL_GRAY};font-size:13px;">'
-                'No organizations were ignored.</div>'))
-
-    msg = (
-        f'<div style="font-family:-apple-system,\'Segoe UI\',Roboto,Helvetica,Arial,sans-serif;'
-        f'background-color:#eef1f4;padding:8px 0;">'
-        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>'
-        '<td align="center" style="padding:8px 14px 32px 14px;">'
-        '<table role="presentation" width="720" cellpadding="0" cellspacing="0" '
-        'bgcolor="#ffffff" '
-        f'style="max-width:720px;width:100%;background-color:#ffffff;border-radius:10px;'
-        f'border:1px solid {EMAIL_BORDER};overflow:hidden;">'
-        f'<tr><td bgcolor="{EMAIL_NAVY}" style="background-color:{EMAIL_NAVY};'
-        f'padding:22px 28px;">'
-        f'<div style="color:#ffffff;font-size:19px;font-weight:600;">'
-        f'{os.path.basename(__file__)}&nbsp;'
-        f'<span style="font-weight:400;opacity:.7;font-size:14px;">v{__version__}</span></div>'
-        f'<div style="color:#c9d6e6;font-size:12.5px;margin-top:6px;">{run_data} &middot; '
-        f'manifold: {ARG.MANIFOLD} &middot; '
-        f'<span style="background-color:{mode_badge_bg};color:#fff;border-radius:10px;'
-        f'padding:1px 9px;font-size:11px;font-weight:600;letter-spacing:.03em;">'
-        f'{mode_label}</span></div></td></tr>'
-        f'<tr><td style="padding:22px 22px 6px 22px;">'
-        # cellspacing (not CSS margin, which <td> mostly ignores) puts a real gap
-        # between the KPI tiles; Outlook's Word engine honors this old-school
-        # HTML attribute far more reliably than CSS spacing tricks.
-        f'<table role="presentation" width="100%" cellpadding="0" cellspacing="6"><tr>'
-        f'{kpis}</tr></table></td></tr>'
-        f'<tr><td style="padding:18px 28px 4px 28px;">{breakdown_section}</td></tr>'
-        f'<tr><td style="padding:20px 28px 4px 28px;">{new_section}</td></tr>'
-        f'<tr><td style="padding:20px 28px 4px 28px;">{boomerang_section}</td></tr>'
-        f'<tr><td style="padding:20px 28px 4px 28px;">{alumni_section}</td></tr>'
-        f'<tr><td style="padding:20px 28px 4px 28px;">{skipped_section}</td></tr>'
-        f'<tr><td style="padding:20px 28px 4px 28px;">{ignored_org_section}</td></tr>'
-        f'<tr><td bgcolor="{EMAIL_STRIPE_BG}" style="padding:18px 28px;'
-        f'background-color:{EMAIL_STRIPE_BG};color:{EMAIL_GRAY};'
-        f'font-size:11px;text-align:center;border-top:1px solid {EMAIL_BORDER};">'
-        'Generated by add_people_to_orcid.py &middot; Data and Information Services '
-        '&middot; Janelia Research Campus</td></tr>'
-        '</table></td></tr></table></div>')
-
+    ignored_html = (
+        html_metric_rows([(html.escape(org), f"{cnt:,}") for org, cnt in ignored_orgs])
+        if ignored_orgs
+        else f'<div style="color:{EMAIL_GRAY};font-size:13px;">'
+             'No organizations were ignored.</div>')
+    body += JE.body_row(
+        JE.section_header(f"&#127970; Ignored Organizations ({len(ignored_orgs):,})")
+        + ignored_html)
+    msg = JE.render(os.path.basename(__file__), __version__, run_data,
+                    mode_label, mode_tone, kpis, body)
     subject = "Janelians added to orcid collection from People system"
     email = DIS['developer'] if ARG.TEST else DIS['receivers']
     try:
