@@ -2,22 +2,28 @@
     Update the MongoDB org_group collection with data from the People system.
 '''
 
-__version__ = '1.0.0'
+__version__ = '1.1.0'
 
 import argparse
+import collections
+import html
 import json
 from operator import attrgetter
 import os
 import sys
 import jrc_common.jrc_common as JRC
+import jrc_email.jrc_email as JE
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation,logging-not-lazy
 
 # Database
 DB = {}
 # Global variables
-ARG = LOGGER = None
+ARG = DISCONFIG = LOGGER = None
 IGNORE = {}
+# Run summary for the email
+COUNT = collections.defaultdict(lambda: 0, {})
+CHANGES = []
 
 def terminate_program(msg=None):
     ''' Terminate the program gracefully
@@ -181,6 +187,16 @@ def process_list(raw, rec):
             organizations.add(org)
     organizations = sorted(list(organizations))
     print(json.dumps(organizations, indent=2))
+    # Track the membership delta for the run-summary email. Computed regardless of
+    # --write so a dry run still reports what would change.
+    added = sorted(set(organizations) - original_members)
+    removed = sorted(original_members - set(organizations))
+    COUNT['groups'] += 1
+    if added or removed:
+        COUNT['groups_changed'] += 1
+        COUNT['orgs_added'] += len(added)
+        COUNT['orgs_removed'] += len(removed)
+        CHANGES.append({'group': rec['group'], 'added': added, 'removed': removed})
     if not ARG.WRITE:
         return
     try:
@@ -189,13 +205,10 @@ def process_list(raw, rec):
                                                   )
         LOGGER.info(f"Updated {rec['group']}: {result.modified_count} " \
                     + f"record{'' if result.modified_count == 1 else 's'} modified")
-        if result.modified_count > 0:
-            added = set(organizations) - original_members
-            removed = original_members - set(organizations)
-            if added:
-                LOGGER.info(f"Added organizations: {sorted(list(added))}")
-            if removed:
-                LOGGER.info(f"Removed organizations: {sorted(list(removed))}")
+        if added:
+            LOGGER.info(f"Added organizations: {added}")
+        if removed:
+            LOGGER.info(f"Removed organizations: {removed}")
     except Exception as err:
         terminate_program(err)
 
@@ -251,6 +264,63 @@ def update_orgs():
         ARG.PID = rec['manager']
         process_single_group()
 
+
+def generate_email():
+    ''' Build and send the HTML run-summary email (jrc_email house style): KPI
+        tiles for groups processed/changed and orgs added/removed, plus a table of
+        each changed group's added/removed organizations. Recipient is the
+        developer with --test, else the receivers list.
+        Keyword arguments:
+          None
+        Returns:
+          None
+    '''
+    run_data = JRC.get_run_data(__file__, __version__).strip()
+    run_data += f" &middot; manifold: {ARG.MANIFOLD}"
+    mode_label = 'WRITE' if ARG.WRITE else 'DRY RUN'
+    mode_tone = 'good' if ARG.WRITE else 'warn'
+    kpis = ''.join([
+        JE.kpi_card(f"{COUNT['groups']:,}", "Groups processed", width='25%'),
+        JE.kpi_card(f"{COUNT['groups_changed']:,}", "Groups changed",
+                    'good' if COUNT['groups_changed'] else 'neutral', '25%'),
+        JE.kpi_card(f"{COUNT['orgs_added']:,}", "Orgs added",
+                    'good' if COUNT['orgs_added'] else 'neutral', '25%'),
+        JE.kpi_card(f"{COUNT['orgs_removed']:,}", "Orgs removed",
+                    'bad' if COUNT['orgs_removed'] else 'neutral', '25%'),
+    ])
+    if CHANGES:
+        rows = ""
+        for idx, chg in enumerate(CHANGES):
+            bgc = "#f4f6f8" if idx % 2 == 0 else "#ffffff"
+            added = html.escape(", ".join(chg['added'])) if chg['added'] else "&mdash;"
+            removed = html.escape(", ".join(chg['removed'])) if chg['removed'] else "&mdash;"
+            rows += (f'<tr bgcolor="{bgc}" style="background-color:{bgc};">'
+                     f'<td style="padding:6px 12px;vertical-align:top;font-weight:600;">'
+                     f'{html.escape(chg["group"])}</td>'
+                     f'<td style="padding:6px 12px;vertical-align:top;color:#256029;">{added}</td>'
+                     f'<td style="padding:6px 12px;vertical-align:top;color:#5b6b7c;">'
+                     f'{removed}</td></tr>')
+        table = (
+            '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+            'style="border-collapse:collapse;font-size:13px;">'
+            '<tr style="color:#5b6b7c;font-size:10.5px;text-transform:uppercase;'
+            'letter-spacing:.03em;"><td style="padding:6px 12px;">Group</td>'
+            '<td style="padding:6px 12px;">Orgs added</td>'
+            '<td style="padding:6px 12px;">Orgs removed</td></tr>' + rows + '</table>')
+        body = JE.body_row(
+            JE.section_header(f"&#128101; Changed groups ({COUNT['groups_changed']:,})") + table)
+    else:
+        body = JE.body_row('<div style="font-size:13px;color:#5b6b7c;">'
+                           'No org-group membership changes.</div>')
+    msg = JE.render(os.path.basename(__file__), __version__, run_data,
+                    mode_label, mode_tone, kpis, body)
+    email = DISCONFIG['developer'] if ARG.TEST else DISCONFIG['receivers']
+    try:
+        LOGGER.info(f"Sending email to {email}")
+        JRC.send_email(msg, DISCONFIG['sender'], email, "SupOrg to org-group sync", mime='html')
+    except Exception as err:
+        LOGGER.error(f"Could not send email: {err}")
+
 # -----------------------------------------------------------------------------
 
 if __name__ == '__main__':
@@ -266,12 +336,17 @@ if __name__ == '__main__':
                       help='MongoDB manifold (dev, prod)')
     PARSER.add_argument('--write', dest='WRITE', action='store_true',
                         default=False, help='Write to database/config system')
+    PARSER.add_argument('--test', dest='TEST', action='store_true',
+                        default=False, help='Send email to developer only')
     PARSER.add_argument('--verbose', dest='VERBOSE', action='store_true',
                         default=False, help='Flag, Chatty')
     PARSER.add_argument('--debug', dest='DEBUG', action='store_true',
                         default=False, help='Flag, Very chatty')
     ARG = PARSER.parse_args()
     LOGGER = JRC.setup_logging(ARG)
+    DISCONFIG = JRC.simplenamespace_to_dict(JRC.get_config("dis"))
     initialize_program()
     update_orgs()
+    if ARG.TEST or ARG.WRITE:
+        generate_email()
     terminate_program()

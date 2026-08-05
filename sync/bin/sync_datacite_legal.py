@@ -5,19 +5,21 @@
 import argparse
 import collections
 from operator import attrgetter
+import os
 import sys
 from tqdm import tqdm
 import jrc_common.jrc_common as JRC
+import jrc_email.jrc_email as JE
 import dis_license_lib as DISL
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation,duplicate-code
 
 DB = {}
 COUNT = collections.defaultdict(lambda: 0, {})
-ARG = LOGGER = None
+ARG = DISCONFIG = LOGGER = None
 LICENSE = {}
 
-__version__ = '2.0.0'
+__version__ = '2.1.0'
 
 def terminate_program(msg=None):
     ''' Terminate the program gracefully
@@ -119,6 +121,56 @@ def processing():
     print(f"{'DOIs skipped (Unpaywall down):':<32}{COUNT['unpaywall_unreachable']:,}")
     print(f"{'DOIs skipped (OpenAlex down):':<32}{COUNT['openalex_unreachable']:,}")
 
+
+def generate_email():
+    ''' Build and send the HTML run-summary email (jrc_email house style): KPI
+        tiles for the headline counts and a table of the license-resolution
+        diagnostics. Sent only with --test (to the developer) or --write (to the
+        receivers list).
+        Keyword arguments:
+          None
+        Returns:
+          None
+    '''
+    run_data = JRC.get_run_data(__file__, __version__).strip()
+    mode_label = 'WRITE' if ARG.WRITE else 'DRY RUN'
+    mode_tone = 'good' if ARG.WRITE else 'warn'
+    kpis = ''.join([
+        JE.kpi_card(f"{COUNT['read']:,}", "DOIs read", width='25%'),
+        JE.kpi_card(f"{COUNT['updated']:,}", "Licenses set",
+                    'good' if COUNT['updated'] else 'neutral', '25%'),
+        JE.kpi_card(f"{COUNT['no_license']:,}", "No license",
+                    'bad' if COUNT['no_license'] else 'neutral', '25%'),
+        JE.kpi_card(f"{COUNT['pmc_skipped_no_id']:,}", "PMC: no ID", width='25%'),
+    ])
+    diagnostics = [("PMC 429 exhausted", COUNT['pmc_429_exhausted']),
+                   ("PMC unreachable", COUNT['pmc_unreachable']),
+                   ("Unpaywall not indexed", COUNT['unpaywall_not_indexed']),
+                   ("Unpaywall unreachable", COUNT['unpaywall_unreachable']),
+                   ("OpenAlex unreachable", COUNT['openalex_unreachable'])]
+    rows = ""
+    for idx, (label, val) in enumerate(diagnostics):
+        bgc = "#f4f6f8" if idx % 2 == 0 else "#ffffff"
+        rows += (f'<tr bgcolor="{bgc}" style="background-color:{bgc};">'
+                 f'<td style="padding:6px 12px;">{label}</td>'
+                 f'<td style="padding:6px 12px;" align="right">{val:,}</td></tr>')
+    diag_table = (
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+        'style="border-collapse:collapse;font-size:13px;">'
+        '<tr style="color:#5b6b7c;font-size:10.5px;text-transform:uppercase;'
+        'letter-spacing:.03em;"><td style="padding:6px 12px;">Resolution diagnostic</td>'
+        '<td style="padding:6px 12px;" align="right">DOIs</td></tr>'
+        + rows + '</table>')
+    body = JE.body_row(JE.section_header("&#9878; License resolution diagnostics") + diag_table)
+    msg = JE.render(os.path.basename(__file__), __version__, run_data,
+                    mode_label, mode_tone, kpis, body)
+    email = DISCONFIG['developer'] if ARG.TEST else DISCONFIG['receivers']
+    try:
+        LOGGER.info(f"Sending email to {email}")
+        JRC.send_email(msg, DISCONFIG['sender'], email, "DataCite legal sync", mime='html')
+    except Exception as err:
+        LOGGER.error(err)
+
 # -----------------------------------------------------------------------------
 
 if __name__ == '__main__':
@@ -129,12 +181,17 @@ if __name__ == '__main__':
                         help='MongoDB manifold (dev, prod)')
     PARSER.add_argument('--write', dest='WRITE', action='store_true',
                         default=False, help='Write to database')
+    PARSER.add_argument('--test', dest='TEST', action='store_true',
+                        default=False, help='Send email to developer only')
     PARSER.add_argument('--verbose', dest='VERBOSE', action='store_true',
                         default=False, help='Flag, Chatty')
     PARSER.add_argument('--debug', dest='DEBUG', action='store_true',
                         default=False, help='Flag, Very chatty')
     ARG = PARSER.parse_args()
     LOGGER = JRC.setup_logging(ARG)
+    DISCONFIG = JRC.simplenamespace_to_dict(JRC.get_config("dis"))
     initialize_program()
     processing()
+    if ARG.TEST or ARG.WRITE:
+        generate_email()
     terminate_program()
