@@ -7,7 +7,7 @@
            to DIS MongoDB.
 """
 
-__version__ = '22.4.0'
+__version__ = '22.4.1'
 
 import argparse
 import collections
@@ -26,6 +26,7 @@ import requests
 from tqdm import tqdm
 import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
+import jrc_email.jrc_email as JE
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,logging-fstring-interpolation,logging-not-lazy,too-many-lines
 
@@ -1200,17 +1201,22 @@ def generate_emails():
         Returns:
           None
     '''
-    msg = JRC.get_run_data(__file__, __version__)
+    run_data = JRC.get_run_data(__file__, __version__).strip()
     if ARG.SOURCE:
-        msg += f"<br>DOIs passed in from {ARG.SOURCE}<br>"
-    msg += f"The following DOIs were inserted into the {ARG.MANIFOLD} MongoDB DIS database:<br>"
-    for doi in INSERTED:
-        msg += f"<a href='https://dis.int.janelia.org/doiui/{doi}'>{doi}</a><br>"
+        run_data += f" &middot; source: {ARG.SOURCE}"
+    mode_label = 'DEV' if ARG.MANIFOLD == 'dev' else 'PROD'
+    mode_tone = 'warn' if ARG.MANIFOLD == 'dev' else 'good'
+    kpis = JE.kpi_card(f"{len(INSERTED):,}", "DOIs inserted", 'good', width='25%')
+    body = JE.body_row(
+        JE.section_header(f"Inserted DOIs ({len(INSERTED):,})")
+        + JE.doi_card(f"Inserted into {ARG.MANIFOLD} MongoDB", [(doi, None) for doi in INSERTED],
+                      'good'))
+    msg = JE.render(os.path.basename(__file__), __version__, run_data,
+                    mode_label, mode_tone, kpis, body)
     try:
-        LOGGER.info(f"Sending email to {DISCONFIG['receivers']}")
-        JRC.send_email(msg, DISCONFIG['sender'], DISCONFIG['developer'] \
-                       if ARG.MANIFOLD == 'dev' else DISCONFIG['receivers'],
-                       "New DOIs", mime='html')
+        email = DISCONFIG['developer'] if ARG.MANIFOLD == 'dev' else DISCONFIG['receivers']
+        LOGGER.info(f"Sending email to {email}")
+        JRC.send_email(msg, DISCONFIG['sender'], email, "New DOIs", mime='html')
     except Exception as err:
         LOGGER.error(err)
     if not TO_BE_PROCESSED:
