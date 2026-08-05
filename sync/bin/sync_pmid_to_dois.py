@@ -3,7 +3,7 @@
     DOI needs to be in the PubMed or PubMed Central archive.
 '''
 
-__version__ = '6.3.0'
+__version__ = '6.3.1'
 
 import argparse
 import collections
@@ -17,6 +17,7 @@ from metapub import PubMedFetcher
 import metapub.exceptions
 from tqdm import tqdm
 import jrc_common.jrc_common as JRC
+import jrc_email.jrc_email as JE
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation
 
@@ -114,16 +115,49 @@ def postprocessing(audit, error):
         LOGGER.info(f"Wrote {len(audit):,} update{'' if len(audit) == 1 else 's'} to {filename}")
     if (not COUNT['updated']) or (not (ARG.TEST or ARG.WRITE)):
         return
-    text = f"<pre>PMIDs have been added to DOIs.\n\n{msg}</pre>"
+    # House-style HTML run summary (jrc_email): KPI tiles for the headline counts
+    # and a compact "Update breakdown" table for the per-source detail (jrc_email
+    # has no label/value-table primitive), with the updates file attached.
+    run_data = JRC.get_run_data(__file__, __version__).strip()
+    mode_label = 'WRITE' if ARG.WRITE else 'DRY RUN'
+    mode_tone = 'good' if ARG.WRITE else 'warn'
+    kpis = ''.join([
+        JE.kpi_card(f"{COUNT['doi']:,}", "DOIs read", width='25%'),
+        JE.kpi_card(f"{COUNT['updated']:,}", "DOIs updated",
+                    'good' if COUNT['updated'] else 'neutral', '25%'),
+        JE.kpi_card(f"{COUNT['written']:,}", "DOIs written",
+                    'good' if COUNT['written'] else 'neutral', '25%'),
+        JE.kpi_card(f"{COUNT['removed']:,}", "PMIDs removed",
+                    'bad' if COUNT['removed'] else 'neutral', '25%'),
+    ])
+    breakdown = [("PubMed (eutils)", COUNT['PubMed (eutils)']), ("PubMed", COUNT['PubMed']),
+                 ("OA", COUNT['OA']), ("MeSH updates", COUNT['mesh'])]
+    rows = ""
+    for idx, (label, val) in enumerate(breakdown):
+        bgc = "#f4f6f8" if idx % 2 == 0 else "#ffffff"
+        rows += (f'<tr bgcolor="{bgc}" style="background-color:{bgc};">'
+                 f'<td style="padding:6px 12px;">{label}</td>'
+                 f'<td style="padding:6px 12px;" align="right">{val:,}</td></tr>')
+    breakdown_table = (
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+        'style="border-collapse:collapse;font-size:13px;">'
+        '<tr style="color:#5b6b7c;font-size:10.5px;text-transform:uppercase;'
+        'letter-spacing:.03em;"><td style="padding:6px 12px;">Source</td>'
+        '<td style="padding:6px 12px;" align="right">DOIs updated</td></tr>'
+        + rows + '</table>')
+    body = JE.body_row(JE.section_header("&#128220; Update breakdown") + breakdown_table)
     if audit:
-        text += "<br><br>Please see the attached file for the new records."
+        body += JE.body_row("<div style='font-size:13px;color:#5b6b7c;'>See the attached "
+                            "<b>pmid_dois_updates.json</b> for the updated records.</div>")
+    email_html = JE.render(os.path.basename(__file__), __version__, run_data,
+                           mode_label, mode_tone, kpis, body)
     subject = "PMIDs added to DOIs"
     email = DIS['developer'] if ARG.TEST else DIS['receivers']
     if audit:
-        JRC.send_email(text, DIS['sender'], email, subject,
+        JRC.send_email(email_html, DIS['sender'], email, subject,
                        attachment=filename, mime='html')
     else:
-        JRC.send_email(text, DIS['sender'], email, subject, mime='html')
+        JRC.send_email(email_html, DIS['sender'], email, subject, mime='html')
 
 
 def get_mesh_array(mesh):

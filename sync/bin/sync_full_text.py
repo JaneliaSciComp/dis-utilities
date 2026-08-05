@@ -2,7 +2,7 @@
     Update links to full-text files for DOIs. PDFs are preferred.
 '''
 
-__version__ = '2.0.0'
+__version__ = '2.1.0'
 
 import argparse
 import collections
@@ -15,6 +15,7 @@ from metapub import FindIt
 from tqdm import tqdm
 import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
+import jrc_email.jrc_email as JE
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation
 
@@ -23,7 +24,7 @@ DB = {}
 # Counters
 COUNT = collections.defaultdict(lambda: 0, {})
 # Global variables
-ARG = CONFIG = LOGGER = None
+ARG = CONFIG = DISCONFIG = LOGGER = None
 
 def terminate_program(msg=None):
     ''' Terminate the program gracefully
@@ -142,6 +143,49 @@ def download_file(doi, url):
         LOGGER.error(f"Error downloading {url}: {err}")
 
 
+def generate_email():
+    ''' Send the house-style HTML run-summary email (jrc_email): KPI tiles for the
+        headline counts plus a per-source full-text breakdown table. Sent to the
+        developer only with --test, otherwise to the configured receivers.
+        Keyword arguments:
+          None
+        Returns:
+          None
+    '''
+    run_data = JRC.get_run_data(__file__, __version__).strip()
+    mode_label = 'WRITE' if ARG.WRITE else 'DRY RUN'
+    mode_tone = 'good' if ARG.WRITE else 'warn'
+    kpis = ''.join([
+        JE.kpi_card(f"{COUNT['read']:,}", "DOIs checked", width='25%'),
+        JE.kpi_card(f"{COUNT['updated']:,}", "Full text found",
+                    'good' if COUNT['updated'] else 'neutral', '25%'),
+        JE.kpi_card(f"{COUNT['not_found']:,}", "Not found",
+                    'bad' if COUNT['not_found'] else 'neutral', '25%'),
+        JE.kpi_card(f"{COUNT['downloaded']:,}", "PDFs downloaded", width='25%'),
+    ])
+    sources = [("bioRxiv", COUNT['biorxiv']), ("Crossref", COUNT['link']),
+               ("eLife", COUNT['elife']), ("OpenAlex", COUNT['openalex']),
+               ("OA.Report", COUNT['oa']), ("PMC", COUNT['pmc'])]
+    rows = ""
+    for idx, (label, val) in enumerate(sources):
+        bgc = "#f4f6f8" if idx % 2 == 0 else "#ffffff"
+        rows += (f'<tr bgcolor="{bgc}" style="background-color:{bgc};">'
+                 f'<td style="padding:6px 12px;">{label}</td>'
+                 f'<td style="padding:6px 12px;" align="right">{val:,}</td></tr>')
+    table = (
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+        'style="border-collapse:collapse;font-size:13px;">'
+        '<tr style="color:#5b6b7c;font-size:10.5px;text-transform:uppercase;'
+        'letter-spacing:.03em;"><td style="padding:6px 12px;">Source</td>'
+        '<td style="padding:6px 12px;" align="right">Full text found</td></tr>'
+        + rows + '</table>')
+    body = JE.body_row(JE.section_header("&#128196; Full-text sources") + table)
+    email_html = JE.render(os.path.basename(__file__), __version__, run_data,
+                           mode_label, mode_tone, kpis, body)
+    recipient = DISCONFIG['developer'] if ARG.TEST else DISCONFIG['receivers']
+    JRC.send_email(email_html, DISCONFIG['sender'], recipient, "Full-text sync", mime='html')
+
+
 def processing():
     ''' Update full-text links for DOIs
         Keyword arguments:
@@ -201,6 +245,7 @@ def processing():
         with open('dois_missing_fulltext.txt', 'w', encoding='utf-8') as f:
             for line in notfound:
                 f.write(line + '\n')
+    COUNT['read'] = cnt
     print(f"DOIs checked:    {cnt:,}")
     print("Sources:")
     print(f"  bioRxiv:       {COUNT['biorxiv']:,}")
@@ -212,6 +257,8 @@ def processing():
     print(f"DOIs updated:    {COUNT['updated']:,}")
     print(f"PDFs downloaded: {COUNT['downloaded']:,}")
     print(f"DOIs not found:  {COUNT['not_found']:,}")
+    if ARG.TEST or ARG.WRITE:
+        generate_email()
 
 # -----------------------------------------------------------------------------
 
@@ -227,6 +274,8 @@ if __name__ == '__main__':
     PARSER.add_argument('--manifold', dest='MANIFOLD', action='store',
                         default='prod', choices=['dev', 'prod'],
                         help='MongoDB manifold (dev, prod)')
+    PARSER.add_argument('--test', dest='TEST', action='store_true',
+                        default=False, help='Send email to developer only')
     PARSER.add_argument('--write', dest='WRITE', action='store_true',
                         default=False, help='Write to database/config system')
     PARSER.add_argument('--verbose', dest='VERBOSE', action='store_true',
@@ -236,6 +285,7 @@ if __name__ == '__main__':
     ARG = PARSER.parse_args()
     LOGGER = JRC.setup_logging(ARG)
     initialize_program()
+    DISCONFIG = JRC.simplenamespace_to_dict(JRC.get_config("dis"))
     CONFIG = configparser.ConfigParser()
     CONFIG.read('config.ini')
     processing()
