@@ -315,6 +315,31 @@ div.scroll {max-height: 200px;
             padding: 8px;
 }
 
+/* Bordered, scrollable pane with an always-visible styled scrollbar, so it
+   reads clearly as a scroll box (tag-metrics Tags table). */
+div.tag-scrollbox {max-height: 520px;
+                   overflow-y: scroll;
+                   border: 1px solid var(--muted-border);
+                   border-radius: 5px;
+}
+
+/* Shared always-visible teal scrollbar for the app's scroll boxes - Firefox via
+   scrollbar-color, Chrome/Safari via ::-webkit-scrollbar - so scroll panes are
+   obvious even where the OS hides scrollbars at rest (e.g. the DOI-detail author
+   lists in div.scroll, and the tag-metrics table in div.tag-scrollbox). */
+div.tag-scrollbox, div.scroll {scrollbar-color: var(--table-accent) var(--page-bg);}
+div.tag-scrollbox::-webkit-scrollbar,
+div.scroll::-webkit-scrollbar {width: 12px;}
+div.tag-scrollbox::-webkit-scrollbar-track,
+div.scroll::-webkit-scrollbar-track {background: var(--page-bg);
+                                     border-radius: 5px;
+}
+div.tag-scrollbox::-webkit-scrollbar-thumb,
+div.scroll::-webkit-scrollbar-thumb {background: var(--table-accent);
+                                     border-radius: 6px;
+                                     border: 3px solid var(--page-bg);
+}
+
 div.codescroll-full {height: calc(100vh - 200px);
                      width: 90%;
                      overflow: auto;

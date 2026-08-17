@@ -671,7 +671,8 @@ def _format_heatmap_value(val, fmt):
 
 
 def heat_map(data, title, x_field, y_field, value_field, width=950, height=500,
-             value_format="$0,0", palette=None, col_totals=False, row_totals=False):
+             value_format="$0,0", palette=None, col_totals=False, row_totals=False,
+             highlight_max_total=False):
     ''' Create a heat map
         Keyword arguments:
           data: dict with lists keyed by x_field, y_field, and value_field
@@ -685,6 +686,8 @@ def heat_map(data, title, x_field, y_field, value_field, width=950, height=500,
           palette: list of colors to use (optional, defaults to TURBO256_STRETCHED)
           col_totals: label string for a totals row summing each column; False disables (optional)
           row_totals: label string for a totals column summing each row; False disables (optional)
+          highlight_max_total: outline the largest cell in the totals row and the totals
+                               column (optional; only has effect with col_totals/row_totals)
         Returns:
           Figure components (chartscript, chartdiv)
     '''
@@ -736,6 +739,24 @@ def heat_map(data, title, x_field, y_field, value_field, width=950, height=500,
             p.text(x=x_field, y=y_field, text='text', source=tot_source,
                    text_align='center', text_baseline='middle',
                    text_font_size=font_size, text_color='black', text_font_style='bold')
+    if highlight_max_total:
+        # Outline the largest cell in each totals band (peak column, peak row).
+        hl_x, hl_y = [], []
+        for tot_source in (col_total_source, row_total_source):
+            if tot_source is None:
+                continue
+            vals = list(tot_source.data[value_field])
+            if not vals:
+                continue
+            top_val = max(vals)
+            for xv, yv, val in zip(tot_source.data[x_field], tot_source.data[y_field], vals):
+                if val == top_val:
+                    hl_x.append(xv)
+                    hl_y.append(yv)
+        if hl_x:
+            hl_source = ColumnDataSource({x_field: hl_x, y_field: hl_y})
+            p.rect(x=x_field, y=y_field, width=1, height=1, source=hl_source,
+                   fill_alpha=0, line_color="#111827", line_width=3)
     color_bar = ColorBar(color_mapper=mapper,
                          ticker=BasicTicker(desired_num_ticks=8),
                          formatter=NumeralTickFormatter(format=value_format),
