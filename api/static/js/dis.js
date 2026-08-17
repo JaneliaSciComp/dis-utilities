@@ -77,6 +77,31 @@ function applyRowFilters(tid, counter) {
   });
 }
 
+// Filter a class-tagged table: hide/show body rows of class `cls` in table
+// `tid`, flip the button label (id btnId) between labelAfterHide/labelAfterShow,
+// and recompute footer totals - every tfoot cell carrying
+// data-sum-col="<0-based column>" is re-summed over the still-visible rows.
+function filterTagTable(tid, btnId, cls, labelAfterHide, labelAfterShow) {
+  const rows = $('#' + tid + ' > tbody > tr.' + cls);
+  const hide = rows.filter(':visible').length > 0;
+  rows.toggle(!hide);
+  if (btnId && labelAfterHide && labelAfterShow) {
+    $('#' + btnId).text(hide ? labelAfterHide : labelAfterShow);
+  }
+  $('#' + tid + ' tfoot [data-sum-col]').each(function () {
+    const col = parseInt($(this).attr('data-sum-col'), 10);
+    let sum = 0;
+    $('#' + tid + ' > tbody > tr:visible').each(function () {
+      const c = this.cells[col];
+      if (c) {
+        const n = parseInt((c.textContent || '').replace(/[^\d-]/g, ''), 10);
+        if (!isNaN(n)) { sum += n; }
+      }
+    });
+    $(this).text(sum.toLocaleString());
+  });
+}
+
 // Tag-chip filter: clicking a chip shows only rows carrying its tag-<slug>
 // class; clicking the active chip again clears the filter. Composes with
 // toggler()/cycle_filter() via applyRowFilters(), so it works alongside the

@@ -48,7 +48,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.3.0"
+__version__ = "120.4.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -359,6 +359,8 @@ def get_custom_payload(ipd, display_value):
         ipd['field'] = CUSTOM_REGEX[ipd['field']]['field']
     elif ipd['value'] == "!EXISTS!":
         ipd['value'] = {"$exists": 1}
+    elif ipd['value'] == "!NOTEXISTS!":
+        ipd['value'] = {"$exists": 0}
     if ipd.get('title'):
         fdisplay = ipd['title']
     else:
@@ -3950,12 +3952,19 @@ def show_acknowledgement_metrics(limit=10):
             total[col] += count
         trows.append(cells)
         row_classes.append(rclass)
-    footer = [fcell('TOTAL', colspan=2)] + [fcell(f"{total[c]:,}", align='center') for c in cols]
+    # Numeric footer cells carry data-sum-col (0-based body column) so the active-
+    # SupOrg filter (filterTagTable) re-sums them over the visible rows. The id must
+    # be unique on the page (the tab pane is id='tags'), so use 'acktags'.
+    footer = [fcell('TOTAL', colspan=2)] + [
+        safe(f"<th style='text-align: center;' data-sum-col='{i + 2}'>{total[c]:,}</th>")
+        for i, c in enumerate(cols)]
     entity_table = render_table(['Acknowledgement', 'SupOrg'] + cols, trows,
-                                table_id='types', css='tablesorter numbers-scroll',
+                                table_id='acktags', css='tablesorter numbers-scroll',
                                 row_classes=row_classes, footer=footer)
-    cbutton = "<button class=\"btn btn-outline-warning\" " \
-              + "onclick=\"$('.other').toggle();\">Filter for active SupOrgs</button>"
+    cbutton = ("<button id=\"acktags-filter\" class=\"btn btn-outline-warning\" "
+               "onclick=\"filterTagTable('acktags','acktags-filter','other',"
+               "'Show all tags','Filter for active SupOrgs')\">"
+               "Filter for active SupOrgs</button>")
     ent_cards = stat_cards([("Acknowledgements", f"{len(tags):,}"),
                             ("Active SupOrgs", f"{active:,}")], div_id='ent-stats')
     ent_chartscript = ent_chartdiv = ""
@@ -4060,6 +4069,335 @@ def show_acknowledgement_metrics(limit=10):
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="Acknowledgement metrics", html=html,
                                          navbar=generate_navbar('Acknowledgements')))
+
+
+@app.route('/tag_metrics/<int:limit>')
+@app.route('/tag_metrics')
+def show_tag_metrics(limit=15):
+    ''' Tag metrics - a tabbed page over the jrc_tag field on the dois collection
+        (Janelia author affiliation/lab/project tags; external_dois carry none).
+        Tabs: Tags (per-tag Crossref/DataCite counts + top-tags chart), By year
+        (tagging coverage + tagged-DOI volume by publishing year), and Trends
+        (per-tag heat maps by year, one per registrar). A shared coverage header
+        and an actionable untagged-DOIs callout sit above the tabs.
+        Keyword arguments:
+          limit: top-N limit for the top-tags chart and heat maps
+        Returns:
+          Response
+    '''
+    coll = DB['dis'].dois
+    try:
+        orgs = DL.get_supervisory_orgs(DB['dis'].suporg)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get supervisory orgs"),
+                               message=error_message(err))
+    # Coverage: tagged vs untagged DOIs, split by registrar (jrc_obtained_from)
+    try:
+        cov = {}
+        for src in ('Crossref', 'DataCite'):
+            tot = coll.count_documents({"jrc_obtained_from": src})
+            tag = coll.count_documents({"jrc_obtained_from": src,
+                                        "jrc_tag.0": {"$exists": True}})
+            cov[src] = (tag, tot - tag, tot)
+        # Per-tag Crossref/DataCite counts
+        agg = list(coll.aggregate([{"$match": {"jrc_tag.0": {"$exists": True}}},
+                                   {"$unwind": "$jrc_tag"},
+                                   {"$group": {"_id": {"name": "$jrc_tag.name",
+                                                       "src": "$jrc_obtained_from"},
+                                               "count": {"$sum": 1}}}]))
+        yr = {"$substr": ["$jrc_publishing_date", 0, 4]}
+        yagg = list(coll.aggregate([
+            {"$match": {"jrc_tag.0": {"$exists": True},
+                        "jrc_publishing_date": {"$exists": True}}},
+            {"$group": {"_id": {"yr": yr, "src": "$jrc_obtained_from"}, "n": {"$sum": 1}}}]))
+        # Tagging coverage by year: tagged vs untagged (all dated Janelia DOIs)
+        cyagg = list(coll.aggregate([
+            {"$match": {"jrc_publishing_date": {"$exists": True}}},
+            {"$project": {"yr": yr, "tagged": {"$cond": [{"$gt": [
+                {"$size": {"$ifNull": ["$jrc_tag", []]}}, 0]}, 1, 0]}}},
+            {"$group": {"_id": "$yr", "all": {"$sum": 1}, "tagged": {"$sum": "$tagged"}}}]))
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not compute tag metrics"),
+                               message=error_message(err))
+
+    def pct(num, den):
+        return f"{num / den * 100:.1f}%" if den else "0.0%"
+    # ----- shared coverage header -----
+    cov_rows = [[src, f"{t:,} ({pct(t, tot)})", f"{u:,} ({pct(u, tot)})", f"{tot:,}"]
+                for src, (t, u, tot) in cov.items()]
+    gt = sum(v[0] for v in cov.values())
+    gu = sum(v[1] for v in cov.values())
+    gg = sum(v[2] for v in cov.values())
+    cov_footer = [fcell('TOTAL'), fcell(f"{gt:,} ({pct(gt, gg)})", align='center'),
+                  fcell(f"{gu:,} ({pct(gu, gg)})", align='center'), fcell(f"{gg:,}", align='center')]
+    cov_table = render_table(['Registrar', 'Tagged', 'Untagged', 'Total'], cov_rows,
+                             table_id='tagcoverage', css='tablesorter numbers-scroll',
+                             footer=cov_footer, width=460)
+    coverage_html = ("<h5 style='margin:14px 0 6px 0;'>Tag coverage</h5>"
+                     "<div style='color:#a8c4e0;font-size:0.82em;margin-bottom:8px;'>"
+                     "Tags apply to Janelia-authored DOIs only. "
+                     "&ldquo;Tagged&rdquo; = at least one tag.</div>" + cov_table)
+
+    # Untagged actionable callout: drill into the untagged DOIs via /doiui/custom
+    # (POST form; !NOTEXISTS! -> {"$exists": 0} on jrc_tag.0, matching the coverage
+    # untagged counts). One button per non-empty registrar plus an "All" button.
+    def untagged_button(label, count, src=None):
+        src_input = (f'<input type="hidden" name="jrc_obtained_from" value="{src}">'
+                     if src else '')
+        return ('<form method="POST" action="/doiui/custom" style="display:inline;'
+                'margin:0 6px 0 0;">'
+                '<input type="hidden" name="field" value="jrc_tag.0">'
+                '<input type="hidden" name="value" value="!NOTEXISTS!">'
+                '<input type="hidden" name="title" value="Untagged">' + src_input
+                + '<button type="submit" class="btn btn-sm btn-outline-warning" '
+                f'style="padding:1px 8px;">{label}: {count:,}</button></form>')
+    if gu:
+        buttons = untagged_button("All", gu)
+        for src in ('Crossref', 'DataCite'):
+            if cov[src][1]:
+                buttons += untagged_button(src, cov[src][1], src)
+        coverage_html += (
+            "<div style='margin:10px 0 4px 0;padding:8px 12px;border-left:4px solid "
+            "#f0ad4e;background:rgba(240,173,78,0.08);font-size:0.9em;'>"
+            f"<b>Untagged:</b> {gu:,} Janelia DOIs carry no tags. Review "
+            "&ndash; " + buttons + "</div>")
+    # ----- Tags tab: per-tag table + top-tags chart -----
+    tags = {}
+    for row in agg:
+        name = row['_id'].get('name')
+        if not name:
+            continue
+        entry = tags.setdefault(name, {'Crossref': 0, 'DataCite': 0})
+        if row['_id'].get('src') in ('Crossref', 'DataCite'):
+            entry[row['_id']['src']] += row['count']
+    trows = []
+    row_classes = []
+    active = 0
+    tot_cr = tot_dc = 0
+
+    def count_cell(cnt, name, source):
+        ''' A tag/registrar DOI count rendered as a drill-down link: nav_post posts
+            to /doiui/custom for jrc_tag.name = name filtered to that registrar.
+            Zero counts stay as plain text (no empty result page). '''
+        if not cnt:
+            return f"{cnt:,}"
+        # str(escape(...)) keeps the name HTML-safe but leaves the attribute's own
+        # quotes literal (a bare Markup would escape those too and break the tag).
+        onclick = ("onclick='nav_post(\"jrc_tag.name\",\"" + str(escape(name))
+                   + "\",\"" + source + "\")'")
+        return f"<a href='#' {onclick}>{cnt:,}</a>"
+    for name in sorted(tags, key=lambda n: tags[n]['Crossref'] + tags[n]['DataCite'], reverse=True):
+        cri = tags[name]['Crossref']
+        dci = tags[name]['DataCite']
+        tot_cr += cri
+        tot_dc += dci
+        rclass = 'other'
+        if name in orgs:
+            if 'active' in orgs[name]:
+                org = "<span style='color: lime;'>Yes</span>"
+                rclass = 'active'
+                active += 1
+            else:
+                org = "<span style='color: yellow;'>Inactive</span>"
+        else:
+            org = "<span style='color: red;'>No</span>"
+        link = f"<a href='/tag/{quote(name, safe='')}'>{escape(name)}</a>"
+        trows.append([safe(link), safe(org), safe(count_cell(cri, name, 'Crossref')),
+                      safe(count_cell(dci, name, 'DataCite')), f"{cri + dci:,}"])
+        row_classes.append(rclass)
+    # Numeric footer cells carry data-sum-col (0-based body column) so the active-
+    # SupOrg filter (filterTagTable) can re-sum them over the visible rows.
+    tag_footer = [fcell('TOTAL', colspan=2),
+                  safe(f"<th style='text-align: center;' data-sum-col='2'>{tot_cr:,}</th>"),
+                  safe(f"<th style='text-align: center;' data-sum-col='3'>{tot_dc:,}</th>"),
+                  safe("<th style='text-align: center;' data-sum-col='4'>"
+                       f"{tot_cr + tot_dc:,}</th>")]
+    # id must NOT be 'tags' - the Bootstrap tab pane already uses id='tags', and a
+    # duplicate id makes $('#tags ...') resolve to the pane, breaking the footer re-sum.
+    tag_table = render_table(['Tag', 'SupOrg', 'Crossref', 'DataCite', 'Total'], trows,
+                             table_id='tagtable', css='tablesorter numbers-scroll',
+                             row_classes=row_classes, footer=tag_footer)
+    entries = tot_cr + tot_dc
+    avg_tags = entries / gt if gt else 0
+    tag_cards = stat_cards([("Distinct tags", f"{len(tags):,}"),
+                            ("Active SupOrgs", f"{active:,}"),
+                            ("Avg tags / tagged DOI", f"{avg_tags:.2f}")], div_id='tag-stats')
+    tag_note = ("<div style='color:#a8c4e0;font-size:0.82em;margin:6px 0 8px 0;'>"
+                "Counts below are tag <b>entries</b>, not DOIs: a DOI can carry several "
+                f"tags (avg {avg_tags:.2f} per tagged DOI), so the column totals "
+                f"({entries:,}) exceed the {gt:,} tagged DOIs in the coverage table above."
+                "</div>")
+    cbutton = ("<button id=\"tags-filter\" class=\"btn btn-outline-warning\" "
+               "onclick=\"filterTagTable('tagtable','tags-filter','other',"
+               "'Show all tags','Filter for active SupOrgs')\">"
+               "Filter for active SupOrgs</button>")
+    tag_chartscript = tag_chartdiv = ""
+    if tags:
+        totals = {n: v['Crossref'] + v['DataCite'] for n, v in tags.items()}
+        top = sorted(totals, key=totals.get, reverse=True)[:limit]
+        chart_data = {n: {'Crossref': tags[n]['Crossref'], 'DataCite': tags[n]['DataCite']}
+                      for n in top}
+        ctitle = "Top tags"
+        if len(totals) > limit:
+            ctitle += f" (top {limit} of {len(totals):,})"
+        nav = {n: f"/tag/{quote(n, safe='')}" for n in chart_data}
+        tag_chartscript, tag_chartdiv = DP.hbar_stacked_chart(
+            chart_data, ['Crossref', 'DataCite'], ctitle, value_label="DOIs",
+            value_format="0,0", nav=nav)
+    # Table and top-tags chart sit side by side (chart is a fixed 650x450 block,
+    # the table scrolls within a matching height) to save vertical space; the row
+    # wraps to stacked on narrow viewports.
+    table_block = ("<div class='tag-scrollbox' style='flex:1 1 540px;min-width:360px;'>"
+                   f"{tag_table}</div>")
+    chart_block = f"<div style='flex:0 0 auto;'>{tag_chartdiv}</div>" if tag_chartdiv else ""
+    tags_body = (tag_cards + tag_note + f"<div style='margin-bottom:8px;'>{cbutton}</div>"
+                 + "<div style='display:flex;flex-wrap:wrap;gap:18px;"
+                 "align-items:flex-start;'>" + table_block + chart_block + "</div>")
+    # ----- By year tab: tagged DOIs per publishing year, Crossref vs DataCite -----
+    ymap = {}
+    for row in yagg:
+        year = row['_id'].get('yr')
+        if not year:
+            continue
+        entry = ymap.setdefault(year, {'Crossref': 0, 'DataCite': 0})
+        if row['_id'].get('src') in ('Crossref', 'DataCite'):
+            entry[row['_id']['src']] += row['n']
+    # Coverage-by-year (tagged vs untagged); green/purple to distinguish it from the
+    # blue/orange registrar split below (matches the acknowledgement-metrics page).
+    cymap = {r['_id']: (r['tagged'], r['all']) for r in cyagg if r['_id']}
+    cov_chartscript = cov_chartdiv = ""
+    cyears = sorted(cymap)
+    if cyears:
+        cydata = {"years": cyears,
+                  "Tagged": [cymap[y][0] for y in cyears],
+                  "Untagged": [cymap[y][1] - cymap[y][0] for y in cyears]}
+        cov_chartscript, cov_chartdiv = DP.stacked_bar_chart(
+            cydata, "Tagging coverage by year (Tagged vs Untagged)", xaxis="years",
+            yaxis=["Tagged", "Untagged"], colors=["#2ca02c", "#9c27b0"],
+            orient=pi / 4, width=1000, height=350)
+    by_chartscript = by_chartdiv = ""
+    years = sorted(ymap)
+    if years:
+        ydata = {"years": years,
+                 "Crossref": [ymap[y]['Crossref'] for y in years],
+                 "DataCite": [ymap[y]['DataCite'] for y in years]}
+        by_chartscript, by_chartdiv = DP.stacked_bar_chart(
+            ydata, "Tagged DOIs by year (by registrar)", xaxis="years",
+            yaxis=["Crossref", "DataCite"], colors=DP.SOURCE_PALETTE,
+            orient=pi / 4, width=1000, height=350)
+    byyear_body = ("<div style='color:#a8c4e0;font-size:0.82em;margin-bottom:8px;'>"
+                   "Coverage = tagged vs untagged Janelia DOIs by publishing year; the "
+                   "volume chart below splits the tagged DOIs by registrar.</div>"
+                   + (cov_chartdiv + "<br>" if cov_chartdiv else "")
+                   + (by_chartdiv or "<div>No dated tagged DOIs.</div>"))
+    # ----- Trends tab: DOIs per publication year, one heat map per registrar
+    # (Crossref / DataCite). Rows = tags, columns = years, cell color = DOI
+    # count, with per-year (Total row) and per-tag (Total column) sums. The maps
+    # show the top-N tags by total (same set in both, so they line up
+    # row-for-row); each map also gets a tab-delimited download of the FULL
+    # tags x years matrix for ALL tags in that registrar. -----
+    trend_chartscript = trend_chartdiv = ""
+    if tags:
+        try:
+            tyrows = list(coll.aggregate([
+                {"$match": {"jrc_tag.0": {"$exists": True},
+                            "jrc_publishing_date": {"$exists": True}}},
+                {"$unwind": "$jrc_tag"},
+                {"$group": {"_id": {"name": "$jrc_tag.name", "yr": yr,
+                                    "src": "$jrc_obtained_from"}, "n": {"$sum": 1}}}]))
+        except Exception as err:
+            return render_template('error.html', urlroot=request.url_root,
+                                   title=render_warning("Could not compute tag trends"),
+                                   message=error_message(err))
+        per = {'Crossref': {}, 'DataCite': {}}
+        yrset = {'Crossref': set(), 'DataCite': set()}
+        for row in tyrows:
+            nm = row['_id'].get('name')
+            year = row['_id'].get('yr')
+            src = row['_id'].get('src')
+            if not (nm and year) or src not in per:
+                continue
+            per[src].setdefault(nm, {})[year] = row['n']
+            yrset[src].add(year)
+        for src in ('Crossref', 'DataCite'):
+            syears = sorted(yrset[src])
+            if not syears:
+                continue
+            # Download: ALL tags for this registrar (rows = tags, cols = years, + Total),
+            # biggest tags first. Covers dated tagged DOIs only (undated can't be placed).
+            src_tags = sorted(per[src], key=lambda n: sum(per[src][n].values()), reverse=True)
+            dl_header = ['Tag'] + syears + ['Total']
+            dl_body = ""
+            for nm in src_tags:
+                counts = [per[src][nm].get(y, 0) for y in syears]
+                dl_body += "\t".join([nm] + [str(c) for c in counts]
+                                     + [str(sum(counts))]) + "\n"
+            dl_button = create_downloadable(f"tag_year_{src.lower()}", dl_header, dl_body)
+            dl_caption = (f"<div style='margin:8px 0 2px 0;'>All {len(src_tags):,} {src} "
+                          f"tags (tags &times; years): {dl_button}</div>")
+            # Heat map: the biggest N tags in THIS registrar
+            src_top = src_tags[:limit]
+            sub = f" (top {limit} of {len(src_tags):,})" if len(src_tags) > limit else ""
+            hx, hy, hval = [], [], []
+            for nm in src_top:
+                for year in syears:
+                    cnt = per[src].get(nm, {}).get(year, 0)
+                    if cnt:
+                        hx.append(year)
+                        hy.append(nm)
+                        hval.append(cnt)
+            map_div = ""
+            if hval:
+                script, div = DP.heat_map(
+                    {"Year": hx, "Tag": hy, "DOIs": hval},
+                    f"{src} DOIs – tagged by publication year{sub}",
+                    x_field="Year", y_field="Tag", value_field="DOIs",
+                    width=1000, value_format="0,0",
+                    col_totals="Total", row_totals="Total", highlight_max_total=True)
+                trend_chartscript += script
+                map_div = div
+            trend_chartdiv += dl_caption + map_div + "<br><br>"
+    trends_body = ("<div style='color:#a8c4e0;font-size:0.82em;margin-bottom:8px;'>"
+                   f"DOI counts per publication year for the biggest {limit} tags in each "
+                   "registrar, as a heat map. Cell color = DOI count (scale at right); hover "
+                   "for exact numbers; the Total row/column give per-year and per-tag sums. "
+                   "Each download button gives the full tags &times; years matrix for "
+                   "<b>all</b> tags in that registrar as a tab-delimited file.</div>"
+                   + (trend_chartdiv or "<div>No dated tagged DOIs.</div>"))
+    # ----- tabs -----
+    active_tab = request.args.get('tab')
+    if active_tab not in ('tags', 'byyear', 'trends'):
+        active_tab = 'tags'
+
+    def tab_button(key, label, is_active):
+        return ('<li class="nav-item" role="presentation">'
+                f'<button class="nav-link{" active" if is_active else ""}" id="{key}-tab" '
+                f'data-toggle="tab" data-target="#{key}" type="button" role="tab" '
+                f'aria-controls="{key}" aria-selected="{"true" if is_active else "false"}">'
+                f'{label}</button></li>')
+
+    def tab_pane(key, body, is_active):
+        cls = "tab-pane fade show active" if is_active else "tab-pane fade"
+        return (f'<div class="{cls}" id="{key}" role="tabpanel" '
+                f'aria-labelledby="{key}-tab"><br>{body}</div>')
+    tabs = ('<ul class="nav nav-tabs" role="tablist">'
+            + tab_button('tags', 'Tags', active_tab == 'tags')
+            + tab_button('byyear', 'By year', active_tab == 'byyear')
+            + tab_button('trends', 'Trends', active_tab == 'trends')
+            + '</ul><div class="tab-content">'
+            + tab_pane('tags', tags_body, active_tab == 'tags')
+            + tab_pane('byyear', byyear_body, active_tab == 'byyear')
+            + tab_pane('trends', trends_body, active_tab == 'trends')
+            + '</div>')
+    bokeh_cdn = '<script src="https://cdn.bokeh.org/bokeh/release/bokeh-3.5.0.min.js"></script>'
+    html = (coverage_html + tabs + bokeh_cdn + tag_chartscript + cov_chartscript
+            + by_chartscript + trend_chartscript)
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="Tag metrics", html=html,
+                                         navbar=generate_navbar('Tag/affiliation')))
 
 # ******************************************************************************
 # * UI endpoints (general)                                                     *
@@ -5841,7 +6179,7 @@ def show_doiui_custom(year='All'):
                 return render_template('error.html', urlroot=request.url_root,
                                        title=render_warning(f"Missing {row}"),
                                        message=f"You must specify a {row}")
-        display_value = '' if ipd['value'] == "!EXISTS!" else ipd['value']
+        display_value = '' if ipd['value'] in ("!EXISTS!", "!NOTEXISTS!") else ipd['value']
         payload, ptitle = get_custom_payload(ipd, display_value)
     else:
         payload = ipd['query']
@@ -12947,140 +13285,16 @@ def ror(rorid=None):
 # ******************************************************************************
 
 @app.route('/dois_tag_ack/<string:tagtype>')
-def show_tag_ack(tagtype):
-    ''' Show DOI tags (jrc_tag) with counts, broken down by jrc_obtained_from
-        (Crossref/DataCite). Acknowledgements now live on the tabbed metrics page
-        at /acknowledgement_metrics (this route is tag-only).
+def show_tag_ack(tagtype):  # pylint: disable=unused-argument
+    ''' Legacy URL: the DOI-tag table now lives on the tabbed /tag_metrics page
+        (Tags tab), which supersedes this standalone view. Redirect there so old
+        links and bookmarks keep working. tagtype is ignored (only "tag" existed).
         Keyword arguments:
-          tagtype: must be "tag"
+          tagtype: former tag type (ignored)
+        Returns:
+          Redirect to /tag_metrics
     '''
-    tag_config = {
-        'tag': {'mongo': 'jrc_tag', 'nav': 'jrc_tag.name',
-                'label': 'Tag', 'errmsg': 'tags', 'title': 'DOI tags',
-                'navbar': 'Tag/affiliation', 'has_curator': False,
-                'has_source_split': True, 'has_doi_type_split': False,
-                'doi_type_link': False},
-    }
-    if tagtype not in tag_config:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Invalid tag type"),
-                               message=f"tagtype must be one of: {', '.join(tag_config)}")
-    cfg = tag_config[tagtype]
-    group_id = {"tag": f"${cfg['mongo']}.name"}
-    project = {"_id": 0, f"{cfg['mongo']}.name": 1}
-    if cfg['has_source_split']:
-        group_id["source"] = "$jrc_obtained_from"
-        project["jrc_obtained_from"] = 1
-    if cfg['has_curator']:
-        group_id["curator"] = f"${cfg['mongo']}.curator"
-        project[f"{cfg['mongo']}.curator"] = 1
-    payload = [{"$unwind": f"${cfg['mongo']}"},
-               {"$project": project},
-               {"$group": {"_id": group_id, "count": {"$sum": 1}}},
-               {"$sort": {"_id.tag": 1}}
-              ]
-    try:
-        orgs = DL.get_supervisory_orgs(DB['dis'].suporg)
-    except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get supervisory orgs"),
-                               message=error_message(err))
-    # Human-curated ack tags can carry any name a curator typed (see
-    # utility/bin/update_tags.py --acknowledge), with no requirement that it
-    # already exist in search_regex - unlike IRIS tags, whose names always
-    # come from there. /acksregexui 404s on a key with no search_regex
-    # document, so only link tags that actually have one.
-    regex_keys = set(DB['dis'].search_regex.distinct('key')) if cfg['doi_type_link'] else set()
-    # Internal (dois) and external (external_dois) DOIs are queried and
-    # combined here - the source collection is not a jrc_obtained_from value,
-    # so it can only be told apart by which collection each count came from.
-    source_cols = SOURCES if cfg['has_source_split'] else []
-    extra_cols = ['Internal', 'External'] if cfg['has_doi_type_split'] else []
-    if cfg['has_curator']:
-        extra_cols += ['IRIS', 'Human']
-    tags = {}
-    for coll_name, doi_type_col in (('dois', 'Internal'), ('external_dois', 'External')):
-        try:
-            rows = DB['dis'][coll_name].aggregate(payload)
-        except Exception as err:
-            return render_template('error.html', urlroot=request.url_root,
-                                   title=render_warning(f"Could not get {cfg['errmsg']} " \
-                                                        + f"for {tagtype} from {coll_name} " \
-                                                        + "collection"),
-                                   message=error_message(err))
-        for row in rows:
-            tag = row['_id'].get('tag')
-            count = row['count']
-            entry = tags.setdefault(tag, {})
-            if cfg['has_source_split']:
-                # external_dois records carry no jrc_obtained_from at all (that
-                # field is dois-only), so $group omits the "source" key
-                # entirely for them rather than setting it to null.
-                source = row['_id'].get('source')
-                if source:
-                    entry[source] = entry.get(source, 0) + count
-            entry[doi_type_col] = entry.get(doi_type_col, 0) + count
-            if cfg['has_curator']:
-                curator_col = 'IRIS' if row['_id'].get('curator') == 'IRIS' else 'Human'
-                entry[curator_col] = entry.get(curator_col, 0) + count
-    trows = []
-    row_classes = []
-    total = {col: 0 for col in source_cols + extra_cols}
-    active = 0
-    for tag, val in tags.items():
-        link = f"<a href='/tag/{escape(tag)}'>{tag}</a>"
-        rclass = 'other'
-        if tag in orgs:
-            if 'active' in orgs[tag]:
-                org = "<span style='color: lime;'>Yes</span>"
-                rclass = 'active'
-                active += 1
-            else:
-                org = "<span style='color: yellow;'>Inactive</span>"
-        else:
-            org = "<span style='color: red;'>No</span>"
-        cells = [safe(link), safe(org)]
-        for source in source_cols:
-            if source in val:
-                onclick = f"onclick='nav_post(\"{cfg['nav']}\",\"{tag}\",\"{source}\")'"
-                link = f"<a href='#' {onclick}>{val[source]:,}</a>"
-                total[source] += val[source]
-            else:
-                link = ""
-            cells.append(safe(link))
-        for col in extra_cols:
-            count = val.get(col, 0)
-            if (cfg['doi_type_link'] and col in ('Internal', 'External') and count
-                    and tag in regex_keys):
-                doi_type_param = col.lower()
-                href = f"/acksregexui/{quote(tag, safe='')}?doi_type={doi_type_param}"
-                cell_html = f"<a href='{href}'>{count:,}</a>"
-            else:
-                cell_html = f"{count:,}" if count else ""
-            cells.append(safe(cell_html))
-            total[col] += count
-        trows.append(cells)
-        row_classes.append(rclass)
-    footer = [fcell('TOTAL', colspan=2)] + [fcell(f"{total[col]:,}", align='center')
-                                            for col in source_cols + extra_cols]
-    html = render_table([cfg['label'], 'SupOrg'] + source_cols + extra_cols, trows,
-                        table_id='types', css='tablesorter numbers-scroll',
-                        row_classes=row_classes, footer=footer)
-    cbutton = "<button class=\"btn btn-outline-warning\" " \
-              + "onclick=\"$('.other').toggle();\">Filter for active SupOrgs</button>"
-    stat_items = [(cfg['label'] + 's', f"{len(tags):,}"), ("Active SupOrgs", f"{active:,}")]
-    if cfg['has_source_split']:
-        stat_items += [("Crossref", f"{total['Crossref']:,}"),
-                       ("DataCite", f"{total['DataCite']:,}")]
-    else:
-        stat_items += [("Internal", f"{total['Internal']:,}"),
-                       ("External", f"{total['External']:,}")]
-    cards = stat_cards(stat_items, div_id='tagack-stats')
-    html = cards + f"<div>{cbutton}{html}</div>"
-    endpoint_access()
-    return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title=cfg['title'], html=html,
-                                         navbar=generate_navbar(cfg['navbar'])))
+    return redirect('/tag_metrics')
 
 
 @app.route('/dois_lab')
@@ -13473,11 +13687,12 @@ def show_projects(option=None):
     if not cnt:
         html = "<p>No projects found</p>"
     else:
-        cards = stat_cards([("Projects", f"{cnt:,}"),
-                            ("Active", f"{active:,}"),
-                            ("Inactive", f"{inactive:,}"),
-                            ("Unknown", f"{unknown:,}")],
-                           div_id='proj-stats')
+        card_items = [("Projects", f"{cnt:,}"),
+                      ("Active", f"{active:,}"),
+                      ("Inactive", f"{inactive:,}")]
+        if unknown:
+            card_items.append(("Unknown", f"{unknown:,}"))
+        cards = stat_cards(card_items, div_id='proj-stats')
         html = cards + html
     title = "Project mapping"
     if option == 'full':
