@@ -65,7 +65,15 @@ HIGH-LEVEL FLOW
    - Calls doi_common.get_acknowledgements, which downloads the paper from arXiv
      (HTML render, then e-print TeX source) and extracts the Acknowledgements
      section.
-6. Europe PMC pass (add_europepmc_internal_acks)
+6. bioRxiv/medRxiv pass (add_biorxiv_internal_acks)
+   - Queries `dois` for records whose DOI matches /10.1101\// or /10.64898\//
+     (the legacy and 2025 openRxiv prefixes) and that lack `jrc_acknowledgements`
+     (skipping any already resolved earlier this run).
+   - Resolves each preprint's free jatsxml URL from the bioRxiv/medRxiv content
+     API (biorxiv server first, then medrxiv) and flattens its <back><ack>.
+   - Reaches preprints the Europe PMC catch-all cannot: EPMC open-access full
+     text needs a PMCID, which preprints lack.
+7. Europe PMC pass (add_europepmc_internal_acks)
    - Runs last, as a catch-all: queries `dois` for every article-like record
      (EPMC_ELIGIBLE_TYPES) still lacking `jrc_acknowledgements` (skipping any
      already resolved earlier this run), searches Europe PMC's open-access subset
@@ -74,19 +82,25 @@ HIGH-LEVEL FLOW
    - Covers DOIs the prefix-based passes miss - notably non-PMC-registered
      publishers whose open-access copy still lands in the Europe PMC OA subset.
      Skips the DataCite dataset/software pool, which Europe PMC does not carry.
-7. Database update (--write mode)
-   - For each collected record, performs a MongoDB update_one setting
+8. Database update (--write mode)
+   - Collected records are written via bulk_write UpdateOne, setting
      `jrc_acknowledgements` and `jrc_ack_source` (the source's display label -
-     eLife/Elsevier/PMC/arXiv) on the matching DOI document.
-8. Output
+     eLife/Elsevier/PMC/arXiv/bioRxiv/medRxiv/Europe PMC) on the matching DOI.
+   - Writes are FLUSHED INCREMENTALLY as the passes run (record_ack/flush_acks,
+     every FLUSH_EVERY new acks) plus a final flush - not one bulk_write at the
+     very end - so a long/throttled pass (notably bioRxiv, whose host rate-limits
+     hard) saves progress continuously and an interrupted run keeps every ack it
+     already committed.
+9. Output
    - Prints a per-source summary of counts.
    - Writes internal_acks.json with all collected acknowledgement records.
    - Writes internal_ack_errors.json if any source calls raised exceptions.
    - Sends a summary email whenever records were found (--write or not):
      a header banner (run data, mode, DRY RUN/WRITE badge), KPI stat tiles per
      source plus an error tile, one card per source
-     (eLife/Elsevier/PMC/arXiv/Europe PMC) listing its DOIs (linked to the DIS
-     UI, with a PMCID column for the PMC and Europe PMC sources), and
+     (eLife/Elsevier/PMC/arXiv/bioRxiv/medRxiv/Europe PMC) listing its DOIs
+     (linked to the DIS UI, with a PMCID column for the PMC and Europe PMC
+     sources), and
      an Errors table when any source call raised. Built entirely from inline
      styles/tables (no <style> block) for compatibility with older email clients,
      matching the convention used by sync_citations.py.
@@ -115,7 +129,7 @@ import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
 import jrc_email.jrc_email as JE
 
-__version__ = '1.6.1'
+__version__ = '1.7.5'
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation,no-member
 
@@ -125,15 +139,26 @@ DB = {}
 COUNT = collections.defaultdict(lambda: 0, {})
 # Global variables
 ARG = DIS = LOGGER = None
+# Incremental-write state: DOIs already persisted this run. Writes are flushed as
+# the passes run (record_ack/flush_acks) instead of one bulk_write at the very end,
+# so a long/throttled pass (notably bioRxiv) saves progress continuously - an
+# interrupted run keeps every ack it already committed.
+WRITTEN = set()
+FLUSH_EVERY = 5
 # Display order for the "source" label stored on each internal-DOI record
 # (add_elife_internal_acks etc.), used to group the run-summary email.
-SOURCE_LABELS = ('eLife', 'Elsevier', 'PMC', 'arXiv', 'Europe PMC')
+SOURCE_LABELS = ('eLife', 'Elsevier', 'PMC', 'arXiv', 'bioRxiv', 'medRxiv', 'Europe PMC')
 # Europe PMC REST endpoints (add_europepmc_internal_acks). fullTextXML is served
 # only for PMCID-bearing open-access articles, so the by-DOI search is filtered
 # to OPEN_ACCESS:Y.
 EPMC_REST = "https://www.ebi.ac.uk/europepmc/webservices/rest/"
 EPMC_SEARCH = EPMC_REST + "search"
 POLITE_HEADERS = {'User-Agent': 'janelia-dis/pull_internal_acks'}
+# bioRxiv/medRxiv content API: /details/<server>/<doi> returns each version's
+# metadata including a free jatsxml URL (no auth). bioRxiv/medRxiv preprints use
+# the 10.1101 (legacy) or 10.64898 (openRxiv, 2025) prefix; the fetcher tries the
+# biorxiv server first, then medrxiv.
+BIORXIV_DETAILS = "https://api.biorxiv.org/details/"
 # Crossref `type` values the Europe PMC pass will try. Europe PMC indexes journal
 # articles, preprints, chapters and proceedings - not datasets/software, so this
 # deliberately skips the large DataCite deposit pool (figshare/Zenodo etc., stored
@@ -192,6 +217,63 @@ def restrict_to_doi(payload):
     return payload
 
 
+def flush_acks(internal):
+    ''' In --write mode, persist ack records not yet written (DOI not in the module
+        WRITTEN set) with one unordered bulk_write, marking them written. Called
+        periodically by record_ack() during long passes AND once at the end of
+        processing(), so a long/throttled run (notably bioRxiv) saves progress as it
+        goes: an interrupted run keeps every ack already committed. On a
+        BulkWriteError the batch's successes still count and the run continues;
+        modified counts accumulate in COUNT['updated']. No-op in a dry run.
+        Keyword arguments:
+          internal: collected ack records
+        Returns:
+          None
+    '''
+    if not ARG.WRITE:
+        return
+    operations = []
+    for rec in internal:
+        if rec['doi'] in WRITTEN:
+            continue
+        WRITTEN.add(rec['doi'])
+        if not isinstance(rec['ack'], str):
+            LOGGER.warning(f"Weird format for {rec['doi']}")
+            continue
+        operations.append(UpdateOne({"doi": rec['doi']},
+                                    {"$set": {"jrc_acknowledgements": rec['ack'],
+                                              "jrc_ack_source": rec['source']}}))
+    if not operations:
+        return
+    try:
+        # Unordered so one failed update doesn't block the rest of the batch.
+        result = DB['dis']['dois'].bulk_write(operations, ordered=False)
+        COUNT['updated'] += result.modified_count
+    except BulkWriteError as err:
+        write_errors = err.details.get('writeErrors', [])
+        COUNT['updated'] += err.details.get('nModified', 0)
+        COUNT['write_errors'] += len(write_errors)
+        LOGGER.error(f"{len(write_errors):,} of {len(operations):,} updates failed: "
+                     f"{write_errors}")
+    except Exception as err:
+        terminate_program(err)
+
+
+def record_ack(internal, rec):
+    ''' Append an ack record; in --write mode flush to the DB every FLUSH_EVERY new
+        records (see flush_acks), so progress is saved incrementally rather than in
+        one bulk_write at the end.
+        Keyword arguments:
+          internal: collected ack records (appended to)
+          rec: the ack record dict ({doi, ack, source, ...})
+        Returns:
+          None
+    '''
+    internal.append(rec)
+    if ARG.WRITE and (len(internal) - len(WRITTEN)) >= FLUSH_EVERY:
+        flush_acks(internal)
+
+
 def add_elife_internal_acks(internal, error):
     ''' Add eLife acknowledgements to the internal DOIs
         Keyword arguments:
@@ -223,9 +305,9 @@ def add_elife_internal_acks(internal, error):
             continue
         if acklist:
             COUNT['elife_add'] += 1
-            internal.append({"doi": doi,
-                             "ack": ' '.join(acklist),
-                             "source": "eLife"})
+            record_ack(internal, {"doi": doi,
+                                  "ack": ' '.join(acklist),
+                                  "source": "eLife"})
 
 
 def add_elsevier_internal_acks(internal, error):
@@ -253,9 +335,9 @@ def add_elsevier_internal_acks(internal, error):
             continue
         if acktext:
             COUNT['elsevier_add'] += 1
-            internal.append({"doi": row['doi'],
-                             "ack": acktext,
-                             "source": "Elsevier"})
+            record_ack(internal, {"doi": row['doi'],
+                                  "ack": acktext,
+                                  "source": "Elsevier"})
 
 
 def add_pmc_internal_acks(internal, error):
@@ -286,10 +368,10 @@ def add_pmc_internal_acks(internal, error):
             continue
         if ack:
             COUNT['pmc_add'] += 1
-            internal.append({"pmcid": row['jrc_pmc'],
-                             "doi": row['doi'],
-                             "ack": ack,
-                             "source": "PMC"})
+            record_ack(internal, {"pmcid": row['jrc_pmc'],
+                                  "doi": row['doi'],
+                                  "ack": ack,
+                                  "source": "PMC"})
 
 
 def add_arxiv_internal_acks(internal, error):
@@ -319,9 +401,122 @@ def add_arxiv_internal_acks(internal, error):
             continue
         if acktext:
             COUNT['arxiv_add'] += 1
-            internal.append({"doi": row['doi'],
-                             "ack": acktext,
-                             "source": "arXiv"})
+            record_ack(internal, {"doi": row['doi'],
+                                  "ack": acktext,
+                                  "source": "arXiv"})
+
+
+def _biorxiv_get(url, retries=4):
+    ''' GET a bioRxiv/medRxiv URL, retrying on 429/5xx with capped backoff - the
+        preprint host's Cloudflare front end throttles aggressively. Raises on a
+        non-2xx status after the retries so the caller records a REAL error rather
+        than silently reporting "no acknowledgement" for what was actually a block.
+        Keyword arguments:
+          url: request URL
+          retries: maximum attempts
+        Returns:
+          A 200 requests.Response (raises on a non-2xx status after the retries)
+    '''
+    if getattr(ARG, 'NO_RETRY', False):
+        retries = 1   # --no-retry: fail fast on a 429 instead of backing off
+    resp = None
+    for attempt in range(retries):
+        resp = requests.get(url, headers=POLITE_HEADERS, timeout=30)
+        if resp.status_code == 200:
+            return resp
+        if resp.status_code not in (429, 500, 502, 503, 504) or attempt == retries - 1:
+            break
+        after = resp.headers.get('Retry-After')
+        try:
+            wait = min(int(after), 30) if after else min(2 ** attempt, 30)
+        except ValueError:
+            wait = min(2 ** attempt, 30)
+        LOGGER.debug(f"bioRxiv HTTP {resp.status_code} for {url}; retrying in {wait}s")
+        time.sleep(wait)
+    resp.raise_for_status()   # non-2xx after retries -> raise (recorded as an error)
+    return resp
+
+
+def _biorxiv_ack(doi):
+    ''' Fetch an acknowledgement for a bioRxiv/medRxiv DOI from its free JATS full
+        text. Resolves the per-article jatsxml URL from the content API (latest
+        version), fetches it, and flattens <back><ack> with the same parser the
+        Europe PMC pass uses. New (openRxiv) and legacy DOIs share the details API,
+        so the biorxiv server is tried first and medrxiv second. A persistent
+        Cloudflare throttle on the jatsxml fetch raises (via _biorxiv_get) so it is
+        recorded as an error, not mistaken for a paper with no acknowledgement.
+        Keyword arguments:
+          doi: preprint DOI (10.1101/... or 10.64898/..., lower-case)
+        Returns:
+          (ack_text, server_label) - ack_text is None when there is no full text or
+          no <ack>; server_label is 'bioRxiv'/'medRxiv' (the server that answered)
+          or None when neither server holds the DOI
+    '''
+    for server, label in (('biorxiv', 'bioRxiv'), ('medrxiv', 'medRxiv')):
+        # The details API (api.biorxiv.org) rarely throttles; a failure here just
+        # means "not this server's DOI", so fall through to the other server.
+        try:
+            coll = _biorxiv_get(f"{BIORXIV_DETAILS}{server}/{doi}").json().get('collection') or []
+        except Exception:
+            continue
+        jats_url = coll[-1].get('jatsxml') if coll and isinstance(coll[-1], dict) else None
+        if not jats_url:
+            continue   # not this server's DOI - try the other
+        # jatsxml is served from the preprint host behind Cloudflare; a persistent
+        # 429 here raises (via _biorxiv_get) and is recorded as an error.
+        parsed = xmltodict.parse(_biorxiv_get(jats_url).content)
+        article = parsed.get('article') or (parsed.get('pmc-articleset') or {}).get('article') or {}
+        ack = (article.get('back') or {}).get('ack')
+        if not ack:
+            return None, label   # found the paper on this server, but it has no <ack>
+        return (DL._parse_pmc_ack(ack) or None), label
+    return None, None
+
+
+def add_biorxiv_internal_acks(internal, error):
+    ''' Add bioRxiv/medRxiv acknowledgements to the internal DOIs. Covers the
+        10.1101 and 10.64898 preprint prefixes, which the Europe PMC catch-all
+        cannot reach (EPMC open-access full text requires a PMCID, preprints lack it).
+        Fetches the ack by DOI from the free preprint JATS, so it captures every
+        preprint's acknowledgement regardless of content. Skips DOIs an earlier
+        pass already resolved this run.
+        Keyword arguments:
+          internal: list of internal DOIs (appended to)
+          error: list of error records (appended to)
+        Returns:
+          None
+    '''
+    already = {row['doi'] for row in internal}
+    # 10.1101 is the legacy bioRxiv/medRxiv prefix; openRxiv migrated to the 10.64898
+    # prefix in 2025, so match both.
+    payload = {"doi": {"$regex": r"10\.(?:1101|64898)/"},
+               "jrc_acknowledgements": {"$exists": False}}
+    payload = restrict_to_doi(payload)
+    try:
+        cnt = DB['dis'].dois.count_documents(payload)
+        if cnt < 1:
+            return
+        LOGGER.info(f"Found {cnt:,} bioRxiv/medRxiv DOIs without acknowledgements")
+        rows = DB['dis'].dois.find(payload, {"doi": 1})
+    except Exception as err:
+        terminate_program(err)
+    pbar = tqdm(rows, total=cnt, desc="Finding bioRxiv acknowledgements")
+    for row in pbar:
+        if row['doi'] in already:
+            continue
+        time.sleep(ARG.SLEEP)   # bioRxiv/medRxiv host 429s aggressively; tune via --sleep
+        try:
+            ack, label = _biorxiv_ack(row['doi'])
+        except Exception as err:
+            error.append({"doi": row['doi'], "source": "biorxiv", "error": str(err)})
+            ack = None
+        if ack:
+            COUNT['biorxiv_add'] += 1
+            record_ack(internal, {"doi": row['doi'], "ack": ack, "source": label})
+        # Live tallies alongside the bar: acks found this run, acks committed to the
+        # DB so far (flush_acks bumps COUNT['updated']), and fetch errors (throttles).
+        pbar.set_postfix(found=COUNT['biorxiv_add'], written=COUNT['updated'],
+                         errors=len(error), refresh=False)
 
 
 def _europepmc_request(url, params=None, retries=3):
@@ -417,10 +612,10 @@ def add_europepmc_internal_acks(internal, error):
             continue
         if ack:
             COUNT['europepmc_add'] += 1
-            internal.append({"pmcid": pmcid,
-                             "doi": row['doi'],
-                             "ack": ack,
-                             "source": "Europe PMC"})
+            record_ack(internal, {"pmcid": pmcid,
+                                  "doi": row['doi'],
+                                  "ack": ack,
+                                  "source": "Europe PMC"})
 
 
 def generate_email(internal, error):
@@ -483,35 +678,17 @@ def processing():
                'elsevier': lambda: add_elsevier_internal_acks(internal, error),
                'pmc': lambda: add_pmc_internal_acks(internal, error),
                'arxiv': lambda: add_arxiv_internal_acks(internal, error),
+               'biorxiv': lambda: add_biorxiv_internal_acks(internal, error),
                'europepmc': lambda: add_europepmc_internal_acks(internal, error)}
     for source, handler in sources.items():
         if ARG.SOURCE in (None, source):
             handler()
-    operations = []
-    for row in tqdm(internal, total=len(internal), desc="Updating internal DOIs"):
-        if not isinstance(row['ack'], str):
-            LOGGER.warning(f"Weird format for {row['doi']}")
-            continue
-        operations.append(UpdateOne({"doi": row['doi']},
-                                    {"$set": {"jrc_acknowledgements": row['ack'],
-                                              "jrc_ack_source": row['source']}}))
-    COUNT['updated'] = len(operations)
-    if ARG.WRITE and operations:
-        # Unordered so one failed update doesn't block the rest of the batch.
-        try:
-            result = DB['dis']['dois'].bulk_write(operations, ordered=False)
-            COUNT['updated'] = result.modified_count
-        except BulkWriteError as err:
-            # Unordered means every non-failing op in the batch already went
-            # through - report the real counts and keep going instead of
-            # losing this run's JSON/email output over one bad document.
-            write_errors = err.details.get('writeErrors', [])
-            COUNT['updated'] = err.details.get('nModified', 0)
-            COUNT['write_errors'] = len(write_errors)
-            LOGGER.error(f"{len(write_errors):,} of {len(operations):,} updates failed: "
-                        f"{write_errors}")
-        except Exception as err:
-            terminate_program(err)
+    # Final flush of anything record_ack()'s periodic flushing didn't cover (each
+    # pass's tail below FLUSH_EVERY). In --write mode the writes have been streaming
+    # to the DB as the passes ran; here we just persist the remainder.
+    flush_acks(internal)
+    if not ARG.WRITE:
+        COUNT['updated'] = sum(1 for rec in internal if isinstance(rec['ack'], str))
     if ARG.SOURCE in (None, 'elife'):
         print(f"eLife DOIs added:    {COUNT['elife_add']:,}")
     if ARG.SOURCE in (None, 'elsevier'):
@@ -520,9 +697,13 @@ def processing():
         print(f"PMC DOIs added:      {COUNT['pmc_add']:,}")
     if ARG.SOURCE in (None, 'arxiv'):
         print(f"arXiv DOIs added:    {COUNT['arxiv_add']:,}")
+    if ARG.SOURCE in (None, 'biorxiv'):
+        print(f"bioRxiv DOIs added:  {COUNT['biorxiv_add']:,}")
     if ARG.SOURCE in (None, 'europepmc'):
         print(f"Europe PMC DOIs added: {COUNT['europepmc_add']:,}")
     print(f"DOIs updated:        {COUNT['updated']:,}")
+    if error:
+        print(f"Fetch errors:        {len(error):,} (e.g. throttled - see internal_ack_errors.json)")
     if COUNT['write_errors']:
         print(f"DOIs failed to update: {COUNT['write_errors']:,}")
     if internal:
@@ -542,9 +723,15 @@ if __name__ == '__main__':
     PARSER.add_argument('--doi', dest='DOI', default=None,
                         help='Restrict processing to a single DOI')
     PARSER.add_argument('--source', dest='SOURCE', action='store',
-                        choices=['elife', 'elsevier', 'pmc', 'arxiv', 'europepmc'],
+                        choices=['elife', 'elsevier', 'pmc', 'arxiv', 'biorxiv', 'europepmc'],
                         default=None,
                         help='Restrict processing to a single source [all]')
+    PARSER.add_argument('--sleep', dest='SLEEP', action='store', type=float, default=3.0,
+                        help='Seconds between bioRxiv/medRxiv requests; raise it if the '
+                             'preprint host throttles (429s) [3.0]')
+    PARSER.add_argument('--no-retry', dest='NO_RETRY', action='store_true', default=False,
+                        help='Fail fast on a bioRxiv 429 instead of retrying with backoff '
+                             '- a quick, lossy pass; re-run (incremental) to accumulate')
     PARSER.add_argument('--write', dest='WRITE', action='store_true',
                         default=False, help='Flag, Update database')
     PARSER.add_argument('--verbose', dest='VERBOSE', action='store_true',
