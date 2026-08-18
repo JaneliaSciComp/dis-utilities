@@ -6,6 +6,7 @@ import collections
 from datetime import date, datetime, timedelta
 from html import escape
 import inspect
+import itertools
 from io import BytesIO
 import json
 from json import JSONEncoder
@@ -48,7 +49,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.4.1"
+__version__ = "120.5.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -4086,9 +4087,10 @@ def show_tag_metrics(limit=15):
     ''' Tag metrics - a tabbed page over the jrc_tag field on the dois collection
         (Janelia author affiliation/lab/project tags; external_dois carry none).
         Tabs: Tags (per-tag Crossref/DataCite counts + top-tags chart), By year
-        (tagging coverage + tagged-DOI volume by publishing year), and Trends
-        (per-tag heat maps by year, one per registrar). A shared coverage header
-        and an actionable untagged-DOIs callout sit above the tabs.
+        (tagging coverage + tagged-DOI volume by publishing year), Trends (per-tag
+        heat maps by year, one per registrar), and Co-tagged (which tags share
+        DOIs - top pairs table + a tag x tag co-occurrence heat map). A shared
+        coverage header and an actionable untagged-DOIs callout sit above the tabs.
         Keyword arguments:
           limit: top-N limit for the top-tags chart and heat maps
         Returns:
@@ -4375,9 +4377,56 @@ def show_tag_metrics(limit=15):
                    "Each download button gives the full tags &times; years matrix for "
                    "<b>all</b> tags in that registrar as a tab-delimited file.</div>"
                    + (trend_chartdiv or "<div>No dated tagged DOIs.</div>"))
+    # ----- Co-tagged tab: which tags share DOIs (collaboration/project structure).
+    # Pair counts over DOIs carrying >=2 tags (only those can co-occur). -----
+    pairs = collections.Counter()
+    try:
+        for row in coll.find({"jrc_tag.1": {"$exists": True}}, {"jrc_tag.name": 1}):
+            names = sorted({tag['name'] for tag in row.get('jrc_tag', []) if tag.get('name')})
+            for name_a, name_b in itertools.combinations(names, 2):
+                pairs[(name_a, name_b)] += 1
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not compute tag co-occurrence"),
+                               message=error_message(err))
+    # Top co-tagged pairs table (each tag links to its page; count = shared DOIs).
+    prows = []
+    for (name_a, name_b), shared in pairs.most_common(limit):
+        la = f"<a href='/tag/{quote(name_a, safe='')}'>{escape(name_a)}</a>"
+        lb = f"<a href='/tag/{quote(name_b, safe='')}'>{escape(name_b)}</a>"
+        prows.append([safe(la), safe(lb), f"{shared:,}"])
+    pair_table = render_table(['Tag', 'Co-tagged with', 'Shared DOIs'], prows,
+                              table_id='cotagpairs', css='tablesorter numbers-scroll')
+    # Tag x tag co-occurrence heat map over the top-N tags by total (diagonal omitted).
+    cotag_top = sorted(tags, key=lambda n: tags[n]['Crossref'] + tags[n]['DataCite'],
+                       reverse=True)[:limit]
+    cooccur_chartscript = cooccur_chartdiv = ""
+    hx, hy, hval = [], [], []
+    for name_a in cotag_top:
+        for name_b in cotag_top:
+            if name_a == name_b:
+                continue
+            shared = pairs.get(tuple(sorted((name_a, name_b))), 0)
+            if shared:
+                hy.append(name_a)
+                hx.append(name_b)
+                hval.append(shared)
+    if hval:
+        cooccur_chartscript, cooccur_chartdiv = DP.heat_map(
+            {"Tag": hy, "Co-tag": hx, "Shared": hval},
+            f"Tag co-occurrence: shared DOIs among the top {len(cotag_top)} tags",
+            x_field="Co-tag", y_field="Tag", value_field="Shared",
+            width=1000, value_format="0,0")
+    cotag_body = ("<div style='color:#a8c4e0;font-size:0.82em;margin-bottom:8px;'>"
+                  "Tags that share DOIs &ndash; collaboration and project structure. The "
+                  f"table lists the top {len(prows)} co-tagged pairs (each tag links to its "
+                  "page); the heat map shows shared-DOI counts among the top tags (diagonal "
+                  "omitted).</div>"
+                  + (pair_table if prows else "<div>No co-tagged DOIs.</div>")
+                  + "<br>" + cooccur_chartdiv)
     # ----- tabs -----
     active_tab = request.args.get('tab')
-    if active_tab not in ('tags', 'byyear', 'trends'):
+    if active_tab not in ('tags', 'byyear', 'trends', 'cotag'):
         active_tab = 'tags'
 
     def tab_button(key, label, is_active):
@@ -4395,14 +4444,16 @@ def show_tag_metrics(limit=15):
             + tab_button('tags', 'Tags', active_tab == 'tags')
             + tab_button('byyear', 'By year', active_tab == 'byyear')
             + tab_button('trends', 'Trends', active_tab == 'trends')
+            + tab_button('cotag', 'Co-tagged', active_tab == 'cotag')
             + '</ul><div class="tab-content">'
             + tab_pane('tags', tags_body, active_tab == 'tags')
             + tab_pane('byyear', byyear_body, active_tab == 'byyear')
             + tab_pane('trends', trends_body, active_tab == 'trends')
+            + tab_pane('cotag', cotag_body, active_tab == 'cotag')
             + '</div>')
     bokeh_cdn = '<script src="https://cdn.bokeh.org/bokeh/release/bokeh-3.5.0.min.js"></script>'
     html = (coverage_html + tabs + bokeh_cdn + tag_chartscript + cov_chartscript
-            + by_chartscript + trend_chartscript)
+            + by_chartscript + trend_chartscript + cooccur_chartscript)
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="Tag metrics", html=html,
