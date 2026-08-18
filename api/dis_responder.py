@@ -48,7 +48,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.4.0"
+__version__ = "120.4.1"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -4040,7 +4040,16 @@ def show_acknowledgement_metrics(limit=10):
     metrics_body = m_html + m_chartdiv
     byyear_body = by_html + by_chartdiv
     sources_body = s_html + s_chartdiv
-    tags_body = ent_cards + f"<div>{cbutton}{entity_table}</div>" + ent_chartdiv
+    # Table and top-entities chart side by side (mirrors the /tag_metrics Tags tab):
+    # the table scrolls within a fixed-height pane, the chart sits beside it, and
+    # the row wraps to stacked on a narrow viewport. The ack table is 6 columns, so
+    # give it a wider basis and an x-scroll guard.
+    ack_table_block = ("<div class='tag-scrollbox' style='flex:1 1 560px;min-width:400px;"
+                       "overflow-x:auto;'>" + entity_table + "</div>")
+    ack_chart_block = f"<div style='flex:0 0 auto;'>{ent_chartdiv}</div>" if ent_chartdiv else ""
+    tags_body = (ent_cards + f"<div style='margin-bottom:8px;'>{cbutton}</div>"
+                 + "<div style='display:flex;flex-wrap:wrap;gap:18px;align-items:flex-start;'>"
+                 + ack_table_block + ack_chart_block + "</div>")
     def tab_button(key, label, is_active):
         return ('<li class="nav-item" role="presentation">'
                 f'<button class="nav-link{" active" if is_active else ""}" id="{key}-tab" '
