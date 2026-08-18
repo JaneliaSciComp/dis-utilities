@@ -773,7 +773,7 @@ def heat_map(data, title, x_field, y_field, value_field, width=950, height=500,
 
 
 def hbar_chart(data, title, value_label="Value", width=650, height=450,  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
-               color=None, value_format="$0,0", show_pct=True, show_values=False, nav=None):
+               color=None, value_format="0,0", show_pct=True, show_values=False, nav=None):
     ''' Create a horizontal bar chart sorted by value (largest at top).
         Accommodates many categories in a fixed footprint and makes relative
         magnitudes easy to compare by bar length.
@@ -784,7 +784,8 @@ def hbar_chart(data, title, value_label="Value", width=650, height=450,  # pylin
           width: figure width in pixels (optional)
           height: figure height in pixels (optional)
           color: single color, list of colors, or palette name (optional)
-          value_format: NumeralJS format for the axis/tooltip (default "$0,0")
+          value_format: NumeralJS format for the axis/tooltip (default "0,0"; pass
+                        "$0,0" for currency, "0%" for a fraction shown as a percent)
           show_pct: include percent-of-total in the hover tooltip (default True)
           show_values: print each value at the end of its bar (default False)
         Returns:
