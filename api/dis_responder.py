@@ -49,7 +49,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.5.0"
+__version__ = "120.8.3"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -5255,204 +5255,272 @@ def show_doi_by_title_ui(title):
 @app.route('/dois_source/<string:year>')
 @app.route('/dois_source')
 def dois_source(year='All'):
-    ''' Show data sources and other statistics
+    ''' Legacy route: the source-only page is now the Sources tab of the tabbed
+        /dois_metrics page. Redirect there (preserving the year) so old links and
+        bookmarks keep working.
+        Keyword arguments:
+          year: publishing year to scope the redirect
+        Returns:
+          Redirect to /dois_metrics
     '''
+    return redirect('/dois_metrics' if year == 'All' else f"/dois_metrics/{year}")
+
+
+@app.route('/dois_metrics/<string:year>')
+@app.route('/dois_metrics')
+def show_dois_metrics(year='All'):
+    ''' DOI metrics - a tabbed page over the dois collection (supersedes the
+        source-only /dois_source). A year pulldown scopes the page. Tabs: Sources
+        (registrar x type/subtype table + by-source and by-load-method pies), By
+        type (resource-type mix), By year (volume by registrar, all years), and
+        Coverage (metadata completeness). Heavy standalone pages are linked, not
+        absorbed (see the "See also" strip).
+        Keyword arguments:
+          year: publishing year to scope to, or 'All'
+        Returns:
+          Response
+    '''
+    coll = DB['dis'].dois
+    yr = {"jrc_publishing_date": {"$regex": "^" + year}} if year != 'All' else {}
+    ysfx = f" ({year})" if year != 'All' else ""
+
+    def pctof(num, den):
+        return f"{num / den * 100:.0f}%" if den else "0%"
+    # ----- shared header: totals + page-wide year filter -----
     try:
-        data, hdict = get_source_data(year)
+        total = coll.count_documents(dict(yr))
+        by_src = {s: coll.count_documents({**yr, "jrc_obtained_from": s})
+                  for s in ('Crossref', 'DataCite')}
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get source data from dois"),
+                               title=render_warning("Could not count DOIs"),
                                message=error_message(err))
-    # HTML and charts
-    trows = []
-    total = 0
+    header = (f"<h5 style='margin:14px 0 6px 0;'>DOI metrics{ysfx}</h5>"
+              + stat_cards([("DOIs", f"{total:,}"),
+                            ("Crossref", f"{by_src['Crossref']:,}"),
+                            ("DataCite", f"{by_src['DataCite']:,}")], div_id='doi-stats')
+              + year_pulldown('dois_metrics'))
+    charts = ""
+    # ----- Sources tab (registrar x type/subtype table + two pies) -----
+    try:
+        sdata, hdict = get_source_data(year)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get source data"),
+                               message=error_message(err))
+    srows, stotal = [], 0
     for key, val in sorted(hdict.items(), key=itemgetter(1), reverse=True):
         src, typ, sub = key.split('_')
         if not sub:
             sub = 'None'
-        total += val
-        if year == 'All':
-            val = f"<a href='/doisui_type/{src}/{typ}/{sub}'>{val}</a>"
-        else:
-            val = f"<a href='/doisui_type/{src}/{typ}/{sub}/{year}'>{val}</a>"
-        trows.append([src, typ, sub if sub != 'None' else '', safe(val)])
-    html = render_table(['Source', 'Type', 'Subtype', 'Count'], trows, table_id='types',
-                        css='tablesorter numberlast-scroll',
-                        footer=[fcell('TOTAL', colspan=3), fcell(f"{total:,}")]) + "<br>"
-    html += year_pulldown('dois_source')
-    title = "DOIs by source"
-    if year != 'All':
-        title += f" ({year})"
-    chartscript, chartdiv = DP.pie_chart(data, title, "source", width=450,
-                                         colors=DP.SOURCE_PALETTE)
-    payload = [{"$group": {"_id": "$jrc_load_source", "count": {"$sum": 1}}},
-               {"$sort" : {"count": -1}}
-              ]
-    if year != 'All':
-        payload.insert(0, {"$match": {"jrc_publishing_date": {"$regex": "^"+ year}}})
+        stotal += val
+        link = (f"/doisui_type/{src}/{typ}/{sub}/{year}" if year != 'All'
+                else f"/doisui_type/{src}/{typ}/{sub}")
+        srows.append([src, typ, sub if sub != 'None' else '',
+                      safe(f"<a href='{link}'>{val:,}</a>")])
+    src_table = render_table(['Source', 'Type', 'Subtype', 'Count'], srows,
+                             table_id='doisrc', css='tablesorter numberlast-scroll',
+                             footer=[fcell('TOTAL', colspan=3), fcell(f"{stotal:,}")])
+    s1, d1 = DP.pie_chart(sdata, f"DOIs by source{ysfx}", "source", width=450,
+                          colors=DP.SOURCE_PALETTE)
+    lm_payload = ([{"$match": dict(yr)}] if year != 'All' else []) + \
+                 [{"$group": {"_id": "$jrc_load_source", "count": {"$sum": 1}}},
+                  {"$sort": {"count": -1}}]
     try:
-        rows = DB['dis'].dois.aggregate(payload)
+        lm = {(row['_id'] or 'None'): row['count'] for row in coll.aggregate(lm_payload)}
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get load methods " \
-                                                    + "from dois collection"),
+                               title=render_warning("Could not get load methods"),
                                message=error_message(err))
-    data = {}
-    for row in rows:
-        data[row['_id']] = row['count']
-    title = "DOIs by load method"
-    if year != 'All':
-        title += f" ({year})"
-    script2, div2 = DP.pie_chart(data, title, "source", width=450,
-                                 colors=DP.SOURCE_PALETTE)
-    chartscript += script2
-    chartdiv += div2
-    # DOIs with PMIDs
-    data = {}
-    payload = {"jrc_obtained_from": "Crossref",
-               "jrc_pmid": {"$exists": True}}
-    tpayload = {"jrc_obtained_from": "Crossref"}
-    if year != 'All':
-        payload["jrc_publishing_date"] = {"$regex": "^"+ year}
-        tpayload["jrc_publishing_date"] = {"$regex": "^"+ year}
+    s2, d2 = DP.pie_chart(lm, f"DOIs by load method{ysfx}", "source", width=450,
+                          colors=DP.get_colors_by_count(len(lm) or 1))
+    charts += s1 + s2
+    sources_body = ("<div style='display:flex;flex-wrap:wrap;gap:18px;align-items:flex-start;'>"
+                    "<div class='tag-scrollbox' style='flex:1 1 460px;min-width:360px;"
+                    f"overflow-x:auto;'>{src_table}</div>"
+                    f"<div style='flex:0 0 auto;'>{d1}{d2}</div></div>")
+    # ----- By type tab (resource-type mix; merges Crossref type + DataCite general) -----
+    type_merge = {"dataset": "Dataset", "journal-article": "JournalArticle",
+                  "posted-content": "Preprint", "book": "BookChapter",
+                  "book-chapter": "BookChapter", "proceedings-article": "ConferenceProceeding",
+                  "other": "Other", "ComputationalNotebook": "Software",
+                  "DataPaper": "JournalArticle", "Image": "Audiovisual",
+                  "component": "BiologicalComponent", "grant": "Grant",
+                  "peer-review": "PeerReview"}
+    tdata = {}
     try:
-        total = DB['dis'].dois.count_documents(tpayload)
-        cnt = DB['dis'].dois.count_documents(payload)
-        data['PMIDs'] = cnt
-        data['No PMIDs'] = total - cnt
+        for row in coll.aggregate([{"$match": {**yr, "jrc_obtained_from": "Crossref"}},
+                                   {"$group": {"_id": "$type", "count": {"$sum": 1}}}]):
+            lab = type_merge.get(row['_id'] or 'None', row['_id'] or 'None')
+            tdata[lab] = tdata.get(lab, 0) + row['count']
+        for row in coll.aggregate([{"$match": {**yr, "jrc_obtained_from": "DataCite"}},
+                                   {"$group": {"_id": "$types.resourceTypeGeneral",
+                                               "count": {"$sum": 1}}}]):
+            lab = type_merge.get(row['_id'] or 'None', row['_id'] or 'None')
+            tdata[lab] = tdata.get(lab, 0) + row['count']
+        proto = coll.count_documents({**yr, "jrc_journal": "protocols.io"})
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
-                                title=render_warning("Could not get load methods " \
-                                                     + "from dois collection"),
-                                message=error_message(err))
-    title = "Crossref DOIs with PMIDs"
-    if year != 'All':
-        title += f" ({year})"
-    chartscript2, chartdiv2 = DP.pie_chart(data, title, "source", width=450,
-                                           colors=DP.SOURCE_PALETTE)
-    # DOIs with PMIDs
-    data = {}
-    payload = {"jrc_obtained_from": "Crossref",
-               "jrc_fulltext_url": {"$exists": True}}
-    if year != 'All':
-        payload["jrc_publishing_date"] = {"$regex": "^"+ year}
+                               title=render_warning("Could not get type data"),
+                               message=error_message(err))
+    if proto and 'Preprint' in tdata:
+        tdata['Preprint'] -= proto
+        tdata['Protocols'] = proto
+    bytype_body = "<div>No typed DOIs.</div>"
+    if tdata:
+        trows = [[t, f"{c:,}"] for t, c in sorted(tdata.items(), key=itemgetter(1), reverse=True)]
+        type_table = render_table(['Type', 'Count'], trows, table_id='doitype',
+                                  css='tablesorter numberlast-scroll',
+                                  footer=[fcell('TOTAL'), fcell(f"{sum(tdata.values()):,}")])
+        s3, d3 = DP.pie_chart(dict(sorted(tdata.items(), key=itemgetter(1), reverse=True)),
+                              f"DOIs by type{ysfx}", "type", width=600, height=460,
+                              colors=DP.get_colors_by_count(len(tdata)))
+        charts += s3
+        bytype_body = ("<div style='display:flex;flex-wrap:wrap;gap:18px;align-items:flex-start;'>"
+                       "<div class='tag-scrollbox' style='flex:1 1 380px;min-width:320px;'>"
+                       f"{type_table}</div><div style='flex:0 0 auto;'>{d3}</div></div>")
+    # ----- By year tab (all years, by registrar) -----
+    ymap = {}
     try:
-        cnt = DB['dis'].dois.count_documents(payload)
-        data['Available'] = cnt
-        data['Not available'] = total - cnt
+        for row in coll.aggregate([
+                {"$match": {"jrc_publishing_date": {"$exists": True}}},
+                {"$group": {"_id": {"yr": {"$substr": ["$jrc_publishing_date", 0, 4]},
+                                    "src": "$jrc_obtained_from"}, "n": {"$sum": 1}}}]):
+            y = row['_id'].get('yr')
+            if not y:
+                continue
+            entry = ymap.setdefault(y, {'Crossref': 0, 'DataCite': 0})
+            if row['_id'].get('src') in entry:
+                entry[row['_id']['src']] += row['n']
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
-                                title=render_warning("Could not get load methods " \
-                                                     + "from dois collection"),
-                                message=error_message(err))
-    title = "Crossref DOIs with full text available"
-    if year != 'All':
-        title += f" ({year})"
-    script2, div2 = DP.pie_chart(data, title, "source", width=450,
-                                 colors=DP.SOURCE_PALETTE)
-    chartscript2 += script2
-    chartdiv2 += div2
-    title = "DOI sources"
-    if year != 'All':
-        title += f" ({year})"
+                               title=render_warning("Could not get DOIs by year"),
+                               message=error_message(err))
+    byyear_body = "<div>No dated DOIs.</div>"
+    years = sorted(ymap)
+    if years:
+        ydata = {"years": years, "Crossref": [ymap[y]['Crossref'] for y in years],
+                 "DataCite": [ymap[y]['DataCite'] for y in years]}
+        s4, d4 = DP.stacked_bar_chart(ydata, "DOIs by publishing year (by registrar)",
+                                      xaxis="years", yaxis=["Crossref", "DataCite"],
+                                      colors=DP.SOURCE_PALETTE, orient=pi / 4,
+                                      width=1000, height=350)
+        charts += s4
+        byyear_body = ("<div style='color:#a8c4e0;font-size:0.82em;margin-bottom:8px;'>"
+                       "All years (not scoped by the year filter). See the "
+                       "<a href='/dois_yearly'>DOI yearly report</a> for detail.</div>" + d4)
+    # ----- Coverage tab: metadata completeness -----
+    # Each entry is (label, query, scope). Journal-article fields (PMID, PMC, MeSH,
+    # full text, preprint, acknowledgements, newsletter, OpenAlex) essentially never
+    # apply to DataCite datasets, so they are scored against the Crossref population
+    # ('Crossref' scope) rather than the whole corpus; the rest are corpus-wide ('All').
+    cov_fields = [("Author (jrc_author)", {"jrc_author.0": {"$exists": True}}, 'All'),
+                  ("License (jrc_license)", {"jrc_license": {"$exists": True}}, 'All'),
+                  ("Tag (jrc_tag)", {"jrc_tag.0": {"$exists": True}}, 'All'),
+                  ("Full-text URL (jrc_fulltext_url)",
+                   {"jrc_fulltext_url": {"$exists": True}}, 'Crossref'),
+                  ("PubMed ID (jrc_pmid)", {"jrc_pmid": {"$exists": True}}, 'Crossref'),
+                  ("Acknowledgements (jrc_acknowledgements)",
+                   {"jrc_acknowledgements": {"$exists": True}}, 'Crossref'),
+                  ("Newsletter (jrc_newsletter)",
+                   {"jrc_newsletter": {"$exists": True}}, 'Crossref'),
+                  ("PMC ID (jrc_pmc)", {"jrc_pmc": {"$exists": True}}, 'Crossref'),
+                  ("OpenAlex ID (jrc_openalex_id)",
+                   {"jrc_openalex_id": {"$exists": True}}, 'Crossref'),
+                  ("Citation count (jrc_citation_count)",
+                   {"jrc_citation_count": {"$exists": True}}, 'All'),
+                  ("MeSH terms (jrc_mesh)", {"jrc_mesh.0": {"$exists": True}}, 'Crossref'),
+                  ("Linked preprint (jrc_preprint)",
+                   {"jrc_preprint.0": {"$exists": True}}, 'Crossref'),
+                  ("Open access (jrc_is_oa)", {"jrc_is_oa": True}, 'All')]
+    cx_total = by_src['Crossref']
+    crows, cov = [], {}
+    try:
+        for label, cquery, scope in cov_fields:
+            if scope == 'Crossref':
+                num = coll.count_documents({**yr, "jrc_obtained_from": "Crossref", **cquery})
+                den = cx_total
+            else:
+                num = coll.count_documents({**yr, **cquery})
+                den = total
+            crows.append([label, scope, f"{num:,}", pctof(num, den)])
+            name = label.split(' (')[0]
+            if scope == 'Crossref':
+                name += " (Crossref)"
+            cov[name] = (num / den) if den else 0  # fraction; axis formats it as a %
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not compute coverage"),
+                               message=error_message(err))
+    cov_table = render_table(['Metadata field', 'Scope', 'DOIs', '% of scope'], crows,
+                             table_id='doicov', css='tablesorter numberlast-scroll')
+    cs, cd = DP.hbar_chart(cov, f"Metadata coverage{ysfx} (% of applicable DOIs)",
+                           value_label="Coverage", value_format="0%", show_pct=False,
+                           width=680, height=430)
+    charts += cs
+    coverage_body = ("<div style='color:#a8c4e0;font-size:0.82em;margin-bottom:8px;'>"
+                     f"Share of DOIs{ysfx} carrying each field. Journal-article fields "
+                     f"(scope <em>Crossref</em>) are scored against the {cx_total:,} "
+                     "Crossref DOIs, since DataCite datasets can't carry them; the rest "
+                     f"against all {total:,}.</div>"
+                     "<div style='display:flex;flex-wrap:wrap;gap:18px;align-items:flex-start;'>"
+                     "<div class='tag-scrollbox' style='flex:1 1 440px;min-width:360px;"
+                     f"overflow-x:auto;'>{cov_table}</div>"
+                     f"<div style='flex:0 0 auto;'>{cd}</div></div>")
+    # ----- tabs -----
+    active_tab = request.args.get('tab')
+    if active_tab not in ('sources', 'bytype', 'byyear', 'coverage'):
+        active_tab = 'sources'
+
+    def tab_button(key, label, is_active):
+        return ('<li class="nav-item" role="presentation">'
+                f'<button class="nav-link{" active" if is_active else ""}" id="{key}-tab" '
+                f'data-toggle="tab" data-target="#{key}" type="button" role="tab" '
+                f'aria-controls="{key}" aria-selected="{"true" if is_active else "false"}">'
+                f'{label}</button></li>')
+
+    def tab_pane(key, body, is_active):
+        cls = "tab-pane fade show active" if is_active else "tab-pane fade"
+        return (f'<div class="{cls}" id="{key}" role="tabpanel" '
+                f'aria-labelledby="{key}-tab"><br>{body}</div>')
+    tabs = ('<ul class="nav nav-tabs" role="tablist">'
+            + tab_button('sources', 'Sources', active_tab == 'sources')
+            + tab_button('bytype', 'By type', active_tab == 'bytype')
+            + tab_button('byyear', 'By year', active_tab == 'byyear')
+            + tab_button('coverage', 'Coverage', active_tab == 'coverage')
+            + '</ul><div class="tab-content">'
+            + tab_pane('sources', sources_body, active_tab == 'sources')
+            + tab_pane('bytype', bytype_body, active_tab == 'bytype')
+            + tab_pane('byyear', byyear_body, active_tab == 'byyear')
+            + tab_pane('coverage', coverage_body, active_tab == 'coverage')
+            + '</div>')
+    seealso = ("<div style='margin-top:16px;font-size:0.85em;color:#a8c4e0;'>See also: "
+               "<a href='/dois_yearly'>Yearly report</a> &middot; "
+               "<a href='/dois_publisher'>Publishers</a> &middot; "
+               "<a href='/dois_license'>Licenses</a> &middot; "
+               "<a href='/citation_metrics/crossref'>Citations</a> &middot; "
+               "<a href='/source_metrics'>Impact by source</a></div>")
+    bokeh_cdn = '<script src="https://cdn.bokeh.org/bokeh/release/bokeh-3.5.0.min.js"></script>'
+    html = header + tabs + seealso + bokeh_cdn + charts
     endpoint_access()
-    return make_response(render_template('bokeh.html', urlroot=request.url_root,
-                                         title=title, html=html,
-                                         chartscript=chartscript, chartdiv=chartdiv,
-                                         chartscript2=chartscript2, chartdiv2=chartdiv2,
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="DOI metrics", html=html,
                                          navbar=generate_navbar('DOIs')))
 
 
 @app.route('/dois_type/<string:year>')
 @app.route('/dois_type')
 def dois_type(year='All'):
-    ''' Show DOI counts by type as a table and pie chart
+    ''' Legacy route: the by-type breakdown is now the "By type" tab of the tabbed
+        /dois_metrics page. Redirect there (preserving the year) so old links and
+        bookmarks keep working.
+        Keyword arguments:
+          year: publishing year to scope the redirect
+        Returns:
+          Redirect to /dois_metrics (By type tab)
     '''
-    match = {"jrc_obtained_from": "Crossref"}
-    if year != 'All':
-        match["jrc_publishing_date"] = {"$regex": "^" + year}
-    payload = [{"$match": match},
-               {"$group": {"_id": "$type", "count": {"$sum": 1}}}
-              ]
-    try:
-        rows = DB['dis'].dois.aggregate(payload)
-    except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get Crossref type data from dois"),
-                               message=error_message(err))
-    type_merge = {"dataset": "Dataset",
-                  "journal-article": "JournalArticle",
-                  "posted-content": "Preprint",
-                  "book": "BookChapter",
-                  "book-chapter": "BookChapter",
-                  "proceedings-article": "ConferenceProceeding",
-                  "other": "Other",
-                  "ComputationalNotebook": "Software",
-                  "DataPaper": "JournalArticle",
-                  "Image": "Audiovisual",
-                  "component": "BiologicalComponent",
-                  "grant": "Grant",
-                  "peer-review": "PeerReview"}
-    data = {}
-    for row in rows:
-        label = row['_id'] if row['_id'] else 'None'
-        label = type_merge.get(label, label)
-        data[label] = data.get(label, 0) + row['count']
-    match["jrc_obtained_from"] = "DataCite"
-    payload = [{"$match": match},
-               {"$group": {"_id": "$types.resourceTypeGeneral", "count": {"$sum": 1}}}
-              ]
-    try:
-        rows = DB['dis'].dois.aggregate(payload)
-    except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get DataCite type data from dois"),
-                               message=error_message(err))
-    for row in rows:
-        label = row['_id'] if row['_id'] else 'None'
-        label = type_merge.get(label, label)
-        data[label] = data.get(label, 0) + row['count']
-    proto_match = {"jrc_journal": "protocols.io"}
-    if year != 'All':
-        proto_match["jrc_publishing_date"] = {"$regex": "^" + year}
-    try:
-        proto_cnt = DB['dis'].dois.count_documents(proto_match)
-    except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get protocols.io count from dois"),
-                               message=error_message(err))
-    if proto_cnt and 'Preprint' in data:
-        data['Preprint'] -= proto_cnt
-        data['Protocols'] = proto_cnt
-    total = sum(data.values())
-    if not data:
-        html = year_pulldown('typechart', start_year=2006) \
-               + f"<br><br><p>No DOIs were found for {year}.</p>"
-        endpoint_access()
-        return make_response(render_template('general.html', urlroot=request.url_root,
-                                             title="DOIs by type", html=html,
-                                             navbar=generate_navbar('DOIs')))
-    html = "<span style='color:goldenrod'><i class='fa-solid fa-warning'></i>" \
-           + " This chart is an experimental feature</span>"
-    trows = []
-    for typ, cnt in sorted(data.items(), key=itemgetter(1), reverse=True):
-        trows.append([typ, f"{cnt:,}"])
-    html += render_table(['Type', 'Count'], trows, table_id='types',
-                         css='tablesorter numberlast-scroll',
-                         footer=[fcell('TOTAL'), fcell(f"{total:,}")]) + "<br>"
-    html += year_pulldown('typechart', start_year=2006)
-    title = "DOIs by type"
-    if year != 'All':
-        title += f" ({year})"
-    data = dict(sorted(data.items(), key=itemgetter(1), reverse=True))
-    colors = DP.get_colors_by_count(len(data))
-    chartscript, chartdiv = DP.pie_chart(data, title, "type",
-                                         width=750, height=506, colors=colors)
-    endpoint_access()
-    return make_response(render_template('bokeh.html', urlroot=request.url_root,
-                                         title=title, html=html,
-                                         chartscript=chartscript, chartdiv=chartdiv,
-                                         navbar=generate_navbar('DOIs')))
+    base = '/dois_metrics' if year == 'All' else f"/dois_metrics/{year}"
+    return redirect(f"{base}?tab=bytype")
 
 
 @app.route('/dois_licenser/<string:source>/<string:lic>/<string:year>')
@@ -11488,7 +11556,8 @@ def show_subscription_year(year=None):
     # Tap a provider bar -> that provider's cost-by-year report
     pnav = {prov: f"/subscription/cost/{quote(prov, safe='')}" for prov in data}
     barscript, bardiv = DP.hbar_chart(data, f'Subscription costs by provider for {year}',
-                                      value_label='Cost', width=650, height=450, nav=pnav)
+                                      value_label='Cost', value_format="$0,0",
+                                      width=650, height=450, nav=pnav)
     endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                         title=f"Subscription costs by provider for {year}",
