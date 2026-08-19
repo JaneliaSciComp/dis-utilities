@@ -49,7 +49,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.10.0"
+__version__ = "120.10.1"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -10883,7 +10883,7 @@ def show_dois_heatmap(groupby, source='Crossref', top=10):
     endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title=f'{source} {label.lower()} heatmap',
-                                         html2=html, chartscript=chartscript, chartdiv=chartdiv,
+                                         html=html, chartscript=chartscript, chartdiv=chartdiv,
                                          navbar=generate_navbar('Journals')))
 
 
@@ -12259,12 +12259,12 @@ def show_subscription(sid):
             html += f"<tr><td>% cost change from FY {data['year'][-2]}</td><td>" \
                     + f"{delta}%</td></tr>"
         title = 'Subscription cost by year'
-        tt = [("Year", "@year"), ("Cost", "$@$name{0.2f}")]
-        chartscript, chartdiv = DP.stacked_bar_chart(data, title,
-                                                     xaxis='year', yaxis=('cost', 'cost2'),
-                                                     orient=pi/4, width=500, height=400,
-                                                     colors=['green']*2, legend=False,
-                                                     tooltip=tt)
+        # Single cost series -> dual_axis_chart with no line series: gives a $-formatted
+        # ($0,0) y-axis (the old stacked_bar_chart abuse left bare numbers on the axis)
+        # and matches the other subscription cost charts.
+        chartscript, chartdiv = DP.dual_axis_chart(data, title=title, x_field='year',
+                                                   bar_field='cost', bar_label='Cost',
+                                                   width=500, height=400)
     # Close table and show button(s)
     html += '</table>'
     if row.get('urls'):
