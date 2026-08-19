@@ -48,7 +48,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.12.3"
+__version__ = "120.12.4"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -889,48 +889,30 @@ def get_dois_for_orcid(oid, orc):
     return rows
 
 
-def get_work_title(row):
-    ''' Get a work title
-        Keyword arguments:
-          row: row from dois collection
-        Returns:
-          title
-    '''
-    if 'title' in row and isinstance(row['title'], str):
-        return row['title']
-    return DL.get_title(row)
-
-
 def generate_works_table(rows, name=None, show="full", eid=None):
-    ''' Generate table HTML for a person's works
+    ''' Generate table HTML for a person's works. Renders through standard_doi_table so
+        the columns (Published | DOI | Journal | Title), version-filter toggle, TSV
+        download, and count match every other DOI list in the app; a green checkmark is
+        prefixed to the DOI of works the person authored while a Janelia employee.
         Keyword arguments:
           rows: rows from dois collection
-          name: search key [optional]
+          name: search key [optional] - when set, matching author names are listed above
           show: show full, or journal/preprint only
-          eid: employee ID
+          eid: employee ID (drives the green-checkmark marker)
         Returns:
           HTML and a list of DOIs
     '''
     works = []
     dois = []
     authors = {}
-    html = ""
-    fileoutput = ""
     for row in rows:
         if show == "journal" and not (("type" in row and row['type'] == "journal-article") \
                                   or ("types" in row and "resourceTypeGeneral" in row["types"] \
                                       and row["types"]["resourceTypeGeneral"] == "Preprint") \
                                   or ("subtype" in row and row['subtype'] == "preprint")):
             continue
-        doi = doi_link(row['doi']) if row['doi'] else "&nbsp;"
         dois.append(row['doi'])
-        payload = {"date":  DL.get_publishing_date(row),
-                   "doi": doi,
-                   "title": get_work_title(row),
-                   "raw": row
-                  }
-        works.append(payload)
-        fileoutput += f"{payload['date']}\t{row['doi']}\t{payload['title']}\n"
+        works.append(row)
         if name:
             alist = DL.get_author_details(row)
             if alist:
@@ -943,27 +925,15 @@ def generate_works_table(rows, name=None, show="full", eid=None):
             else:
                 print(f"Could not get author details for {row['doi']}")
     if not works:
-        return html, []
-    trows = []
-    row_classes = []
-    for work in sorted(works, key=lambda row: row['date'], reverse=True):
-        version = DL.is_version(work['raw'])
-        wrkdoi = work['doi'] if work['doi'] else '&nbsp;'
-        if eid and 'jrc_author' in work['raw'] and eid in work['raw']['jrc_author']:
-            wrkdoi = f"<i class='fa-solid fa-circle-check' style='color: lime'></i> {wrkdoi}"
-        else:
-            wrkdoi = f"&nbsp;&nbsp;&nbsp;&nbsp;{wrkdoi}"
-        trows.append([work['date'], safe(wrkdoi), work['title']])
-        row_classes.append('ver' if version else '')
-    html += render_table(['Published', 'DOI', 'Title'], trows, table_id='pubs',
-                         css='tablesorter standard-scroll', row_classes=row_classes)
-    if authors:
-        html = f"<br>Authors found: {', '.join(sorted(authors.values()))}<br>" \
-               + f"This may include non-Janelia authors<br>{html}"
-    cbutton = "<button class=\"btn btn-outline-warning\" " \
-              + "onclick=\"toggler('pubs', 'ver', 'totalrows');\">" \
-              + "Filter versioned DOIs</button>"
-    html = cbutton + create_downloadable('works', ['Published', 'DOI', 'Title'], fileoutput) + html
+        return "", []
+    works.sort(key=DL.get_publishing_date, reverse=True)
+    def mark_fn(row):
+        ''' Green checkmark for works the person authored while a Janelia employee,
+            else four non-breaking spaces to keep the DOIs left-aligned. '''
+        if eid and 'jrc_author' in row and eid in row['jrc_author']:
+            return "<i class='fa-solid fa-circle-check' style='color: lime'></i> "
+        return "&nbsp;&nbsp;&nbsp;&nbsp;"
+    table, _, _ = standard_doi_table(works, mark_fn=mark_fn, download_name='works')
     preamble = f'''
     The works below were searched for using this author's name and ORCID. A green checkmark
     (<i class='fa-solid fa-circle-check' style='color: lime'></i>) indicates that automated or
@@ -973,8 +943,10 @@ def generate_works_table(rows, name=None, show="full", eid=None):
     information was not provided to Crossref/DataCite. If one of your publications doesn't have a
     check (or is missing), please email the DOI to the Library at {LIBRARY}.
     '''
-    html = f"<hr>{preamble}<br>Number of DOIs: " \
-           + f"<span id='totalrows'>{len(works):,}</span><br>" + html
+    if authors:
+        table = f"<br>Authors found: {', '.join(sorted(authors.values()))}<br>" \
+                + f"This may include non-Janelia authors<br>{table}"
+    html = f"<hr>{preamble}{table}"
     return html, dois
 
 
@@ -1809,7 +1781,7 @@ def standard_ack_table(rows, ack, is_regex=False, show_count=True):
               + "onclick=\"toggler('dois', 'ver', 'totalrows');\">" \
               + "Filter versioned DOIs</button>&nbsp;"
     html = counter + cyclebtn + typebtn + cbutton \
-           + create_downloadable('standard', header, fileoutput) + chipbar + tagkey + html
+           + create_downloadable(download_name, header, fileoutput) + chipbar + tagkey + html
     return html, cnt, oacnt
 
 
@@ -1831,7 +1803,8 @@ def ack_stat_cards(cnt, internal, external):
 
 
 def standard_doi_table(rows, prefix=None, count_card=False, show_count=True,
-                       extra_headers=None, extra_fn=None):
+                       extra_headers=None, extra_fn=None, mark_fn=None,
+                       download_name='standard'):
     ''' Create a standard table of DOIs
         Keyword arguments:
           rows: rows from dois collection
@@ -1849,6 +1822,10 @@ def standard_doi_table(rows, prefix=None, count_card=False, show_count=True,
                     Table cells go through render_table (plain text is escaped; wrap a
                     value in safe()/cell() for trusted HTML or a numeric sort key); the
                     TSV download gets the same values with any HTML tags stripped.
+          mark_fn: optional callable(row) -> trusted HTML string prefixed inside the DOI
+                   cell before the link (e.g. a green checkmark marking a person's works);
+                   the raw DOI in the TSV download is unaffected
+          download_name: base filename for the TSV download button (default 'standard')
         Returns:
           html: HTML
           cnt: number of DOIs
@@ -1870,7 +1847,9 @@ def standard_doi_table(rows, prefix=None, count_card=False, show_count=True,
         row['journal'] = DL.get_journal(row, full=False, name_only=True)
         row['title'] = DL.get_title(row)
         extra = list(extra_fn(row)) if extra_fn else []
-        trows.append([row['published'], safe(row['link']), row['journal'], row['title']] + extra)
+        mark = mark_fn(row) if mark_fn else ''
+        trows.append([row['published'], safe(mark + row['link']), row['journal'], row['title']]
+                     + extra)
         row_classes.append('ver' if version else '')
         if row['title']:
             row['title'] = row['title'].replace("\n", " ")
@@ -1893,9 +1872,9 @@ def standard_doi_table(rows, prefix=None, count_card=False, show_count=True,
               + "Filter versioned DOIs</button>&nbsp;"
     if prefix:
         html = counter + year_pulldown(prefix) + "&nbsp;"*5 \
-               + cbutton + create_downloadable('standard', header, fileoutput) + html
+               + cbutton + create_downloadable(download_name, header, fileoutput) + html
     else:
-        html = counter + cbutton + create_downloadable('standard', header, fileoutput) + html
+        html = counter + cbutton + create_downloadable(download_name, header, fileoutput) + html
     return html, cnt, oacnt
 
 # ******************************************************************************
