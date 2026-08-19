@@ -48,7 +48,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.12.2"
+__version__ = "120.12.3"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -1142,40 +1142,60 @@ def endpoint_access():
         pass
 
 
-def generate_user_table(rows):
-    ''' Generate HTML for a list of users
+def generate_user_table(rows, download=None):
+    ''' Build the canonical "list of Janelians" table: one row per person with the
+        ORCID (linked to the canonical /userui route), given/family name(s),
+        affiliations (as /tag/ links, matching the person page), and a Status column
+        of badges - so former-employee status is a badge, not a literal "YES" column.
+        A "Filter for current authors" toggle hides former employees. Used by the
+        org-authors, affiliation, and name-search pages.
         Keyword arguments:
-          rows: rows from orcid collection
+          rows: rows from the orcid collection
+          download: optional base filename; when given, a TSV download button (ORCID,
+                    name, affiliations, former-employee flag) is prepended
         Returns:
-          HTML for a list of authors with a count
+          (html, count) tuple
     '''
     count = 0
     trows = []
     row_classes = []
+    dl_rows = []
     for row in rows:
         count += 1
-        if 'orcid' in row:
+        if row.get('orcid'):
             # Canonical person route is /userui; it resolves an ORCID string via the
             # orcid field (no '@' -> use_eid=False), so author links land on the same
             # page as author links elsewhere in the app (UI-audit row 226).
             link = f"<a href='/userui/{row['orcid']}'>{row['orcid']}</a>"
-        elif 'userIdO365' in row:
+        elif row.get('userIdO365'):
             link = f"<a href='/userui/{row['userIdO365']}'>No ORCID found</a>"
         else:
             link = f"<a href='/unvaluserui/{row['_id']}'>No ORCID found</a>"
+        given = ', '.join(sorted(row.get('given', [])))
+        family = ', '.join(sorted(row.get('family', [])))
+        # Affiliations = affiliations + managed orgs, deduped/sorted, each a /tag/ link.
+        affs = sorted(set(list(row.get('affiliations', [])) + list(row.get('managed', []))))
+        affil_html = ', '.join(f"<a href='/tag/{quote(a, safe='')}'>{escape(a)}</a>"
+                               for a in affs)
         auth = DL.get_single_author_details(row, DB['dis'].orcid)
+        is_alum = bool(auth and auth.get('alumni'))
         badges = get_badges(auth, True)
-        row_classes.append('other' if (auth and auth['alumni']) else 'active')
-        trows.append([safe(link),
-                      ', '.join(sorted(row['given'])),
-                      ', '.join(sorted(row['family'])),
-                      safe(' '.join(badges))])
-    table = render_table(['ORCID', 'Given name', 'Family name', 'Status'], trows,
-                         table_id='ops', row_classes=row_classes)
+        row_classes.append('other' if is_alum else 'active')
+        trows.append([safe(link), given, family, safe(affil_html), safe(' '.join(badges))])
+        dl_rows.append([row.get('orcid', ''), given, family, ', '.join(affs),
+                        'Yes' if is_alum else ''])
+    header = ['ORCID', 'Given name(s)', 'Family name(s)', 'Affiliations', 'Status']
+    table = render_table(header, trows, table_id='ops', row_classes=row_classes)
     cbutton = "<button class=\"btn btn-outline-warning\" " \
               + "onclick=\"toggler('ops', 'other', 'totalrowsa');\">" \
               + "Filter for current authors</button>"
-    return cbutton + table, count
+    html = cbutton + table
+    if download:
+        dl_header = ['ORCID', 'Given name(s)', 'Family name(s)', 'Affiliations',
+                     'Former employee']
+        content = ''.join('\t'.join(r) + '\n' for r in dl_rows)
+        html = create_downloadable(download, dl_header, content) + html
+    return html, count
 
 # ******************************************************************************
 # * DOI utility functions                                                      *
@@ -10166,7 +10186,6 @@ def show_org_authors(org_in):
         orgs = row['members']
     else:
         orgs = [org_in]
-    html = '<br>'.join(orgs)
     payload = {"$or": [{"managed": {"$in": orgs}}, {"affiliations": {"$in": orgs}}]}
     try:
         rows = DB['dis'].orcid.find(payload).collation({"locale": "en"}).sort("family", 1)
@@ -10174,29 +10193,11 @@ def show_org_authors(org_in):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get authors from orcid collection"),
                                message=error_message(err))
-    header = ["Given name(s)", "Family name(s)", "Alumni", "ORCID", "Affiliations"]
-    content = ""
-    trows = []
-    cnt = 0
-    for row in rows:
-        given = ', '.join(row['given'])
-        family = ', '.join(row['family'])
-        alum = "YES" if row.get('alumni') else ""
-        orc = f"<a href='/userui/{row['orcid']}'>{row['orcid']}</a>" \
-              if 'orcid' in row and row['orcid'] else ""
-        affil = row['affiliations'] if 'affiliations' in row else []
-        if row.get('managed'):
-            affil.extend(row['managed'])
-        affil = sorted(list(set(affil)))
-        affil = ', '.join(affil)
-        trows.append([given, family, alum, safe(orc), affil])
-        content += f"{given}\t{family}\t{alum}\t{row['orcid'] if 'orcid' in row else ''}\t{affil}\n"
-        cnt += 1
-    html = render_table(header, trows, table_id='authors', css='tablesorter standard-scroll')
-    html = create_downloadable(f"{org_in.replace(' ', '_')}", header, content) + html
+    table, cnt = generate_user_table(rows, download=org_in.replace(' ', '_'))
+    html = f"<p>Number of authors: <span id='totalrowsa'>{cnt:,}</span></p>" + table
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title=f"Authors for {org_in} ({cnt})", html=html,
+                                         title=f"Authors for {org_in}", html=html,
                                          navbar=generate_navbar('Authorship')))
 
 
