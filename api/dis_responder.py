@@ -24,7 +24,6 @@ from urllib.parse import quote, unquote
 import concurrent.futures
 import dateutil.parser
 import dateutil.tz
-from bokeh.palettes import all_palettes, plasma
 import bson
 from flask import (Flask, make_response, render_template, request, jsonify, redirect, send_file)
 from flask_cors import CORS
@@ -49,7 +48,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.10.1"
+__version__ = "120.10.2"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -13835,11 +13834,10 @@ def dois_top(show="journal", num=10):
     height = 600
     if num > 23:
         height += 22 * (num - 23)
-    colors = plasma(len(top))
-    if len(top) <= 10:
-        colors = all_palettes['Category10'][len(top)]
-    elif len(top) <= 20:
-        colors = all_palettes['Category20'][len(top)]
+    # Audit chart policy: route N-category colours through get_colors_by_count
+    # (it applies the same Category10/20/plasma tiers this used to hand-roll, and
+    # safely handles 1-2 series where Category10[<3] would KeyError).
+    colors = DP.get_colors_by_count(len(top))
     chartscript, chartdiv = DP.stacked_bar_chart(data, f"DOIs published by year for top {num} tags",
                                                  xaxis="years", yaxis=top, width=900, height=height,
                                                  colors=colors)
