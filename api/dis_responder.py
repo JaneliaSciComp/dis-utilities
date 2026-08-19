@@ -48,7 +48,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.12.1"
+__version__ = "120.12.2"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -13411,6 +13411,99 @@ def people(name=None):
                                          navbar=generate_navbar('System')))
 
 
+# Friendly labels + section grouping for the /peoplerec HTML view. A People
+# record is a flat dict of scalars plus a few list-of-dict fields; the HTML view
+# renders friendly-labeled Field/Value tables per section (empties skipped) plus
+# an affiliations table. The JSON response path still returns the raw record.
+PEOPLE_LABELS = {
+    'nameFirstPreferred': 'Preferred first name', 'nameFirst': 'First name',
+    'nameMiddlePreferred': 'Preferred middle name', 'nameMiddle': 'Middle name',
+    'nameLastPreferred': 'Preferred last name', 'nameLast': 'Last name',
+    'businessTitle': 'Business title', 'jobTitle': 'Job title', 'jobCode': 'Job code',
+    'jobFamily': 'Job family', 'jobProfileVisiting': 'Visiting job profile',
+    'workerType': 'Worker type', 'employeeType': 'Employee type', 'ecaType': 'ECA type',
+    'fteType': 'FTE type', 'cwrVisiting': 'Contingent worker (visiting)',
+    'enabled': 'Enabled', 'spendLimit': 'Spend limit',
+    'supOrgName': 'Supervisory org', 'supOrgCode': 'Supervisory org code',
+    'supOrgSubType': 'Supervisory org subtype', 'ccDescr': 'Cost center',
+    'costCenter': 'Cost center code', 'teamCode': 'Team',
+    'rollUpGroup': 'Roll-up group', 'subRollUpGroup': 'Sub roll-up group',
+    'locationName': 'Location', 'locationCode': 'Location code', 'building': 'Building',
+    'workSpaceName': 'Workspace', 'secondaryLocation': 'Secondary location',
+    'secondaryWorkspace': 'Secondary workspace', 'departmentAddress1': 'Address line 1',
+    'departmentAddress2': 'Address line 2', 'departmentAddress3': 'Address line 3',
+    'departmentCity': 'City', 'departmentState': 'State',
+    'departmentPostalCode': 'Postal code', 'departmentCountry': 'Country',
+    'email': 'Email', 'phone1': 'Phone', 'phone1Type': 'Phone type',
+    'phone2': 'Phone 2', 'phone2Type': 'Phone 2 type', 'fax': 'Fax',
+    'hireDate': 'Hire date', 'terminationDate': 'Termination date',
+    'contingentWorkerEndDate': 'Contingent worker end date', 'modifiedOn': 'Modified on',
+    'userId': 'User ID', 'userIdO365': 'O365 user ID'}
+PEOPLE_SECTIONS = (
+    ('Name', ('nameFirstPreferred', 'nameFirst', 'nameMiddlePreferred', 'nameMiddle',
+              'nameLastPreferred', 'nameLast')),
+    ('Role', ('businessTitle', 'jobTitle', 'jobCode', 'jobFamily', 'jobProfileVisiting',
+              'workerType', 'employeeType', 'ecaType', 'fteType', 'cwrVisiting',
+              'enabled', 'spendLimit')),
+    ('Organization', ('supOrgName', 'supOrgCode', 'supOrgSubType', 'ccDescr', 'costCenter',
+                      'teamCode', 'rollUpGroup', 'subRollUpGroup')),
+    ('Location', ('locationName', 'locationCode', 'building', 'workSpaceName',
+                  'secondaryLocation', 'secondaryWorkspace', 'departmentAddress1',
+                  'departmentAddress2', 'departmentAddress3', 'departmentCity',
+                  'departmentState', 'departmentPostalCode', 'departmentCountry')),
+    ('Contact', ('email', 'phone1', 'phone1Type', 'phone2', 'phone2Type', 'fax')),
+    ('Dates', ('hireDate', 'terminationDate', 'contingentWorkerEndDate', 'modifiedOn')),
+    ('Identifiers', ('userId', 'userIdO365')))
+
+
+def _people_record_html(rec):
+    ''' Render a People record as friendly-labeled Field/Value tables grouped into
+        sections (empty values skipped), plus an affiliations table. Replaces the
+        former raw json.dumps <pre> dump; the JSON response path is unchanged.
+        Keyword arguments:
+          rec: People record dict (employeeId/managerId already removed)
+        Returns:
+          HTML string
+    '''
+    def present(val):
+        return val not in (None, '', [], {})
+    html = ""
+    shown = set()
+    for section, keys in PEOPLE_SECTIONS:
+        rows = []
+        for key in keys:
+            shown.add(key)
+            val = rec.get(key)
+            if not present(val):
+                continue
+            if isinstance(val, bool):
+                val = 'Yes' if val else 'No'
+            label = PEOPLE_LABELS.get(key, key)
+            if key == 'email':
+                val = safe(f"<a href='mailto:{escape(str(val))}'>{escape(str(val))}</a>")
+            rows.append([label, val])
+        if rows:
+            html += (f"<h5 style='margin:14px 0 6px 0;'>{section}</h5>"
+                     + render_table(['Field', 'Value'], rows, width=560))
+    affs = rec.get('affiliations') or []
+    if affs:
+        arows = [[a.get('role', ''), a.get('supOrgName', ''), a.get('supOrgSubType', ''),
+                  a.get('type', '')] for a in affs]
+        html += ("<h5 style='margin:14px 0 6px 0;'>Affiliations</h5>"
+                 + render_table(['Role', 'Supervisory org', 'Subtype', 'Type'], arows,
+                                width=560))
+    # Future-proofing: surface any scalar field not covered above so nothing new
+    # from People silently disappears (nested/empty structures are still omitted;
+    # the raw record remains available via the JSON response).
+    handled = shown | {'affiliations', 'photoURL', 'employeeId', 'managerId'}
+    extra = [[k, rec[k]] for k in sorted(rec)
+             if k not in handled and present(rec[k]) and not isinstance(rec[k], (list, dict))]
+    if extra:
+        html += ("<h5 style='margin:14px 0 6px 0;'>Other</h5>"
+                 + render_table(['Field', 'Value'], extra, width=560))
+    return html
+
+
 @app.route('/peoplerec/<string:eid>')
 def peoplerec(eid):
     '''
@@ -13465,7 +13558,7 @@ def peoplerec(eid):
     if 'photoURL' in rec:
         title += f"&nbsp;<img src='{rec['photoURL']}' width=100 height=100 " \
                  + f"alt='Photo of {rec['nameFirstPreferred']}'>"
-    html = f"<div class='codescroll-full'><pre>{json.dumps(rec, indent=2)}</pre></div>"
+    html = _people_record_html(rec)
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
