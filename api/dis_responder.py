@@ -1155,7 +1155,10 @@ def generate_user_table(rows):
     for row in rows:
         count += 1
         if 'orcid' in row:
-            link = f"<a href='/orcidui/{row['orcid']}'>{row['orcid']}</a>"
+            # Canonical person route is /userui; it resolves an ORCID string via the
+            # orcid field (no '@' -> use_eid=False), so author links land on the same
+            # page as author links elsewhere in the app (UI-audit row 226).
+            link = f"<a href='/userui/{row['orcid']}'>{row['orcid']}</a>"
         elif 'userIdO365' in row:
             link = f"<a href='/userui/{row['userIdO365']}'>No ORCID found</a>"
         else:
