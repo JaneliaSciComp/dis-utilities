@@ -48,7 +48,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.12.0"
+__version__ = "120.12.1"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -3970,7 +3970,7 @@ def _build_ack_heatmap():
     if hval:
         chartscript, chartdiv = DP.heat_map(
             {"Year": hx, "Acknowledgement": hy, "Acks": hval},
-            "Acknowledgements by entity and publishing year",
+            "Acknowledgements by tag and publishing year",
             x_field="Year", y_field="Acknowledgement", value_field="Acks",
             width=1000, value_format="0,0",
             col_totals="Total", row_totals="Total", highlight_max_total=True)
