@@ -48,7 +48,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.11.4"
+__version__ = "120.12.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -3918,13 +3918,73 @@ def _build_ack_byyear():
     return caption, chartscript, chartdiv
 
 
+def _build_ack_heatmap():
+    ''' Build the "Heatmap" tab: an acknowledgement-entity (row) x publishing-year
+        (column) heat map. Each cell is the total number of acknowledgements of that
+        entity in that year across BOTH collections (dois + external_dois) and ALL
+        curators - i.e. Internal+External, which equals Human+IRIS (they partition the
+        same set, so this is not a sum of all four). The row set is every entity in the
+        jrc_acknowledge corpus (a small controlled vocabulary), so no top-N cutoff is
+        needed. DOIs with no jrc_publishing_date cannot be placed on a year axis and are
+        excluded.
+        Keyword arguments:
+          None
+        Returns:
+          (html, chartscript, chartdiv) tuple
+    '''
+    yr = {"$substr": ["$jrc_publishing_date", 0, 4]}
+    payload = [{"$match": {"jrc_publishing_date": {"$exists": True}}},
+               {"$unwind": "$jrc_acknowledge"},
+               {"$group": {"_id": {"tag": "$jrc_acknowledge.name", "yr": yr},
+                           "count": {"$sum": 1}}}]
+    per = {}          # tag -> {year -> count}
+    yrset = set()
+    for coll_name in ('dois', 'external_dois'):
+        for row in DB['dis'][coll_name].aggregate(payload):
+            tag = row['_id'].get('tag')
+            year = row['_id'].get('yr')
+            if not (tag and year):
+                continue
+            entry = per.setdefault(tag, {})
+            entry[year] = entry.get(year, 0) + row['count']
+            yrset.add(year)
+    caption = ("<div style='color:#a8c4e0;font-size:0.82em;margin-bottom:10px;'>"
+               "Acknowledgement counts by entity and publishing year, summed across "
+               "internal (<code>dois</code>) and external (<code>external_dois</code>) "
+               "DOIs and all curators. Cell color = number of acknowledgements (scale at "
+               "right); hover for exact numbers; the Total row/column give per-year and "
+               "per-entity sums, and the largest total in each is outlined. DOIs without a "
+               "publishing date are excluded.</div>")
+    if not yrset:
+        return caption + "<div>No dated acknowledgements.</div>", "", ""
+    years = sorted(yrset)
+    hx, hy, hval = [], [], []
+    for tag, ymap in per.items():
+        for year in years:
+            cnt = ymap.get(year, 0)
+            if cnt:
+                hx.append(year)
+                hy.append(tag)
+                hval.append(cnt)
+    chartscript = chartdiv = ""
+    if hval:
+        chartscript, chartdiv = DP.heat_map(
+            {"Year": hx, "Acknowledgement": hy, "Acks": hval},
+            "Acknowledgements by entity and publishing year",
+            x_field="Year", y_field="Acknowledgement", value_field="Acks",
+            width=1000, value_format="0,0",
+            col_totals="Total", row_totals="Total", highlight_max_total=True)
+    return caption, chartscript, chartdiv
+
+
 @app.route('/acknowledgement_metrics/<int:limit>')
 @app.route('/acknowledgement_metrics')
 def show_acknowledgement_metrics(limit=10):
     ''' Acknowledgement metrics - a tabbed page over the acknowledgement corpus:
         the Stored acknowledgements tab (by type/year/journal), the Sources tab
-        (jrc_ack_source split Internal vs External), and the Tags tab (tagging
-        coverage and per-tag counts).
+        (jrc_ack_source split Internal vs External), the Tags tab (tagging
+        coverage and per-tag counts), and the Heatmap tab (per-entity x publishing-year
+        acknowledgement counts across both collections).
         Replaces the former /acknowledgement_stats and /dois_tag_ack/ack pages.
         Keyword arguments:
           limit: top-N limit for the Metrics-tab journal tables
@@ -4067,13 +4127,15 @@ def show_acknowledgement_metrics(limit=10):
     m_html, m_chartscript, m_chartdiv = _build_ack_metrics(limit)
     by_html, by_chartscript, by_chartdiv = _build_ack_byyear()
     s_html, s_chartscript, s_chartdiv = _build_ack_sources()
+    h_html, h_chartscript, h_chartdiv = _build_ack_heatmap()
     # Tabs
     active_tab = request.args.get('tab')
-    if active_tab not in ('metrics', 'byyear', 'sources', 'tags'):
+    if active_tab not in ('metrics', 'byyear', 'sources', 'tags', 'heatmap'):
         active_tab = 'metrics'
     metrics_body = m_html + m_chartdiv
     byyear_body = by_html + by_chartdiv
     sources_body = s_html + s_chartdiv
+    heatmap_body = h_html + h_chartdiv
     # Table and top-entities chart side by side (mirrors the /tag_metrics Tags tab):
     # the table scrolls within a fixed-height pane, the chart sits beside it, and
     # the row wraps to stacked on a narrow viewport. The ack table is 6 columns, so
@@ -4088,15 +4150,17 @@ def show_acknowledgement_metrics(limit=10):
             + tab_button('byyear', 'By year', active_tab == 'byyear')
             + tab_button('sources', 'Sources', active_tab == 'sources')
             + tab_button('tags', 'Tags', active_tab == 'tags')
+            + tab_button('heatmap', 'Heatmap', active_tab == 'heatmap')
             + '</ul><div class="tab-content">'
             + tab_pane('metrics', metrics_body, active_tab == 'metrics')
             + tab_pane('byyear', byyear_body, active_tab == 'byyear')
             + tab_pane('sources', sources_body, active_tab == 'sources')
             + tab_pane('tags', tags_body, active_tab == 'tags')
+            + tab_pane('heatmap', heatmap_body, active_tab == 'heatmap')
             + '</div>')
     bokeh_cdn = '<script src="https://cdn.bokeh.org/bokeh/release/bokeh-3.5.0.min.js"></script>'
     html = (coverage_html + tabs + bokeh_cdn + m_chartscript + by_chartscript
-            + s_chartscript + ent_chartscript)
+            + s_chartscript + ent_chartscript + h_chartscript)
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="Acknowledgement metrics", html=html,
