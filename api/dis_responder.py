@@ -48,7 +48,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.12.1"
+__version__ = "120.12.6"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -889,48 +889,30 @@ def get_dois_for_orcid(oid, orc):
     return rows
 
 
-def get_work_title(row):
-    ''' Get a work title
-        Keyword arguments:
-          row: row from dois collection
-        Returns:
-          title
-    '''
-    if 'title' in row and isinstance(row['title'], str):
-        return row['title']
-    return DL.get_title(row)
-
-
 def generate_works_table(rows, name=None, show="full", eid=None):
-    ''' Generate table HTML for a person's works
+    ''' Generate table HTML for a person's works. Renders through standard_doi_table so
+        the columns (Published | DOI | Journal | Title), version-filter toggle, TSV
+        download, and count match every other DOI list in the app; a green checkmark is
+        prefixed to the DOI of works the person authored while a Janelia employee.
         Keyword arguments:
           rows: rows from dois collection
-          name: search key [optional]
+          name: search key [optional] - when set, matching author names are listed above
           show: show full, or journal/preprint only
-          eid: employee ID
+          eid: employee ID (drives the green-checkmark marker)
         Returns:
           HTML and a list of DOIs
     '''
     works = []
     dois = []
     authors = {}
-    html = ""
-    fileoutput = ""
     for row in rows:
         if show == "journal" and not (("type" in row and row['type'] == "journal-article") \
                                   or ("types" in row and "resourceTypeGeneral" in row["types"] \
                                       and row["types"]["resourceTypeGeneral"] == "Preprint") \
                                   or ("subtype" in row and row['subtype'] == "preprint")):
             continue
-        doi = doi_link(row['doi']) if row['doi'] else "&nbsp;"
         dois.append(row['doi'])
-        payload = {"date":  DL.get_publishing_date(row),
-                   "doi": doi,
-                   "title": get_work_title(row),
-                   "raw": row
-                  }
-        works.append(payload)
-        fileoutput += f"{payload['date']}\t{row['doi']}\t{payload['title']}\n"
+        works.append(row)
         if name:
             alist = DL.get_author_details(row)
             if alist:
@@ -943,27 +925,15 @@ def generate_works_table(rows, name=None, show="full", eid=None):
             else:
                 print(f"Could not get author details for {row['doi']}")
     if not works:
-        return html, []
-    trows = []
-    row_classes = []
-    for work in sorted(works, key=lambda row: row['date'], reverse=True):
-        version = DL.is_version(work['raw'])
-        wrkdoi = work['doi'] if work['doi'] else '&nbsp;'
-        if eid and 'jrc_author' in work['raw'] and eid in work['raw']['jrc_author']:
-            wrkdoi = f"<i class='fa-solid fa-circle-check' style='color: lime'></i> {wrkdoi}"
-        else:
-            wrkdoi = f"&nbsp;&nbsp;&nbsp;&nbsp;{wrkdoi}"
-        trows.append([work['date'], safe(wrkdoi), work['title']])
-        row_classes.append('ver' if version else '')
-    html += render_table(['Published', 'DOI', 'Title'], trows, table_id='pubs',
-                         css='tablesorter standard-scroll', row_classes=row_classes)
-    if authors:
-        html = f"<br>Authors found: {', '.join(sorted(authors.values()))}<br>" \
-               + f"This may include non-Janelia authors<br>{html}"
-    cbutton = "<button class=\"btn btn-outline-warning\" " \
-              + "onclick=\"toggler('pubs', 'ver', 'totalrows');\">" \
-              + "Filter versioned DOIs</button>"
-    html = cbutton + create_downloadable('works', ['Published', 'DOI', 'Title'], fileoutput) + html
+        return "", []
+    works.sort(key=DL.get_publishing_date, reverse=True)
+    def mark_fn(row):
+        ''' Green checkmark for works the person authored while a Janelia employee,
+            else four non-breaking spaces to keep the DOIs left-aligned. '''
+        if eid and 'jrc_author' in row and eid in row['jrc_author']:
+            return "<i class='fa-solid fa-circle-check' style='color: lime'></i> "
+        return "&nbsp;&nbsp;&nbsp;&nbsp;"
+    table, _, _ = standard_doi_table(works, mark_fn=mark_fn, download_name='works')
     preamble = f'''
     The works below were searched for using this author's name and ORCID. A green checkmark
     (<i class='fa-solid fa-circle-check' style='color: lime'></i>) indicates that automated or
@@ -973,8 +943,10 @@ def generate_works_table(rows, name=None, show="full", eid=None):
     information was not provided to Crossref/DataCite. If one of your publications doesn't have a
     check (or is missing), please email the DOI to the Library at {LIBRARY}.
     '''
-    html = f"<hr>{preamble}<br>Number of DOIs: " \
-           + f"<span id='totalrows'>{len(works):,}</span><br>" + html
+    if authors:
+        table = f"<br>Authors found: {', '.join(sorted(authors.values()))}<br>" \
+                + f"This may include non-Janelia authors<br>{table}"
+    html = f"<hr>{preamble}{table}"
     return html, dois
 
 
@@ -1030,8 +1002,12 @@ def get_orcid_from_db(oid, use_eid=False, bare=False, show="full"):
     html += f"<tr><td>Given name:</td><td>{', '.join(sorted(orc['given']))}</td></tr>"
     html += f"<tr><td>Family name:</td><td>{', '.join(sorted(orc['family']))}</td></tr>"
     if 'orcid' in orc:
+        cpaste = " <button style='background-color:transparent;border:none;' " \
+                 + f"onclick=\"copyText('{orc['orcid']}')\">" \
+                 + "<i class='fas fa-regular fa-copy shadow' " \
+                 + "style='background-color:transparent'></i></button>"
         html += f"<tr><td>ORCID:</td><td><a href='{ORCID}{orc['orcid']}'>" \
-                + f"{orc['orcid']}</a></td></tr>"
+                + f"{orc['orcid']}</a>{cpaste}</td></tr>"
     if 'userIdO365' in orc:
         link = "<a href='" + f"{WORKDAY}{orc['userIdO365']}" \
                + f"' target='_blank'>{orc['userIdO365']}</a>"
@@ -1142,37 +1118,60 @@ def endpoint_access():
         pass
 
 
-def generate_user_table(rows):
-    ''' Generate HTML for a list of users
+def generate_user_table(rows, download=None):
+    ''' Build the canonical "list of Janelians" table: one row per person with the
+        ORCID (linked to the canonical /userui route), given/family name(s),
+        affiliations (as /tag/ links, matching the person page), and a Status column
+        of badges - so former-employee status is a badge, not a literal "YES" column.
+        A "Filter for current authors" toggle hides former employees. Used by the
+        org-authors, affiliation, and name-search pages.
         Keyword arguments:
-          rows: rows from orcid collection
+          rows: rows from the orcid collection
+          download: optional base filename; when given, a TSV download button (ORCID,
+                    name, affiliations, former-employee flag) is prepended
         Returns:
-          HTML for a list of authors with a count
+          (html, count) tuple
     '''
     count = 0
     trows = []
     row_classes = []
+    dl_rows = []
     for row in rows:
         count += 1
-        if 'orcid' in row:
-            link = f"<a href='/orcidui/{row['orcid']}'>{row['orcid']}</a>"
-        elif 'userIdO365' in row:
+        if row.get('orcid'):
+            # Canonical person route is /userui; it resolves an ORCID string via the
+            # orcid field (no '@' -> use_eid=False), so author links land on the same
+            # page as author links elsewhere in the app (UI-audit row 226).
+            link = f"<a href='/userui/{row['orcid']}'>{row['orcid']}</a>"
+        elif row.get('userIdO365'):
             link = f"<a href='/userui/{row['userIdO365']}'>No ORCID found</a>"
         else:
             link = f"<a href='/unvaluserui/{row['_id']}'>No ORCID found</a>"
+        given = ', '.join(sorted(row.get('given', [])))
+        family = ', '.join(sorted(row.get('family', [])))
+        # Affiliations = affiliations + managed orgs, deduped/sorted, each a /tag/ link.
+        affs = sorted(set(list(row.get('affiliations', [])) + list(row.get('managed', []))))
+        affil_html = ', '.join(f"<a href='/tag/{quote(a, safe='')}'>{escape(a)}</a>"
+                               for a in affs)
         auth = DL.get_single_author_details(row, DB['dis'].orcid)
+        is_alum = bool(auth and auth.get('alumni'))
         badges = get_badges(auth, True)
-        row_classes.append('other' if (auth and auth['alumni']) else 'active')
-        trows.append([safe(link),
-                      ', '.join(sorted(row['given'])),
-                      ', '.join(sorted(row['family'])),
-                      safe(' '.join(badges))])
-    table = render_table(['ORCID', 'Given name', 'Family name', 'Status'], trows,
-                         table_id='ops', row_classes=row_classes)
+        row_classes.append('other' if is_alum else 'active')
+        trows.append([safe(link), given, family, safe(affil_html), safe(' '.join(badges))])
+        dl_rows.append([row.get('orcid', ''), given, family, ', '.join(affs),
+                        'Yes' if is_alum else ''])
+    header = ['ORCID', 'Given name(s)', 'Family name(s)', 'Affiliations', 'Status']
+    table = render_table(header, trows, table_id='ops', row_classes=row_classes)
     cbutton = "<button class=\"btn btn-outline-warning\" " \
               + "onclick=\"toggler('ops', 'other', 'totalrowsa');\">" \
               + "Filter for current authors</button>"
-    return cbutton + table, count
+    html = cbutton + table
+    if download:
+        dl_header = ['ORCID', 'Given name(s)', 'Family name(s)', 'Affiliations',
+                     'Former employee']
+        content = ''.join('\t'.join(r) + '\n' for r in dl_rows)
+        html = create_downloadable(download, dl_header, content) + html
+    return html, count
 
 # ******************************************************************************
 # * DOI utility functions                                                      *
@@ -1808,7 +1807,8 @@ def ack_stat_cards(cnt, internal, external):
 
 
 def standard_doi_table(rows, prefix=None, count_card=False, show_count=True,
-                       extra_headers=None, extra_fn=None):
+                       extra_headers=None, extra_fn=None, mark_fn=None,
+                       download_name='standard'):
     ''' Create a standard table of DOIs
         Keyword arguments:
           rows: rows from dois collection
@@ -1826,6 +1826,10 @@ def standard_doi_table(rows, prefix=None, count_card=False, show_count=True,
                     Table cells go through render_table (plain text is escaped; wrap a
                     value in safe()/cell() for trusted HTML or a numeric sort key); the
                     TSV download gets the same values with any HTML tags stripped.
+          mark_fn: optional callable(row) -> trusted HTML string prefixed inside the DOI
+                   cell before the link (e.g. a green checkmark marking a person's works);
+                   the raw DOI in the TSV download is unaffected
+          download_name: base filename for the TSV download button (default 'standard')
         Returns:
           html: HTML
           cnt: number of DOIs
@@ -1847,7 +1851,9 @@ def standard_doi_table(rows, prefix=None, count_card=False, show_count=True,
         row['journal'] = DL.get_journal(row, full=False, name_only=True)
         row['title'] = DL.get_title(row)
         extra = list(extra_fn(row)) if extra_fn else []
-        trows.append([row['published'], safe(row['link']), row['journal'], row['title']] + extra)
+        mark = mark_fn(row) if mark_fn else ''
+        trows.append([row['published'], safe(mark + row['link']), row['journal'], row['title']]
+                     + extra)
         row_classes.append('ver' if version else '')
         if row['title']:
             row['title'] = row['title'].replace("\n", " ")
@@ -1870,9 +1876,9 @@ def standard_doi_table(rows, prefix=None, count_card=False, show_count=True,
               + "Filter versioned DOIs</button>&nbsp;"
     if prefix:
         html = counter + year_pulldown(prefix) + "&nbsp;"*5 \
-               + cbutton + create_downloadable('standard', header, fileoutput) + html
+               + cbutton + create_downloadable(download_name, header, fileoutput) + html
     else:
-        html = counter + cbutton + create_downloadable('standard', header, fileoutput) + html
+        html = counter + cbutton + create_downloadable(download_name, header, fileoutput) + html
     return html, cnt, oacnt
 
 # ******************************************************************************
@@ -10163,7 +10169,6 @@ def show_org_authors(org_in):
         orgs = row['members']
     else:
         orgs = [org_in]
-    html = '<br>'.join(orgs)
     payload = {"$or": [{"managed": {"$in": orgs}}, {"affiliations": {"$in": orgs}}]}
     try:
         rows = DB['dis'].orcid.find(payload).collation({"locale": "en"}).sort("family", 1)
@@ -10171,29 +10176,11 @@ def show_org_authors(org_in):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get authors from orcid collection"),
                                message=error_message(err))
-    header = ["Given name(s)", "Family name(s)", "Alumni", "ORCID", "Affiliations"]
-    content = ""
-    trows = []
-    cnt = 0
-    for row in rows:
-        given = ', '.join(row['given'])
-        family = ', '.join(row['family'])
-        alum = "YES" if row.get('alumni') else ""
-        orc = f"<a href='/userui/{row['orcid']}'>{row['orcid']}</a>" \
-              if 'orcid' in row and row['orcid'] else ""
-        affil = row['affiliations'] if 'affiliations' in row else []
-        if row.get('managed'):
-            affil.extend(row['managed'])
-        affil = sorted(list(set(affil)))
-        affil = ', '.join(affil)
-        trows.append([given, family, alum, safe(orc), affil])
-        content += f"{given}\t{family}\t{alum}\t{row['orcid'] if 'orcid' in row else ''}\t{affil}\n"
-        cnt += 1
-    html = render_table(header, trows, table_id='authors', css='tablesorter standard-scroll')
-    html = create_downloadable(f"{org_in.replace(' ', '_')}", header, content) + html
+    table, cnt = generate_user_table(rows, download=org_in.replace(' ', '_'))
+    html = f"<p>Number of authors: <span id='totalrowsa'>{cnt:,}</span></p>" + table
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title=f"Authors for {org_in} ({cnt})", html=html,
+                                         title=f"Authors for {org_in}", html=html,
                                          navbar=generate_navbar('Authorship')))
 
 
@@ -12318,9 +12305,38 @@ def show_subscription(sid):
 # ******************************************************************************
 # * UI endpoints (ORCID)                                                       *
 # ******************************************************************************
+def _render_person(orciddata, full_name, show, prefix, extra=''):
+    ''' Render a person page (shared by /orcidui and /userui) with a consistent
+        header/body: the DB name as the page title, the shared orcid-collection body,
+        the journal/preprint toggle spliced in right after the works count, and any
+        route-specific HTML (e.g. /orcidui's live-ORCID extra works) appended below.
+        Keyword arguments:
+          orciddata: person body HTML from get_orcid_from_db
+          full_name: the person's name (page title)
+          show: 'full' or 'journal' (drives the toggle button)
+          prefix: route base for the toggle links (e.g. /userui/<eid> or /orcidui/<oid>)
+          extra: optional trailing HTML appended after the body
+        Returns:
+          Response
+    '''
+    buttons = journal_buttons(show, prefix)
+    # The works table renders the count as "Number of DOIs: <span id='totalrows'>N</span>";
+    # splice the journal/preprint toggle in right after it.
+    count_re = r"(Number of DOIs: <span id='totalrows'>[\d,]+</span>)"
+    if re.search(count_re, orciddata):
+        orciddata = re.sub(count_re, lambda m: m.group(1) + buttons, orciddata, count=1)
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=full_name, html=orciddata + extra,
+                                         navbar=generate_navbar('Authorship')))
+
+
+@app.route('/orcidui/<string:oid>/<string:show>')
 @app.route('/orcidui/<string:oid>')
-def show_oid_ui(oid):
-    ''' Show ORCID user
+def show_oid_ui(oid, show='full'):
+    ''' Show ORCID user. Shares the canonical person header/body with /userui
+        (DB name as title, copyable ORCID in the body, journal/preprint toggle) and
+        additionally appends the live-ORCID extra-works list below.
     '''
     try:
         data = JRC.call_orcid(oid)
@@ -12334,18 +12350,9 @@ def show_oid_ui(oid):
         return render_template('warning.html', urlroot=request.url_root,
                                title=render_warning(f"Could not find ORCID ID {oid}", 'warning'),
                                message=data['user-message'])
-    name = data['person']['name']
-    if not name:
-        who = ''
-    elif name['credit-name']:
-        who = f"{name['credit-name']['value']}"
-    elif 'family-name' not in name or not name['family-name']:
-        who = f"{name['given-names']['value']} <span style='color: red'>" \
-              + "(Family name is missing in ORCID)</span>"
-    else:
-        who = f"{name['given-names']['value']} {name['family-name']['value']}"
     try:
-        orciddata, dois, _ = get_orcid_from_db(oid, use_eid=bool('userIdO365' in oid))
+        orciddata, dois, full_name = get_orcid_from_db(oid, use_eid=bool('userIdO365' in oid),
+                                                       show=show)
     except CustomException as err:
         return render_template('error.html', urlroot=request.url_root,
                                 title=render_warning(f"Could not find ORCID ID {oid}", 'error'),
@@ -12354,19 +12361,10 @@ def show_oid_ui(oid):
         return render_template('warning.html', urlroot=request.url_root,
                                title=render_warning(f"Could not find ORCID ID {oid}", 'warning'),
                                message="Could not find any information for this ORCID ID")
-    html = f"<h3>{who}</h3>{orciddata}"
-    # Works
+    extra = ''
     if data.get('activities-summary', {}).get('works', {}).get('group'):
-        html += add_orcid_works(data, dois)
-    endpoint_access()
-    cpaste = " <button style='background-color:transparent;border:none;' " \
-             + f"onclick=\"copyText('{oid}')\">" \
-             + "<i class='fas fa-regular fa-copy shadow' " \
-             + "style='background-color:transparent'></i></button>"
-    return make_response(render_template('general.html', urlroot=request.url_root, pagetitle=oid,
-                                         title=f"<a href='{ORCID}{oid}' " \
-                                               + f"target='_blank'>{oid}</a>{cpaste}", html=html,
-                                         navbar=generate_navbar('Authorship')))
+        extra = add_orcid_works(data, dois)
+    return _render_person(orciddata, full_name, show, f"/orcidui/{oid}", extra=extra)
 
 
 @app.route('/userui/<string:eid>/<string:show>')
@@ -12375,10 +12373,8 @@ def show_user_ui(eid, show='full'):
     ''' Show user record by employeeId (user ID) or ORCID
     '''
     try:
-        if "@" in eid:
-            orciddata, _, full_name = get_orcid_from_db(eid, use_eid=True, bare=False, show=show)
-        else:
-            orciddata, _, full_name = get_orcid_from_db(eid, use_eid=False, bare=False, show=show)
+        orciddata, _, full_name = get_orcid_from_db(eid, use_eid=bool('@' in eid),
+                                                    bare=False, show=show)
     except CustomException as err:
         return render_template('error.html', urlroot=request.url_root,
                                 title=render_warning(f"Could not find user ID {eid}",
@@ -12388,17 +12384,7 @@ def show_user_ui(eid, show='full'):
         return render_template('warning.html', urlroot=request.url_root,
                                title=render_warning(f"Could not find user ID {eid}", 'warning'),
                                message="Could not find any information for this employee ID")
-    buttons = journal_buttons(show, f"/userui/{eid}")
-    # The works table renders the count as "Number of DOIs: <span id='totalrows'>N</span>",
-    # so match that span form (the old bare "DOIs: N" pattern never matched) and drop the
-    # journal/preprint toggle in right after the count.
-    count_re = r"(Number of DOIs: <span id='totalrows'>[\d,]+</span>)"
-    if re.search(count_re, orciddata):
-        orciddata = re.sub(count_re, lambda m: m.group(1) + buttons, orciddata, count=1)
-    endpoint_access()
-    return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title=full_name, html=orciddata,
-                                         navbar=generate_navbar('Authorship')))
+    return _render_person(orciddata, full_name, show, f"/userui/{eid}")
 
 
 @app.route('/unvaluserui/<string:iid>')
@@ -13411,6 +13397,99 @@ def people(name=None):
                                          navbar=generate_navbar('System')))
 
 
+# Friendly labels + section grouping for the /peoplerec HTML view. A People
+# record is a flat dict of scalars plus a few list-of-dict fields; the HTML view
+# renders friendly-labeled Field/Value tables per section (empties skipped) plus
+# an affiliations table. The JSON response path still returns the raw record.
+PEOPLE_LABELS = {
+    'nameFirstPreferred': 'Preferred first name', 'nameFirst': 'First name',
+    'nameMiddlePreferred': 'Preferred middle name', 'nameMiddle': 'Middle name',
+    'nameLastPreferred': 'Preferred last name', 'nameLast': 'Last name',
+    'businessTitle': 'Business title', 'jobTitle': 'Job title', 'jobCode': 'Job code',
+    'jobFamily': 'Job family', 'jobProfileVisiting': 'Visiting job profile',
+    'workerType': 'Worker type', 'employeeType': 'Employee type', 'ecaType': 'ECA type',
+    'fteType': 'FTE type', 'cwrVisiting': 'Contingent worker (visiting)',
+    'enabled': 'Enabled', 'spendLimit': 'Spend limit',
+    'supOrgName': 'Supervisory org', 'supOrgCode': 'Supervisory org code',
+    'supOrgSubType': 'Supervisory org subtype', 'ccDescr': 'Cost center',
+    'costCenter': 'Cost center code', 'teamCode': 'Team',
+    'rollUpGroup': 'Roll-up group', 'subRollUpGroup': 'Sub roll-up group',
+    'locationName': 'Location', 'locationCode': 'Location code', 'building': 'Building',
+    'workSpaceName': 'Workspace', 'secondaryLocation': 'Secondary location',
+    'secondaryWorkspace': 'Secondary workspace', 'departmentAddress1': 'Address line 1',
+    'departmentAddress2': 'Address line 2', 'departmentAddress3': 'Address line 3',
+    'departmentCity': 'City', 'departmentState': 'State',
+    'departmentPostalCode': 'Postal code', 'departmentCountry': 'Country',
+    'email': 'Email', 'phone1': 'Phone', 'phone1Type': 'Phone type',
+    'phone2': 'Phone 2', 'phone2Type': 'Phone 2 type', 'fax': 'Fax',
+    'hireDate': 'Hire date', 'terminationDate': 'Termination date',
+    'contingentWorkerEndDate': 'Contingent worker end date', 'modifiedOn': 'Modified on',
+    'userId': 'User ID', 'userIdO365': 'O365 user ID'}
+PEOPLE_SECTIONS = (
+    ('Name', ('nameFirstPreferred', 'nameFirst', 'nameMiddlePreferred', 'nameMiddle',
+              'nameLastPreferred', 'nameLast')),
+    ('Role', ('businessTitle', 'jobTitle', 'jobCode', 'jobFamily', 'jobProfileVisiting',
+              'workerType', 'employeeType', 'ecaType', 'fteType', 'cwrVisiting',
+              'enabled', 'spendLimit')),
+    ('Organization', ('supOrgName', 'supOrgCode', 'supOrgSubType', 'ccDescr', 'costCenter',
+                      'teamCode', 'rollUpGroup', 'subRollUpGroup')),
+    ('Location', ('locationName', 'locationCode', 'building', 'workSpaceName',
+                  'secondaryLocation', 'secondaryWorkspace', 'departmentAddress1',
+                  'departmentAddress2', 'departmentAddress3', 'departmentCity',
+                  'departmentState', 'departmentPostalCode', 'departmentCountry')),
+    ('Contact', ('email', 'phone1', 'phone1Type', 'phone2', 'phone2Type', 'fax')),
+    ('Dates', ('hireDate', 'terminationDate', 'contingentWorkerEndDate', 'modifiedOn')),
+    ('Identifiers', ('userId', 'userIdO365')))
+
+
+def _people_record_html(rec):
+    ''' Render a People record as friendly-labeled Field/Value tables grouped into
+        sections (empty values skipped), plus an affiliations table. Replaces the
+        former raw json.dumps <pre> dump; the JSON response path is unchanged.
+        Keyword arguments:
+          rec: People record dict (employeeId/managerId already removed)
+        Returns:
+          HTML string
+    '''
+    def present(val):
+        return val not in (None, '', [], {})
+    html = ""
+    shown = set()
+    for section, keys in PEOPLE_SECTIONS:
+        rows = []
+        for key in keys:
+            shown.add(key)
+            val = rec.get(key)
+            if not present(val):
+                continue
+            if isinstance(val, bool):
+                val = 'Yes' if val else 'No'
+            label = PEOPLE_LABELS.get(key, key)
+            if key == 'email':
+                val = safe(f"<a href='mailto:{escape(str(val))}'>{escape(str(val))}</a>")
+            rows.append([label, val])
+        if rows:
+            html += (f"<h5 style='margin:14px 0 6px 0;'>{section}</h5>"
+                     + render_table(['Field', 'Value'], rows, width=560))
+    affs = rec.get('affiliations') or []
+    if affs:
+        arows = [[a.get('role', ''), a.get('supOrgName', ''), a.get('supOrgSubType', ''),
+                  a.get('type', '')] for a in affs]
+        html += ("<h5 style='margin:14px 0 6px 0;'>Affiliations</h5>"
+                 + render_table(['Role', 'Supervisory org', 'Subtype', 'Type'], arows,
+                                width=560))
+    # Future-proofing: surface any scalar field not covered above so nothing new
+    # from People silently disappears (nested/empty structures are still omitted;
+    # the raw record remains available via the JSON response).
+    handled = shown | {'affiliations', 'photoURL', 'employeeId', 'managerId'}
+    extra = [[k, rec[k]] for k in sorted(rec)
+             if k not in handled and present(rec[k]) and not isinstance(rec[k], (list, dict))]
+    if extra:
+        html += ("<h5 style='margin:14px 0 6px 0;'>Other</h5>"
+                 + render_table(['Field', 'Value'], extra, width=560))
+    return html
+
+
 @app.route('/peoplerec/<string:eid>')
 def peoplerec(eid):
     '''
@@ -13465,7 +13544,7 @@ def peoplerec(eid):
     if 'photoURL' in rec:
         title += f"&nbsp;<img src='{rec['photoURL']}' width=100 height=100 " \
                  + f"alt='Photo of {rec['nameFirstPreferred']}'>"
-    html = f"<div class='codescroll-full'><pre>{json.dumps(rec, indent=2)}</pre></div>"
+    html = _people_record_html(rec)
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
