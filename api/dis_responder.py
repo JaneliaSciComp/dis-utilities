@@ -49,7 +49,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.9.1"
+__version__ = "120.10.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -5642,8 +5642,12 @@ def dois_license(year='All'):
           + "<span style='font-size: 14pt'> of Janelia DOIs have a known license" \
           + f"</span><span style='font-size: 12pt'><br>{defcnt:,}/{total:,}</span><br>"
     html = pre + html
-    chartscript, chartdiv = DP.treemap_chart(data, "DOIs by license", width=700, height=700,
-                                             value_format="0,0")
+    # Ranked categorical breakdown -> horizontal bar (audit chart policy). Colour
+    # defaults to get_colors_by_count (SOURCE_PALETTE is reserved for the 2-way
+    # registrar split); height scales with the number of licenses so bars stay legible.
+    lic_height = max(360, 30 * len(data) + 90)
+    chartscript, chartdiv = DP.hbar_chart(data, "DOIs by license", value_label="DOIs",
+                                          width=700, height=lic_height, show_values=True)
     title = "DOIs by license"
     if year != 'All':
         title += f" ({year})"
@@ -10758,9 +10762,19 @@ def dois_publisher(year='All'):
     title = "DOIs by publisher"
     if year != 'All':
         title += f" for {year}"
+    # Ranked hbar of the top publishers by total DOIs (audit chart policy); the table
+    # above lists every publisher. Default colour = get_colors_by_count (SOURCE_PALETTE
+    # is reserved for the 2-way registrar split); height scales with the bar count.
+    pub_totals = {pub: sum(val.values()) for pub, val in pubs.items()}
+    top_pub = dict(sorted(pub_totals.items(), key=lambda kv: kv[1], reverse=True)[:20])
+    chart_title = f"Top {len(top_pub)} publishers by DOIs"
+    pub_height = max(360, 34 * len(top_pub) + 90)
+    chartscript, chartdiv = DP.hbar_chart(top_pub, chart_title, value_label="DOIs",
+                                          width=760, height=pub_height, show_values=True)
     endpoint_access()
-    return make_response(render_template('general.html', urlroot=request.url_root,
+    return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title=title, html=html,
+                                         chartscript=chartscript, chartdiv=chartdiv,
                                          navbar=generate_navbar('DOIs')))
 
 
@@ -11085,9 +11099,19 @@ def show_journals_dois(year=None):
            + "Subscription tracking is a work in process<br>" \
            + stat_cards(cards, div_id='jdois-stats') \
            + year_pulldown('journals_dois') + html
+    # Ranked hbar of the top journals by DOI count (audit chart policy); the table
+    # above lists every journal. Default colour = get_colors_by_count. The wide
+    # 5-column table means this sits below the table rather than beside it.
+    top_jour = dict(sorted(((k, v['count']) for k, v in journal.items()),
+                           key=lambda kv: kv[1], reverse=True)[:20])
+    chart_title = f"Top {len(top_jour)} journals by DOIs"
+    jour_height = max(360, 34 * len(top_jour) + 90)
+    chartscript, chartdiv = DP.hbar_chart(top_jour, chart_title, value_label="DOIs",
+                                          width=760, height=jour_height, show_values=True)
     endpoint_access()
-    return make_response(render_template('general.html', urlroot=request.url_root,
+    return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title=title, html=html,
+                                         chartscript=chartscript, chartdiv=chartdiv,
                                          navbar=generate_navbar('DOIs')))
 
 
@@ -11105,10 +11129,8 @@ def top_entities(entity_type, year='All', source='crossref', top=10):
     '''
     entity_config = {
         'journal':   {'label': 'Journal',   'note': "Note that this does not contain "
-                                                     "Janelia Research Campus (figshare)<br>",
-                      'pie_width': 875,  'pie_height': 550},
-        'publisher': {'label': 'Publisher', 'note': '',
-                      'pie_width': 1100, 'pie_height': 650},
+                                                     "Janelia Research Campus (figshare)<br>"},
+        'publisher': {'label': 'Publisher', 'note': ''},
     }
     if entity_type not in entity_config:
         return render_template('error.html', urlroot=request.url_root,
@@ -11154,9 +11176,12 @@ def top_entities(entity_type, year='All', source='crossref', top=10):
         title += f" for {fsource}"
     if year != 'All':
         title += f" ({year})"
-    chartscript, chartdiv = DP.pie_chart(data, title, "source",
-                                         width=cfg['pie_width'], height=cfg['pie_height'],
-                                         colors='Category20')
+    # Ranked categorical breakdown -> horizontal bar (audit chart policy). Default
+    # colour = get_colors_by_count (SOURCE_PALETTE is reserved for the 2-way registrar
+    # split); height scales with the number of bars (<= top).
+    ent_height = max(360, 34 * len(data) + 90)
+    chartscript, chartdiv = DP.hbar_chart(data, title, value_label="DOIs",
+                                          width=850, height=ent_height, show_values=True)
     title = f"Top {top} DOI {entity_type}s"
     title += f" for {fsource}"
     if year != 'All':
