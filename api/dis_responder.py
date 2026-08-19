@@ -49,7 +49,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.8.4"
+__version__ = "120.9.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -942,7 +942,7 @@ def generate_works_table(rows, name=None, show="full", eid=None):
                + f"This may include non-Janelia authors<br>{html}"
     cbutton = "<button class=\"btn btn-outline-warning\" " \
               + "onclick=\"toggler('pubs', 'ver', 'totalrows');\">" \
-              + "Filter for versioned DOIs</button>"
+              + "Filter versioned DOIs</button>"
     html = cbutton + create_downloadable('works', ['Published', 'DOI', 'Title'], fileoutput) + html
     preamble = f'''
     The works below were searched for using this author's name and ORCID. A green checkmark
@@ -5295,7 +5295,7 @@ def show_dois_metrics(year='All'):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not count DOIs"),
                                message=error_message(err))
-    header = (f"<h5 style='margin:14px 0 6px 0;'>DOI metrics{ysfx}</h5>"
+    header = (f"<h5 style='margin:14px 0 6px 0;'>Overview{ysfx}</h5>"
               + stat_cards([("DOIs", f"{total:,}"),
                             ("Crossref", f"{by_src['Crossref']:,}"),
                             ("DataCite", f"{by_src['DataCite']:,}")], div_id='doi-stats')
@@ -6682,7 +6682,7 @@ def crossref_subject(subject=None, year='All'):
             html = cards + html
         title = f"DOIs for {subject}"
         if year != 'All':
-            title += f" (year={year})"
+            title += f" ({year})"
     else:
         cnt = 0
         total = 0
@@ -6714,7 +6714,7 @@ def crossref_subject(subject=None, year='All'):
             html = cards + pulldown + "<br><br>" + table
         title = "Crossref subjects"
         if year != 'All':
-            title += f" (year={year})"
+            title += f" ({year})"
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
@@ -6774,7 +6774,7 @@ def datacite_subject(subject=None, year='All'):
             html = cards + html
         title = f"DOIs for {subject}"
         if year != 'All':
-            title += f" (year={year})"
+            title += f" ({year})"
     else:
         cnt = 0
         total = 0
@@ -6813,7 +6813,7 @@ def datacite_subject(subject=None, year='All'):
             html = cards + pulldown + "<br><br>" + table
         title = "DataCite subjects"
         if year != 'All':
-            title += f" (year={year})"
+            title += f" ({year})"
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
@@ -6850,7 +6850,7 @@ def datacite_scheme(scheme, year='All'):
         html = cards + html
     title = f"DataCite DOIs using subject scheme {scheme}"
     if year != 'All':
-        title += f" (year={year})"
+        title += f" ({year})"
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
@@ -6959,7 +6959,7 @@ def datacite_doisd(dtype=None, pub=None, year='All'):
                                           count_card=True)
     title = f"DOIs for {pub} {dtype} ({cnt:,})"
     if year != 'All':
-        title += f" (year={year})"
+        title += f" ({year})"
     chartscript, chartdiv = DP.wedge_chart({'shown': oacnt, 'total': cnt}) if oacnt else ['', '']
     if cnt:
         oamsg = f"<span style='font-size: 18pt; color: lightgray'>{oacnt/cnt*100:.1f}%</span>" \
@@ -7031,7 +7031,7 @@ def citation_list(source='datacite'):
              + f"style='margin-left: 10px'>Switch to {obtained_from[other]}</a>"
     title = f"{obtained} DOI citations"
     if year != 'All':
-        title += f" (year={year})"
+        title += f" ({year})"
     if not cnt:
         # No DOIs for this filter - advise but keep the year pulldown so another
         # year can be chosen
@@ -8002,24 +8002,32 @@ def figshare_metrics(year='All'):  # pylint: disable=too-many-locals,too-many-br
                          ("DOIs cited", f"{cited_dois:,} ({cited_dois/total*100:,.1f}%)"),
                          ("Total citations", f"{cite_total:,}")],
                         div_id='fig-stats2')
+    intro = "<div style='font-size:0.85em; color:#a8c4e0; max-width:620px; " \
+            + "margin:-8px 0 16px 0'>Usage is the sum of per-record views/downloads " \
+            + "across all versions. See <a href='/figshare_groups'>figshare title " \
+            + "groups</a> for the same DOIs collapsed by title.</div>"
     # ----- usage totals -----
     uhtml = "<h4>Usage totals</h4>"
     uhtml += render_table(['Metric', 'Count'],
                           [[k, f"{v:,}"] for k, v in usage.items()],
                           table_id='fig-usage', css='tablesorter numberlast-scroll')
     # ----- deposits & usage by publishing year -----
+    # A specific year is already the query filter, so a by-year breakdown would be
+    # a single, redundant row/bar. Only build it for the all-years view.
     ydata = {'Year': [], 'DOIs': [], 'Downloads': []}
-    ytrows = []
-    for yname in sorted(by_year):
-        rec = by_year[yname]
-        ytrows.append([yname, f"{rec['dois']:,}", f"{rec['views']:,}",
-                       f"{rec['downloads']:,}", f"{rec['citations']:,}"])
-        ydata['Year'].append(yname)
-        ydata['DOIs'].append(rec['dois'])
-        ydata['Downloads'].append(rec['downloads'])
-    yhtml = "<h4>Deposits &amp; usage by publishing year</h4>"
-    yhtml += render_table(['Year', 'DOIs', 'Views', 'Downloads', 'Citations'],
-                          ytrows, table_id='fig-years', css='tablesorter numberlast-scroll')
+    yhtml = ''
+    if year == 'All':
+        ytrows = []
+        for yname in sorted(by_year):
+            rec = by_year[yname]
+            ytrows.append([yname, f"{rec['dois']:,}", f"{rec['views']:,}",
+                           f"{rec['downloads']:,}", f"{rec['citations']:,}"])
+            ydata['Year'].append(yname)
+            ydata['DOIs'].append(rec['dois'])
+            ydata['Downloads'].append(rec['downloads'])
+        yhtml = "<h4>Deposits &amp; usage by publishing year</h4>"
+        yhtml += render_table(['Year', 'DOIs', 'Views', 'Downloads', 'Citations'],
+                              ytrows, table_id='fig-years', css='tablesorter numberlast-scroll')
     # ----- resource type breakdown -----
     type_data = dict(by_type)
     thtml = "<h4>DOIs by resource type</h4>"
@@ -8062,9 +8070,10 @@ def figshare_metrics(year='All'):  # pylint: disable=too-many-locals,too-many-br
     # ----- charts -----
     chartscript = ''
     usage_div = year_div = type_div = pub_div = src_div = ''
-    script, usage_div = DP.pie_chart(usage, "Usage totals", "metric", width=500,
-                                     fmt="{0,0}")
-    chartscript += script
+    if any(usage.values()):
+        script, usage_div = DP.pie_chart(usage, "Usage totals", "metric", width=500,
+                                         fmt="{0,0}")
+        chartscript += script
     if ydata['Year']:
         # Tap a year bar -> figshare metrics scoped to that year
         ynav = {yr: f"/figshare_stats/{yr}" for yr in ydata['Year']}
@@ -8093,10 +8102,12 @@ def figshare_metrics(year='All'):  # pylint: disable=too-many-locals,too-many-br
                + chart_div + "</div></div>"
     title = "figshare metrics"
     if year != 'All':
-        title += f" (year={year})"
-    html = year_pulldown('figshare_stats') + "<br><br>" + cards \
-           + flexrow(uhtml, usage_div) + flexrow(yhtml, year_div) \
-           + flexrow(thtml, type_div) + flexrow(phtml, pub_div)
+        title += f" ({year})"
+    html = year_pulldown('figshare_stats') + "<br><br>" + cards + intro \
+           + flexrow(uhtml, usage_div)
+    if yhtml:
+        html += flexrow(yhtml, year_div)
+    html += flexrow(thtml, type_div) + flexrow(phtml, pub_div)
     if shtml:
         html += flexrow(shtml, src_div)
     endpoint_access()
@@ -8349,6 +8360,10 @@ def figshare_groups(year='All'):  # pylint: disable=too-many-locals,too-many-bra
           f"{grouped_dois:,} ({grouped_dois/total*100:,.1f}%)"),
          largest_card],
         div_id='figg-stats')
+    cards += stat_cards([("Total views", f"{sum(g['views'] for g in groups):,}"),
+                         ("Total downloads", f"{sum(g['downloads'] for g in groups):,}"),
+                         ("Total citations", f"{sum(g['citations'] for g in groups):,}")],
+                        div_id='figg-stats2')
     gnote = "<div style='font-size:0.85em; color:#a8c4e0; max-width:620px; " \
             + "margin:-8px 0 16px 0'>Groups are formed by stripping trailing " \
             + "identifiers from each title (serials like AA0547, specimen codes " \
@@ -8381,7 +8396,7 @@ def figshare_groups(year='All'):  # pylint: disable=too-many-locals,too-many-bra
         sections += group_flexrow(thtml, chart_div)
     title = "figshare title groups"
     if year != 'All':
-        title += f" (year={year})"
+        title += f" ({year})"
     html = year_pulldown('figshare_groups') + "<br><br>" + cards + gnote + sections
     endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
@@ -8579,7 +8594,8 @@ def zenodo_groups(year='All'):  # pylint: disable=too-many-locals,too-many-branc
          largest_card],
         div_id='zeng-stats')
     cards += stat_cards([("Total views", f"{sum(g['views'] for g in groups):,}"),
-                         ("Total downloads", f"{sum(g['downloads'] for g in groups):,}")],
+                         ("Total downloads", f"{sum(g['downloads'] for g in groups):,}"),
+                         ("Total citations", f"{sum(g['citations'] for g in groups):,}")],
                         div_id='zeng-stats2')
     gnote = "<div style='font-size:0.85em; color:#a8c4e0; max-width:620px; " \
             + "margin:-8px 0 16px 0'>Each deposit collapses every version of one " \
@@ -8617,7 +8633,7 @@ def zenodo_groups(year='All'):  # pylint: disable=too-many-locals,too-many-branc
         sections += group_flexrow(thtml, chart_div)
     title = "Zenodo deposits"
     if year != 'All':
-        title += f" (year={year})"
+        title += f" ({year})"
     html = year_pulldown('zenodo_groups') + "<br><br>" + cards + gnote + sections
     endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
@@ -8718,18 +8734,22 @@ def zenodo_stats(year='All'):  # pylint: disable=too-many-locals,too-many-branch
              + "<b>Unique downloads</b> count each IP address only once per record, " \
              + "giving a closer approximation of distinct users reached.</div>"
     # ----- deposits & usage by publishing year -----
+    # A specific year is already the query filter, so a by-year breakdown would be
+    # a single, redundant row/bar. Only build it for the all-years view.
     ydata = {'Year': [], 'DOIs': [], 'Downloads': []}
-    ytrows = []
-    for yname in sorted(by_year):
-        rec = by_year[yname]
-        ytrows.append([yname, f"{rec['dois']:,}", f"{rec['views']:,}",
-                       f"{rec['downloads']:,}", f"{rec['citations']:,}"])
-        ydata['Year'].append(yname)
-        ydata['DOIs'].append(rec['dois'])
-        ydata['Downloads'].append(rec['downloads'])
-    yhtml = "<h4>Deposits &amp; usage by publishing year</h4>"
-    yhtml += render_table(['Year', 'DOIs', 'Views', 'Downloads', 'Citations'],
-                          ytrows, table_id='zen-years', css='tablesorter numberlast-scroll')
+    yhtml = ''
+    if year == 'All':
+        ytrows = []
+        for yname in sorted(by_year):
+            rec = by_year[yname]
+            ytrows.append([yname, f"{rec['dois']:,}", f"{rec['views']:,}",
+                           f"{rec['downloads']:,}", f"{rec['citations']:,}"])
+            ydata['Year'].append(yname)
+            ydata['DOIs'].append(rec['dois'])
+            ydata['Downloads'].append(rec['downloads'])
+        yhtml = "<h4>Deposits &amp; usage by publishing year</h4>"
+        yhtml += render_table(['Year', 'DOIs', 'Views', 'Downloads', 'Citations'],
+                              ytrows, table_id='zen-years', css='tablesorter numberlast-scroll')
     # ----- resource type breakdown -----
     type_data = dict(by_type)
     thtml = "<h4>DOIs by resource type</h4>"
@@ -8793,10 +8813,12 @@ def zenodo_stats(year='All'):  # pylint: disable=too-many-locals,too-many-branch
                + chart_div + "</div></div>"
     title = "Zenodo metrics"
     if year != 'All':
-        title += f" (year={year})"
+        title += f" ({year})"
     html = year_pulldown('zenodo_stats') + "<br><br>" + cards + intro \
-           + flexrow(uhtml, usage_div) + flexrow(yhtml, year_div) \
-           + flexrow(thtml, type_div)
+           + flexrow(uhtml, usage_div)
+    if yhtml:
+        html += flexrow(yhtml, year_div)
+    html += flexrow(thtml, type_div)
     if shtml:
         html += flexrow(shtml, src_div)
     endpoint_access()
@@ -8958,7 +8980,7 @@ def protocolsio_stats(year='All'):  # pylint: disable=too-many-locals,too-many-b
             + "DOIs collapsed by concept (version series).</div>"
     # ----- usage totals -----
     uhtml = "<h4>Usage totals</h4>"
-    uhtml += render_table(['Attribute', 'Count'],
+    uhtml += render_table(['Metric', 'Count'],
                           [[k, f"{v:,}"] for k, v in usage.items()],
                           table_id='pio-usage', css='tablesorter numberlast-scroll')
     uhtml += "<div style='font-size:0.85em; color:#a8c4e0; max-width:560px; margin:6px 0 0 0'>" \
@@ -8966,18 +8988,22 @@ def protocolsio_stats(year='All'):  # pylint: disable=too-many-locals,too-many-b
              + "PDF/format exports); <b>Runs</b> tracks protocols.io's \"start experiment\" " \
              + "feature, and <b>Forks</b> counts derivative copies (public/private).</div>"
     # ----- DOIs & usage by publishing year -----
+    # A specific year is already the query filter, so a by-year breakdown would be
+    # a single, redundant row/bar. Only build it for the all-years view.
     ydata = {'Year': [], 'DOIs': [], 'Views': []}
-    ytrows = []
-    for yname in sorted(by_year):
-        rec = by_year[yname]
-        ytrows.append([yname, f"{rec['dois']:,}", f"{rec['views']:,}",
-                       f"{rec['exports']:,}", f"{rec['citations']:,}"])
-        ydata['Year'].append(yname)
-        ydata['DOIs'].append(rec['dois'])
-        ydata['Views'].append(rec['views'])
-    yhtml = "<h4>DOIs &amp; usage by publishing year</h4>"
-    yhtml += render_table(['Year', 'DOIs', 'Views', 'Exports', 'Citations'],
-                          ytrows, table_id='pio-years', css='tablesorter numberlast-scroll')
+    yhtml = ''
+    if year == 'All':
+        ytrows = []
+        for yname in sorted(by_year):
+            rec = by_year[yname]
+            ytrows.append([yname, f"{rec['dois']:,}", f"{rec['views']:,}",
+                           f"{rec['exports']:,}", f"{rec['citations']:,}"])
+            ydata['Year'].append(yname)
+            ydata['DOIs'].append(rec['dois'])
+            ydata['Views'].append(rec['views'])
+        yhtml = "<h4>DOIs &amp; usage by publishing year</h4>"
+        yhtml += render_table(['Year', 'DOIs', 'Views', 'Exports', 'Citations'],
+                              ytrows, table_id='pio-years', css='tablesorter numberlast-scroll')
     # ----- citation sources (which source surfaces protocols.io citations) -----
     src_data = dict(cite_src)
     shtml = ''
@@ -9029,9 +9055,11 @@ def protocolsio_stats(year='All'):  # pylint: disable=too-many-locals,too-many-b
                + chart_div + "</div></div>"
     title = "protocols.io metrics"
     if year != 'All':
-        title += f" (year={year})"
+        title += f" ({year})"
     html = year_pulldown('protocolsio_stats') + "<br><br>" + cards + intro \
-           + flexrow(uhtml, usage_div) + flexrow(yhtml, year_div)
+           + flexrow(uhtml, usage_div)
+    if yhtml:
+        html += flexrow(yhtml, year_div)
     if shtml:
         html += flexrow(shtml, src_div)
     endpoint_access()
@@ -9206,7 +9234,7 @@ def protocolsio_dois(year='All'):  # pylint: disable=too-many-locals,too-many-br
         sections += group_flexrow(thtml, chart_div)
     title = "protocols.io deposits"
     if year != 'All':
-        title += f" (year={year})"
+        title += f" ({year})"
     html = year_pulldown('protocolsio_dois') + "<br><br>" + cards + gnote + sections
     endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
@@ -9477,7 +9505,7 @@ def elife_stats(year='All'):  # pylint: disable=too-many-locals,too-many-branche
                + chart_div + "</div></div>"
     title = "eLife metrics"
     if year != 'All':
-        title += f" (year={year})"
+        title += f" ({year})"
     html = year_pulldown('elife_stats') + "<br><br>" + cards + intro + flexrow(uhtml, usage_div)
     if yhtml:
         html += flexrow(yhtml, year_div)
@@ -9653,7 +9681,7 @@ def elife_dois(year='All'):  # pylint: disable=too-many-locals,too-many-branches
         sections += group_flexrow(thtml, chart_div)
     title = "eLife articles"
     if year != 'All':
-        title += f" (year={year})"
+        title += f" ({year})"
     html = year_pulldown('elife_dois') + "<br><br>" + cards + gnote + sections
     endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
@@ -10689,7 +10717,7 @@ def dois_publisher(year='All'):
                 link = ""
             cells.append(safe(link))
         trows.append(cells)
-    footer = [fcell('TOTAL')] + [fcell(f"{total[source]:,}", align='center')
+    footer = [fcell('Total')] + [fcell(f"{total[source]:,}", align='center')
                                  for source in SOURCES]
     html = render_table(['Publisher', 'Crossref', 'DataCite'], trows, table_id='types',
                         css='tablesorter numbers-scroll', footer=footer)
