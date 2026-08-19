@@ -48,7 +48,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.11.0"
+__version__ = "120.11.1"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -5869,9 +5869,9 @@ def dois_report(year=None):
                       + f"{BOLD}{typed['DataCite']:,}" \
                       + "</span> DataCite entries"
     if 'Journal articles' not in stat:
-        stat['Journal articles'] = "{BOLD}0</span> journal articles<br>"
+        stat['Journal articles'] = f"{BOLD}0</span> journal articles<br>"
     if 'Preprints' not in stat:
-        stat['Preprints'] = "{BOLD}0</span> preprints<br>"
+        stat['Preprints'] = f"{BOLD}0</span> preprints<br>"
     # Authors
     try:
         rows = coll.find({"jrc_publishing_date": {"$regex": "^"+ year}})
@@ -5937,9 +5937,10 @@ def dois_report(year=None):
             continue
         cnt += 1
         total += row['numtags']
-    stat['Tags'] = f"{BOLD}{total/cnt:.1f}</span> " \
+    avg_tags = (total / cnt) if cnt else 0
+    stat['Tags'] = f"{BOLD}{avg_tags:.1f}</span> " \
                    + "average tags per tagged entry"
-    sheet.append(f"Average tags per tagged entry\t{total/cnt:.1f}")
+    sheet.append(f"Average tags per tagged entry\t{avg_tags:.1f}")
     sheet = create_downloadable(f"{year}_in_review", None, "\n".join(sheet))
     html = f"<h2 class='dark'>Entries</h2>{stat['Entries']}<br>" \
            + f"<h2 class='dark'>Articles</h2>{stat['Journal articles']}" \
@@ -5986,7 +5987,9 @@ def dois_yearly(year=None):
                                message=error_message(err))
     typed = counts_by_type(rows)
     first, last, anyauth = get_first_last_authors(year)
-    stat = {}
+    # Pre-seed every type at 0 so a year with no data (e.g. a future year) still has
+    # stat['Journal articles'] / stat['Preprints'] etc. for the summary and can't KeyError.
+    stat = {val: f"{BOLD}0</span> {val.lower()}" for val in pmap.values()}
     # Journal count
     payload = [{"$unwind" : "$container-title"},
                {"$match": {"container-title": {"$exists": True}, "type": "journal-article",
@@ -6100,7 +6103,9 @@ def dois_time(period, year=None):
         year = str(datetime.now().year)
     substr_len = 7 if period == 'month' else 4
     pipeline = []
-    if year:
+    # Treat an explicit 'All' like no year filter (it's a label, not a date prefix -
+    # "^All" would match nothing); the month nav below is already guarded for 'All'.
+    if year and year != 'All':
         pipeline.append({"$match": {"jrc_publishing_date": {"$regex": "^" + year}}})
     pipeline += [
         {"$group": {"_id": {period: {"$substrBytes": ["$jrc_publishing_date", 0, substr_len]},
