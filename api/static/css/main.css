@@ -315,6 +315,36 @@ div.scroll {max-height: 200px;
             padding: 8px;
 }
 
+/* Reusable label with a pure-CSS hover tooltip: the visible text is the friendly
+   label; its internal name (a data-field attribute) shows in a small box on hover.
+   Dotted underline + help cursor signal it; no JS needed. Usage:
+     <span class="field-tip" data-field="jrc_author">Author</span>
+   NOTE: the tooltip is an absolutely-positioned ::after, so the host must NOT sit
+   inside an overflow-clipping container (e.g. div.tag-scrollbox) or it is clipped.
+   First used by the /dois_metrics Coverage tab (field name -> jrc_ field). */
+.field-tip {position: relative;
+            display: inline-block;
+            border-bottom: 1px dotted var(--table-accent);
+            cursor: help;}
+.field-tip::after {content: attr(data-field);
+                   position: absolute;
+                   left: 0;
+                   bottom: calc(100% + 6px);
+                   z-index: 1000;
+                   padding: 3px 7px;
+                   border-radius: 4px;
+                   background: #1b2a3a;
+                   color: #e8f0f8;
+                   border: 1px solid var(--muted-border);
+                   font-family: monospace;
+                   font-size: 0.82em;
+                   white-space: nowrap;
+                   opacity: 0;
+                   pointer-events: none;
+                   transition: opacity 0.1s ease;
+                   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);}
+.field-tip:hover::after {opacity: 1;}
+
 /* Bordered, scrollable pane with an always-visible styled scrollbar, so it
    reads clearly as a scroll box (tag-metrics Tags table). */
 div.tag-scrollbox {max-height: 520px;

@@ -49,7 +49,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.9.0"
+__version__ = "120.9.1"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -133,6 +133,27 @@ app.config.from_pyfile("config.cfg")
 CORS(app, supports_credentials=True)
 app.config["STARTDT"] = datetime.now()
 app.config["LAST_TRANSACTION"] = time()
+
+
+@app.url_defaults
+def _static_cache_bust(endpoint, values):
+    ''' Append a static file's last-modified time as a ?v= query param to every
+        url_for('static', ...) URL, so a browser refetches an asset whenever it
+        actually changes. This is automatic: no template edits and no coupling to
+        __version__ - the param is derived from the file's mtime, so it changes
+        exactly when the file does (and only then).
+        Keyword arguments:
+          endpoint: the endpoint being built a URL for
+          values: the URL values dict (mutated in place to add 'v')
+        Returns:
+          None
+    '''
+    if endpoint == 'static' and 'filename' in values:
+        try:
+            fpath = os.path.join(app.static_folder, values['filename'])
+            values['v'] = int(os.stat(fpath).st_mtime)
+        except OSError:
+            pass
 
 
 def _load_config_ns(name):
@@ -3754,14 +3775,14 @@ def _build_ack_sources():
         i, e = unrec['Internal'], unrec['External']
         trows.append([safe("<span style='color:#a8c4e0;'>(source not recorded)</span>"),
                       f"{i:,}", f"{e:,}", f"{i + e:,}"])
-    footer = [fcell('TOTAL'), fcell(f"{grand_int:,}", align='center'),
+    footer = [fcell('Total'), fcell(f"{grand_int:,}", align='center'),
               fcell(f"{grand_ext:,}", align='center'),
               fcell(f"{grand_int + grand_ext:,}", align='center')]
     src_table = render_table(['Source', 'Internal', 'External', 'Total'], trows,
                              table_id='acksources', css='tablesorter numbers-scroll',
                              footer=footer, width=500)
     caption = ("<div style='color:#a8c4e0;font-size:0.82em;margin:6px 0 8px 0;'>"
-               "Where each stored acknowledgement was fetched from (jrc_ack_source), "
+               "Where each stored acknowledgement was fetched from, "
                "for Internal DOIs (dois) and External DOIs (external_dois). "
                "&ldquo;(source not recorded)&rdquo; = acknowledgement text stored "
                "before source tracking.</div>")
@@ -3956,7 +3977,7 @@ def show_acknowledgement_metrics(limit=10):
     # Numeric footer cells carry data-sum-col (0-based body column) so the active-
     # SupOrg filter (filterTagTable) re-sums them over the visible rows. The id must
     # be unique on the page (the tab pane is id='tags'), so use 'acktags'.
-    footer = [fcell('TOTAL', colspan=2)] + [
+    footer = [fcell('Total', colspan=2)] + [
         safe(f"<th style='text-align: center;' data-sum-col='{i + 2}'>{total[c]:,}</th>")
         for i, c in enumerate(cols)]
     entity_table = render_table(['Acknowledgement', 'SupOrg'] + cols, trows,
@@ -4002,7 +4023,7 @@ def show_acknowledgement_metrics(limit=10):
     gt = sum(v[0] for v in cov.values())
     gu = sum(v[1] for v in cov.values())
     gg = sum(v[2] for v in cov.values())
-    cov_footer = [fcell('TOTAL'), fcell(f"{gt:,} ({pct(gt, gg)})", align='center'),
+    cov_footer = [fcell('Total'), fcell(f"{gt:,} ({pct(gt, gg)})", align='center'),
                   fcell(f"{gu:,} ({pct(gu, gg)})", align='center'),
                   fcell(f"{gg:,}", align='center')]
     cov_table = render_table(['Collection', 'Tagged', 'Untagged', 'Total'], cov_rows,
@@ -4141,7 +4162,7 @@ def show_tag_metrics(limit=15):
     gt = sum(v[0] for v in cov.values())
     gu = sum(v[1] for v in cov.values())
     gg = sum(v[2] for v in cov.values())
-    cov_footer = [fcell('TOTAL'), fcell(f"{gt:,} ({pct(gt, gg)})", align='center'),
+    cov_footer = [fcell('Total'), fcell(f"{gt:,} ({pct(gt, gg)})", align='center'),
                   fcell(f"{gu:,} ({pct(gu, gg)})", align='center'), fcell(f"{gg:,}", align='center')]
     cov_table = render_table(['Registrar', 'Tagged', 'Untagged', 'Total'], cov_rows,
                              table_id='tagcoverage', css='tablesorter numbers-scroll',
@@ -4220,7 +4241,7 @@ def show_tag_metrics(limit=15):
         row_classes.append(rclass)
     # Numeric footer cells carry data-sum-col (0-based body column) so the active-
     # SupOrg filter (filterTagTable) can re-sum them over the visible rows.
-    tag_footer = [fcell('TOTAL', colspan=2),
+    tag_footer = [fcell('Total', colspan=2),
                   safe(f"<th style='text-align: center;' data-sum-col='2'>{tot_cr:,}</th>"),
                   safe(f"<th style='text-align: center;' data-sum-col='3'>{tot_dc:,}</th>"),
                   safe("<th style='text-align: center;' data-sum-col='4'>"
@@ -5320,7 +5341,7 @@ def show_dois_metrics(year='All'):
                       safe(f"<a href='{link}'>{val:,}</a>")])
     src_table = render_table(['Source', 'Type', 'Subtype', 'Count'], srows,
                              table_id='doisrc', css='tablesorter numberlast-scroll',
-                             footer=[fcell('TOTAL', colspan=3), fcell(f"{stotal:,}")])
+                             footer=[fcell('Total', colspan=3), fcell(f"{stotal:,}")])
     s1, d1 = DP.pie_chart(sdata, f"DOIs by source{ysfx}", "source", width=450,
                           colors=DP.SOURCE_PALETTE)
     lm_payload = ([{"$match": dict(yr)}] if year != 'All' else []) + \
@@ -5371,7 +5392,7 @@ def show_dois_metrics(year='All'):
         trows = [[t, f"{c:,}"] for t, c in sorted(tdata.items(), key=itemgetter(1), reverse=True)]
         type_table = render_table(['Type', 'Count'], trows, table_id='doitype',
                                   css='tablesorter numberlast-scroll',
-                                  footer=[fcell('TOTAL'), fcell(f"{sum(tdata.values()):,}")])
+                                  footer=[fcell('Total'), fcell(f"{sum(tdata.values()):,}")])
         s3, d3 = DP.pie_chart(dict(sorted(tdata.items(), key=itemgetter(1), reverse=True)),
                               f"DOIs by type{ysfx}", "type", width=600, height=460,
                               colors=DP.get_colors_by_count(len(tdata)))
@@ -5443,8 +5464,14 @@ def show_dois_metrics(year='All'):
             else:
                 num = coll.count_documents({**yr, **cquery})
                 den = total
-            crows.append([label, scope, f"{num:,}", pctof(num, den)])
-            name = label.split(' (')[0]
+            # Show the friendly label in the cell; keep the jrc_ field name in a
+            # hover tooltip for curators (rather than inline in user-facing text).
+            friendly = label.split(' (')[0]
+            field = label[label.find('(') + 1:label.rfind(')')] if '(' in label else ''
+            field_cell = safe(f"<span class='field-tip' data-field='{escape(field)}'>"
+                              f"{escape(friendly)}</span>") if field else friendly
+            crows.append([field_cell, scope, f"{num:,}", pctof(num, den)])
+            name = friendly
             if scope == 'Crossref':
                 name += " (Crossref)"
             cov[name] = (num / den) if den else 0  # fraction; axis formats it as a %
@@ -5464,8 +5491,8 @@ def show_dois_metrics(year='All'):
                      "Crossref DOIs, since DataCite datasets can't carry them; the rest "
                      f"against all {total:,}.</div>"
                      "<div style='display:flex;flex-wrap:wrap;gap:18px;align-items:flex-start;'>"
-                     "<div class='tag-scrollbox' style='flex:1 1 440px;min-width:360px;"
-                     f"overflow-x:auto;'>{cov_table}</div>"
+                     "<div style='flex:1 1 440px;min-width:360px;'>"
+                     f"{cov_table}</div>"
                      f"<div style='flex:0 0 auto;'>{cd}</div></div>")
     # ----- tabs -----
     active_tab = request.args.get('tab')
@@ -5814,7 +5841,7 @@ def dois_report(year=None):
     stat['ORCID'] = f"{BOLD}{cnt:,}</span> " \
                     + "distinct Janelia authors for all entries, " \
                     + f"{BOLD}{orc:,}</span> " \
-                    + f"({orc/cnt*100:.2f}%) with ORCIDs"
+                    + f"({(orc / cnt * 100) if cnt else 0:.2f}%) with ORCIDs"
     sheet.extend([f"Distinct Janelia authors\t{cnt}", f"Janelia authors with ORCIDs\t{orc}"])
     # Entries
     if 'DataCite' not in typed:
@@ -5921,7 +5948,9 @@ def dois_report(year=None):
 def dois_yearly(year=None):
     ''' Show year in review
     '''
-    if year is None:
+    # A "year in review" is inherently per-year (its pulldown offers no "All");
+    # fall back to the current year for a missing or hand-typed "All" value.
+    if year in (None, 'All'):
         year = str(datetime.now().year)
     pmap = {"journal-article": "Journal articles", "posted-content": "Posted content",
             "preprints": "Preprints", "proceedings-article": "Proceedings articles",
@@ -6014,7 +6043,7 @@ def dois_yearly(year=None):
     stat['ORCID'] = f"{BOLD}{cnt:,}</span> " \
                     + "distinct Janelia authors for all entries, " \
                     + f"{BOLD}{orc:,}</span> " \
-                    + f"({orc/cnt*100:.2f}%) with ORCIDs"
+                    + f"({(orc / cnt * 100) if cnt else 0:.2f}%) with ORCIDs"
     # Journals
     journal = get_top_journals(year)
     cnt = 0
@@ -6922,7 +6951,7 @@ def datacite_dois():
                 trows.append([typ, detail, pub, safe(f"<a href='{link}'>{cnt}</a>")])
     inner = render_table(['Type', 'Subtype', 'Publisher', 'Count'], trows, table_id='details',
                          css='tablesorter numberlast-scroll',
-                         footer=[fcell('TOTAL', colspan=3),
+                         footer=[fcell('Total', colspan=3),
                                  fcell(f"{total:,}", align='center')])
     html += f"{inner}</div></div>"
     cards = stat_cards([("DataCite DOIs", f"{total:,}"),
@@ -7051,7 +7080,7 @@ def citation_list(source='datacite'):
                                    ['DOI', 'Title', 'Citations'], fileoutput)
     html = render_table(['DOI', 'Title', 'Citations'], trows, table_id='data',
                         css='tablesorter numberlast-scroll', row_classes=row_classes,
-                        footer=[fcell('TOTAL', colspan=2),
+                        footer=[fcell('Total', colspan=2),
                                 fcell(f"{total:,}", align='center')]) + "<br>"
     # data-* attrs store both states so the onclick can swap without a round-trip.
     # data-filtered tracks current state (0=all shown, 1=versioned filtered).
@@ -7100,7 +7129,7 @@ def datacite_downloads():
         trows.append([safe(link), strip_html_tags(DL.get_title(row)), row['downloadCount']])
     html = render_table(['DOI', 'Title', 'Downloads'], trows, table_id='data',
                         css='tablesorter numberlast-scroll',
-                        footer=[fcell('TOTAL', colspan=2),
+                        footer=[fcell('Total', colspan=2),
                                 fcell(f"{total:,}", align='center')]) + "<br>"
     cards = stat_cards([("Total downloads", f"{total:,}"),
                         ("DOIs with downloads", f"{cnt:,}"),
@@ -7281,7 +7310,7 @@ def citation_metrics(source='datacite'):
     chtml = "<h4>Citations by source</h4>"
     chtml += render_table(['Source', 'DOIs', 'Citations'], trows, table_id='sources',
                           css='tablesorter numbers-scroll',
-                          footer=[fcell('TOTAL', colspan=2),
+                          footer=[fcell('Total', colspan=2),
                                   fcell(f"{cite_total:,}", align='center')])
     chtml += f"<div style='{note_style} max-width:460px'>A citing work found by more " \
              + "than one source counts once per source here; &quot;Total unique " \
@@ -8301,7 +8330,7 @@ def figshare_groups(year='All'):  # pylint: disable=too-many-locals,too-many-bra
         mtable = render_table(['DOI', 'Title', 'Views', 'Downloads', 'Citations'], mrows,
                               table_id='fig-members', css='tablesorter numberlast-scroll',
                               row_classes=mrow_classes,
-                              footer=[fcell('TOTAL', colspan=2),
+                              footer=[fcell('Total', colspan=2),
                                       fcell(f"{tviews:,}", align='center'),
                                       fcell(f"{tdl:,}", align='center'),
                                       fcell(f"{tcit:,}", align='center')])
@@ -8548,7 +8577,7 @@ def zenodo_groups(year='All'):  # pylint: disable=too-many-locals,too-many-branc
         mtable = render_table(['Version DOI', 'Title', 'Views', 'Downloads', 'Citations'],
                               mrows, table_id='zen-members',
                               css='tablesorter numberlast-scroll',
-                              footer=[fcell('TOTAL', colspan=2),
+                              footer=[fcell('Total', colspan=2),
                                       fcell(f"{tviews:,}", align='center'),
                                       fcell(f"{tdl:,}", align='center'),
                                       fcell(f"{tcit:,}", align='center')])
@@ -9146,7 +9175,7 @@ def protocolsio_dois(year='All'):  # pylint: disable=too-many-locals,too-many-br
         mtable = render_table(['Version DOI', 'Title', 'Views', 'Exports', 'Citations'],
                               mrows, table_id='pio-members',
                               css='tablesorter numberlast-scroll',
-                              footer=[fcell('TOTAL', colspan=2),
+                              footer=[fcell('Total', colspan=2),
                                       fcell(f"{tviews:,}", align='center'),
                                       fcell(f"{texp:,}", align='center'),
                                       fcell(f"{tcit:,}", align='center')])
@@ -9594,7 +9623,7 @@ def elife_dois(year='All'):  # pylint: disable=too-many-locals,too-many-branches
         mtable = render_table(['Version DOI', 'Title', 'Views', 'Downloads', 'Citations'],
                               mrows, table_id='eli-members',
                               css='tablesorter numberlast-scroll',
-                              footer=[fcell('TOTAL', colspan=2),
+                              footer=[fcell('Total', colspan=2),
                                       fcell(f"{tviews:,}", align='center'),
                                       fcell(f"{tdl:,}", align='center'),
                                       fcell(f"{tcit:,}", align='center')])
@@ -10257,7 +10286,7 @@ def show_organization(org_in, year=None, show="full"):
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=ptitle, html=html,
-                                         navbar=generate_navbar('DOIs')))
+                                         navbar=generate_navbar('Authorship')))
 
 
 @app.route('/org_summary/<string:org>/<string:year>/<string:which>/')
@@ -10384,7 +10413,7 @@ def org_year(org="Shared Resources"):
     c2 = f"<a href='/org_summary/{org}/All/last'>{total[org]}</a>"
     html = render_table(['Year', 'All', org], trows, table_id='years',
                         css='tablesorter numbers-scroll',
-                        footer=[fcell('TOTAL', header=False), fcell(safe(c1), header=False),
+                        footer=[fcell('Total', header=False), fcell(safe(c1), header=False),
                                 fcell(safe(c2), header=False)]) + "<br>"
     data[f"With {org} authors"] = data.pop(org)
     data[f"No {org} authors"] = data.pop("Janelia")
@@ -10397,7 +10426,7 @@ def org_year(org="Shared Resources"):
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title=title, html=html,
                                          chartscript=chartscript, chartdiv=chartdiv,
-                                         navbar=generate_navbar('DOIs')))
+                                         navbar=generate_navbar('Authorship')))
 
 # ******************************************************************************
 # * UI endpoints (Preprints)                                                  *
@@ -10994,7 +11023,7 @@ def show_journals_dois(year=None):
     ''' Show journals in a table
     '''
     if year is None:
-        year = str(datetime.now().year)
+        year = 'All'
     errmsg = "Could not get journal data from subscription collection"
     try:
         rows = DB['dis'].subscription.find({"type": {"$in": ["Journal", "Repository"]}})
@@ -11378,7 +11407,7 @@ def show_subscription_summary():
             link = ""
         dtl = f"<a href='/subscriptionlist/{publisher}'>{data['TOTAL']:,}</a>"
         trows.append([publisher, safe(link)] + [safe(c) for c in count] + [safe(dtl)])
-    footer = ([fcell('TOTAL', colspan=2, align='right', header=False)]
+    footer = ([fcell('Total', colspan=2, align='right', header=False)]
               + [fcell(safe(f"<a href='/subscriptions/type/{key}'>{val:,}</a>"), header=False)
                  for key, val in types.items()]
               + [fcell(f"{cnt:,}", header=False)])
@@ -11524,7 +11553,7 @@ def show_subscription_summary_by_provider(prov):
         link = f"<a href='/subscriptionlist/{publisher}'>{data['TOTAL']:,}</a>"
         pub_link = f"<a href='/subscriptionlist/{publisher}'>{publisher}</a>"
         trows.append([safe(pub_link)] + [safe(c) for c in count] + [safe(link)])
-    footer = ([fcell('TOTAL', colspan=1, align='right', header=False)]
+    footer = ([fcell('Total', colspan=1, align='right', header=False)]
               + [fcell(safe(f"<a href='/subscriptions/type/{key}'>{val:,}</a>"), header=False)
                  for key, val in types.items()]
               + [fcell(f"{cnt:,}", header=False)])
@@ -11570,7 +11599,7 @@ def show_subscription_year(year=None):
                       cell(f"${float(row['cost'][year]):,.2f}", sort=float(row['cost'][year]))])
     html2 = render_table(['Provider', 'Publisher', 'Title', 'Cost'], trows, table_id='costs',
                          css='tablesorter numberlast-scroll',
-                         footer=[fcell('TOTAL', colspan=3, align='right'),
+                         footer=[fcell('Total', colspan=3, align='right'),
                                  fcell(f"${total:,.2f}")])
     if not data:
         html += f"<br><br><p>No subscription costs were found for {year}.</p>"
@@ -14372,7 +14401,7 @@ def stats_database():
                   "indexSize": f"{dbstat.get('indexes', 0)} indices "
                                + f"({humansize(dbstat.get('indexSize', 0), space='mem')})",
                   "blank2": ""}
-    footer = [fcell('TOTAL', align='right')] \
+    footer = [fcell('Total', align='right')] \
              + [fcell(footer_val[k], align='center') for k in
                 ['objects', 'avgObjSize', 'dataSize', 'storageSize', 'ratio',
                  'blank', 'indexSize', 'blank2']]
