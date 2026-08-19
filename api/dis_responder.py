@@ -48,7 +48,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.10.2"
+__version__ = "120.11.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -1807,7 +1807,8 @@ def ack_stat_cards(cnt, internal, external):
                       div_id='acks-stats')
 
 
-def standard_doi_table(rows, prefix=None, count_card=False, show_count=True):
+def standard_doi_table(rows, prefix=None, count_card=False, show_count=True,
+                       extra_headers=None, extra_fn=None):
     ''' Create a standard table of DOIs
         Keyword arguments:
           rows: rows from dois collection
@@ -1819,12 +1820,20 @@ def standard_doi_table(rows, prefix=None, count_card=False, show_count=True):
                       display the count themselves (e.g. in their own stat card).
                       That caller's count element must carry id='totalrows' so the
                       version-filter toggler still has something to update.
+          extra_headers: optional list of extra column header(s) appended after "Title"
+          extra_fn: optional callable(row) -> list of extra cell values (one per
+                    extra_headers entry, in order) appended to each row after Title.
+                    Table cells go through render_table (plain text is escaped; wrap a
+                    value in safe()/cell() for trusted HTML or a numeric sort key); the
+                    TSV download gets the same values with any HTML tags stripped.
         Returns:
           html: HTML
           cnt: number of DOIs
           oacnt: number of Open Access
     '''
     header = ['Published', 'DOI', 'Journal', 'Title']
+    if extra_headers:
+        header = header + list(extra_headers)
     fileoutput = ""
     cnt = oacnt = 0
     trows = []
@@ -1837,12 +1846,16 @@ def standard_doi_table(rows, prefix=None, count_card=False, show_count=True):
         row['link'] = doi_link(row['doi'])
         row['journal'] = DL.get_journal(row, full=False, name_only=True)
         row['title'] = DL.get_title(row)
-        trows.append([row['published'], safe(row['link']), row['journal'], row['title']])
+        extra = list(extra_fn(row)) if extra_fn else []
+        trows.append([row['published'], safe(row['link']), row['journal'], row['title']] + extra)
         row_classes.append('ver' if version else '')
         if row['title']:
             row['title'] = row['title'].replace("\n", " ")
         cnt += 1
-        fileoutput += dloop(row, ['published', 'doi', 'journal', 'title']) + "\n"
+        line = dloop(row, ['published', 'doi', 'journal', 'title'])
+        if extra:
+            line += "\t" + "\t".join(re.sub(r'<[^>]+>', '', str(x)) for x in extra)
+        fileoutput += line + "\n"
     html = render_table(header, trows, table_id='dois', css='tablesorter standard-scroll',
                         row_classes=row_classes)
     if not show_count:
@@ -6348,9 +6361,7 @@ def show_doiui_custom(year='All'):
     if year != 'All':
         payload['jrc_publishing_date'] = {"$regex": "^"+ year}
     try:
-        cnt = DB['dis'].dois.count_documents(payload)
-        print(f"Custom payload: {payload}     Results: {cnt}")
-        rows = DB['dis'].dois.find(payload)
+        rows = list(DB['dis'].dois.find(payload))
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get DOIs"),
@@ -6358,38 +6369,23 @@ def show_doiui_custom(year='All'):
     if not rows:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("DOIs not found"),
-                               message=f"No DOIs were found for {ipd['field']}={display_value}")
-    header = ['Published', 'DOI', 'Title', 'Newsletter']
-    works = []
-    jorp = newsletter = oacnt =0
-    for row in rows:
-        published = DL.get_publishing_date(row)
-        title = DL.get_title(row)
-        if not title:
-            title = ""
-        if row.get('jrc_is_oa'):
-            oacnt += 1
-        works.append({"published": published, "link": doi_link(row['doi']), "title": title,
-                      "doi": row['doi'], \
-                      "newsletter": row.get('jrc_newsletter', '')})
-        if row.get('jrc_newsletter'):
-            newsletter += 1
-        if DL.is_journal(row) or DL.is_preprint(row):
-            jorp += 1
+                               message=f"No DOIs were found for {ipd['field']}={ipd.get('value', '')}")
+    jorp = sum(1 for row in rows if DL.is_journal(row) or DL.is_preprint(row))
+    newsletter = sum(1 for row in rows if row.get('jrc_newsletter'))
+    rows.sort(key=DL.get_publishing_date, reverse=True)
+    # Standard DOI-list table (version-filter toggle + download) with Newsletter kept
+    # as a trailing extra column; the DOIs card carries id='totalrows' for the toggler.
+    table_html, cnt, oacnt = standard_doi_table(rows, show_count=False,
+                                                extra_headers=['Newsletter'],
+                                                extra_fn=lambda row: [row.get('jrc_newsletter', '')])
+    cards = stat_cards([("DOIs", f"<span id='totalrows'>{cnt:,}</span>"),
+                        ("Journals/preprints", f"{jorp:,}"),
+                        ("In newsletter", f"{newsletter:,}")], div_id='custom-stats')
     data = {'shown': oacnt, 'total': cnt}
     chartscript, chartdiv = DP.wedge_chart(data) if oacnt else ['', '']
     oamsg = f"<span style='font-size: 18pt; color: lightgray'>{oacnt/cnt*100:.1f}%</span>" \
             + f"<span style='font-size: 12pt'><br>{oacnt:,}/{cnt:,}</span>"
-    fileoutput = ""
-    trows = []
-    for row in sorted(works, key=lambda row: row['published'], reverse=True):
-        trows.append([row['published'], safe(row['link']), row['title'], row['newsletter']])
-        row['title'] = row['title'].replace("\n", " ")
-        fileoutput += dloop(row, ['published', 'doi', 'title', 'newsletter']) + "\n"
-    html = render_table(header, trows, table_id='dois', css='tablesorter standard-scroll')
-    html = f"DOIs: {len(works):,}<br>Journals/preprints: {jorp:,}<br>" \
-           + f"DOIs in newsletter: {newsletter:,}<br>" \
-           + create_downloadable(ipd['field'], header, fileoutput) + f"<br>{html}"
+    html = cards + table_html
     endpoint_access()
     return make_response(render_template('custom.html', urlroot=request.url_root,
                                          title=ptitle, html=html, oamsg=oamsg,
@@ -6527,41 +6523,30 @@ def show_doi_subject(subject, partial=None):
         payload = {"$or": [{"subjects.subject": subject},
                            {"jrc_mesh.descriptor_name": subject}]}
     try:
-        rows = DB['dis'].dois.find(payload)
+        rows = list(DB['dis'].dois.find(payload))
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get DOI subjects"),
                                message=error_message(err))
-    header = ['Published', 'DOI', 'Source', 'Title']
-    if partial:
-        header.insert(-1, "Subjects")
-    fileoutput = ""
-    trows = []
-    cnt = 0
-    crossref = False
-    for row in rows:
-        row['published'] = DL.get_publishing_date(row)
-        row['link'] = doi_link(row['doi'])
-        row['title'] = DL.get_title(row)
-        row['source'] = row.get('jrc_obtained_from', 'DataCite')
-        if row['source'] == 'Crossref':
-            crossref = True
-        cells = [row['published'], safe(row['link']), row['source']]
-        if partial:
-            cells.append(safe(add_subjects(row)))
-        cells.append(row['title'])
-        trows.append(cells)
-        if row['title']:
-            row['title'] = row['title'].replace("\n", " ")
-        cnt += 1
-        fileoutput += dloop(row, ['published', 'doi', 'source', 'title']) + "\n"
-    html = render_table(header, trows, table_id='dois', css='tablesorter standard-scroll')
-    counter = f"<p>Number of DOIs: <span id='totalrows'>{cnt:,}</span></p>"
-    if partial and crossref:
-        counter += "<p><i class='fa-solid fa-circle-info'></i> Subjects in " \
-                   + "<span style='color: #777'>dark gray</span> are considered minor in MeSH</p>"
-    html = counter + html
     title = f"DOIs with partial subject {subject}" if partial else f"DOIs for subject {subject}"
+    if not rows:
+        html = render_warning(f"No DOIs found for subject {subject}.", 'warning')
+    else:
+        # Standard DOI-list table + conventions; keep Source (registrar) - and, in
+        # partial mode, the matched Subjects - as trailing extra columns.
+        extra_headers = ['Source'] + (['Subjects'] if partial else [])
+        def _subject_extra(row):
+            vals = [row.get('jrc_obtained_from', 'DataCite')]
+            if partial:
+                vals.append(safe(add_subjects(row)))
+            return vals
+        table_html, _, _ = standard_doi_table(rows, count_card=True,
+                                              extra_headers=extra_headers, extra_fn=_subject_extra)
+        note = ""
+        if partial and any(r.get('jrc_obtained_from') == 'Crossref' for r in rows):
+            note = "<p><i class='fa-solid fa-circle-info'></i> Subjects in " \
+                   + "<span style='color: #777'>dark gray</span> are considered minor in MeSH</p>"
+        html = note + table_html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
@@ -10021,20 +10006,21 @@ def dois_no_janelia(year='All'):
                                title=render_warning("Could not dois with no Janelia authors " \
                                                     + "from dois collection"),
                                message=error_message(err))
-    html = "These are journal articles/preprints with no Janelia authors<br>" \
-           + year_pulldown('dois_no_janelia')
-    if cnt:
-        trows = []
-        for row in rows:
-            title = DL.get_title(row)
-            trows.append([safe(doi_link(row['doi'])), row['publisher'], title,
-                          row['jrc_publishing_date']])
-        html += render_table(['DOI', 'Publisher', 'Title', 'Published'], trows,
-                             table_id='nojanelia', css='tablesorter standard-scroll')
+    intro = "These are journal articles/preprints with no Janelia authors<br>"
     title = "DOIs without Janelia authors"
     if year != 'All':
         title += f" for {year}"
-    title += f" ({cnt:,})"
+    if not cnt:
+        html = intro + year_pulldown('dois_no_janelia') + "<br><br>" \
+               + render_warning(f"No DOIs without Janelia authors were found for {year}.",
+                                'warning')
+    else:
+        # Standard DOI-list table (adds Journal plus the version-filter/download/count
+        # conventions); keep this page's Publisher as a trailing extra column.
+        table_html, _, _ = standard_doi_table(rows, prefix='dois_no_janelia', count_card=True,
+                                              extra_headers=['Publisher'],
+                                              extra_fn=lambda row: [row.get('publisher', '')])
+        html = intro + table_html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
@@ -13534,7 +13520,7 @@ def dois_lab():
                                message=error_message(err))
     pre = "Reported below are journal articles/preprints for all current labs. " \
           + "DOIs in <span style='color: lime;'>green</span> are for multiple labs.<br>"
-    header = ['Lab', 'Published', 'Type', 'DOI','Title']
+    header = ['Lab', 'Published', 'DOI', 'Type', 'Title']
     dois = []
     ddois = {}
     multi = []
@@ -13556,10 +13542,12 @@ def dois_lab():
     fileoutput = ""
     trows = []
     for doi in dois:
-        fileoutput += "\t".join(doi) + "\n"
+        # doi = [lab, published, type, doi, title]. Column order Lab | Published | DOI |
+        # Type | Title (DOI beside Published, matching the standard DOI list); TSV mirrors.
         link = doi_link(doi[3], 'lime') if doi[3] in multi else doi_link(doi[3])
-        trows.append([doi[0], doi[1], doi[2], safe(link), doi[4]])
-    html = render_table(header, trows, table_id='types', css='tablesorter numbers-scroll')
+        trows.append([doi[0], doi[1], safe(link), doi[2], doi[4]])
+        fileoutput += "\t".join([doi[0], doi[1], doi[3], doi[2], doi[4]]) + "\n"
+    html = render_table(header, trows, table_id='types', css='tablesorter standard-scroll')
     cards = [("DOIs", f"{len(ddois):,}"),
              ("Labs", f"{len({doi[0] for doi in dois}):,}")]
     html = stat_cards(cards, div_id='lab-stats') + pre \
@@ -13578,27 +13566,28 @@ def dois_janelia_affiliations(aff):
                        {"creators.affiliation": aff}
                       ]}
     try:
-        rows = DB['dis'].dois.find(payload)
+        rows = list(DB['dis'].dois.find(payload))
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get DOIs for Janelia affiliations"),
                                message=error_message(err))
-    trows = []
-    crossref = datacite = 0
-    for row in rows:
-        if row['jrc_obtained_from'] == 'Crossref':
-            crossref += 1
-        else:
-            datacite += 1
-        trows.append([row['jrc_publishing_date'], safe(doi_link(row['doi'])),
-                      DL.get_title(row)])
-    html = render_table(['Published', 'DOI', 'Title'], trows,
-                        table_id='dois', css='tablesorter standard-scroll')
-    html = f"<p>Crossref DOIs: {crossref:,}<br>DataCite DOIs: {datacite:,}</p>" + html
+    title = f"DOIs with authors affiliated with {aff}"
+    if not rows:
+        html = render_warning(f"No DOIs found with authors affiliated with {aff}.", 'warning')
+    else:
+        crossref = sum(1 for r in rows if r.get('jrc_obtained_from') == 'Crossref')
+        # Standard DOI-list table + version-filter/download conventions; the registrar
+        # split rides in the header cards (the DOIs card carries id='totalrows' so the
+        # version-filter toggler keeps working).
+        cards = stat_cards([("DOIs", f"<span id='totalrows'>{len(rows):,}</span>"),
+                            ("Crossref", f"{crossref:,}"),
+                            ("DataCite", f"{len(rows) - crossref:,}")], div_id='aff-stats')
+        table_html, _, _ = standard_doi_table(rows, show_count=False)
+        html = cards + table_html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title=f"DOIs with authors affiliated with {aff}",
-                                         html=html, navbar=generate_navbar('Tag/affiliation')))
+                                         title=title, html=html,
+                                         navbar=generate_navbar('Tag/affiliation')))
 
 
 @app.route('/janelia_affiliations')
