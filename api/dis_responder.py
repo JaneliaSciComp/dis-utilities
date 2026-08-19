@@ -48,7 +48,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.12.5"
+__version__ = "120.12.6"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -1785,7 +1785,7 @@ def standard_ack_table(rows, ack, is_regex=False, show_count=True):
               + "onclick=\"toggler('dois', 'ver', 'totalrows');\">" \
               + "Filter versioned DOIs</button>&nbsp;"
     html = counter + cyclebtn + typebtn + cbutton \
-           + create_downloadable(download_name, header, fileoutput) + chipbar + tagkey + html
+           + create_downloadable('standard', header, fileoutput) + chipbar + tagkey + html
     return html, cnt, oacnt
 
 
