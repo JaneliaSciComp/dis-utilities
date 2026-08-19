@@ -38,8 +38,8 @@ from dis_html import (DOWNLOAD_ICON, add_jrc_fields, add_subjects, cell,
                       create_downloadable, dloop, doi_link, fcell,
                       generate_navbar, get_license, make_link,
                       oa_status_rank, render_table, render_warning,
-                      safe, stat_cards, tiny_badge,
-                      year_pulldown as _year_pulldown)
+                      safe, stat_cards, tab_button, tab_pane, tiny_badge,
+                      two_col, year_pulldown as _year_pulldown)
 from dis_config import (ARTICLES, DATACITE, DOI, DO_NOT_DISPLAY, EMAIL,
                         EPT_ONE, EPT_TWO, LIBRARY, NCBI_MESH, OAREPORT,
                         OPENALEX, ORCID, PMCID, PMID, PREFERRED_AFF,
@@ -48,7 +48,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.11.2"
+__version__ = "120.11.3"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -4082,18 +4082,7 @@ def show_acknowledgement_metrics(limit=10):
                        "overflow-x:auto;'>" + entity_table + "</div>")
     ack_chart_block = f"<div style='flex:0 0 auto;'>{ent_chartdiv}</div>" if ent_chartdiv else ""
     tags_body = (ent_cards + f"<div style='margin-bottom:8px;'>{cbutton}</div>"
-                 + "<div style='display:flex;flex-wrap:wrap;gap:18px;align-items:flex-start;'>"
-                 + ack_table_block + ack_chart_block + "</div>")
-    def tab_button(key, label, is_active):
-        return ('<li class="nav-item" role="presentation">'
-                f'<button class="nav-link{" active" if is_active else ""}" id="{key}-tab" '
-                f'data-toggle="tab" data-target="#{key}" type="button" role="tab" '
-                f'aria-controls="{key}" aria-selected="{"true" if is_active else "false"}">'
-                f'{label}</button></li>')
-    def tab_pane(key, body, is_active):
-        cls = "tab-pane fade show active" if is_active else "tab-pane fade"
-        return (f'<div class="{cls}" id="{key}" role="tabpanel" '
-                f'aria-labelledby="{key}-tab"><br>{body}</div>')
+                 + two_col(ack_table_block, ack_chart_block))
     tabs = ('<ul class="nav nav-tabs" role="tablist">'
             + tab_button('metrics', 'Stored acknowledgements', active_tab == 'metrics')
             + tab_button('byyear', 'By year', active_tab == 'byyear')
@@ -4297,8 +4286,7 @@ def show_tag_metrics(limit=15):
                    f"{tag_table}</div>")
     chart_block = f"<div style='flex:0 0 auto;'>{tag_chartdiv}</div>" if tag_chartdiv else ""
     tags_body = (tag_cards + tag_note + f"<div style='margin-bottom:8px;'>{cbutton}</div>"
-                 + "<div style='display:flex;flex-wrap:wrap;gap:18px;"
-                 "align-items:flex-start;'>" + table_block + chart_block + "</div>")
+                 + two_col(table_block, chart_block))
     # ----- By year tab: tagged DOIs per publishing year, Crossref vs DataCite -----
     ymap = {}
     for row in yagg:
@@ -4462,17 +4450,6 @@ def show_tag_metrics(limit=15):
     if active_tab not in ('tags', 'byyear', 'trends', 'cotag'):
         active_tab = 'tags'
 
-    def tab_button(key, label, is_active):
-        return ('<li class="nav-item" role="presentation">'
-                f'<button class="nav-link{" active" if is_active else ""}" id="{key}-tab" '
-                f'data-toggle="tab" data-target="#{key}" type="button" role="tab" '
-                f'aria-controls="{key}" aria-selected="{"true" if is_active else "false"}">'
-                f'{label}</button></li>')
-
-    def tab_pane(key, body, is_active):
-        cls = "tab-pane fade show active" if is_active else "tab-pane fade"
-        return (f'<div class="{cls}" id="{key}" role="tabpanel" '
-                f'aria-labelledby="{key}-tab"><br>{body}</div>')
     tabs = ('<ul class="nav nav-tabs" role="tablist">'
             + tab_button('tags', 'Tags', active_tab == 'tags')
             + tab_button('byyear', 'By year', active_tab == 'byyear')
@@ -5368,10 +5345,9 @@ def show_dois_metrics(year='All'):
     s2, d2 = DP.pie_chart(lm, f"DOIs by load method{ysfx}", "source", width=450,
                           colors=DP.get_colors_by_count(len(lm) or 1))
     charts += s1 + s2
-    sources_body = ("<div style='display:flex;flex-wrap:wrap;gap:18px;align-items:flex-start;'>"
-                    "<div class='tag-scrollbox' style='flex:1 1 460px;min-width:360px;"
-                    f"overflow-x:auto;'>{src_table}</div>"
-                    f"<div style='flex:0 0 auto;'>{d1}{d2}</div></div>")
+    sources_body = two_col("<div class='tag-scrollbox' style='flex:1 1 460px;min-width:360px;"
+                           f"overflow-x:auto;'>{src_table}</div>",
+                           f"<div style='flex:0 0 auto;'>{d1}{d2}</div>")
     # ----- By type tab (resource-type mix; merges Crossref type + DataCite general) -----
     type_merge = {"dataset": "Dataset", "journal-article": "JournalArticle",
                   "posted-content": "Preprint", "book": "BookChapter",
@@ -5409,9 +5385,8 @@ def show_dois_metrics(year='All'):
                               f"DOIs by type{ysfx}", "type", width=600, height=460,
                               colors=DP.get_colors_by_count(len(tdata)))
         charts += s3
-        bytype_body = ("<div style='display:flex;flex-wrap:wrap;gap:18px;align-items:flex-start;'>"
-                       "<div class='tag-scrollbox' style='flex:1 1 380px;min-width:320px;'>"
-                       f"{type_table}</div><div style='flex:0 0 auto;'>{d3}</div></div>")
+        bytype_body = two_col("<div class='tag-scrollbox' style='flex:1 1 380px;min-width:320px;'>"
+                              f"{type_table}</div>", f"<div style='flex:0 0 auto;'>{d3}</div>")
     # ----- By year tab (all years, by registrar) -----
     ymap = {}
     try:
@@ -5502,26 +5477,14 @@ def show_dois_metrics(year='All'):
                      f"(scope <em>Crossref</em>) are scored against the {cx_total:,} "
                      "Crossref DOIs, since DataCite datasets can't carry them; the rest "
                      f"against all {total:,}.</div>"
-                     "<div style='display:flex;flex-wrap:wrap;gap:18px;align-items:flex-start;'>"
-                     "<div style='flex:1 1 440px;min-width:360px;'>"
-                     f"{cov_table}</div>"
-                     f"<div style='flex:0 0 auto;'>{cd}</div></div>")
+                     + two_col("<div style='flex:1 1 440px;min-width:360px;'>"
+                               f"{cov_table}</div>",
+                               f"<div style='flex:0 0 auto;'>{cd}</div>"))
     # ----- tabs -----
     active_tab = request.args.get('tab')
     if active_tab not in ('sources', 'bytype', 'byyear', 'coverage'):
         active_tab = 'sources'
 
-    def tab_button(key, label, is_active):
-        return ('<li class="nav-item" role="presentation">'
-                f'<button class="nav-link{" active" if is_active else ""}" id="{key}-tab" '
-                f'data-toggle="tab" data-target="#{key}" type="button" role="tab" '
-                f'aria-controls="{key}" aria-selected="{"true" if is_active else "false"}">'
-                f'{label}</button></li>')
-
-    def tab_pane(key, body, is_active):
-        cls = "tab-pane fade show active" if is_active else "tab-pane fade"
-        return (f'<div class="{cls}" id="{key}" role="tabpanel" '
-                f'aria-labelledby="{key}-tab"><br>{body}</div>')
     tabs = ('<ul class="nav nav-tabs" role="tablist">'
             + tab_button('sources', 'Sources', active_tab == 'sources')
             + tab_button('bytype', 'By type', active_tab == 'bytype')

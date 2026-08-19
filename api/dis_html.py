@@ -187,6 +187,51 @@ def stat_cards(cards, div_id='stat-cards'):
     return html
 
 
+def tab_button(key, label, is_active):
+    ''' One Bootstrap nav-tab <li>/<button>, shared by the tabbed metrics
+        dashboards (dois_metrics, tag_metrics, acknowledgement_metrics).
+        Keyword arguments:
+          key: tab key (drives the id and the #target)
+          label: visible button text
+          is_active: whether this tab is the active one
+        Returns:
+          HTML for one nav-tab button
+    '''
+    return ('<li class="nav-item" role="presentation">'
+            f'<button class="nav-link{" active" if is_active else ""}" id="{key}-tab" '
+            f'data-toggle="tab" data-target="#{key}" type="button" role="tab" '
+            f'aria-controls="{key}" aria-selected="{"true" if is_active else "false"}">'
+            f'{label}</button></li>')
+
+
+def tab_pane(key, body, is_active):
+    ''' One Bootstrap tab-content pane, paired with tab_button().
+        Keyword arguments:
+          key: tab key (matches the button's target)
+          body: pane HTML
+          is_active: whether this pane is the active one
+        Returns:
+          HTML for one tab pane
+    '''
+    cls = "tab-pane fade show active" if is_active else "tab-pane fade"
+    return (f'<div class="{cls}" id="{key}" role="tabpanel" '
+            f'aria-labelledby="{key}-tab"><br>{body}</div>')
+
+
+def two_col(left, right):
+    ''' Wrap two already-styled blocks in the standard "table beside its chart"
+        flex row (left column then right). Each block keeps its own width/scroll
+        styling; this only supplies the shared wrapping row.
+        Keyword arguments:
+          left: left-column HTML (e.g. a table / scroll box)
+          right: right-column HTML (e.g. a chart)
+        Returns:
+          HTML for the two-column flex row
+    '''
+    return ("<div style='display:flex;flex-wrap:wrap;gap:18px;align-items:flex-start;'>"
+            f"{left}{right}</div>")
+
+
 class Safe(str):
     ''' Marks a string as already-rendered, trusted HTML so that render_table()
         will not escape it. Plain str cells are HTML-escaped. '''
