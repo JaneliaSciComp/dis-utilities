@@ -48,7 +48,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.12.4"
+__version__ = "120.12.5"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -1002,8 +1002,12 @@ def get_orcid_from_db(oid, use_eid=False, bare=False, show="full"):
     html += f"<tr><td>Given name:</td><td>{', '.join(sorted(orc['given']))}</td></tr>"
     html += f"<tr><td>Family name:</td><td>{', '.join(sorted(orc['family']))}</td></tr>"
     if 'orcid' in orc:
+        cpaste = " <button style='background-color:transparent;border:none;' " \
+                 + f"onclick=\"copyText('{orc['orcid']}')\">" \
+                 + "<i class='fas fa-regular fa-copy shadow' " \
+                 + "style='background-color:transparent'></i></button>"
         html += f"<tr><td>ORCID:</td><td><a href='{ORCID}{orc['orcid']}'>" \
-                + f"{orc['orcid']}</a></td></tr>"
+                + f"{orc['orcid']}</a>{cpaste}</td></tr>"
     if 'userIdO365' in orc:
         link = "<a href='" + f"{WORKDAY}{orc['userIdO365']}" \
                + f"' target='_blank'>{orc['userIdO365']}</a>"
@@ -12301,9 +12305,38 @@ def show_subscription(sid):
 # ******************************************************************************
 # * UI endpoints (ORCID)                                                       *
 # ******************************************************************************
+def _render_person(orciddata, full_name, show, prefix, extra=''):
+    ''' Render a person page (shared by /orcidui and /userui) with a consistent
+        header/body: the DB name as the page title, the shared orcid-collection body,
+        the journal/preprint toggle spliced in right after the works count, and any
+        route-specific HTML (e.g. /orcidui's live-ORCID extra works) appended below.
+        Keyword arguments:
+          orciddata: person body HTML from get_orcid_from_db
+          full_name: the person's name (page title)
+          show: 'full' or 'journal' (drives the toggle button)
+          prefix: route base for the toggle links (e.g. /userui/<eid> or /orcidui/<oid>)
+          extra: optional trailing HTML appended after the body
+        Returns:
+          Response
+    '''
+    buttons = journal_buttons(show, prefix)
+    # The works table renders the count as "Number of DOIs: <span id='totalrows'>N</span>";
+    # splice the journal/preprint toggle in right after it.
+    count_re = r"(Number of DOIs: <span id='totalrows'>[\d,]+</span>)"
+    if re.search(count_re, orciddata):
+        orciddata = re.sub(count_re, lambda m: m.group(1) + buttons, orciddata, count=1)
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=full_name, html=orciddata + extra,
+                                         navbar=generate_navbar('Authorship')))
+
+
+@app.route('/orcidui/<string:oid>/<string:show>')
 @app.route('/orcidui/<string:oid>')
-def show_oid_ui(oid):
-    ''' Show ORCID user
+def show_oid_ui(oid, show='full'):
+    ''' Show ORCID user. Shares the canonical person header/body with /userui
+        (DB name as title, copyable ORCID in the body, journal/preprint toggle) and
+        additionally appends the live-ORCID extra-works list below.
     '''
     try:
         data = JRC.call_orcid(oid)
@@ -12317,18 +12350,9 @@ def show_oid_ui(oid):
         return render_template('warning.html', urlroot=request.url_root,
                                title=render_warning(f"Could not find ORCID ID {oid}", 'warning'),
                                message=data['user-message'])
-    name = data['person']['name']
-    if not name:
-        who = ''
-    elif name['credit-name']:
-        who = f"{name['credit-name']['value']}"
-    elif 'family-name' not in name or not name['family-name']:
-        who = f"{name['given-names']['value']} <span style='color: red'>" \
-              + "(Family name is missing in ORCID)</span>"
-    else:
-        who = f"{name['given-names']['value']} {name['family-name']['value']}"
     try:
-        orciddata, dois, _ = get_orcid_from_db(oid, use_eid=bool('userIdO365' in oid))
+        orciddata, dois, full_name = get_orcid_from_db(oid, use_eid=bool('userIdO365' in oid),
+                                                       show=show)
     except CustomException as err:
         return render_template('error.html', urlroot=request.url_root,
                                 title=render_warning(f"Could not find ORCID ID {oid}", 'error'),
@@ -12337,19 +12361,10 @@ def show_oid_ui(oid):
         return render_template('warning.html', urlroot=request.url_root,
                                title=render_warning(f"Could not find ORCID ID {oid}", 'warning'),
                                message="Could not find any information for this ORCID ID")
-    html = f"<h3>{who}</h3>{orciddata}"
-    # Works
+    extra = ''
     if data.get('activities-summary', {}).get('works', {}).get('group'):
-        html += add_orcid_works(data, dois)
-    endpoint_access()
-    cpaste = " <button style='background-color:transparent;border:none;' " \
-             + f"onclick=\"copyText('{oid}')\">" \
-             + "<i class='fas fa-regular fa-copy shadow' " \
-             + "style='background-color:transparent'></i></button>"
-    return make_response(render_template('general.html', urlroot=request.url_root, pagetitle=oid,
-                                         title=f"<a href='{ORCID}{oid}' " \
-                                               + f"target='_blank'>{oid}</a>{cpaste}", html=html,
-                                         navbar=generate_navbar('Authorship')))
+        extra = add_orcid_works(data, dois)
+    return _render_person(orciddata, full_name, show, f"/orcidui/{oid}", extra=extra)
 
 
 @app.route('/userui/<string:eid>/<string:show>')
@@ -12358,10 +12373,8 @@ def show_user_ui(eid, show='full'):
     ''' Show user record by employeeId (user ID) or ORCID
     '''
     try:
-        if "@" in eid:
-            orciddata, _, full_name = get_orcid_from_db(eid, use_eid=True, bare=False, show=show)
-        else:
-            orciddata, _, full_name = get_orcid_from_db(eid, use_eid=False, bare=False, show=show)
+        orciddata, _, full_name = get_orcid_from_db(eid, use_eid=bool('@' in eid),
+                                                    bare=False, show=show)
     except CustomException as err:
         return render_template('error.html', urlroot=request.url_root,
                                 title=render_warning(f"Could not find user ID {eid}",
@@ -12371,17 +12384,7 @@ def show_user_ui(eid, show='full'):
         return render_template('warning.html', urlroot=request.url_root,
                                title=render_warning(f"Could not find user ID {eid}", 'warning'),
                                message="Could not find any information for this employee ID")
-    buttons = journal_buttons(show, f"/userui/{eid}")
-    # The works table renders the count as "Number of DOIs: <span id='totalrows'>N</span>",
-    # so match that span form (the old bare "DOIs: N" pattern never matched) and drop the
-    # journal/preprint toggle in right after the count.
-    count_re = r"(Number of DOIs: <span id='totalrows'>[\d,]+</span>)"
-    if re.search(count_re, orciddata):
-        orciddata = re.sub(count_re, lambda m: m.group(1) + buttons, orciddata, count=1)
-    endpoint_access()
-    return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title=full_name, html=orciddata,
-                                         navbar=generate_navbar('Authorship')))
+    return _render_person(orciddata, full_name, show, f"/userui/{eid}")
 
 
 @app.route('/unvaluserui/<string:iid>')
