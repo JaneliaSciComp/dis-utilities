@@ -48,7 +48,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.11.3"
+__version__ = "120.11.4"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -6136,7 +6136,7 @@ def dois_time(period, year=None):
         if year and year != 'All':
             nav = {m: {"field": "publishing_year", "value": f"{year}-{m}"}
                    for m in data['months']}
-        title = f"DOIs published by month for {year}"
+        title = f"DOIs published by month ({year})"
         chart_title = title
         pulldown = year_pulldown('dois_time/month', all_years=False)
     footer = [fcell('Total')] + [fcell(f"{counter[source]:,}", align='center')
@@ -6679,8 +6679,8 @@ def crossref_subject(subject=None, year='All'):
             total += row['count']
             subj = row['_id']
             trows.append([subj,
-                          safe(f"<a href='/crossref_subject/{subj}{ysuffix}'>"
-                               + f"{row['count']}</a>")])
+                          cell(safe(f"<a href='/crossref_subject/{subj}{ysuffix}'>"
+                                    + f"{row['count']:,}</a>"), sort=row['count'])])
         pulldown = year_pulldown('crossref_subject', query=True)
         if not cnt:
             # No subjects for this filter - advise rather than show an empty table,
@@ -6778,8 +6778,8 @@ def datacite_subject(subject=None, year='All'):
             else:
                 scheme_cell = scheme
             trows.append([subj, scheme_cell,
-                          safe(f"<a href='/datacite_subject/{subj}{ysuffix}'>"
-                               + f"{row['count']}</a>")])
+                          cell(safe(f"<a href='/datacite_subject/{subj}{ysuffix}'>"
+                                    + f"{row['count']:,}</a>"), sort=row['count'])])
         pulldown = year_pulldown('datacite_subject', query=True)
         if not cnt:
             # No subjects for this filter - advise rather than show an empty table,
@@ -7082,7 +7082,8 @@ def datacite_downloads():
         total += row['downloadCount']
         cnt += 1
         link = doi_link(row['doi'])
-        trows.append([safe(link), strip_html_tags(DL.get_title(row)), row['downloadCount']])
+        trows.append([safe(link), strip_html_tags(DL.get_title(row)),
+                      cell(f"{row['downloadCount']:,}", sort=row['downloadCount'])])
     html = render_table(['DOI', 'Title', 'Downloads'], trows, table_id='data',
                         css='tablesorter numberlast-scroll',
                         footer=[fcell('Total', colspan=2),
@@ -10714,7 +10715,7 @@ def dois_publisher(year='All'):
            + year_pulldown('dois_publisher') + html
     title = "DOIs by publisher"
     if year != 'All':
-        title += f" for {year}"
+        title += f" ({year})"
     # Ranked hbar of the top publishers by total DOIs (audit chart policy); the table
     # above lists every publisher. Default colour = get_colors_by_count (SOURCE_PALETTE
     # is reserved for the 2-way registrar split); height scales with the bar count.
