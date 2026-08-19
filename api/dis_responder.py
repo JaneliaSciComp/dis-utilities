@@ -48,7 +48,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.11.1"
+__version__ = "120.11.2"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -6698,8 +6698,8 @@ def crossref_subject(subject=None, year='All'):
             html = year_pulldown(f"crossref_subject/{subject}") + "<br><br>" \
                    + render_warning(msg, 'warning')
         else:
-            cards = stat_cards([("DOIs", f"<span id='totalrows'>{cnt:,}</span>"),
-                                ("Subject", subject)],
+            cards = stat_cards([("Subject", subject),
+                                ("DOIs", f"<span id='totalrows'>{cnt:,}</span>")],
                                div_id='crsubj-stats')
             html = cards + html
         title = f"DOIs for {subject}"
@@ -7124,8 +7124,8 @@ def datacite_downloads():
                         css='tablesorter numberlast-scroll',
                         footer=[fcell('Total', colspan=2),
                                 fcell(f"{total:,}", align='center')]) + "<br>"
-    cards = stat_cards([("Total downloads", f"{total:,}"),
-                        ("DOIs with downloads", f"{cnt:,}"),
+    cards = stat_cards([("DOIs with downloads", f"{cnt:,}"),
+                        ("Total downloads", f"{total:,}"),
                         ("Avg. per DOI", f"{total/cnt:,.1f}" if cnt else "0")],
                        div_id='dcdl-stats')
     html = cards + html
@@ -11055,7 +11055,7 @@ def show_journals_dois(year=None):
     cards = [("Journals found", f"{len(journal):,}"),
              ("Tracked subscriptions", f"{tracked:,}")]
     if free_cnt:
-        cards.append(("Free to read", f"{free_cnt:,}", "lime"))
+        cards.append(("Open access", f"{free_cnt:,}", "lime"))
     if subscribed_cnt:
         cards.append(("Subscribed journals", f"{subscribed_cnt:,}", "yellowgreen"))
     trows = []
@@ -11372,8 +11372,8 @@ def show_subscription_summary():
     # Stat cards
     cards = [("Providers", f"{pcount:,}"),
              ("Publishers", f"{len(pubcnt):,}"),
-             ("Subscriptions", f"{cnt:,}"),
-             ("Open access", f"{oacnt/cnt*100:.2f}%" if cnt else "0%")]
+             ("Titles", f"{cnt:,}"),
+             ("Open access", f"{oacnt:,}", "lime")]
     if cost_total is not None:
         cost_link = f"<a href='/subscription/cost'>${cost_total:,.2f}</a>"
         cards.append((f"Subscription cost ({cost_year})", cost_link))
@@ -11525,10 +11525,10 @@ def show_subscription_summary_by_provider(prov):
                                title=render_warning(errmsg),
                                message=error_message(err))
     # Stat cards
-    cards = [("Total titles", f"{cnt:,}"),
+    cards = [("Titles", f"{cnt:,}"),
              ("Publishers", f"{len(transform):,}")]
     if oa_cnt:
-        cards.append(("Open access titles", f"{oa_cnt:,}"))
+        cards.append(("Open access", f"{oa_cnt:,}", "lime"))
     if cost_total is not None:
         cost_link = f"<a href='/subscription/cost/{prov}'>${cost_total:,.2f}</a>"
         cards.append((f"Subscription cost ({cost_year})", cost_link))
@@ -11624,7 +11624,7 @@ def show_subscription_year(year=None):
                                              html=html,
                                              navbar=generate_navbar('Subscriptions')))
     html += stat_cards([("Providers", f"{len(data):,}"),
-                        ("Subscriptions", f"{sub_cnt:,}"),
+                        ("Titles", f"{sub_cnt:,}"),
                         ("Total cost", f"${total:,.2f}")], div_id='subyear-stats')
     # Tap a provider bar -> that provider's cost-by-year report
     pnav = {prov: f"/subscription/cost/{quote(prov, safe='')}" for prov in data}
@@ -11936,9 +11936,9 @@ def show_subscriptionlist(sub, field='publisher', stype=None):
     html = render_table(header, trows, table_id='journals', css='tablesorter standard-scroll')
     title = f"ubscriptions for {field} {sub}"
     title = f"{stype} s{title}" if stype else f"S{title}"
-    cards = [("Journals", f"{cnt:,}")]
+    cards = [("Titles", f"{cnt:,}")]
     if free_cnt:
-        cards.append(("Free to read", f"{free_cnt:,}", "lime"))
+        cards.append(("Open access", f"{free_cnt:,}", "lime"))
     if subscribed_cnt:
         cards.append(("Subscribed journals", f"{subscribed_cnt:,}", "yellowgreen"))
     if janelia_pubs:
@@ -12177,7 +12177,7 @@ def show_subscription_apcs(provider=None, publisher=None):
         title = f"{title} / {publisher}"
     html = stat_cards([("Providers", f"{len(provider_list):,}"),
                        ("Publishers", f"{len(publisher_list):,}"),
-                       ("Journals", f"{cnt:,}")], div_id='apclist-stats') + html
+                       ("Titles", f"{cnt:,}")], div_id='apclist-stats') + html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
