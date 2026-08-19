@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block script %}
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery-cookie/1.4.1/jquery.cookie.min.js"></script>
-<script src="/static/bootstrap-autocomplete/autocomplete.js"></script>
+<script src="{{ url_for('static', filename='js/bootstrap-autocomplete/autocomplete.js') }}"></script>
 <script>
 $(document).on('keypress', 'input', function(e) {
   if (e.which === 13) {
