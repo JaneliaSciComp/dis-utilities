@@ -232,6 +232,34 @@ def two_col(left, right):
             f"{left}{right}</div>")
 
 
+def registrar_switch(url, label):
+    ''' Canonical registrar-switch button (the Crossref <-> DataCite toggle used by
+        the twin pages). One wording ("Switch to <label>") and one spacing, so the
+        button looks the same on every page that offers the toggle.
+        Keyword arguments:
+          url: target URL for the other registrar's view
+          label: the other registrar's display name (e.g. "Crossref")
+        Returns:
+          HTML string (an anchor styled as a small outline button)
+    '''
+    return (f"<a href='{url}' class='btn btn-outline-primary btn-sm' "
+            f"style='margin-bottom:12px'>Switch to {escape(label)}</a>")
+
+
+def see_also(links):
+    ''' Canonical "See also:" cross-navigation footer strip for a page family.
+        Keyword arguments:
+          links: list of (label, url) pairs; empty/falsy -> no strip rendered
+        Returns:
+          HTML string (a styled footer div), or '' if there are no links
+    '''
+    if not links:
+        return ''
+    items = " &middot; ".join(f"<a href='{url}'>{escape(label)}</a>" for label, url in links)
+    return ("<div style='margin-top:16px;font-size:0.85em;color:#a8c4e0;'>See also: "
+            + items + "</div>")
+
+
 class Safe(str):
     ''' Marks a string as already-rendered, trusted HTML so that render_table()
         will not escape it. Plain str cells are HTML-escaped. '''
