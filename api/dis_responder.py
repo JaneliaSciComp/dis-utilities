@@ -37,8 +37,8 @@ import dis_plots as DP
 from dis_html import (DOWNLOAD_ICON, add_jrc_fields, add_subjects, cell,
                       create_downloadable, dloop, doi_link, fcell,
                       generate_navbar, get_license, make_link,
-                      oa_status_rank, render_table, render_warning,
-                      safe, stat_cards, tab_button, tab_pane, tiny_badge,
+                      oa_status_rank, registrar_switch, render_table, render_warning,
+                      safe, see_also, stat_cards, tab_button, tab_pane, tiny_badge,
                       two_col, year_pulldown as _year_pulldown)
 from dis_config import (ARTICLES, DATACITE, DOI, DO_NOT_DISPLAY, EMAIL,
                         EPT_ONE, EPT_TWO, LIBRARY, NCBI_MESH, OAREPORT,
@@ -48,7 +48,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.12.6"
+__version__ = "120.13.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -4164,8 +4164,11 @@ def show_acknowledgement_metrics(limit=10):
             + tab_pane('tags', tags_body, active_tab == 'tags')
             + tab_pane('heatmap', heatmap_body, active_tab == 'heatmap')
             + '</div>')
+    seealso = see_also([("DOI metrics", "/dois_metrics"),
+                        ("Tags", "/tag_metrics"),
+                        ("Impact by source", "/source_metrics")])
     bokeh_cdn = '<script src="https://cdn.bokeh.org/bokeh/release/bokeh-3.5.0.min.js"></script>'
-    html = (coverage_html + tabs + bokeh_cdn + m_chartscript + by_chartscript
+    html = (coverage_html + tabs + seealso + bokeh_cdn + m_chartscript + by_chartscript
             + s_chartscript + ent_chartscript + h_chartscript)
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
@@ -4531,8 +4534,11 @@ def show_tag_metrics(limit=15):
             + tab_pane('trends', trends_body, active_tab == 'trends')
             + tab_pane('cotag', cotag_body, active_tab == 'cotag')
             + '</div>')
+    seealso = see_also([("DOI metrics", "/dois_metrics"),
+                        ("Acknowledgements", "/acknowledgement_metrics"),
+                        ("Impact by source", "/source_metrics")])
     bokeh_cdn = '<script src="https://cdn.bokeh.org/bokeh/release/bokeh-3.5.0.min.js"></script>'
-    html = (coverage_html + tabs + bokeh_cdn + tag_chartscript + cov_chartscript
+    html = (coverage_html + tabs + seealso + bokeh_cdn + tag_chartscript + cov_chartscript
             + by_chartscript + trend_chartscript + cooccur_chartscript)
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
@@ -5566,12 +5572,11 @@ def show_dois_metrics(year='All'):
             + tab_pane('byyear', byyear_body, active_tab == 'byyear')
             + tab_pane('coverage', coverage_body, active_tab == 'coverage')
             + '</div>')
-    seealso = ("<div style='margin-top:16px;font-size:0.85em;color:#a8c4e0;'>See also: "
-               "<a href='/dois_yearly'>Yearly report</a> &middot; "
-               "<a href='/dois_publisher'>Publishers</a> &middot; "
-               "<a href='/dois_license'>Licenses</a> &middot; "
-               "<a href='/citation_metrics/crossref'>Citations</a> &middot; "
-               "<a href='/source_metrics'>Impact by source</a></div>")
+    seealso = see_also([("Yearly report", "/dois_yearly"),
+                        ("Publishers", "/dois_publisher"),
+                        ("Licenses", "/dois_license"),
+                        ("Citations", "/citation_metrics/crossref"),
+                        ("Impact by source", "/source_metrics")])
     bokeh_cdn = '<script src="https://cdn.bokeh.org/bokeh/release/bokeh-3.5.0.min.js"></script>'
     html = header + tabs + seealso + bokeh_cdn + charts
     endpoint_access()
@@ -7082,8 +7087,7 @@ def citation_list(source='datacite'):
     pulldown = year_pulldown(f"citation_list/{source}", query=True)
     other = 'crossref' if source == 'datacite' else 'datacite'
     ysuffix = '' if year == 'All' else f"?year={year}"
-    switch = f"<a href='/citation_list/{other}{ysuffix}' class='btn btn-outline-primary btn-sm' " \
-             + f"style='margin-left: 10px'>Switch to {obtained_from[other]}</a>"
+    switch = registrar_switch(f"/citation_list/{other}{ysuffix}", obtained_from[other])
     title = f"{obtained} DOI citations"
     if year != 'All':
         title += f" ({year})"
@@ -7093,7 +7097,7 @@ def citation_list(source='datacite'):
         msg = f"No {obtained} DOIs with citations were found"
         if year != 'All':
             msg += f" for publishing year {year}"
-        html = pulldown + switch + "<br><br>" + render_warning(msg, 'warning')
+        html = switch + "<br>" + pulldown + "<br><br>" + render_warning(msg, 'warning')
         endpoint_access()
         return make_response(render_template('general.html', urlroot=request.url_root,
                                              title=title, html=html,
@@ -7126,7 +7130,7 @@ def citation_list(source='datacite'):
                         ("Total citations", f"<span id='cite-total'>{total:,}</span>"),
                         ("Avg. per DOI", f"<span id='cite-avg'>{avg_all}</span>")],
                        div_id='dccc-stats')
-    html = cards + pulldown + cbutton + switch + download + "<br><br>" + html
+    html = switch + "<br>" + cards + pulldown + cbutton + download + "<br><br>" + html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
@@ -7332,8 +7336,7 @@ def citation_metrics(source='datacite'):
     if notes:
         notes = f"<div style='margin:-8px 0 16px 0'>{notes}</div>"
     other = 'crossref' if source == 'datacite' else 'datacite'
-    switch = f"<a href='/citation_metrics/{other}' class='btn btn-outline-primary btn-sm' " \
-             + f"style='margin-bottom: 12px'>Switch to {obtained_from[other]} metrics</a>"
+    switch = registrar_switch(f"/citation_metrics/{other}", obtained_from[other])
     chtml = "<h4>Citations by source</h4>"
     chtml += render_table(['Source', 'DOIs', 'Citations'], trows, table_id='sources',
                           css='tablesorter numbers-scroll',
@@ -7880,7 +7883,10 @@ def source_metrics(year='All'):  # pylint: disable=too-many-locals
     if year != 'All':
         title += f" ({year})"
     html = year_pulldown('source_metrics') + "<br><br>" + cards + intro \
-           + flexrow(chtml, share_div) + flexrow(conchtml, lorenz_div) + uhtml
+           + flexrow(chtml, share_div) + flexrow(conchtml, lorenz_div) + uhtml \
+           + see_also([("DOI metrics", "/dois_metrics"),
+                       ("Citations", "/citation_metrics/crossref"),
+                       ("Acknowledgements", "/acknowledgement_metrics")])
     endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title=title, html=html,
