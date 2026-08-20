@@ -294,6 +294,17 @@ table.property {
   flex: 1;
 }
 
+/* One column inside a .flexrow (e.g. a table beside its chart). The parent
+   .flexrow supplies the flex context; each column sizes to its content and wraps
+   below on a narrow viewport, with callers setting an explicit width/flex-basis
+   inline where a fixed column width is needed. `flex: 0 1 auto` is the default
+   flex-item value, so this changes nothing visually - it just makes .flexcol a
+   real, documented class instead of an undefined one that worked only by relying
+   on the parent's flex context (used ~23x in dis_responder + bokeh.html/custom.html). */
+.flexcol {
+  flex: 0 1 auto;
+}
+
 .fas {
   color: white;
   text-shadow: 1px 1px #333
