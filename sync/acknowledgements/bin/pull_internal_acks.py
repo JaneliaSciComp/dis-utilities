@@ -129,7 +129,7 @@ import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
 import jrc_email.jrc_email as JE
 
-__version__ = '1.7.5'
+__version__ = '1.7.6'
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation,no-member
 
@@ -497,7 +497,11 @@ def add_biorxiv_internal_acks(internal, error):
         if cnt < 1:
             return
         LOGGER.info(f"Found {cnt:,} bioRxiv/medRxiv DOIs without acknowledgements")
-        rows = DB['dis'].dois.find(payload, {"doi": 1})
+        # Materialized up front (not streamed off a live cursor): this pass sleeps/
+        # retries on every row to respect the preprint host's throttling, so a run
+        # can take well over MongoDB's 10-minute server-side cursor timeout between
+        # getMore calls, which previously raised CursorNotFound partway through.
+        rows = list(DB['dis'].dois.find(payload, {"doi": 1}))
     except Exception as err:
         terminate_program(err)
     pbar = tqdm(rows, total=cnt, desc="Finding bioRxiv acknowledgements")
