@@ -48,7 +48,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.13.3"
+__version__ = "120.13.4"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -7900,16 +7900,35 @@ def source_metrics(year='All'):  # pylint: disable=too-many-locals
     title = "Impact by source"
     if year != 'All':
         title += f" ({year})"
-    html = year_pulldown('source_metrics') + "<br><br>" + cards + intro \
-           + flexrow(chtml, share_div) + flexrow(conchtml, lorenz_div) + uhtml \
-           + see_also([("DOI metrics", "/dois_metrics"),
-                       ("Citations", "/citation_metrics/crossref"),
-                       ("Acknowledgements", "/acknowledgement_metrics")])
+    # Tabbed layout, matching the sibling dashboards (dois_metrics / tag_metrics /
+    # acknowledgement_metrics): the overview cards + intro are a shared header above
+    # the tabs, and each metric section becomes a tab (content and table/chart
+    # pairings unchanged). The charts are fixed-width, so they hydrate correctly even
+    # inside an initially-hidden pane. general.html + an injected Bokeh CDN tag + the
+    # chart scripts in the body is the same recipe the other tabbed dashboards use.
+    header = cards + intro
+    active_tab = request.args.get('tab')
+    if active_tab not in ('citations', 'concentration', 'usage'):
+        active_tab = 'citations'
+    tabs = ('<ul class="nav nav-tabs" role="tablist">'
+            + tab_button('citations', 'Citations', active_tab == 'citations')
+            + tab_button('concentration', 'Concentration', active_tab == 'concentration')
+            + tab_button('usage', 'Usage', active_tab == 'usage')
+            + '</ul><div class="tab-content">'
+            + tab_pane('citations', flexrow(chtml, share_div), active_tab == 'citations')
+            + tab_pane('concentration', flexrow(conchtml, lorenz_div),
+                       active_tab == 'concentration')
+            + tab_pane('usage', uhtml, active_tab == 'usage')
+            + '</div>')
+    seealso = see_also([("DOI metrics", "/dois_metrics"),
+                        ("Citations", "/citation_metrics/crossref"),
+                        ("Acknowledgements", "/acknowledgement_metrics")])
+    bokeh_cdn = '<script src="https://cdn.bokeh.org/bokeh/release/bokeh-3.5.0.min.js"></script>'
+    html = year_pulldown('source_metrics') + "<br><br>" + header + tabs + seealso \
+           + bokeh_cdn + chartscript
     endpoint_access()
-    return make_response(render_template('bokeh.html', urlroot=request.url_root,
+    return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
-                                         chartscript=chartscript, chartdiv='',
-                                         chartscript2='', chartdiv2='',
                                          navbar=generate_navbar('DOIs')))
 
 
