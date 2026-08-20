@@ -48,7 +48,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.13.0"
+__version__ = "120.13.1"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -928,13 +928,24 @@ def generate_works_table(rows, name=None, show="full", eid=None):
         return "", []
     works.sort(key=DL.get_publishing_date, reverse=True)
     def mark_fn(row):
-        ''' Green checkmark for works the person authored while a Janelia employee,
-            else four non-breaking spaces to keep the DOIs left-aligned. '''
-        if eid and 'jrc_author' in row and eid in row['jrc_author']:
+        ''' Green checkmark for works the person authored while a Janelia employee, else
+            four non-breaking spaces to keep the DOIs left-aligned. Only meaningful when an
+            eid is known; a name search (eid=None) has no single employee, so no marker. '''
+        if not eid:
+            return ''
+        if 'jrc_author' in row and eid in row['jrc_author']:
             return "<i class='fa-solid fa-circle-check' style='color: lime'></i> "
         return "&nbsp;&nbsp;&nbsp;&nbsp;"
     table, _, _ = standard_doi_table(works, mark_fn=mark_fn, download_name='works')
-    preamble = f'''
+    if authors:
+        table = f"<br>Authors found: {', '.join(sorted(authors.values()))}<br>" \
+                + f"This may include non-Janelia authors<br>{table}"
+    # The green-checkmark preamble only makes sense when an eid drives the checks (the
+    # person pages /orcidui and /userui). A name search (eid=None, e.g. /doisui_name) has
+    # no single employee, so no check ever renders - show no preamble then, rather than
+    # describing a checkmark that isn't there.
+    if eid:
+        preamble = f'''
     The works below were searched for using this author's name and ORCID. A green checkmark
     (<i class='fa-solid fa-circle-check' style='color: lime'></i>) indicates that automated or
     manual curation has determined that the author contributed to the publication while they were
@@ -943,10 +954,9 @@ def generate_works_table(rows, name=None, show="full", eid=None):
     information was not provided to Crossref/DataCite. If one of your publications doesn't have a
     check (or is missing), please email the DOI to the Library at {LIBRARY}.
     '''
-    if authors:
-        table = f"<br>Authors found: {', '.join(sorted(authors.values()))}<br>" \
-                + f"This may include non-Janelia authors<br>{table}"
-    html = f"<hr>{preamble}{table}"
+        html = f"<hr>{preamble}{table}"
+    else:
+        html = table
     return html, dois
 
 
