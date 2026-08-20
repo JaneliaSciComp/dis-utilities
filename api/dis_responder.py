@@ -48,7 +48,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.13.8"
+__version__ = "120.13.9"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -4366,7 +4366,7 @@ def show_tag_metrics(limit=15):
     # Table and top-tags chart sit side by side (chart is a fixed 650x450 block,
     # the table scrolls within a matching height) to save vertical space; the row
     # wraps to stacked on narrow viewports.
-    table_block = ("<div class='tag-scrollbox' style='flex:1 1 540px;min-width:360px;'>"
+    table_block = ("<div class='tag-scrollbox' style='flex:1 1 560px;min-width:360px;'>"
                    f"{tag_table}</div>")
     chart_block = f"<div style='flex:0 0 auto;'>{tag_chartdiv}</div>" if tag_chartdiv else ""
     tags_body = (tag_cards + tag_note + f"<div style='margin-bottom:8px;'>{cbutton}</div>"
@@ -5431,7 +5431,7 @@ def show_dois_metrics(year='All'):
     s2, d2 = DP.pie_chart(lm, f"DOIs by load method", "source", width=450,
                           colors=DP.get_colors_by_count(len(lm) or 1))
     charts += s1 + s2
-    sources_body = two_col("<div class='tag-scrollbox' style='flex:1 1 460px;min-width:360px;"
+    sources_body = two_col("<div class='tag-scrollbox' style='flex:1 1 440px;min-width:360px;"
                            f"overflow-x:auto;'>{src_table}</div>",
                            f"<div style='flex:0 0 auto;'>{d1}{d2}</div>")
     # ----- By type tab (resource-type mix; merges Crossref type + DataCite general) -----
@@ -5471,7 +5471,7 @@ def show_dois_metrics(year='All'):
                               f"DOIs by type", "type", width=600, height=460,
                               colors=DP.get_colors_by_count(len(tdata)))
         charts += s3
-        bytype_body = two_col("<div class='tag-scrollbox' style='flex:1 1 380px;min-width:320px;'>"
+        bytype_body = two_col("<div class='tag-scrollbox' style='flex:1 1 440px;min-width:320px;'>"
                               f"{type_table}</div>", f"<div style='flex:0 0 auto;'>{d3}</div>")
     # ----- By year tab (all years, by registrar) -----
     ymap = {}
@@ -5563,7 +5563,7 @@ def show_dois_metrics(year='All'):
                      f"(scope <em>Crossref</em>) are scored against the {cx_total:,} "
                      "Crossref DOIs, since DataCite datasets can't carry them; the rest "
                      f"against all {total:,}.</div>"
-                     + two_col("<div style='flex:1 1 440px;min-width:360px;'>"
+                     + two_col("<div style='flex:1 1 440px;min-width:360px;overflow-x:auto;'>"
                                f"{cov_table}</div>",
                                f"<div style='flex:0 0 auto;'>{cd}</div>"))
     # ----- tabs -----
@@ -11712,7 +11712,7 @@ def show_subscription_year(year=None):
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                         title=f"Subscription costs by provider for {year}",
                                         html=html, html2=html2,
-                                        chartscript2=barscript, chartdiv2=bardiv,
+                                        chartscript=barscript, chartdiv=bardiv,
                                         navbar=generate_navbar('Subscriptions')))
 
 
@@ -11830,8 +11830,15 @@ def show_subscription_costs(provider=None):
     if perclist:
         footer = [fcell('AVERAGE % change', colspan=3, align='right'),
                   fcell(f"{sum(perclist)/len(perclist):+.2f}%")]
-    html = render_table(['Year', 'Subscriptions', 'Cost', '% change'], trows,
-                        table_id='costs', css='tablesorter numbers-scroll', footer=footer)
+    # Stat-cards header (mirrors show_subscription_year, which has one) so the cost
+    # pair presents the same way.
+    cards = stat_cards([("Years", f"{len(data['Year']):,}"),
+                        ("Total cost", f"${sum(data['Cost']):,.2f}"),
+                        (f"Latest ({data['Year'][-1]})", f"${data['Cost'][-1]:,.2f}")],
+                       div_id='subcost-stats')
+    html = cards + render_table(['Year', 'Subscriptions', 'Cost', '% change'], trows,
+                                table_id='costs', css='tablesorter numbers-scroll',
+                                footer=footer)
     if not provider:
         html += "<br><br><h3>Providers</h3>"
         html += '<br>'.join([f"<a href='/subscription/cost/{pp}'>{pp}</a>" \

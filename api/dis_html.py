@@ -333,7 +333,11 @@ def render_table(headers, rows, table_id=None, css="tablesorter standard-scroll"
           headers: list of column-header values (escaped unless wrapped in safe())
           rows: list of rows, each a list of cell values (escaped unless safe())
           table_id: optional id attribute for the <table>
-          css: table CSS class(es)
+          css: table CSS class(es). Scroll-variant convention (pick by numeric-column
+               layout): `standard-scroll` = text / DOI-list tables (no numeric-only
+               columns to right-align); `numberlast-scroll` = a single trailing numeric
+               column (e.g. a Count or Cost); `numbers-scroll` = two or more numeric
+               columns. Always keep the `tablesorter` prefix.
           row_classes: optional list, one entry per row, giving each <tr>'s class
                        (falsy entries get no class)
           footer: optional list of <tfoot> cells. fcell() results (Safe) are used
