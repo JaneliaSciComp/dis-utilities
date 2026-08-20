@@ -5,6 +5,7 @@
 
 import requests
 import argparse
+import re
 import sys
 from nameparser import HumanName
 from operator import attrgetter
@@ -25,7 +26,7 @@ def create_item(doi):
     if response:
         doi_record = get_doi_record(doi)
         item_type = get_type(doi_record)
-        citation = response['data']
+        citation = re.sub(r'\s+', ' ', response['data']).strip()
         if 'jrc_preprint' in response and item_type == 'Journal article':
             return(Item(  
                 citation = citation, 
@@ -61,27 +62,54 @@ def get_type(doi_record):
 ### Functions for formatting and printing citations
 
 
-def parse_ris(lines):
-    with open(arg.RIS, "r") as inF:
-        lines = inF.readlines()
-        title = None
-        doi = None
-        authors = []
-        for line in lines:
-            try:
-                code, content = line.split("  - ")[0], line.split("  - ")[1].strip()
-                if code == 'T1':
-                    title = content
-                if code == 'DO':
-                    doi = content
-                if code == 'AU':
-                    authors.append(HumanName(content))
-            except:
-                continue
+def build_ris_citation(title, doi, authors):
+    title_str = re.sub(r'\s+', ' ', " ".join(title)).strip()
+    author_parts = []
+    for raw, name in authors:
+        if name.last:
+            author_parts.append(f"{name.last}, {''.join(name.initials_list()[:-1])}")
+        else:
+            # nameparser couldn't split this into first/last (single-token or
+            # corporate/consortium author) -- fall back to the raw AU value
+            # rather than silently dropping the author.
+            author_parts.append(raw)
+    author_str = ', '.join(author_parts)
+    return f"{author_str}. {title_str}. https://doi.org/{doi}."
 
-        author_str = ', '.join([f"{name.last}, {''.join(name.initials_list()[:-1])}" for name in authors])
-        citation = f"{author_str}. {title}. https://doi.org/{doi}."
-        return citation
+
+def parse_ris(lines):
+    citations = []
+    title = []
+    doi = None
+    authors = []
+    last_code = None
+    for line in lines:
+        try:
+            code, content = line.split("  - ")[0], line.split("  - ")[1].strip()
+        except IndexError:
+            # Some exporters wrap a long title across multiple lines without
+            # repeating the 'T1' tag -- treat those as a continuation of the
+            # title we're currently accumulating.
+            stripped = line.strip()
+            if stripped and last_code == 'T1' and title:
+                title[-1] = f"{title[-1]} {stripped}"
+            continue
+        if code == 'T1':
+            title.append(content)
+        elif code == 'DO':
+            doi = content
+        elif code == 'AU':
+            authors.append((content, HumanName(content)))
+        elif code == 'ER':
+            # end of record -- a .ris file may contain more than one citation
+            citations.append(build_ris_citation(title, doi, authors))
+            title, doi, authors = [], None, []
+        last_code = code
+
+    if title or doi or authors:
+        citations.append(build_ris_citation(title, doi, authors))
+
+    return citations
 
 
 
@@ -158,7 +186,9 @@ if __name__ == '__main__':
             raise ImportError
 
     if arg.RIS:
-        print(parse_ris(arg.RIS))
+        with open(arg.RIS, "r") as inF:
+            for citation in parse_ris(inF.readlines()):
+                print(f"{citation}\n")
         sys.exit(0)
     
     items = [i for i in items if i is not None]
