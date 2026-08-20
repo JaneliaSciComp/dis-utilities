@@ -48,7 +48,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.14.0"
+__version__ = "120.14.1"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -5090,26 +5090,48 @@ def doi_tabs(doi, row, rowext, data, authors):
     return html
 
 
+BATCH_MAX_BYTES = 2_000_000   # cap on an uploaded DOI/PMID list (~2 MB)
+BATCH_MAX_TOKENS = 5000       # cap on the number of ids processed per request
+
+
 @app.route('/doiui_batch', methods=['POST'])
 def show_doi_batch():
-    ''' Standard DOI table for a whitespace-separated list of DOIs/PMIDs, submitted
-        from the home page's "Find a DOI or PMID" box. A single entry routes to
-        /doiui client-side; this handles two or more. PMIDs (all-digit tokens) are
-        resolved via jrc_pmid, the same way /doiui does; tokens with no matching
-        dois-collection record are listed as not found above the table.
+    ''' Standard DOI table for a list of DOIs/PMIDs, submitted from the home page's
+        "Find a DOI or PMID" box (pasted, whitespace-separated) or as an uploaded
+        text/CSV file. A single pasted entry routes to /doiui client-side; this
+        handles two or more, plus any uploaded file. Tokens are split on whitespace
+        or commas (so space-, newline-, tab-, and comma-separated lists all work).
+        PMIDs (all-digit tokens) are resolved via jrc_pmid, the same way /doiui does;
+        tokens with no matching dois-collection record are listed as not found.
     '''
-    # Normalize + dedupe (preserving input order); all-digit tokens are PMIDs.
+    raw = request.form.get('dois', '')
+    upload = request.files.get('file')
+    if upload and upload.filename:
+        # Read at most the cap (+1 byte to detect oversize) rather than the whole file.
+        data = upload.read(BATCH_MAX_BYTES + 1)
+        if len(data) > BATCH_MAX_BYTES:
+            return render_template('warning.html', urlroot=request.url_root,
+                                   title=render_warning("File too large", 'warning'),
+                                   message=f"The uploaded file exceeds the "
+                                           f"{BATCH_MAX_BYTES // 1_000_000} MB limit.")
+        raw += "\n" + data.decode('utf-8-sig', errors='replace')
+    # Normalize + dedupe (preserving input order); split on any run of whitespace or
+    # commas; all-digit tokens are PMIDs. Cap the count to bound the lookup.
     pmids, dois, seen = [], [], set()
-    for tok in request.form.get('dois', '').split():
+    truncated = False
+    for tok in re.split(r'[\s,]+', raw):
         token = tok.strip().strip('/').lower()
         if not token or token in seen:
             continue
+        if len(seen) >= BATCH_MAX_TOKENS:
+            truncated = True
+            break
         seen.add(token)
         (pmids if token.isdigit() else dois).append(token)
     if not seen:
         return render_template('warning.html', urlroot=request.url_root,
                                title=render_warning("No DOIs or PMIDs", 'warning'),
-                               message="You must enter at least one DOI or PMID")
+                               message="You must enter or upload at least one DOI or PMID")
     try:
         rows = list(DB['dis'].dois.find({"$or": [{"doi": {"$in": dois}},
                                                  {"jrc_pmid": {"$in": pmids}}]}))
@@ -5121,6 +5143,9 @@ def show_doi_batch():
                + [t for t in pmids if t not in found_pmids]
     rows.sort(key=lambda row: DL.get_publishing_date(row) or '', reverse=True)
     html = ""
+    if truncated:
+        html += render_warning(f"Only the first {BATCH_MAX_TOKENS:,} entries were processed.",
+                               'warning') + "<br>"
     if notfound:
         html += render_warning(f"{len(notfound)} of {len(seen):,} entered not found in the "
                                + "DOI collection: "
