@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block script %}
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery-cookie/1.4.1/jquery.cookie.min.js"></script>
+{% if bokeh %}<script src="https://cdn.bokeh.org/bokeh/release/bokeh-3.5.0.min.js"></script>{% endif %}
 {% endblock %}
 {% block onload %}
 onload="tableInitialize();"

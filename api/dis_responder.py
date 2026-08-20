@@ -48,7 +48,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.13.7"
+__version__ = "120.13.8"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -4179,12 +4179,11 @@ def show_acknowledgement_metrics(limit=10):
     seealso = see_also([("DOI metrics", "/dois_metrics"),
                         ("Tags", "/tag_metrics"),
                         ("Impact by source", "/source_metrics")])
-    bokeh_cdn = '<script src="https://cdn.bokeh.org/bokeh/release/bokeh-3.5.0.min.js"></script>'
-    html = (coverage_html + tabs + seealso + bokeh_cdn + m_chartscript + by_chartscript
+    html = (coverage_html + tabs + seealso + m_chartscript + by_chartscript
             + s_chartscript + ent_chartscript + h_chartscript)
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title="Acknowledgement metrics", html=html,
+                                         title="Acknowledgement metrics", html=html, bokeh=True,
                                          navbar=generate_navbar('Acknowledgements')))
 
 
@@ -4549,12 +4548,11 @@ def show_tag_metrics(limit=15):
     seealso = see_also([("DOI metrics", "/dois_metrics"),
                         ("Acknowledgements", "/acknowledgement_metrics"),
                         ("Impact by source", "/source_metrics")])
-    bokeh_cdn = '<script src="https://cdn.bokeh.org/bokeh/release/bokeh-3.5.0.min.js"></script>'
-    html = (coverage_html + tabs + seealso + bokeh_cdn + tag_chartscript + cov_chartscript
+    html = (coverage_html + tabs + seealso + tag_chartscript + cov_chartscript
             + by_chartscript + trend_chartscript + cooccur_chartscript)
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title="Tag metrics", html=html,
+                                         title="Tag metrics", html=html, bokeh=True,
                                          navbar=generate_navbar('Tag/affiliation')))
 
 # ******************************************************************************
@@ -5393,7 +5391,7 @@ def show_dois_metrics(year='All'):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not count DOIs"),
                                message=error_message(err))
-    header = (f"<h5 style='margin:14px 0 6px 0;'>Overview{ysfx}</h5>"
+    header = (f"<h5 style='margin:14px 0 6px 0;'>Overview</h5>"
               + stat_cards([("DOIs", f"{total:,}"),
                             ("Crossref", f"{by_src['Crossref']:,}"),
                             ("DataCite", f"{by_src['DataCite']:,}")], div_id='doi-stats')
@@ -5419,7 +5417,7 @@ def show_dois_metrics(year='All'):
     src_table = render_table(['Source', 'Type', 'Subtype', 'Count'], srows,
                              table_id='doisrc', css='tablesorter numberlast-scroll',
                              footer=[fcell('Total', colspan=3), fcell(f"{stotal:,}")])
-    s1, d1 = DP.pie_chart(sdata, f"DOIs by source{ysfx}", "source", width=450,
+    s1, d1 = DP.pie_chart(sdata, f"DOIs by source", "source", width=450,
                           colors=DP.SOURCE_PALETTE)
     lm_payload = ([{"$match": dict(yr)}] if year != 'All' else []) + \
                  [{"$group": {"_id": "$jrc_load_source", "count": {"$sum": 1}}},
@@ -5430,7 +5428,7 @@ def show_dois_metrics(year='All'):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get load methods"),
                                message=error_message(err))
-    s2, d2 = DP.pie_chart(lm, f"DOIs by load method{ysfx}", "source", width=450,
+    s2, d2 = DP.pie_chart(lm, f"DOIs by load method", "source", width=450,
                           colors=DP.get_colors_by_count(len(lm) or 1))
     charts += s1 + s2
     sources_body = two_col("<div class='tag-scrollbox' style='flex:1 1 460px;min-width:360px;"
@@ -5470,7 +5468,7 @@ def show_dois_metrics(year='All'):
                                   css='tablesorter numberlast-scroll',
                                   footer=[fcell('Total'), fcell(f"{sum(tdata.values()):,}")])
         s3, d3 = DP.pie_chart(dict(sorted(tdata.items(), key=itemgetter(1), reverse=True)),
-                              f"DOIs by type{ysfx}", "type", width=600, height=460,
+                              f"DOIs by type", "type", width=600, height=460,
                               colors=DP.get_colors_by_count(len(tdata)))
         charts += s3
         bytype_body = two_col("<div class='tag-scrollbox' style='flex:1 1 380px;min-width:320px;'>"
@@ -5556,12 +5554,12 @@ def show_dois_metrics(year='All'):
                                message=error_message(err))
     cov_table = render_table(['Metadata field', 'Scope', 'DOIs', '% of scope'], crows,
                              table_id='doicov', css='tablesorter numberlast-scroll')
-    cs, cd = DP.hbar_chart(cov, f"Metadata coverage{ysfx} (% of applicable DOIs)",
+    cs, cd = DP.hbar_chart(cov, f"Metadata coverage (% of applicable DOIs)",
                            value_label="Coverage", value_format="0%", show_pct=False,
                            width=680, height=430)
     charts += cs
     coverage_body = ("<div style='color:#a8c4e0;font-size:0.82em;margin-bottom:8px;'>"
-                     f"Share of DOIs{ysfx} carrying each field. Journal-article fields "
+                     f"Share of DOIs carrying each field. Journal-article fields "
                      f"(scope <em>Crossref</em>) are scored against the {cx_total:,} "
                      "Crossref DOIs, since DataCite datasets can't carry them; the rest "
                      f"against all {total:,}.</div>"
@@ -5589,11 +5587,10 @@ def show_dois_metrics(year='All'):
                         ("Licenses", "/dois_license"),
                         ("Citations", "/citation_metrics/crossref"),
                         ("Impact by source", "/source_metrics")])
-    bokeh_cdn = '<script src="https://cdn.bokeh.org/bokeh/release/bokeh-3.5.0.min.js"></script>'
-    html = header + tabs + seealso + bokeh_cdn + charts
+    html = header + tabs + seealso + charts
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title="DOI metrics", html=html,
+                                         title=f"DOI metrics{ysfx}", html=html, bokeh=True,
                                          navbar=generate_navbar('DOIs')))
 
 
@@ -7924,12 +7921,10 @@ def source_metrics(year='All'):  # pylint: disable=too-many-locals
     seealso = see_also([("DOI metrics", "/dois_metrics"),
                         ("Citations", "/citation_metrics/crossref"),
                         ("Acknowledgements", "/acknowledgement_metrics")])
-    bokeh_cdn = '<script src="https://cdn.bokeh.org/bokeh/release/bokeh-3.5.0.min.js"></script>'
-    html = year_pulldown('source_metrics') + "<br><br>" + header + tabs + seealso \
-           + bokeh_cdn + chartscript
+    html = year_pulldown('source_metrics') + "<br><br>" + header + tabs + seealso + chartscript
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title=title, html=html,
+                                         title=title, html=html, bokeh=True,
                                          navbar=generate_navbar('DOIs')))
 
 
