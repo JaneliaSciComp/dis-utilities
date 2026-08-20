@@ -48,7 +48,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.13.6"
+__version__ = "120.13.7"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -9529,7 +9529,7 @@ def elife_stats(year='All'):  # pylint: disable=too-many-locals,too-many-branche
     # A specific year is already the query filter (elife_match), so every doc
     # shares that one year - a by-year breakdown would be a single, redundant
     # row/bar. Only build it for the all-years view.
-    ydata = {'Year': [], 'DOIs': [], 'Views': []}
+    ydata = {'Year': [], 'DOIs': [], 'Downloads': []}
     yhtml = ''
     if year == 'All':
         ytrows = []
@@ -9539,7 +9539,7 @@ def elife_stats(year='All'):  # pylint: disable=too-many-locals,too-many-branche
                            f"{rec['downloads']:,}", f"{rec['citations']:,}"])
             ydata['Year'].append(yname)
             ydata['DOIs'].append(rec['dois'])
-            ydata['Views'].append(rec['views'])
+            ydata['Downloads'].append(rec['downloads'])
         yhtml = "<h4>DOIs &amp; usage by publishing year</h4>"
         yhtml += render_table(['Year', 'DOIs', 'Views', 'Downloads', 'Citations'],
                               ytrows, table_id='eli-years', css='tablesorter numberlast-scroll')
@@ -9584,9 +9584,9 @@ def elife_stats(year='All'):  # pylint: disable=too-many-locals,too-many-branche
         # Tap a year bar -> eLife metrics scoped to that year
         ynav = {yr: f"/elife_stats/{yr}" for yr in ydata['Year']}
         script, year_div = DP.dual_axis_chart(
-            ydata, title="DOIs & views by year", x_field='Year',
-            bar_field='DOIs', line_field='Views', bar_label='DOIs published',
-            line_label='Views', bar_color='darkorange', bar_format="0,0",
+            ydata, title="DOIs & downloads by year", x_field='Year',
+            bar_field='DOIs', line_field='Downloads', bar_label='DOIs published',
+            line_label='Downloads', bar_color='darkorange', bar_format="0,0",
             line_format="0,0", width=650, height=400, nav=ynav)
         chartscript += script
     script, type_div = DP.hbar_chart(type_data, "DOIs by type", value_label="DOIs",
