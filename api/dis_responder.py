@@ -48,7 +48,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.13.1"
+__version__ = "120.13.2"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -1038,7 +1038,8 @@ def get_orcid_from_db(oid, use_eid=False, bare=False, show="full"):
     if tablehtml:
         html = f"{' '.join(get_badges(sad, True))}{html}{tablehtml}"
     else:
-        html = f"{' '.join(get_badges(sad, True))}{html}<br>No works found in dois collection."
+        html = f"{' '.join(get_badges(sad, True))}{html}" \
+               + render_warning("No works were found in the dois collection.", 'warning')
     return html, dois, full_name
 
 
@@ -4742,7 +4743,7 @@ def dois_mytags(orcid="0000-0003-3118-1636", year='All'):
     if cnt:
         html = f"{htmlp}Tags: {', '.join(tags)}<br><br>{html}"
     else:
-        html = "<br>No DOIs found for my affiliations"
+        html = htmlp + render_warning("No DOIs were found for your affiliations.", 'warning')
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
                                          navbar=generate_navbar('Tag/affiliation')))
@@ -5681,8 +5682,8 @@ def dois_license(year='All'):
     srt = sorted(data.items(), key=lambda item: item[1], reverse=True)
     data = dict(srt)
     if not data or not total:
-        html = year_pulldown('dois_license') \
-               + f"<br><br><p>No DOIs were found for {year}.</p>"
+        html = year_pulldown('dois_license') + "<br><br>" \
+               + render_warning(f"No DOIs were found for {year}.", 'warning')
         endpoint_access()
         return make_response(render_template('general.html', urlroot=request.url_root,
                                              title="DOIs by license", html=html,
@@ -7036,7 +7037,7 @@ def datacite_doisd(dtype=None, pub=None, year='All'):
                 + f"<span style='font-size: 12pt'><br>{oacnt:,}/{cnt:,}</span>"
     else:
         oamsg = ""
-        html += f"<br>No DOIs found for {pub} {dtype}"
+        html += render_warning(f"No DOIs were found for {pub} {dtype}.", 'warning')
     endpoint_access()
     return make_response(render_template('custom.html', urlroot=request.url_root,
                                          title=title, html=html, oamsg=oamsg,
@@ -10291,7 +10292,7 @@ def show_organization(org_in, year=None, show="full"):
                         table_id='dois', css='tablesorter standard-scroll')
     if not dcnt:
         html = year_pulldown(f"org_detail/{org_in}") + subtitle \
-               + f"<br>No DOIs found for {org_in}" \
+               + render_warning(f"No DOIs were found for {org_in}.", 'warning') \
                + journal_buttons(show, f"/org_detail/{org_in}/{year}")
     else:
         header = ['Published', 'DOI', 'Tags', 'Title', 'Authors']
@@ -11648,7 +11649,7 @@ def show_subscription_year(year=None):
                          footer=[fcell('Total', colspan=3, align='right'),
                                  fcell(f"${total:,.2f}")])
     if not data:
-        html += f"<br><br><p>No subscription costs were found for {year}.</p>"
+        html += render_warning(f"No subscription costs were found for {year}.", 'warning')
         endpoint_access()
         return make_response(render_template('general.html', urlroot=request.url_root,
                                              title=f"Subscription costs by provider for {year}",
@@ -14145,7 +14146,7 @@ def orcid_affiliation(aff, year='All'):
     if cnt:
         html = htmlp + html
     else:
-        html = f"{htmlp}<br>No DOIs found for {aff}"
+        html = htmlp + render_warning(f"No DOIs were found for {aff}.", 'warning')
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=aff, html=html,
@@ -14182,7 +14183,7 @@ def tag_nohead(aff, year='All'):
                 + f"<span style='font-size: 12pt'><br>{oacnt:,}/{cnt:,}</span>"
     else:
         oamsg = ""
-        html += f"<br>No DOIs found for {aff}"
+        html += render_warning(f"No DOIs were found for {aff}.", 'warning')
     title = aff
     if year != 'All':
         title += f" ({year})"
