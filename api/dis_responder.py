@@ -48,7 +48,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.13.4"
+__version__ = "120.13.5"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -271,10 +271,11 @@ def year_pulldown(prefix, all_years=True, suffix='', start_year=2006, query=Fals
             pfx = prefix.strip('/')
             yr = None
             if path.startswith(pfx + '/'):
-                rest = path[len(pfx) + 1:]
-                if suffix and rest.endswith(suffix):
-                    rest = rest[:-len(suffix)]
-                yr = rest or None
+                # The year is always the first path segment after the prefix (links
+                # are built as {prefix}/{year}{suffix}), so take it directly. Avoids
+                # the old suffix-stripping, which was case-/format-fragile - e.g.
+                # top_entities' "/Crossref/10" suffix vs a lowercased URL segment.
+                yr = path[len(pfx) + 1:].split('/')[0] or None
         if not yr:
             yr = 'All' if all_years else str(datetime.now().year)
         selected = "(all years)" if yr == 'All' else yr
