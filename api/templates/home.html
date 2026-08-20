@@ -39,13 +39,29 @@ $(document).on('keypress', 'input', function(e) {
   return;
 });
   function find_doi() {
-    var focusedElement = $(':focus');
-    if (!$('#doi').val()) {
+    var val = $('#doi').val().trim();
+    if (!val) {
       alert("You must enter a DOI or PMID");
       return;
     }
-    url = "/doiui/" + $("#doi").val();
-    window.location = url;
+    var tokens = val.split(/\s+/).filter(Boolean);
+    if (tokens.length > 1) {
+      // A whitespace-separated list -> POST to the batch report. POST (not a GET
+      // path) avoids URL-length and slash-encoding problems with many DOIs. A
+      // single entry falls through to the normal /doiui route below.
+      var form = document.createElement('form');
+      form.method = 'POST';
+      form.action = '/doiui_batch';
+      var input = document.createElement('input');
+      input.type = 'hidden';
+      input.name = 'dois';
+      input.value = val;
+      form.appendChild(input);
+      document.body.appendChild(form);
+      form.submit();
+      return;
+    }
+    window.location = "/doiui/" + tokens[0];
   }
   function find_dois() {
     if (!$('#doiname').val()) {
@@ -146,16 +162,34 @@ onload="tableInitialize();"
 
 {% block content %}
 <h2>Search</h2>
+<!-- Standalone (non-nested) form for the DOI/PMID file upload. The file input and
+     button below live inside the main search <form> for layout, but are associated
+     with THIS form via the HTML5 form="doiupload" attribute, so the upload POSTs to
+     /doiui_batch instead of submitting the (GET) search form. -->
+<form id="doiupload" method="POST" action="/doiui_batch" enctype="multipart/form-data"></form>
 <form>
 <div class="flexcontainer">
   <div class="flexitem">
   <span class="form-control-lg">Find a DOI or PMID:</span>
   </div>
   <div class="flexitem">
-    <input type="text" class="form-control form-control-lg" id="doi" size=28>
+    <input type="text" class="form-control form-control-lg" id="doi" size=28
+           placeholder="one or more, space-separated">
   </div>
-  <div class="flexitem">
+  <div class="flexitemauto">
     <button type="submit" id="doib" class="btn btn-primary" onclick="find_doi(); return false;" href="#">Look up</button>
+  </div>
+  <div class="flexitemauto" style="margin-left: 22px;">
+    <!-- Native file input is hidden and driven by the styled label below (a native
+         file input's "Choose File" text can't be relabeled); a JS onchange shows the
+         picked filename since the hidden input no longer displays it. -->
+    <input type="file" name="file" id="doifile" form="doiupload"
+           accept=".txt,.csv,.tsv,text/plain" style="display:none"
+           onchange="document.getElementById('doifilename').textContent =
+                     this.files.length ? this.files[0].name : 'No file chosen';">
+    <label for="doifile" class="btn btn-outline-secondary" style="margin:0;">Choose file of DOIs or PMIDs</label>
+    <span id="doifilename" style="margin:0 6px; font-style:italic; color:#a8c4e0;">No file chosen</span>
+    <button type="submit" form="doiupload" class="btn btn-outline-primary">Upload list</button>
   </div>
 </div>
 <br>
