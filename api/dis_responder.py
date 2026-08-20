@@ -48,7 +48,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.13.2"
+__version__ = "120.13.3"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -6421,9 +6421,16 @@ def show_doiui_custom(year='All'):
                                title=render_warning("Could not get DOIs"),
                                message=error_message(err))
     if not rows:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("DOIs not found"),
-                               message=f"No DOIs were found for {ipd['field']}={ipd.get('value', '')}")
+        # Valid query, no matches: inline warning on the custom page (keeps the page
+        # title) instead of a full error page. Escape the user-supplied field/value -
+        # the old error.html path was auto-escaped by Jinja; render_warning is not.
+        emsg = f"No DOIs were found for {escape(ipd['field'])}=" \
+               + f"{escape(str(ipd.get('value', '')))}."
+        endpoint_access()
+        return make_response(render_template('custom.html', urlroot=request.url_root,
+                                             title=ptitle, html=render_warning(emsg, 'warning'),
+                                             oamsg='', chartscript='', chartdiv='',
+                                             navbar=generate_navbar('DOIs')))
     jorp = sum(1 for row in rows if DL.is_journal(row) or DL.is_preprint(row))
     newsletter = sum(1 for row in rows if row.get('jrc_newsletter'))
     rows.sort(key=DL.get_publishing_date, reverse=True)
@@ -10863,9 +10870,14 @@ def show_dois_heatmap(groupby, source='Crossref', top=10):
     raw = [{'year': r['_id']['year'], groupby: r['_id'][groupby],
             'count': r['count']} for r in rows]
     if not raw:
-        return render_template('error.html', urlroot=request.url_root,
-                               title='No data found',
-                               message=f"No {groupby}/year data found for source {source}")
+        # No data for this source: inline warning on the normal template instead of a
+        # full error page (groupby/source are validated/normalized, so no escaping).
+        emsg = f"No {groupby}/year data was found for source {source}."
+        endpoint_access()
+        return make_response(render_template('bokeh.html', urlroot=request.url_root,
+                                             title=f'{source} {label.lower()} heatmap',
+                                             html=render_warning(emsg, 'warning'), chartscript='',
+                                             chartdiv='', navbar=generate_navbar('Journals')))
     totals = {}
     for r in raw:
         totals[r[groupby]] = totals.get(r[groupby], 0) + r['count']
@@ -11077,9 +11089,15 @@ def show_journals_dois(year=None):
                                title=render_warning(errmsg),
                                message=error_message(err))
     if not journal:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning(errmsg),
-                               message='No journals were found')
+        # Empty result for a valid year: keep the year pulldown so another year can be
+        # chosen, and show the standard inline warning instead of a full error page.
+        etitle = "DOIs by journal" + (f" ({year})" if year != 'All' else "")
+        emsg = "No journals were found" + (f" for {year}" if year != 'All' else "") + "."
+        ehtml = year_pulldown('journals_dois') + "<br><br>" + render_warning(emsg, 'warning')
+        endpoint_access()
+        return make_response(render_template('bokeh.html', urlroot=request.url_root,
+                                             title=etitle, html=ehtml, chartscript='',
+                                             chartdiv='', navbar=generate_navbar('DOIs')))
     tracked = sum(1 for key in journal if key in subscribed)
     subscribed_cnt = sum(1 for key in journal if key in subscribed
                          and subscribed[key].get('access') == 'Subscription')
@@ -11173,9 +11191,21 @@ def top_entities(entity_type, year='All', source='crossref', top=10):
                                title=render_warning(f"Could not get {entity_type} data from dois"),
                                message=error_message(err))
     if not entities:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning(f"Could not get {entity_type} data from dois"),
-                               message=f"No {entity_type}s were found")
+        # Empty result for a valid filter: keep the year pulldown (carrying the
+        # source/top for publishers) and show the standard inline warning.
+        esuffix = f"/{fsource}/{top}" if entity_type == 'publisher' else ''
+        etitle = f"DOIs by {entity_type}"
+        if entity_type == 'publisher':
+            etitle += f" for {fsource}"
+        if year != 'All':
+            etitle += f" ({year})"
+        emsg = f"No {entity_type}s were found" + (f" for {year}" if year != 'All' else "") + "."
+        ehtml = year_pulldown(f'top_entities/{entity_type}', suffix=esuffix) + "<br><br>" \
+                + render_warning(emsg, 'warning')
+        endpoint_access()
+        return make_response(render_template('bokeh.html', urlroot=request.url_root,
+                                             title=etitle, html=ehtml, chartscript='',
+                                             chartdiv='', navbar=generate_navbar('Journals')))
     trows = []
     data = {}
     for key in sorted(entities, key=entities.get, reverse=True):
