@@ -48,7 +48,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.13.9"
+__version__ = "120.14.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -5088,6 +5088,53 @@ def doi_tabs(doi, row, rowext, data, authors):
                 + f'aria-labelledby="{key}-tab"><br>{val}</div>'
     html += '</div>'
     return html
+
+
+@app.route('/doiui_batch', methods=['POST'])
+def show_doi_batch():
+    ''' Standard DOI table for a whitespace-separated list of DOIs/PMIDs, submitted
+        from the home page's "Find a DOI or PMID" box. A single entry routes to
+        /doiui client-side; this handles two or more. PMIDs (all-digit tokens) are
+        resolved via jrc_pmid, the same way /doiui does; tokens with no matching
+        dois-collection record are listed as not found above the table.
+    '''
+    # Normalize + dedupe (preserving input order); all-digit tokens are PMIDs.
+    pmids, dois, seen = [], [], set()
+    for tok in request.form.get('dois', '').split():
+        token = tok.strip().strip('/').lower()
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        (pmids if token.isdigit() else dois).append(token)
+    if not seen:
+        return render_template('warning.html', urlroot=request.url_root,
+                               title=render_warning("No DOIs or PMIDs", 'warning'),
+                               message="You must enter at least one DOI or PMID")
+    try:
+        rows = list(DB['dis'].dois.find({"$or": [{"doi": {"$in": dois}},
+                                                 {"jrc_pmid": {"$in": pmids}}]}))
+    except Exception as err:
+        return inspect_error(err, 'Could not get DOIs')
+    found_dois = {row['doi'] for row in rows}
+    found_pmids = {str(row['jrc_pmid']) for row in rows if row.get('jrc_pmid') is not None}
+    notfound = [t for t in dois if t not in found_dois] \
+               + [t for t in pmids if t not in found_pmids]
+    rows.sort(key=lambda row: DL.get_publishing_date(row) or '', reverse=True)
+    html = ""
+    if notfound:
+        html += render_warning(f"{len(notfound)} of {len(seen):,} entered not found in the "
+                               + "DOI collection: "
+                               + ", ".join(escape(t) for t in notfound), 'warning') + "<br>"
+    if rows:
+        table, _, _ = standard_doi_table(rows, count_card=True)
+        html += table
+    else:
+        html += render_warning("None of the entered DOIs/PMIDs were found in the DOI "
+                               + "collection.", 'warning')
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="DOI report", html=html,
+                                         navbar=generate_navbar('DOIs')))
 
 
 @app.route('/doiui/<path:doi>')
