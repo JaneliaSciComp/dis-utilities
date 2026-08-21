@@ -11,23 +11,11 @@ $(document).on('keypress', 'input', function(e) {
     if (eid == 'doi') {
         find_doi();
     }
-    else if (eid == 'doiname') {
-        find_dois();
-    }
-    else if (eid == 'doisack') {
-        find_acks();
-    }
-    else if (eid == 'doistitle') {
-        find_titles();
-    }
-    else if (eid == 'input-journallist') {
-        find_journals();
+    else if (eid == 'findby-input') {
+        find_by();
     }
     else if (eid == 'input-orglist') {
         find_orgs();
-    }
-    else if (eid == 'input-projlist') {
-        find_projects();
     }
     else if (eid == 'oid') {
         find_oid();
@@ -63,44 +51,47 @@ $(document).on('keypress', 'input', function(e) {
     }
     window.location = "/doiui/" + tokens[0];
   }
-  function find_dois() {
-    if (!$('#doiname').val()) {
-      alert("You must enter a name");
+  // Consolidated "Find DOIs by ..." control: the #findby-type pulldown picks the
+  // term, one #findby-input box holds the value, one button dispatches. The journal
+  // and project terms carry a datalist for typeahead, swapped onto the shared input
+  // when selected (findby_changed).
+  var FINDBY = {
+    name:    {route: '/doisui_name/', placeholder: '', prompt: 'a name'},
+    title:   {route: '/titlesui/',    placeholder: '', prompt: 'a title'},
+    ack:     {route: '/acksui/',      placeholder: '', prompt: 'acknowledgement text'},
+    journal: {route: '/journal/', placeholder: 'Select a journal', prompt: 'a journal', list: 'list-journal'},
+    project: {route: '/tag/',     placeholder: 'Select a project', prompt: 'a project', list: 'list-proj', path: true}
+  };
+  function findby_changed() {
+    var cfg = FINDBY[$('#findby-type').val()];
+    var input = document.getElementById('findby-input');
+    input.value = '';   // clear any value typed under the previously-selected term
+    input.placeholder = cfg.placeholder;
+    if (cfg.list) {
+      input.setAttribute('list', cfg.list);
+      $('#findby-input').autocomplete();   // (re)bind bootstrap-autocomplete to the datalist
+    } else {
+      input.removeAttribute('list');
+    }
+  }
+  function find_by() {
+    var cfg = FINDBY[$('#findby-type').val()];
+    var val = $('#findby-input').val().trim();
+    if (!val) {
+      alert("You must enter " + cfg.prompt);
       return;
     }
-    url = "/doisui_name/" + $("#doiname").val();
-    window.location = url;
+    window.location = cfg.route + (cfg.path ? val : encodeURIComponent(val));
   }
-  function find_titles() {
-    if (!$('#doistitle').val()) {
-      alert("You must enter a title");
-      return;
-    }
-    url = "/titlesui/" + $("#doistitle").val();
-    window.location = url;
-  }
-  function find_acks() {
-    if (!$('#doisack').val()) {
-      alert("You must enter acknowledgement text");
-      return;
-    }
-    url = "/acksui/" + $("#doisack").val();
-    window.location = url;
-  }
-  function find_journals() {
-    if (!$('#input-journallist').val()) {
-      alert("You must enter a journal");
-      return;
-    }
-    url = "/journal/" + $("#input-journallist").val();
-    window.location = url;
-  }
+  // Sync the input's placeholder/datalist to the pulldown on load (covers a browser
+  // restoring a previously-selected term).
+  document.addEventListener('DOMContentLoaded', function() { findby_changed(); }, false);
   function find_orgs() {
     if (!$('#input-orglist').val()) {
       alert("You must enter an organization");
       return;
     }
-    url = "/org_detail/" + $("#input-orglist").val();
+    url = "/org_detail/" + encodeURIComponent($("#input-orglist").val());
     window.location = url;
   }
   function find_orgs_authors() {
@@ -108,7 +99,7 @@ $(document).on('keypress', 'input', function(e) {
       alert("You must enter an organization");
       return;
     }
-    url = "/org_authors/" + $("#input-orglist").val();
+    url = "/org_authors/" + encodeURIComponent($("#input-orglist").val());
     window.location = url;
   }
   function find_orgs_summary() {
@@ -117,7 +108,7 @@ $(document).on('keypress', 'input', function(e) {
       return;
     }
     const currentYear = new Date().getFullYear();
-    url = "/org_summary/" + $("#input-orglist").val() + "/" + currentYear;
+    url = "/org_summary/" + encodeURIComponent($("#input-orglist").val()) + "/" + currentYear;
     window.location = url;
   }
   function find_orgs_year() {
@@ -126,15 +117,7 @@ $(document).on('keypress', 'input', function(e) {
       return;
     }
     const currentYear = new Date().getFullYear();
-    url = "/org_year/" + $("#input-orglist").val()
-    window.location = url;
-  }
-  function find_projects() {
-    if (!$('#input-projlist').val()) {
-      alert("You must enter a project");
-      return;
-    }
-    url = "/tag/" + $("#input-projlist").val();
+    url = "/org_year/" + encodeURIComponent($("#input-orglist").val())
     window.location = url;
   }
   function find_oid() {
@@ -142,7 +125,7 @@ $(document).on('keypress', 'input', function(e) {
       alert("You must enter an ORCID");
       return;
     }
-    url = "/orcidui/" + $("#oid").val();
+    url = "/orcidui/" + encodeURIComponent($("#oid").val());
     window.location = url;
   }
   function find_names() {
@@ -150,7 +133,7 @@ $(document).on('keypress', 'input', function(e) {
       alert("You must enter a name");
       return;
     }
-    url = "/namesui/" + $("#name").val();
+    url = "/namesui/" + encodeURIComponent($("#name").val());
     window.location = url;
   }
 
@@ -162,12 +145,6 @@ onload="tableInitialize();"
 
 {% block content %}
 <h2>Search</h2>
-<!-- Standalone (non-nested) form for the DOI/PMID file upload. The file input and
-     button below live inside the main search <form> for layout, but are associated
-     with THIS form via the HTML5 form="doiupload" attribute, so the upload POSTs to
-     /doiui_batch instead of submitting the (GET) search form. -->
-<form id="doiupload" method="POST" action="/doiui_batch" enctype="multipart/form-data"></form>
-<form>
 <div class="flexcontainer">
   <div class="flexitem">
   <span class="form-control-lg">Find a DOI or PMID:</span>
@@ -177,79 +154,52 @@ onload="tableInitialize();"
            placeholder="one or more, space-separated">
   </div>
   <div class="flexitemauto">
-    <button type="submit" id="doib" class="btn btn-primary" onclick="find_doi(); return false;" href="#">Look up</button>
+    <button type="button" class="btn btn-primary" onclick="find_doi();">Look up</button>
   </div>
   <div class="flexitemauto" style="margin-left: 22px;">
-    <!-- Native file input is hidden and driven by the styled label below (a native
-         file input's "Choose File" text can't be relabeled); a JS onchange shows the
-         picked filename since the hidden input no longer displays it. -->
-    <input type="file" name="file" id="doifile" form="doiupload"
-           accept=".txt,.csv,.tsv,text/plain" style="display:none"
-           onchange="document.getElementById('doifilename').textContent =
-                     this.files.length ? this.files[0].name : 'No file chosen';">
-    <label for="doifile" class="btn btn-outline-secondary" style="margin:0;">Choose file of DOIs or PMIDs</label>
-    <span id="doifilename" style="margin:0 6px; font-style:italic; color:#a8c4e0;">No file chosen</span>
-    <button type="submit" form="doiupload" class="btn btn-outline-primary">Upload list</button>
+    <!-- Inline form posts the uploaded DOI/PMID list to /doiui_batch. The native file
+         input is hidden and driven by the styled label (a native file input's "Choose
+         File" text can't be relabeled); a JS onchange shows the picked filename. -->
+    <form method="POST" action="/doiui_batch" enctype="multipart/form-data" style="display:inline; margin:0;">
+      <input type="file" name="file" id="doifile"
+             accept=".txt,.csv,.tsv,text/plain" style="display:none"
+             onchange="document.getElementById('doifilename').textContent =
+                       this.files.length ? this.files[0].name : 'No file chosen';">
+      <label for="doifile" class="btn btn-outline-secondary" style="margin:0;">Choose file of DOIs or PMIDs</label>
+      <span id="doifilename" style="margin:0 6px; font-style:italic; color:#a8c4e0;">No file chosen</span>
+      <button type="submit" class="btn btn-outline-primary">Upload list</button>
+    </form>
   </div>
 </div>
 <br>
 <div class="flexcontainer">
-  <div class="flexitem">
-  <span class="form-control-lg">Find DOIs by full last name:</span>
+  <div class="flexitemauto">
+  <span class="form-control-lg">Find DOIs by</span>
+  </div>
+  <div class="flexitemauto">
+    <select class="form-control form-control-lg" id="findby-type" onchange="findby_changed();" style="width:auto;">
+      <option value="title">title</option>
+      <option value="ack">acknowledgement</option>
+      <option value="name">last name</option>
+      <option value="journal">journal</option>
+      <option value="project">project</option>
+    </select>
   </div>
   <div class="flexitem">
-    <input type="text" class="form-control form-control-lg" id="doiname" size=28>
+    <input type="text" class="form-control form-control-lg" id="findby-input" size=28>
   </div>
-  <div class="flexitem">
-    <button type="submit" id="doib" class="btn btn-primary" onclick="find_dois(); return false;" href="#">Look up</button>
+  <div class="flexitemauto">
+    <button type="button" class="btn btn-primary" onclick="find_by();">Look up</button>
   </div>
 </div>
-<br>
-<div class="flexcontainer">
-  <div class="flexitem">
-  <span class="form-control-lg">Find DOIs by title:</span>
-  </div>
-  <div class="flexitem">
-    <input type="text" class="form-control form-control-lg" id="doistitle" size=28>
-  </div>
-  <div class="flexitem">
-    <button type="submit" id="doib" class="btn btn-primary" onclick="find_titles(); return false;" href="#">Look up</button>
-  </div>
-</div>
-<br>
-<div class="flexcontainer">
-  <div class="flexitem">
-  <span class="form-control-lg">Find DOIs by acknowledgement:</span>
-  </div>
-  <div class="flexitem">
-    <input type="text" class="form-control form-control-lg" id="doisack" size=28>
-  </div>
-  <div class="flexitem">
-    <button type="submit" id="doib" class="btn btn-primary" onclick="find_acks(); return false;" href="#">Look up</button>
-  </div>
-</div>
-<br>
-<div class="flexcontainer">
-  <div class="flexitem">
-  <span class="form-control-lg">Find DOIs by journal:</span>
-  </div>
-  <div class="flexitem">
-    <div class="form-group">
-      <input type="text" class="form-control" placeholder="Select a journal" list="list-journal" id="input-journallist">
-      <datalist id="list-journal">
-        {{ journals | safe }}
-      </datalist>
-  </div>
-  <script>
-      document.addEventListener('DOMContentLoaded', e => {
-          $('#input-journallist').autocomplete()
-      }, false);
-  </script>
-  </div>
-  <div class="flexitem">
-    <button type="submit" id="doij" class="btn btn-primary" onclick="find_journals(); return false;" href="#">Look up</button>
-  </div>
-</div>
+<!-- Datalists for the journal/project typeahead; findby_changed() swaps the right one
+     onto #findby-input (via its list= attribute) when that term is selected. -->
+<datalist id="list-journal">
+  {{ journals | safe }}
+</datalist>
+<datalist id="list-proj">
+  {{ projects | safe }}
+</datalist>
 <br>
 <div class="flexcontainer">
   <div class="flexitem">
@@ -278,28 +228,6 @@ onload="tableInitialize();"
 <br>
 <div class="flexcontainer">
   <div class="flexitem">
-  <span class="form-control-lg">Find DOIs by project:</span>
-  </div>
-  <div class="flexitem">
-    <div class="form-group">
-      <input type="text" class="form-control" placeholder="Select a project" list="list-proj" id="input-projlist">
-      <datalist id="list-proj">
-        {{ projects | safe }}
-      </datalist>
-  </div>
-  <script>
-      document.addEventListener('DOMContentLoaded', e => {
-          $('#input-projlist').autocomplete()
-      }, false);
-  </script>
-  </div>
-  <div class="flexitem">
-    <button type="submit" id="doip" class="btn btn-primary" onclick="find_projects(); return false;" href="#">Look up</button>
-  </div>
-</div>
-<br>
-<div class="flexcontainer">
-  <div class="flexitem">
   <span class="form-control-lg">Find an ORCID:</span>
   </div>
   <div class="flexitem">
@@ -321,5 +249,4 @@ onload="tableInitialize();"
     <button type="submit" id="nameb" class="btn btn-primary" onclick="find_names(); return false;" href="#">Look up</button>
   </div>
 </div>
-</form>
 {% endblock %}
