@@ -48,7 +48,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.15.1"
+__version__ = "120.16.1"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -1818,6 +1818,29 @@ def ack_stat_cards(cnt, internal, external):
                       div_id='acks-stats')
 
 
+# Inline formatting tags publisher titles legitimately use (italic species names,
+# superscripts, etc.); every other tag in a title stays escaped.
+TITLE_SAFE_TAGS = ('i', 'b', 'em', 'strong', 'sub', 'sup')
+
+
+def render_title_html(title):
+    ''' Render a DOI title for on-screen display: HTML-escape the whole string (so any
+        script/markup in this external Crossref/DataCite metadata is neutralized), then
+        restore a small allowlist of inline formatting tags and collapse whitespace
+        runs. Returns a safe() value. TSV downloads use the raw title unchanged.
+        Keyword arguments:
+          title: the DOI title (may be empty/None)
+        Returns:
+          A safe() HTML string
+    '''
+    if not title:
+        return safe('')
+    out = escape(title)
+    for tag in TITLE_SAFE_TAGS:
+        out = out.replace(f"&lt;{tag}&gt;", f"<{tag}>").replace(f"&lt;/{tag}&gt;", f"</{tag}>")
+    return safe(re.sub(r'\s+', ' ', out).strip())
+
+
 def standard_doi_table(rows, prefix=None, count_card=False, show_count=True,
                        extra_headers=None, extra_fn=None, mark_fn=None,
                        download_name='standard'):
@@ -1864,8 +1887,8 @@ def standard_doi_table(rows, prefix=None, count_card=False, show_count=True,
         row['title'] = DL.get_title(row)
         extra = list(extra_fn(row)) if extra_fn else []
         mark = mark_fn(row) if mark_fn else ''
-        trows.append([row['published'], safe(mark + row['link']), row['journal'], row['title']]
-                     + extra)
+        trows.append([row['published'], safe(mark + row['link']), row['journal'],
+                      render_title_html(row['title'])] + extra)
         row_classes.append('ver' if version else '')
         if row['title']:
             row['title'] = row['title'].replace("\n", " ")
@@ -5151,7 +5174,40 @@ def show_doi_batch():
                                + "DOI collection: "
                                + ", ".join(escape(t) for t in notfound), 'warning') + "<br>"
     if rows:
-        table, _, _ = standard_doi_table(rows, count_card=True)
+        # Resolve every jrc_author employeeId across the rows to a linked name in one
+        # orcid-collection query (eid -> (name, href)); jrc_author holds employeeIds.
+        all_eids = {eid for row in rows for eid in row.get('jrc_author', [])}
+        author_map = {}
+        if all_eids:
+            for arec in DB['dis'].orcid.find({"employeeId": {"$in": list(all_eids)}},
+                                             {"employeeId": 1, "given": 1, "family": 1,
+                                              "orcid": 1, "userIdO365": 1}):
+                given = (arec.get('given') or [''])[0]
+                family = (arec.get('family') or [''])[0]
+                name = f"{given} {family}".strip() or arec['employeeId']
+                if arec.get('orcid'):
+                    href = f"/userui/{arec['orcid']}"
+                elif arec.get('userIdO365'):
+                    href = f"/userui/{arec['userIdO365']}"
+                else:
+                    href = f"/unvaluserui/{arec['_id']}"
+                author_map[arec['employeeId']] = (name, href)
+
+        def janelia_authors(row):
+            ''' Comma-separated linked Janelia-author names for the row's jrc_author
+                employeeIds; an eid with no orcid record is shown as-is. '''
+            parts = []
+            for eid in row.get('jrc_author', []):
+                if eid in author_map:
+                    name, href = author_map[eid]
+                    parts.append(f"<a href='{href}'>{escape(name)}</a>")
+                else:
+                    parts.append(escape(str(eid)))
+            return [safe(", ".join(parts))]
+
+        table, _, _ = standard_doi_table(rows, count_card=True,
+                                         extra_headers=['Janelia authors'],
+                                         extra_fn=janelia_authors)
         html += table
     else:
         html += render_warning("None of the entered DOIs/PMIDs were found in the DOI "
