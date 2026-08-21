@@ -21,11 +21,20 @@ Sources queried, in order:
                 proceedings-article) so the DataCite dataset pool that Europe PMC
                 does not carry is not scanned
 
+A DOI that every applicable source fetches cleanly (HTTP 200, no raised error) but
+that yields no acknowledgement is marked `jrc_no_acknowledgements`=True once its
+record is settled (jrc_updated older than NO_ACK_THRESHOLD_DAYS), and every source
+query skips DOIs already so marked - so the same ack-less DOIs are not re-fetched on
+every run. The field is only ever set True (consumers query it via $exists); a
+transient fetch error disqualifies a DOI from being marked that run, and the marking
+is skipped entirely for a single-source (--source) run.
+
 INPUTS
 ------
 - NCBI_API_KEY environment variable (required): API key for the NCBI E-utilities API.
 - DIS MongoDB database (read/write depending on --write flag):
-    - Collection `dois`      : source of DOI records; updated with acknowledgements.
+    - Collection `dois`      : source of DOI records; updated with acknowledgements
+                               (and jrc_no_acknowledgements for ack-less, settled DOIs).
 - Command-line flags:
     --doi DOI  Restrict processing to a single DOI (across all sources).
     --source   Restrict processing to a single source (elife, elsevier, pmc,
@@ -115,6 +124,7 @@ DEPENDENCIES
 
 import argparse
 import collections
+from datetime import datetime, timedelta
 import json
 from operator import attrgetter
 import os
@@ -129,7 +139,7 @@ import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
 import jrc_email.jrc_email as JE
 
-__version__ = '1.7.6'
+__version__ = '1.8.0'
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation,no-member
 
@@ -145,6 +155,16 @@ ARG = DIS = LOGGER = None
 # interrupted run keeps every ack it already committed.
 WRITTEN = set()
 FLUSH_EVERY = 5
+# jrc_no_acknowledgements marker: set True on a settled DOI (jrc_updated older than
+# NO_ACK_THRESHOLD_DAYS) that every applicable source fetched cleanly (a 200, no
+# raised exception) yet yielded no acknowledgement, so future runs skip it on all
+# sources. Only ever set True; queried via $exists (a False value is never written).
+# CHECKED_NO_ACK / FETCH_ERRORED track per-run per-DOI outcomes for the end-of-run
+# reconciliation (mark_no_acknowledgements).
+NO_ACK_FIELD = 'jrc_no_acknowledgements'
+NO_ACK_THRESHOLD_DAYS = 180
+CHECKED_NO_ACK = set()
+FETCH_ERRORED = set()
 # Display order for the "source" label stored on each internal-DOI record
 # (add_elife_internal_acks etc.), used to group the run-summary email.
 SOURCE_LABELS = ('eLife', 'Elsevier', 'PMC', 'arXiv', 'bioRxiv', 'medRxiv', 'Europe PMC')
@@ -282,7 +302,8 @@ def add_elife_internal_acks(internal, error):
         Returns:
           None
     '''
-    payload = {"doi": {"$regex": r"10\.7554/elife"}, "jrc_acknowledgements": {"$exists": False}}
+    payload = {"doi": {"$regex": r"10\.7554/elife"},
+               "jrc_acknowledgements": {"$exists": False}, NO_ACK_FIELD: {"$exists": False}}
     payload = restrict_to_doi(payload)
     try:
         cnt = DB['dis'].dois.count_documents(payload)
@@ -302,12 +323,15 @@ def add_elife_internal_acks(internal, error):
                        if ack.get('text')]
         except Exception as err:
             error.append({"doi": doi, "source": "elife", "error": str(err)})
+            FETCH_ERRORED.add(doi)
             continue
         if acklist:
             COUNT['elife_add'] += 1
             record_ack(internal, {"doi": doi,
                                   "ack": ' '.join(acklist),
                                   "source": "eLife"})
+        else:
+            CHECKED_NO_ACK.add(doi)
 
 
 def add_elsevier_internal_acks(internal, error):
@@ -318,7 +342,8 @@ def add_elsevier_internal_acks(internal, error):
         Returns:
           None
     '''
-    payload = {"doi": {"$regex": r"10\.1016/"}, "jrc_acknowledgements": {"$exists": False}}
+    payload = {"doi": {"$regex": r"10\.1016/"},
+               "jrc_acknowledgements": {"$exists": False}, NO_ACK_FIELD: {"$exists": False}}
     payload = restrict_to_doi(payload)
     try:
         cnt = DB['dis'].dois.count_documents(payload)
@@ -332,12 +357,15 @@ def add_elsevier_internal_acks(internal, error):
             acktext, _ = DL.get_acknowledgements(row['doi'])
         except Exception as err:
             error.append({"doi": row['doi'], "source": "elsevier", "error": str(err)})
+            FETCH_ERRORED.add(row['doi'])
             continue
         if acktext:
             COUNT['elsevier_add'] += 1
             record_ack(internal, {"doi": row['doi'],
                                   "ack": acktext,
                                   "source": "Elsevier"})
+        else:
+            CHECKED_NO_ACK.add(row['doi'])
 
 
 def add_pmc_internal_acks(internal, error):
@@ -348,7 +376,8 @@ def add_pmc_internal_acks(internal, error):
         Returns:
           None
     '''
-    payload = {"jrc_pmc": {"$exists": True}, "jrc_acknowledgements": {"$exists": False}}
+    payload = {"jrc_pmc": {"$exists": True},
+               "jrc_acknowledgements": {"$exists": False}, NO_ACK_FIELD: {"$exists": False}}
     payload = restrict_to_doi(payload)
     try:
         cnt = DB['dis'].dois.count_documents(payload)
@@ -365,6 +394,7 @@ def add_pmc_internal_acks(internal, error):
         except Exception as err:
             error.append({"doi": row['doi'], "pmcid": row['jrc_pmc'],
                           "source": "pmc", "error": str(err)})
+            FETCH_ERRORED.add(row['doi'])
             continue
         if ack:
             COUNT['pmc_add'] += 1
@@ -372,6 +402,8 @@ def add_pmc_internal_acks(internal, error):
                                   "doi": row['doi'],
                                   "ack": ack,
                                   "source": "PMC"})
+        else:
+            CHECKED_NO_ACK.add(row['doi'])
 
 
 def add_arxiv_internal_acks(internal, error):
@@ -382,7 +414,8 @@ def add_arxiv_internal_acks(internal, error):
         Returns:
           None
     '''
-    payload = {"doi": {"$regex": r"10\.48550/arxiv"}, "jrc_acknowledgements": {"$exists": False}}
+    payload = {"doi": {"$regex": r"10\.48550/arxiv"},
+               "jrc_acknowledgements": {"$exists": False}, NO_ACK_FIELD: {"$exists": False}}
     payload = restrict_to_doi(payload)
     try:
         cnt = DB['dis'].dois.count_documents(payload)
@@ -398,12 +431,15 @@ def add_arxiv_internal_acks(internal, error):
             acktext, _ = DL.get_acknowledgements(row['doi'])
         except Exception as err:
             error.append({"doi": row['doi'], "source": "arxiv", "error": str(err)})
+            FETCH_ERRORED.add(row['doi'])
             continue
         if acktext:
             COUNT['arxiv_add'] += 1
             record_ack(internal, {"doi": row['doi'],
                                   "ack": acktext,
                                   "source": "arXiv"})
+        else:
+            CHECKED_NO_ACK.add(row['doi'])
 
 
 def _biorxiv_get(url, retries=4):
@@ -490,7 +526,7 @@ def add_biorxiv_internal_acks(internal, error):
     # 10.1101 is the legacy bioRxiv/medRxiv prefix; openRxiv migrated to the 10.64898
     # prefix in 2025, so match both.
     payload = {"doi": {"$regex": r"10\.(?:1101|64898)/"},
-               "jrc_acknowledgements": {"$exists": False}}
+               "jrc_acknowledgements": {"$exists": False}, NO_ACK_FIELD: {"$exists": False}}
     payload = restrict_to_doi(payload)
     try:
         cnt = DB['dis'].dois.count_documents(payload)
@@ -509,14 +545,23 @@ def add_biorxiv_internal_acks(internal, error):
         if row['doi'] in already:
             continue
         time.sleep(ARG.SLEEP)   # bioRxiv/medRxiv host 429s aggressively; tune via --sleep
+        errored = False
         try:
             ack, label = _biorxiv_ack(row['doi'])
         except Exception as err:
             error.append({"doi": row['doi'], "source": "biorxiv", "error": str(err)})
+            FETCH_ERRORED.add(row['doi'])
             ack = None
+            errored = True
         if ack:
             COUNT['biorxiv_add'] += 1
             record_ack(internal, {"doi": row['doi'], "ack": ack, "source": label})
+        elif not errored and label:
+            # label set => the paper was located on a server and genuinely has no
+            # <ack>; label None means "not found / both details lookups failed",
+            # which is too ambiguous to mark as a clean no-ack (bioRxiv is the only
+            # source for these preprint prefixes).
+            CHECKED_NO_ACK.add(row['doi'])
         # Live tallies alongside the bar: acks found this run, acks committed to the
         # DB so far (flush_acks bumps COUNT['updated']), and fetch errors (throttles).
         pbar.set_postfix(found=COUNT['biorxiv_add'], written=COUNT['updated'],
@@ -593,7 +638,7 @@ def add_europepmc_internal_acks(internal, error):
           None
     '''
     already = {row['doi'] for row in internal}
-    payload = {"jrc_acknowledgements": {"$exists": False},
+    payload = {"jrc_acknowledgements": {"$exists": False}, NO_ACK_FIELD: {"$exists": False},
                "type": {"$in": list(EPMC_ELIGIBLE_TYPES)}}
     payload = restrict_to_doi(payload)
     try:
@@ -613,6 +658,7 @@ def add_europepmc_internal_acks(internal, error):
             ack, pmcid = _europepmc_ack(row['doi'])
         except Exception as err:
             error.append({"doi": row['doi'], "source": "europepmc", "error": str(err)})
+            FETCH_ERRORED.add(row['doi'])
             continue
         if ack:
             COUNT['europepmc_add'] += 1
@@ -620,6 +666,8 @@ def add_europepmc_internal_acks(internal, error):
                                   "doi": row['doi'],
                                   "ack": ack,
                                   "source": "Europe PMC"})
+        else:
+            CHECKED_NO_ACK.add(row['doi'])
 
 
 def generate_email(internal, error):
@@ -641,6 +689,8 @@ def generate_email(internal, error):
                                'good' if by_source.get(label) else 'neutral')
                    for label in SOURCE_LABELS)
     kpis += JE.kpi_card(f"{len(error):,}", "Errors", 'bad' if error else 'neutral')
+    kpis += JE.kpi_card(f"{COUNT['no_ack_marked']:,}",
+                        'No-ack marked' if ARG.WRITE else 'No-ack (would mark)', 'neutral')
     # Found section: one DOI card per source (PMCID column for the sources that
     # carry one, e.g. PMC and Europe PMC).
     found = JE.section_header(f"&#128209; Acknowledgements Found ({len(internal):,})")
@@ -667,6 +717,50 @@ def generate_email(internal, error):
     JRC.send_email(msg, DIS['sender'], email, "Acknowledgements updated for DOIs", mime='html')
 
 
+def mark_no_acknowledgements(internal):
+    ''' End-of-run reconciliation: mark settled, fully-checked, ack-less DOIs with
+        NO_ACK_FIELD=True so future runs skip them on every source. A DOI qualifies
+        only if some source fetched it cleanly this run (CHECKED_NO_ACK), NO source
+        raised for it (not in FETCH_ERRORED), no ack was found (not in `internal`),
+        and its record is settled (jrc_updated older than NO_ACK_THRESHOLD_DAYS).
+        Skipped entirely for a single-source run (--source): "no acks on ANY source"
+        can't be concluded when only one source ran. Writes only under --write; the
+        count is reported either way. Only ever sets True (a False value is never
+        written; consumers query via $exists).
+        Keyword arguments:
+          internal: collected ack records (the DOIs that DID get an ack this run)
+        Returns:
+          The list of {doi, jrc_journal, type, jrc_updated} dicts that were (or, in a
+          dry run, would be) marked - dumped to no_ack_marked.json for review before a
+          --write run. Empty for a single-source run or when nothing qualifies.
+    '''
+    if ARG.SOURCE is not None:
+        return []
+    found = {rec['doi'] for rec in internal}
+    candidates = CHECKED_NO_ACK - FETCH_ERRORED - found
+    if not candidates:
+        return []
+    cutoff = datetime.now() - timedelta(days=NO_ACK_THRESHOLD_DAYS)
+    query = {"doi": {"$in": list(candidates)}, "jrc_updated": {"$lt": cutoff},
+             NO_ACK_FIELD: {"$exists": False}}
+    try:
+        rows = list(DB['dis'].dois.find(query, {"doi": 1, "jrc_journal": 1, "type": 1,
+                                                "jrc_updated": 1}))
+    except Exception as err:
+        terminate_program(err)
+    marked = [{"doi": row['doi'], "jrc_journal": row.get('jrc_journal'),
+               "type": row.get('type'), "jrc_updated": str(row.get('jrc_updated'))}
+              for row in rows]
+    COUNT['no_ack_marked'] = len(marked)
+    if ARG.WRITE and marked:
+        try:
+            DB['dis'].dois.update_many({"doi": {"$in": [rec['doi'] for rec in marked]}},
+                                       {"$set": {NO_ACK_FIELD: True}})
+        except Exception as err:
+            terminate_program(err)
+    return marked
+
+
 def processing():
     ''' Find DOIs without acknowledgements.
         Keyword arguments:
@@ -691,6 +785,7 @@ def processing():
     # pass's tail below FLUSH_EVERY). In --write mode the writes have been streaming
     # to the DB as the passes ran; here we just persist the remainder.
     flush_acks(internal)
+    no_ack_dois = mark_no_acknowledgements(internal)
     if not ARG.WRITE:
         COUNT['updated'] = sum(1 for rec in internal if isinstance(rec['ack'], str))
     if ARG.SOURCE in (None, 'elife'):
@@ -706,6 +801,10 @@ def processing():
     if ARG.SOURCE in (None, 'europepmc'):
         print(f"Europe PMC DOIs added: {COUNT['europepmc_add']:,}")
     print(f"DOIs updated:        {COUNT['updated']:,}")
+    if ARG.SOURCE is None:
+        verb = 'marked' if ARG.WRITE else 'would mark'
+        hint = ' (see no_ack_marked.json)' if COUNT['no_ack_marked'] else ''
+        print(f"No-ack DOIs {verb}: {COUNT['no_ack_marked']:,}{hint}")
     if error:
         print(f"Fetch errors:        {len(error):,} (e.g. throttled - see internal_ack_errors.json)")
     if COUNT['write_errors']:
@@ -716,7 +815,10 @@ def processing():
     if error:
         with open('internal_ack_errors.json', 'w', encoding='utf-8') as fileout:
             json.dump(error, fileout, indent=4)
-    if internal:
+    if no_ack_dois:
+        with open('no_ack_marked.json', 'w', encoding='utf-8') as fileout:
+            json.dump(no_ack_dois, fileout, indent=4)
+    if internal or COUNT['no_ack_marked']:
         generate_email(internal, error)
 
 # -----------------------------------------------------------------------------
