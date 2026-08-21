@@ -7,6 +7,7 @@ onload="tableInitialize();"
 {% endblock %}
 
 {% block content %}
+  {% if banner %}{{ banner|safe }}{% endif %}
   <h2>{{title|safe}}</h2>
   {{ recsec|safe }}
   {{ doisec|safe }}
