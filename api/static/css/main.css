@@ -508,6 +508,10 @@ hr {border-color: var(--muted-border);
    color: black;
    background-color: deepskyblue;
 }
+.badge-external {
+   color: black;
+   background-color: goldenrod;
+}
 .badge-lab {
    color: white;
    background-color: #8b008b;

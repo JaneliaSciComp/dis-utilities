@@ -48,7 +48,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.16.1"
+__version__ = "120.16.7"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -1823,11 +1823,34 @@ def ack_stat_cards(cnt, internal, external):
 TITLE_SAFE_TAGS = ('i', 'b', 'em', 'strong', 'sub', 'sup')
 
 
+def strip_tex_math(title):
+    ''' Best-effort de-TeX of a title for display. Some Crossref/DataCite titles carry
+        LaTeX math (e.g. "$${\\bf{Micro}}{{\\mathbb{S}}}{\\bf{plit}}$$: ...") that would
+        otherwise show as raw markup. Drop $...$/$$...$$ delimiters, unwrap \\cmd{...}
+        formatting to its content, and remove leftover TeX grouping braces. Only runs
+        when the title carries a TeX signature (a \\command or "$$"), so plain titles
+        (and a lone "$5") are left untouched; bare symbol commands like \\alpha remain.
+        Keyword arguments:
+          title: the DOI title string
+        Returns:
+          The de-TeX'd title (or the original, unchanged)
+    '''
+    if not title or not (re.search(r'\\[A-Za-z]', title) or '$$' in title):
+        return title
+    out = re.sub(r'\${1,2}', '', title)               # drop $...$ / $$...$$ delimiters
+    for _ in range(8):                                # unwrap \cmd{...} -> ... (innermost first)
+        new = re.sub(r'\\[A-Za-z]+\s*\{([^{}]*)\}', r'\1', out)
+        if new == out:
+            break
+        out = new
+    return out.replace('{', '').replace('}', '')      # drop leftover TeX grouping braces
+
+
 def render_title_html(title):
-    ''' Render a DOI title for on-screen display: HTML-escape the whole string (so any
-        script/markup in this external Crossref/DataCite metadata is neutralized), then
-        restore a small allowlist of inline formatting tags and collapse whitespace
-        runs. Returns a safe() value. TSV downloads use the raw title unchanged.
+    ''' Render a DOI title for on-screen display: strip any LaTeX math markup, HTML-escape
+        the whole string (so any script/markup in this external Crossref/DataCite metadata
+        is neutralized), then restore a small allowlist of inline formatting tags and
+        collapse whitespace runs. Returns a safe() value. TSV downloads use the raw title.
         Keyword arguments:
           title: the DOI title (may be empty/None)
         Returns:
@@ -1835,7 +1858,7 @@ def render_title_html(title):
     '''
     if not title:
         return safe('')
-    out = escape(title)
+    out = escape(strip_tex_math(title))
     for tag in TITLE_SAFE_TAGS:
         out = out.replace(f"&lt;{tag}&gt;", f"<{tag}>").replace(f"&lt;/{tag}&gt;", f"</{tag}>")
     return safe(re.sub(r'\s+', ' ', out).strip())
@@ -5115,6 +5138,7 @@ def doi_tabs(doi, row, rowext, data, authors):
 
 BATCH_MAX_BYTES = 2_000_000   # cap on an uploaded DOI/PMID list (~2 MB)
 BATCH_MAX_TOKENS = 5000       # cap on the number of ids processed per request
+BATCH_NOTFOUND_SHOWN = 200    # cap on how many not-found ids are listed (in a scrollbox)
 
 
 @app.route('/doiui_batch', methods=['POST'])
@@ -5162,17 +5186,57 @@ def show_doi_batch():
         return inspect_error(err, 'Could not get DOIs')
     found_dois = {row['doi'] for row in rows}
     found_pmids = {str(row['jrc_pmid']) for row in rows if row.get('jrc_pmid') is not None}
-    notfound = [t for t in dois if t not in found_dois] \
-               + [t for t in pmids if t not in found_pmids]
+    nf_dois = [t for t in dois if t not in found_dois]
+    nf_pmids = [t for t in pmids if t not in found_pmids]
+    notfound = nf_dois + nf_pmids
+    # A not-found DOI may still be an external DOI (minimal data) rather than unknown.
+    external = set()
+    if nf_dois:
+        try:
+            external = {r['doi'] for r in
+                        DB['dis'].external_dois.find({"doi": {"$in": nf_dois}}, {"doi": 1})}
+        except Exception as err:
+            return inspect_error(err, 'Could not check external DOIs')
     rows.sort(key=lambda row: DL.get_publishing_date(row) or '', reverse=True)
     html = ""
     if truncated:
         html += render_warning(f"Only the first {BATCH_MAX_TOKENS:,} entries were processed.",
                                'warning') + "<br>"
     if notfound:
-        html += render_warning(f"{len(notfound)} of {len(seen):,} entered not found in the "
-                               + "DOI collection: "
-                               + ", ".join(escape(t) for t in notfound), 'warning') + "<br>"
+        # Vertical, scrollable list of the not-found ids. Each not-found DOI links to
+        # /doiui (live/external lookup) and gets an "external" pill when we hold a
+        # minimal external record; PMIDs stay plain. Capped at BATCH_NOTFOUND_SHOWN.
+        nf_doi_set = set(nf_dois)
+        shown = notfound[:BATCH_NOTFOUND_SHOWN]
+        lines = []
+        for tok in shown:
+            if tok in nf_doi_set:
+                pill = " " + tiny_badge('external', 'external') if tok in external else ""
+                lines.append(f"<div><a href='/doiui/{escape(tok)}'>{escape(tok)}</a>{pill}</div>")
+            else:
+                # A not-found PMID can't resolve here, but links out to PubMed.
+                lines.append(f"<div><a href='https://pubmed.ncbi.nlm.nih.gov/{escape(tok)}/'"
+                             f" target='_blank'>{escape(tok)}</a></div>")
+        ext_note = f", {len(external):,} external" if external else ""
+        html += render_warning(f"{len(notfound):,} of {len(seen):,} entered not found in the "
+                               f"DOI collection{ext_note}:", 'warning')
+        html += ("<div style='max-height:220px; overflow-y:auto; margin:6px 0 4px 0; "
+                 "padding:6px 10px; border:1px solid rgba(168,196,224,0.35); "
+                 "border-radius:4px;'>" + "".join(lines) + "</div>")
+        if len(notfound) > len(shown):
+            # More not found than the scrollbox shows; offer the complete list as a
+            # download (id, type, and whether we hold a minimal external record).
+            html += (f"<div style='color:#a8c4e0;'>&hellip; and "
+                     f"{len(notfound) - len(shown):,} more</div>")
+            nf_pmid_set = set(nf_pmids)
+            dl_rows = [f"{tok}\t{'PMID' if tok in nf_pmid_set else 'DOI'}\t"
+                       f"{'external' if tok in external else 'not found'}" for tok in notfound]
+            html += "<div style='margin-top:6px;'>" \
+                    + create_downloadable('notfound', ['ID', 'Type', 'Status'],
+                                          "\n".join(dl_rows),
+                                          label=f"Download all {len(notfound):,} not-found") \
+                    + "</div>"
+        html += "<br>"
     if rows:
         # Resolve every jrc_author employeeId across the rows to a linked name in one
         # orcid-collection query (eid -> (name, href)); jrc_author holds employeeIds.
@@ -5205,10 +5269,17 @@ def show_doi_batch():
                     parts.append(escape(str(eid)))
             return [safe(", ".join(parts))]
 
-        table, _, _ = standard_doi_table(rows, count_card=True,
-                                         extra_headers=['Janelia authors'],
-                                         extra_fn=janelia_authors)
-        html += table
+        table, cnt, oacnt = standard_doi_table(rows, show_count=False,
+                                               extra_headers=['Janelia authors'],
+                                               extra_fn=janelia_authors)
+        # Rows with at least one Janelia author (a non-empty jrc_author employeeId list).
+        jcount = sum(1 for row in rows if row.get('jrc_author'))
+        # DOIs card carries id='totalrows' so the version-filter toggle keeps it current;
+        # the Open-access and Janelia-authored cards are static totals of the result set.
+        cards = stat_cards([("DOIs", f"<span id='totalrows'>{cnt:,}</span>"),
+                            ("Open access", f"{oacnt:,}"),
+                            ("Janelia-authored", f"{jcount:,}")], div_id='batch-stats')
+        html += cards + table
     else:
         html += render_warning("None of the entered DOIs/PMIDs were found in the DOI "
                                + "collection.", 'warning')
@@ -5286,6 +5357,7 @@ def show_doi_ui(doi):
         return render_template('error.html', urlroot=request.url_root,
                                 title=render_warning("Could not find title"),
                                 message=f"Could not find title for {doi}")
+    title = strip_tex_math(title)   # de-TeX for display, as render_title_html does for tables
     journal = DL.get_journal(data)
     if not journal:
         journal = ''
@@ -5297,6 +5369,7 @@ def show_doi_ui(doi):
         citations = DL.short_citation(doi, True)
     except Exception as err:
         citations = f"Could not generate short citation for {doi} ({err})"
+    citations = strip_tex_math(citations)   # the short citation embeds the (possibly TeX) title
     # Citation
     citsec = cittype = ""
     if 'type' in data:

@@ -489,12 +489,14 @@ def random_string(strlen=8):
     return ''.join(random.choice(cmps) for i in range(strlen))
 
 
-def create_downloadable(name, header, content, size='btn-med'):
+def create_downloadable(name, header, content, size='btn-med', label=None):
     ''' Generate a downloadable content file
         Keyword arguments:
           name: base file name
           header: table header (list of strings)
           content: table content (string)
+          size: button size class (default btn-med)
+          label: button text (default "Download tab-delimited file")
         Returns:
           File name
     '''
@@ -503,8 +505,9 @@ def create_downloadable(name, header, content, size='btn-med'):
         if header:
             content = "\t".join(header) + "\n" + content
         text_file.write(content)
+    label = label or "Download tab-delimited file"
     return f'<a class="btn btn-outline-success {size}" href="/download/{fname}" ' \
-                + f'role="button">{DOWNLOAD_ICON}Download tab-delimited file</a>'
+                + f'role="button">{DOWNLOAD_ICON}{label}</a>'
 
 
 def dloop(row, keys, sep="\t"):
