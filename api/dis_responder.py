@@ -48,7 +48,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.16.7"
+__version__ = "120.17.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -1065,7 +1065,7 @@ def add_orcid_works(data, dois, return_html=True):
         works += 1
         if not doi:
             inner += f"<tr><td>{pdate}</td><td>&nbsp;</td>" \
-                     + f"<td>{wsumm['title']['title']['value']}</td></tr>"
+                     + f"<td>{render_title_html(wsumm['title']['title']['value'])}</td></tr>"
             continue
         link = ""
         if work['external-ids']['external-id'][0]['external-id-url']:
@@ -1077,7 +1077,7 @@ def add_orcid_works(data, dois, return_html=True):
             link = f"{DOI}{doi}"
             link = f"<a href='{link}' target='_blank'>{doi}</a>"
         inner += f"<tr><td>{pdate}</td><td>{link}</td>" \
-                 + f"<td>{wsumm['title']['title']['value']}</td></tr>"
+                 + f"<td>{render_title_html(wsumm['title']['title']['value'])}</td></tr>"
         results.append({"date": pdate, "doi": doi, "title": wsumm['title']['title']['value']})
     if inner:
         title = "title is" if works == 1 else f"{works} titles are"
@@ -1862,6 +1862,47 @@ def render_title_html(title):
     for tag in TITLE_SAFE_TAGS:
         out = out.replace(f"&lt;{tag}&gt;", f"<{tag}>").replace(f"&lt;/{tag}&gt;", f"</{tag}>")
     return safe(re.sub(r'\s+', ' ', out).strip())
+
+
+# JATS inline tags we map to a plain HTML equivalent when rendering an abstract.
+JATS_TAG_MAP = {'italic': 'i', 'bold': 'b', 'sup': 'sup', 'sub': 'sub', 'monospace': 'code'}
+
+
+def jats_to_html(text):
+    ''' Best-effort render of a JATS/MathML abstract as safe HTML. Crossref delivers
+        abstracts as JATS XML (e.g. <jats:p>, <jats:inline-formula> with a <jats:tex-math>
+        + parallel <mml:math>); browsers ignore the unknown tags and leak raw markup.
+        Keep the tex-math branch of each formula (de-TeX'd) and drop the MathML twin,
+        drop the redundant <jats:title>, map a small allowlist of inline tags to HTML,
+        turn <jats:p> into breaks, then escape everything and restore only the allowlist
+        (so nothing else — script, styled spans, stray tags — can render). Returns a str.
+        Keyword arguments:
+          text: the raw abstract (JATS XML, plain, or None)
+        Returns:
+          Safe HTML string ('' if empty)
+    '''
+    if not text:
+        return ''
+    out = re.sub(r'<mml:math\b.*?</mml:math>', '', text, flags=re.S | re.I)   # drop MathML twin
+    out = re.sub(r'<(?:jats:)?tex-math\b[^>]*>(.*?)</(?:jats:)?tex-math>', r'\1',
+                 out, flags=re.S | re.I)                                      # keep TeX branch
+    out = re.sub(r'<(?:jats:)?title\b[^>]*>.*?</(?:jats:)?title>', '',
+                 out, flags=re.S | re.I)                                      # drop redundant title
+    # Sentinel the allowlist tags so they survive the escape pass below (\x00 never
+    # appears in real abstract text and is untouched by html.escape).
+    for jats, htmltag in JATS_TAG_MAP.items():
+        out = re.sub(rf'<(?:jats:)?{jats}\b[^>]*>', f'\x00{htmltag}\x00', out, flags=re.I)
+        out = re.sub(rf'</(?:jats:)?{jats}>', f'\x00/{htmltag}\x00', out, flags=re.I)
+    out = re.sub(r'</?(?:jats:)?p\b[^>]*>', '\x00br\x00', out, flags=re.I)    # paragraphs -> breaks
+    out = re.sub(r'<[^>]+>', '', out)                                        # strip every other tag
+    out = escape(strip_tex_math(out))                                        # de-TeX, then escape all
+    out = re.sub(r'\s+', ' ', out)                                           # collapse source indentation
+    for htmltag in list(JATS_TAG_MAP.values()) + ['br']:
+        out = out.replace(f'\x00{htmltag}\x00', f'<{htmltag}>')
+        out = out.replace(f'\x00/{htmltag}\x00', f'</{htmltag}>')
+    out = re.sub(r'\s*<br>\s*', '<br>', out)                                 # tidy space around breaks
+    out = re.sub(r'(?:<br>){3,}', '<br><br>', out)                           # cap consecutive breaks
+    return re.sub(r'^(?:<br>)+|(?:<br>)+$', '', out).strip()                 # trim edge breaks
 
 
 def standard_doi_table(rows, prefix=None, count_card=False, show_count=True,
@@ -5002,13 +5043,13 @@ def doi_tabs(doi, row, rowext, data, authors):
         if 'project' in data and data['project']:
             if data['project'][0].get('project-description', {}) \
                and data['project'][0]['project-description'][0].get('description', {}):
-                abstract = data['project'][0]['project-description'][0]['description']
+                abstract = jats_to_html(data['project'][0]['project-description'][0]['description'])
                 ptitle = ""
                 if 'project-title' in data['project'][0] and data['project'][0]['project-title']:
                     ptitle = f" ({data['project'][0]['project-title'][0]['title']})"
                 ahtml += f"<h4>Grant{ptitle}</h4><div class='abstract'>{abstract}</div><br>"
     else:
-        abstract = DL.get_abstract(data)
+        abstract = jats_to_html(DL.get_abstract(data))
         if abstract:
             ahtml += f"<h4>Abstract</h4><div class='abstract'>{abstract}</div>"
     if ahtml:
@@ -5357,7 +5398,7 @@ def show_doi_ui(doi):
         return render_template('error.html', urlroot=request.url_root,
                                 title=render_warning("Could not find title"),
                                 message=f"Could not find title for {doi}")
-    title = strip_tex_math(title)   # de-TeX for display, as render_title_html does for tables
+    title = render_title_html(title)   # de-TeX + allowlist HTML + escape (also closes XSS here)
     journal = DL.get_journal(data)
     if not journal:
         journal = ''
@@ -5965,7 +6006,8 @@ def dois_provider_with_janelia(prov):
         if stat:
             stat = safe(f"<span class='oa_{stat}'>{stat.capitalize()}</span>")
         trows.append([row['jrc_publishing_date'], safe(doi_link(row['doi'])),
-                      row['publisher'], row['jrc_journal'], DL.get_title(row), stat])
+                      row['publisher'], row['jrc_journal'],
+                      render_title_html(DL.get_title(row)), stat])
         cnt += 1
     html = render_table(['Published', 'DOI', 'Publisher', 'Journal', 'Title', 'Status'], trows,
                         table_id='dois', css='tablesorter standard-scroll')
@@ -7297,8 +7339,9 @@ def citation_list(source='datacite'):
             total_ver += n
             cnt_ver += 1
         link = doi_link(row['doi'])
-        title_text = strip_html_tags(DL.get_title(row))
-        trows.append([safe(link), title_text, cell(f"{n:,}", sort=n)])
+        raw_title = DL.get_title(row)
+        title_text = strip_html_tags(raw_title)   # plain text for the TSV download
+        trows.append([safe(link), render_title_html(raw_title), cell(f"{n:,}", sort=n)])
         row_classes.append('ver' if is_ver else '')
         fileoutput += f"{row['doi']}\t{title_text}\t{n}\n"
     pulldown = year_pulldown(f"citation_list/{source}", query=True)
@@ -7373,7 +7416,7 @@ def datacite_downloads():
         total += row['downloadCount']
         cnt += 1
         link = doi_link(row['doi'])
-        trows.append([safe(link), strip_html_tags(DL.get_title(row)),
+        trows.append([safe(link), render_title_html(DL.get_title(row)),
                       cell(f"{row['downloadCount']:,}", sort=row['downloadCount'])])
     html = render_table(['DOI', 'Title', 'Downloads'], trows, table_id='data',
                         css='tablesorter numberlast-scroll',
@@ -8529,7 +8572,8 @@ def figshare_groups(year='All'):  # pylint: disable=too-many-locals,too-many-bra
     records = []
     for row in docs:
         fcounts = row.get('jrc_figshare_counts') or {}
-        records.append({'doi': row['doi'], 'title': strip_html_tags(DL.get_title(row)),
+        records.append({'doi': row['doi'],
+                        'title': strip_html_tags(strip_tex_math(DL.get_title(row))),
                         'views': fcounts.get('views', 0),
                         'downloads': fcounts.get('downloads', 0),
                         'citations': row.get('jrc_citation_count', 0) or 0})
@@ -8792,7 +8836,7 @@ def zenodo_groups(year='All'):  # pylint: disable=too-many-locals,too-many-branc
     for row in docs:
         zc = row.get('jrc_zenodo_counts') or {}
         records.append({'doi': row['doi'],
-                        'title': strip_html_tags(DL.get_title(row)),
+                        'title': strip_html_tags(strip_tex_math(DL.get_title(row))),
                         'views': zc.get('views', 0),
                         'downloads': zc.get('downloads', 0),
                         'citations': row.get('jrc_citation_count', 0) or 0,
@@ -9390,7 +9434,7 @@ def protocolsio_dois(year='All'):  # pylint: disable=too-many-locals,too-many-br
     for row in docs:
         pc = row.get('jrc_protocolsio_counts') or {}
         records.append({'doi': row['doi'],
-                        'title': strip_html_tags(DL.get_title(row)),
+                        'title': strip_html_tags(strip_tex_math(DL.get_title(row))),
                         'views': pc.get('views', 0),
                         'exports': pc.get('exports', 0),
                         'citations': row.get('jrc_citation_count', 0) or 0,
@@ -9838,7 +9882,7 @@ def elife_dois(year='All'):  # pylint: disable=too-many-locals,too-many-branches
     for row in docs:
         ec = row.get('jrc_elife_counts') or {}
         records.append({'doi': row['doi'],
-                        'title': strip_html_tags(DL.get_title(row)),
+                        'title': strip_html_tags(strip_tex_math(DL.get_title(row))),
                         'views': ec.get('views', 0),
                         'downloads': ec.get('downloads', 0),
                         'citations': row.get('jrc_citation_count', 0) or 0,
@@ -10489,7 +10533,7 @@ def show_organization(org_in, year=None, show="full"):
             if tag['name'] in orgs:
                 tags.append(tag['name'])
         trows.append([row['jrc_publishing_date'], safe(doi_link(row['doi'])),
-                      ', '.join(sorted(tags)), title])
+                      ', '.join(sorted(tags)), render_title_html(title)])
         authors = DL.get_author_list(row)
         content += f"{row['jrc_publishing_date']}\t{row['doi']}\t" \
                    + f"{', '.join(sorted(tags))}\t{title}\t{authors}\n"
@@ -10929,7 +10973,7 @@ def show_preprint_relation(relation_type, year=None):
     cnt = 0
     for row in rows:
         cnt += 1
-        ptitle = DL.get_title(row)
+        ptitle = render_title_html(DL.get_title(row))
         journal = row.get('jrc_journal', '')
         fileoutput += "\t".join([row['jrc_publishing_date'], row['doi'],
                                  DL.get_title(row), journal]) + "\n"
@@ -11478,7 +11522,8 @@ def dois_nojournal():
     for row in rows:
         cnt += 1
         doi = row['doi']
-        trows.append([safe(f"<a href='/doiui/{doi}'>{doi}</a>"), DL.get_title(row)])
+        trows.append([safe(f"<a href='/doiui/{doi}'>{doi}</a>"),
+                      render_title_html(DL.get_title(row))])
     html = render_table(['DOI', 'Title'], trows,
                         table_id='articles', css='tablesorter standard-scroll')
     if not cnt:
