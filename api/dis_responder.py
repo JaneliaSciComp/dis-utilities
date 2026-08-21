@@ -48,7 +48,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.17.0"
+__version__ = "120.17.2"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -5445,9 +5445,16 @@ def show_doi_ui(doi):
     else:
         doititle = doilink
     doititle += badges
+    # Retraction banner: shown above the DOI line when the record is flagged retracted.
+    banner = ""
+    if row and row.get('jrc_retracted'):
+        banner = ("<div class='retracted-banner'><i class='fa-solid fa-ban'></i>"
+                  "<strong>Retracted</strong> &mdash; this publication has been "
+                  "retracted.</div>")
     endpoint_access()
     return make_response(render_template('doi.html', urlroot=request.url_root, pagetitle=doi,
-                                         title=doititle, recsec=recsec, #doisec=doisec,
+                                         title=doititle, banner=banner, recsec=recsec,
+                                         #doisec=doisec,
                                          cittype=cittype, citsec=citsec,
                                          html=html,
                                          navbar=generate_navbar('DOIs')))

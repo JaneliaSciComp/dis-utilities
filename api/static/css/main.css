@@ -554,6 +554,22 @@ hr {border-color: var(--muted-border);
    color: white;
    background-color: #0000b0;
 }
+.retracted-banner {
+  background-color: rgba(192, 57, 43, 0.18);
+  border-left: 5px solid #c0392b;
+  border-radius: 4px;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  color: #f1a9a0;
+  font-size: 1.2rem;
+}
+.retracted-banner i {
+  color: #e74c3c;
+  margin-right: 8px;
+}
+.retracted-banner strong {
+  color: #e74c3c;
+}
 
 .tag-chip {
   display: inline-block;
