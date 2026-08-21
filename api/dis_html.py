@@ -410,10 +410,14 @@ def generate_navbar(active):
         basic = '<li class="nav-item active">' if heading == active else '<li class="nav-item">'
         drop = '<li class="nav-item dropdown active">' if heading == active \
                else '<li class="nav-item dropdown">'
-        menuhead = '<a class="nav-link dropdown-toggle" href="#" id="navbarDropdown" ' \
+        # Unique id per dropdown (there are ~9): a hardcoded id="navbarDropdown" on
+        # every one is invalid HTML and makes each menu's aria-labelledby resolve to
+        # the first toggle, so screen readers mislabel every menu.
+        did = "navbarDropdown-" + heading.lower().replace("/", "-").replace(" ", "-")
+        menuhead = f'<a class="nav-link dropdown-toggle" href="#" id="{did}" ' \
                    + 'role="button" data-toggle="dropdown" aria-haspopup="true" ' \
                    + f"aria-expanded=\"false\">{heading}</a><div class=\"dropdown-menu\" "\
-                   + 'aria-labelledby="navbarDropdown">'
+                   + f'aria-labelledby="{did}">'
         if subhead:
             nav += drop + menuhead
             nav += generate_navbar_items(subhead)
