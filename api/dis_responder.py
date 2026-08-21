@@ -48,7 +48,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.16.0"
+__version__ = "120.16.1"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -1818,6 +1818,29 @@ def ack_stat_cards(cnt, internal, external):
                       div_id='acks-stats')
 
 
+# Inline formatting tags publisher titles legitimately use (italic species names,
+# superscripts, etc.); every other tag in a title stays escaped.
+TITLE_SAFE_TAGS = ('i', 'b', 'em', 'strong', 'sub', 'sup')
+
+
+def render_title_html(title):
+    ''' Render a DOI title for on-screen display: HTML-escape the whole string (so any
+        script/markup in this external Crossref/DataCite metadata is neutralized), then
+        restore a small allowlist of inline formatting tags and collapse whitespace
+        runs. Returns a safe() value. TSV downloads use the raw title unchanged.
+        Keyword arguments:
+          title: the DOI title (may be empty/None)
+        Returns:
+          A safe() HTML string
+    '''
+    if not title:
+        return safe('')
+    out = escape(title)
+    for tag in TITLE_SAFE_TAGS:
+        out = out.replace(f"&lt;{tag}&gt;", f"<{tag}>").replace(f"&lt;/{tag}&gt;", f"</{tag}>")
+    return safe(re.sub(r'\s+', ' ', out).strip())
+
+
 def standard_doi_table(rows, prefix=None, count_card=False, show_count=True,
                        extra_headers=None, extra_fn=None, mark_fn=None,
                        download_name='standard'):
@@ -1864,8 +1887,8 @@ def standard_doi_table(rows, prefix=None, count_card=False, show_count=True,
         row['title'] = DL.get_title(row)
         extra = list(extra_fn(row)) if extra_fn else []
         mark = mark_fn(row) if mark_fn else ''
-        trows.append([row['published'], safe(mark + row['link']), row['journal'], row['title']]
-                     + extra)
+        trows.append([row['published'], safe(mark + row['link']), row['journal'],
+                      render_title_html(row['title'])] + extra)
         row_classes.append('ver' if version else '')
         if row['title']:
             row['title'] = row['title'].replace("\n", " ")
