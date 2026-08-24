@@ -48,7 +48,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.17.2"
+__version__ = "120.18.2"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -1655,6 +1655,8 @@ def highlight_subtext(text, subtext, is_regex=False):
         Returns:
           Highlighted text
     '''
+    if not subtext:   # nothing to highlight (e.g. a curator-based listing); avoid the
+        return text   # empty-pattern match that would wrap every position in blank spans
     pattern = f"(<[^>]+>)|({subtext if is_regex else re.escape(subtext)})"
     def replace(m):
         if m.group(1):  # inside an HTML tag — leave it alone
@@ -1716,6 +1718,8 @@ def standard_ack_table(rows, ack, is_regex=False, show_count=True):
         # dedupe by name (keeping the last tag object seen), in case a row
         # somehow carries the same tag name twice
         tags = list({tag['name']: tag for tag in row.get('jrc_acknowledge') or []}.values())
+        # List tags alphabetically (case-insensitive) by name.
+        tags.sort(key=lambda tag: tag['name'].lower())
         tag_names = [tag['name'] for tag in tags]
         # IRIS-curated tags render lime (see curator_display()); human-curated
         # tags get no override, so they fall back to the standard link color.
@@ -4227,7 +4231,8 @@ def show_acknowledgement_metrics(limit=10):
             "#f0ad4e;background:rgba(240,173,78,0.08);font-size:0.9em;'>"
             f"<b>Tagging gaps:</b> {gap_int:,} Internal and {gap_ext:,} External "
             "acknowledgements name &ldquo;Janelia&rdquo; but have no entity tag &ndash; "
-            "likely missed attributions to review for entity/regex coverage.</div>")
+            "<a href='/acks_untagged'>review the list</a> to improve entity/regex "
+            "coverage.</div>")
     # Tab builders: Stored (corpus stats), By year (temporal), Sources (jrc_ack_source)
     m_html, m_chartscript, m_chartdiv = _build_ack_metrics(limit)
     by_html, by_chartscript, by_chartdiv = _build_ack_byyear()
@@ -14547,6 +14552,208 @@ def show_doi_by_ack_ui(ack):
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
+                                         navbar=generate_navbar('Acknowledgements')))
+
+
+def curator_display_name(curator):
+    ''' Human-readable label for a jrc_acknowledge curator value: "IRIS (automated)"
+        for machine tags, else the orcid given+family name for a userIdO365, falling
+        back to the raw value when unresolved.
+        Keyword arguments:
+          curator: the stored curator value
+        Returns:
+          Display string
+    '''
+    if curator == 'IRIS':
+        return 'IRIS (automated)'
+    try:
+        rec = DB['dis'].orcid.find_one({"userIdO365": curator}, {"given": 1, "family": 1})
+    except Exception:
+        rec = None
+    if rec:
+        name = f"{(rec.get('given') or [''])[0]} {(rec.get('family') or [''])[0]}".strip()
+        if name:
+            return name
+    return curator
+
+
+def curator_doi_counts():
+    ''' Count distinct DOIs per jrc_acknowledge curator across dois + external_dois.
+        Keyword arguments:
+          None
+        Returns:
+          {curator: distinct-DOI count}
+    '''
+    pipeline = [{"$unwind": "$jrc_acknowledge"},
+                {"$match": {"jrc_acknowledge.curator": {"$exists": True, "$ne": None}}},
+                {"$group": {"_id": "$jrc_acknowledge.curator", "dois": {"$addToSet": "$doi"}}},
+                {"$project": {"count": {"$size": "$dois"}}}]
+    counts = {}
+    for coll in ('dois', 'external_dois'):
+        for doc in DB['dis'][coll].aggregate(pipeline):
+            counts[doc['_id']] = counts.get(doc['_id'], 0) + doc['count']
+    return counts
+
+
+@app.route('/acks_by_curator')
+@app.route('/acks_by_curator/<path:curator>')
+def show_acks_by_curator(curator=None):
+    ''' Acknowledgements by curator. With no curator, show a table of each curator and
+        the number of DOIs they curated, each count linking to that curator's DOI list.
+        With a curator, show the standard acknowledgement table of every DOI that
+        curator tagged (dois + external_dois).
+    '''
+    if not curator:
+        try:
+            counts = curator_doi_counts()
+        except Exception as err:
+            return inspect_error(err, 'Could not aggregate curators')
+        if not counts:
+            return render_template('warning.html', urlroot=request.url_root,
+                                   title=render_warning("No curated acknowledgements", 'warning'),
+                                   message="No acknowledgement tags carry a curator yet.")
+        trows = []
+        for cur, cnt in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0].lower())):
+            link = f"/acks_by_curator/{quote(cur, safe='')}"
+            trows.append([curator_display_name(cur), safe(f"<a href='{link}'>{cnt:,}</a>")])
+        html = stat_cards([("Curators", f"{len(counts):,}"),
+                           ("DOIs curated", f"{sum(counts.values()):,}")],
+                          div_id='curator-stats')
+        html += render_table(['Curator', 'DOIs curated'], trows, table_id='curators')
+        endpoint_access()
+        return make_response(render_template('general.html', urlroot=request.url_root,
+                                             title="Acknowledgements by curator", html=html,
+                                             navbar=generate_navbar('Acknowledgements')))
+    # Per-curator DOI list.
+    payload = {"jrc_acknowledge.curator": curator}
+    union = []
+    internal = external = 0
+    for coll, dtype in (('dois', 'internal'), ('external_dois', 'external')):
+        try:
+            rows = DB['dis'][coll].find(payload).sort("jrc_publishing_date", -1)
+        except Exception as err:
+            return inspect_error(err, f"Could not get DOIs from {coll}")
+        for row in rows:
+            row['doi_type'] = dtype
+            # standard_ack_table reads jrc_acknowledgements unconditionally; a DOI tagged
+            # by hand (tag_acknowledgement.py) may lack it, so default it to empty.
+            row.setdefault('jrc_acknowledgements', '')
+            union.append(row)
+            if dtype == 'internal':
+                internal += 1
+            else:
+                external += 1
+    if not union:
+        return render_template('warning.html', urlroot=request.url_root,
+                               title=render_warning("No DOIs", 'warning'),
+                               message=f"No DOIs were curated by {escape(curator)}.")
+    union.sort(key=lambda row: row.get('jrc_publishing_date', ''), reverse=True)
+    # ack='' -> no highlight (highlight_subtext no-ops on an empty subtext).
+    table, cnt, _ = standard_ack_table(union, '', show_count=False)
+    html = ack_stat_cards(cnt, internal, external) + table
+    title = ("DOIs curated by <span style='color:#51b447 !important'>"
+             f"{escape(curator_display_name(curator))}</span>")
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=title, html=html,
+                                         navbar=generate_navbar('Acknowledgements')))
+
+
+@app.route('/acks_untagged')
+def show_untagged_acks():
+    ''' Review queue: DOIs whose acknowledgement text mentions Janelia but carry no
+        jrc_acknowledge entity tag - likely missed attributions to curate. Rendered
+        with the standard ack table (Janelia mentions highlighted) across dois +
+        external_dois. This is the drill-down behind the /acknowledgement_metrics
+        "tagging gaps" count, and a worklist for tag_acknowledgement.py.
+    '''
+    payload = {"jrc_acknowledgements": {"$regex": "janelia", "$options": "i"},
+               "jrc_acknowledge.0": {"$exists": False}}
+    union = []
+    internal = external = 0
+    for coll, dtype in (('dois', 'internal'), ('external_dois', 'external')):
+        try:
+            rows = DB['dis'][coll].find(payload).sort("jrc_publishing_date", -1)
+        except Exception as err:
+            return inspect_error(err, f"Could not get DOIs from {coll}")
+        for row in rows:
+            row['doi_type'] = dtype
+            union.append(row)
+            if dtype == 'internal':
+                internal += 1
+            else:
+                external += 1
+    if not union:
+        return render_template('warning.html', urlroot=request.url_root,
+                               title=render_warning("No untagged acknowledgements", 'warning'),
+                               message="Every Janelia-mentioning acknowledgement already "
+                                       "carries an entity tag.")
+    union.sort(key=lambda row: row.get('jrc_publishing_date', ''), reverse=True)
+    # Highlight the Janelia mention so the curator can see the context to tag.
+    table, cnt, _ = standard_ack_table(union, 'Janelia', show_count=False)
+    html = ack_stat_cards(cnt, internal, external) + table
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="Untagged acknowledgements mentioning Janelia",
+                                         html=html, navbar=generate_navbar('Acknowledgements')))
+
+
+
+
+@app.route('/acks_coverage')
+def show_acks_coverage():
+    ''' Acknowledgement-harvest coverage for internal DOIs (the dois collection): how
+        many have acknowledgement text, how many were checked and had none
+        (jrc_no_acknowledgements), and how many are still unchecked - the pull_internal_acks
+        backlog. external_dois are acknowledgement-bearing by construction (100% covered),
+        so this focuses on dois. The three buckets partition the collection.
+    '''
+    coll = DB['dis'].dois
+    no_text = {"jrc_acknowledgements": {"$exists": False}}
+    article = {"$or": [{"type": {"$in": ["journal-article", "posted-content",
+                                         "proceedings-article", "book-chapter"]}},
+                       {"subtype": "preprint"}]}
+    try:
+        total = coll.count_documents({})
+        has_text = coll.count_documents({"jrc_acknowledgements": {"$exists": True}})
+        checked = coll.count_documents({**no_text, "jrc_no_acknowledgements": True})
+        unchecked = coll.count_documents({**no_text, "jrc_no_acknowledgements": {"$exists": False}})
+        backlog = coll.count_documents({**no_text, "jrc_no_acknowledgements": {"$exists": False},
+                                        **article})
+    except Exception as err:
+        return inspect_error(err, 'Could not compute acknowledgement coverage')
+
+    def pct(num):
+        return f"{100 * num / total:.1f}%" if total else "0%"
+    cards = stat_cards([("Internal DOIs", f"{total:,}"),
+                        ("With acknowledgements", f"{has_text:,}"),
+                        ("Checked, none found", f"{checked:,}"),
+                        ("Not yet checked", f"{unchecked:,}")], div_id='ackcov-stats')
+    # Proportional coverage bar (flex-grow ratios; a zero bucket collapses to nothing).
+    segs = [("With acknowledgements", has_text, '#51b447'),
+            ("Checked, none found", checked, '#777'),
+            ("Not yet checked", unchecked, '#f0ad4e')]
+    bar = "<div style='display:flex;height:24px;border-radius:4px;overflow:hidden;margin:6px 0 4px;'>"
+    for lbl, num, col in segs:
+        bar += f"<div title=\"{lbl}: {num:,}\" style='flex:{num} 0 0;background:{col};'></div>"
+    bar += "</div><div style='font-size:0.85em;margin-bottom:12px;'>" \
+           + " &nbsp; ".join(f"<span style='color:{c};'>&#9632;</span> {l}" for l, _, c in segs) \
+           + "</div>"
+    trows = [["With acknowledgement text", f"{has_text:,}", pct(has_text)],
+             ["Checked – no acknowledgements found", f"{checked:,}", pct(checked)],
+             ["Not yet checked", f"{unchecked:,}", pct(unchecked)]]
+    table = render_table(['Status', 'DOIs', '% of internal'], trows, table_id='ackcov',
+                         css='tablesorter numbers-scroll')
+    note = ("<div style='margin:12px 0;font-size:0.9em;color:#a8c4e0;'>Of the "
+            f"{unchecked:,} not yet checked, <b>{backlog:,}</b> are article-like (the "
+            "acknowledgement-fetch backlog for pull_internal_acks); the remaining "
+            f"{unchecked - backlog:,} are datasets/software, which the pipeline does not "
+            "fetch acknowledgements for. External DOIs are acknowledgement-bearing by "
+            "construction, so this report covers the internal (dois) collection.</div>")
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="Acknowledgement harvest coverage",
+                                         html=cards + bar + table + note,
                                          navbar=generate_navbar('Acknowledgements')))
 
 
