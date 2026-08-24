@@ -48,7 +48,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.17.2"
+__version__ = "120.18.1"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -4227,7 +4227,8 @@ def show_acknowledgement_metrics(limit=10):
             "#f0ad4e;background:rgba(240,173,78,0.08);font-size:0.9em;'>"
             f"<b>Tagging gaps:</b> {gap_int:,} Internal and {gap_ext:,} External "
             "acknowledgements name &ldquo;Janelia&rdquo; but have no entity tag &ndash; "
-            "likely missed attributions to review for entity/regex coverage.</div>")
+            "<a href='/acks_untagged'>review the list</a> to improve entity/regex "
+            "coverage.</div>")
     # Tab builders: Stored (corpus stats), By year (temporal), Sources (jrc_ack_source)
     m_html, m_chartscript, m_chartdiv = _build_ack_metrics(limit)
     by_html, by_chartscript, by_chartdiv = _build_ack_byyear()
@@ -14548,6 +14549,45 @@ def show_doi_by_ack_ui(ack):
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
                                          navbar=generate_navbar('Acknowledgements')))
+
+
+@app.route('/acks_untagged')
+def show_untagged_acks():
+    ''' Review queue: DOIs whose acknowledgement text mentions Janelia but carry no
+        jrc_acknowledge entity tag - likely missed attributions to curate. Rendered
+        with the standard ack table (Janelia mentions highlighted) across dois +
+        external_dois. This is the drill-down behind the /acknowledgement_metrics
+        "tagging gaps" count, and a worklist for tag_acknowledgement.py.
+    '''
+    payload = {"jrc_acknowledgements": {"$regex": "janelia", "$options": "i"},
+               "jrc_acknowledge.0": {"$exists": False}}
+    union = []
+    internal = external = 0
+    for coll, dtype in (('dois', 'internal'), ('external_dois', 'external')):
+        try:
+            rows = DB['dis'][coll].find(payload).sort("jrc_publishing_date", -1)
+        except Exception as err:
+            return inspect_error(err, f"Could not get DOIs from {coll}")
+        for row in rows:
+            row['doi_type'] = dtype
+            union.append(row)
+            if dtype == 'internal':
+                internal += 1
+            else:
+                external += 1
+    if not union:
+        return render_template('warning.html', urlroot=request.url_root,
+                               title=render_warning("No untagged acknowledgements", 'warning'),
+                               message="Every Janelia-mentioning acknowledgement already "
+                                       "carries an entity tag.")
+    union.sort(key=lambda row: row.get('jrc_publishing_date', ''), reverse=True)
+    # Highlight the Janelia mention so the curator can see the context to tag.
+    table, cnt, _ = standard_ack_table(union, 'Janelia', show_count=False)
+    html = ack_stat_cards(cnt, internal, external) + table
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="Untagged acknowledgements mentioning Janelia",
+                                         html=html, navbar=generate_navbar('Acknowledgements')))
 
 
 @app.route('/acksregexsearch')
