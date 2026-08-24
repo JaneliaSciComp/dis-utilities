@@ -48,7 +48,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.17.3"
+__version__ = "120.18.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -1655,6 +1655,8 @@ def highlight_subtext(text, subtext, is_regex=False):
         Returns:
           Highlighted text
     '''
+    if not subtext:   # nothing to highlight (e.g. a curator-based listing); avoid the
+        return text   # empty-pattern match that would wrap every position in blank spans
     pattern = f"(<[^>]+>)|({subtext if is_regex else re.escape(subtext)})"
     def replace(m):
         if m.group(1):  # inside an HTML tag — leave it alone
@@ -14546,6 +14548,110 @@ def show_doi_by_ack_ui(ack):
                                message=f"Could not find any DOIs with acknowledgement {ack}")
     html = ack_stat_cards(cnt, internal, external) + html
     title = f"DOIs with acknowledgement text <span style='color:#51b447 !important'>{ack}</span>"
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=title, html=html,
+                                         navbar=generate_navbar('Acknowledgements')))
+
+
+def curator_display_name(curator):
+    ''' Human-readable label for a jrc_acknowledge curator value: "IRIS (automated)"
+        for machine tags, else the orcid given+family name for a userIdO365, falling
+        back to the raw value when unresolved.
+        Keyword arguments:
+          curator: the stored curator value
+        Returns:
+          Display string
+    '''
+    if curator == 'IRIS':
+        return 'IRIS (automated)'
+    try:
+        rec = DB['dis'].orcid.find_one({"userIdO365": curator}, {"given": 1, "family": 1})
+    except Exception:
+        rec = None
+    if rec:
+        name = f"{(rec.get('given') or [''])[0]} {(rec.get('family') or [''])[0]}".strip()
+        if name:
+            return name
+    return curator
+
+
+def curator_doi_counts():
+    ''' Count distinct DOIs per jrc_acknowledge curator across dois + external_dois.
+        Keyword arguments:
+          None
+        Returns:
+          {curator: distinct-DOI count}
+    '''
+    pipeline = [{"$unwind": "$jrc_acknowledge"},
+                {"$match": {"jrc_acknowledge.curator": {"$exists": True, "$ne": None}}},
+                {"$group": {"_id": "$jrc_acknowledge.curator", "dois": {"$addToSet": "$doi"}}},
+                {"$project": {"count": {"$size": "$dois"}}}]
+    counts = {}
+    for coll in ('dois', 'external_dois'):
+        for doc in DB['dis'][coll].aggregate(pipeline):
+            counts[doc['_id']] = counts.get(doc['_id'], 0) + doc['count']
+    return counts
+
+
+@app.route('/acks_by_curator')
+@app.route('/acks_by_curator/<path:curator>')
+def show_acks_by_curator(curator=None):
+    ''' Acknowledgements by curator. With no curator, show a table of each curator and
+        the number of DOIs they curated, each count linking to that curator's DOI list.
+        With a curator, show the standard acknowledgement table of every DOI that
+        curator tagged (dois + external_dois).
+    '''
+    if not curator:
+        try:
+            counts = curator_doi_counts()
+        except Exception as err:
+            return inspect_error(err, 'Could not aggregate curators')
+        if not counts:
+            return render_template('warning.html', urlroot=request.url_root,
+                                   title=render_warning("No curated acknowledgements", 'warning'),
+                                   message="No acknowledgement tags carry a curator yet.")
+        trows = []
+        for cur, cnt in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0].lower())):
+            link = f"/acks_by_curator/{quote(cur, safe='')}"
+            trows.append([curator_display_name(cur), safe(f"<a href='{link}'>{cnt:,}</a>")])
+        html = stat_cards([("Curators", f"{len(counts):,}"),
+                           ("DOIs curated", f"{sum(counts.values()):,}")],
+                          div_id='curator-stats')
+        html += render_table(['Curator', 'DOIs curated'], trows, table_id='curators')
+        endpoint_access()
+        return make_response(render_template('general.html', urlroot=request.url_root,
+                                             title="Acknowledgements by curator", html=html,
+                                             navbar=generate_navbar('Acknowledgements')))
+    # Per-curator DOI list.
+    payload = {"jrc_acknowledge.curator": curator}
+    union = []
+    internal = external = 0
+    for coll, dtype in (('dois', 'internal'), ('external_dois', 'external')):
+        try:
+            rows = DB['dis'][coll].find(payload).sort("jrc_publishing_date", -1)
+        except Exception as err:
+            return inspect_error(err, f"Could not get DOIs from {coll}")
+        for row in rows:
+            row['doi_type'] = dtype
+            # standard_ack_table reads jrc_acknowledgements unconditionally; a DOI tagged
+            # by hand (tag_acknowledgement.py) may lack it, so default it to empty.
+            row.setdefault('jrc_acknowledgements', '')
+            union.append(row)
+            if dtype == 'internal':
+                internal += 1
+            else:
+                external += 1
+    if not union:
+        return render_template('warning.html', urlroot=request.url_root,
+                               title=render_warning("No DOIs", 'warning'),
+                               message=f"No DOIs were curated by {escape(curator)}.")
+    union.sort(key=lambda row: row.get('jrc_publishing_date', ''), reverse=True)
+    # ack='' -> no highlight (highlight_subtext no-ops on an empty subtext).
+    table, cnt, _ = standard_ack_table(union, '', show_count=False)
+    html = ack_stat_cards(cnt, internal, external) + table
+    title = ("DOIs curated by <span style='color:#51b447 !important'>"
+             f"{escape(curator_display_name(curator))}</span>")
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
