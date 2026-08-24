@@ -48,7 +48,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.17.2"
+__version__ = "120.17.3"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -1716,6 +1716,8 @@ def standard_ack_table(rows, ack, is_regex=False, show_count=True):
         # dedupe by name (keeping the last tag object seen), in case a row
         # somehow carries the same tag name twice
         tags = list({tag['name']: tag for tag in row.get('jrc_acknowledge') or []}.values())
+        # List tags alphabetically (case-insensitive) by name.
+        tags.sort(key=lambda tag: tag['name'].lower())
         tag_names = [tag['name'] for tag in tags]
         # IRIS-curated tags render lime (see curator_display()); human-curated
         # tags get no override, so they fall back to the standard link color.
