@@ -48,7 +48,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.18.1"
+__version__ = "120.18.2"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -14698,6 +14698,63 @@ def show_untagged_acks():
                                          html=html, navbar=generate_navbar('Acknowledgements')))
 
 
+
+
+@app.route('/acks_coverage')
+def show_acks_coverage():
+    ''' Acknowledgement-harvest coverage for internal DOIs (the dois collection): how
+        many have acknowledgement text, how many were checked and had none
+        (jrc_no_acknowledgements), and how many are still unchecked - the pull_internal_acks
+        backlog. external_dois are acknowledgement-bearing by construction (100% covered),
+        so this focuses on dois. The three buckets partition the collection.
+    '''
+    coll = DB['dis'].dois
+    no_text = {"jrc_acknowledgements": {"$exists": False}}
+    article = {"$or": [{"type": {"$in": ["journal-article", "posted-content",
+                                         "proceedings-article", "book-chapter"]}},
+                       {"subtype": "preprint"}]}
+    try:
+        total = coll.count_documents({})
+        has_text = coll.count_documents({"jrc_acknowledgements": {"$exists": True}})
+        checked = coll.count_documents({**no_text, "jrc_no_acknowledgements": True})
+        unchecked = coll.count_documents({**no_text, "jrc_no_acknowledgements": {"$exists": False}})
+        backlog = coll.count_documents({**no_text, "jrc_no_acknowledgements": {"$exists": False},
+                                        **article})
+    except Exception as err:
+        return inspect_error(err, 'Could not compute acknowledgement coverage')
+
+    def pct(num):
+        return f"{100 * num / total:.1f}%" if total else "0%"
+    cards = stat_cards([("Internal DOIs", f"{total:,}"),
+                        ("With acknowledgements", f"{has_text:,}"),
+                        ("Checked, none found", f"{checked:,}"),
+                        ("Not yet checked", f"{unchecked:,}")], div_id='ackcov-stats')
+    # Proportional coverage bar (flex-grow ratios; a zero bucket collapses to nothing).
+    segs = [("With acknowledgements", has_text, '#51b447'),
+            ("Checked, none found", checked, '#777'),
+            ("Not yet checked", unchecked, '#f0ad4e')]
+    bar = "<div style='display:flex;height:24px;border-radius:4px;overflow:hidden;margin:6px 0 4px;'>"
+    for lbl, num, col in segs:
+        bar += f"<div title=\"{lbl}: {num:,}\" style='flex:{num} 0 0;background:{col};'></div>"
+    bar += "</div><div style='font-size:0.85em;margin-bottom:12px;'>" \
+           + " &nbsp; ".join(f"<span style='color:{c};'>&#9632;</span> {l}" for l, _, c in segs) \
+           + "</div>"
+    trows = [["With acknowledgement text", f"{has_text:,}", pct(has_text)],
+             ["Checked – no acknowledgements found", f"{checked:,}", pct(checked)],
+             ["Not yet checked", f"{unchecked:,}", pct(unchecked)]]
+    table = render_table(['Status', 'DOIs', '% of internal'], trows, table_id='ackcov',
+                         css='tablesorter numbers-scroll')
+    note = ("<div style='margin:12px 0;font-size:0.9em;color:#a8c4e0;'>Of the "
+            f"{unchecked:,} not yet checked, <b>{backlog:,}</b> are article-like (the "
+            "acknowledgement-fetch backlog for pull_internal_acks); the remaining "
+            f"{unchecked - backlog:,} are datasets/software, which the pipeline does not "
+            "fetch acknowledgements for. External DOIs are acknowledgement-bearing by "
+            "construction, so this report covers the internal (dois) collection.</div>")
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="Acknowledgement harvest coverage",
+                                         html=cards + bar + table + note,
+                                         navbar=generate_navbar('Acknowledgements')))
 
 
 @app.route('/acksregexsearch')
