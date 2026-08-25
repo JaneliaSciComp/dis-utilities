@@ -133,6 +133,17 @@ function toggler(tid, fid, counter) {
   applyRowFilters(tid, counter);
 }
 
+// Generic class toggle (like toggler, but with caller-supplied labels): hide/show
+// rows of class `cls` in table `tid`, flipping button `btn`'s label between
+// `whenHidden` (rows now hidden) and `whenShown` (rows now visible). Composes with the
+// other filters via the shared hidden-class set + applyRowFilters.
+function toggleClass(tid, cls, btn, whenHidden, whenShown, counter) {
+  const hidden = hiddenClasses(tid);
+  if (hidden.has(cls)) { hidden.delete(cls); $(btn).text(whenShown); }
+  else { hidden.add(cls); $(btn).text(whenHidden); }
+  applyRowFilters(tid, counter);
+}
+
 // Cycling filter: rotates a table's rows through "A & B" -> "A only" -> "B only".
 // The button label shows the current view. Composes with toggler() via the
 // shared hide set, and keeps the counter span (if given) up to date.
