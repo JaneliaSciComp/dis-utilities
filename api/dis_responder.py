@@ -51,7 +51,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.20.3"
+__version__ = "120.21.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -16221,6 +16221,21 @@ def preprint_date_errors():
 # * Multi-role endpoints (ORCID)                                               *
 # ******************************************************************************
 
+def _affiliation_pills(affiliations):
+    ''' Render affiliation names as small inline pills (raw HTML; wrap in safe()).
+        Keyword arguments:
+          affiliations: a list of names, a single name string, or None
+        Returns:
+          HTML string of pill spans (empty string if none)
+    '''
+    if isinstance(affiliations, str):
+        affiliations = [affiliations] if affiliations else []
+    style = ("display: inline-block; background: #e9f3f3; color: #2e8b8c; "
+             "border-radius: 10px; padding: 1px 9px; margin: 0 4px 3px 0; "
+             "font-size: 0.82em; white-space: nowrap;")
+    return ''.join(f"<span style='{style}'>{escape(a)}</span>" for a in (affiliations or []))
+
+
 @app.route('/labs')
 def show_labs():
     '''
@@ -16268,19 +16283,31 @@ def show_labs():
             result['data'].append(row)
         result['rest']['row_count'] = len(result['data'])
         return generate_response(result)
+    labs = list(rows)
+    # Tag-based DOI counts: one aggregation over the dois collection (jrc_tag.name).
+    try:
+        tagcnt = {r['_id']: r['count'] for r in DB['dis'].dois.aggregate(
+            [{"$unwind": "$jrc_tag"},
+             {"$group": {"_id": "$jrc_tag.name", "count": {"$sum": 1}}}])}
+    except Exception:
+        tagcnt = {}
     trows = []
-    count = 0
-    for row in rows:
-        count += 1
-        if 'affiliations' not in row:
-            row['affiliations'] = ''
+    row_classes = []
+    group_names = []
+    orcid_count = former_count = 0
+    for row in labs:
+        group_names.append(row['group'])
         name = ' '.join([row['given'][0], row['family'][0]])
         if row.get('userIdO365'):
             name = f"<a href='/userui/{row['userIdO365']}'>{name}</a>"
         elif row.get('orcid'):
             name = f"<a href='/userui/{row['orcid']}'>{name}</a>"
-        if row.get('alumni'):
-            name += (f" {tiny_badge('alumni', 'Former employee')}")
+        is_former = bool(row.get('alumni'))
+        if is_former:
+            former_count += 1
+            name += f" {tiny_badge('alumni', 'Former employee')}"
+        if row.get('orcid'):
+            orcid_count += 1
         badges = []
         worker_badge(row, badges)
         name += f" {' '.join(badges)}"
@@ -16289,13 +16316,43 @@ def show_labs():
         except Exception:
             grow = None
         glink = f"<a href='/tag/{row['group']}'>{row['group']}</a>" if grow else row['group']
+        doi = tagcnt.get(row['group'], 0)
         trows.append([safe(name),
                       cell(row['orcid'] if 'orcid' in row else '', style='width: 180px'),
-                      safe(glink), ', '.join(row['affiliations'])])
-    html = render_table(['Name', 'ORCID', 'Group', 'Affiliations'], trows, css='standard')
+                      safe(glink),
+                      safe(_affiliation_pills(row.get('affiliations'))),
+                      f"{doi:,}"])
+        row_classes.append('former' if is_former else '')
+    try:
+        lab_dois = DB['dis'].dois.count_documents({"jrc_tag.name": {"$in": group_names}}) \
+                   if group_names else 0
+    except Exception:
+        lab_dois = 0
+    cards = stat_cards([("Labs", f"{len(labs):,}"),
+                        ("With ORCID iD", f"{orcid_count:,}"),
+                        ("Former", f"{former_count:,}"),
+                        ("Lab DOIs", f"{lab_dois:,}")])
+    controls = ("<div style='margin-bottom: 12px;'>"
+                "<input type='text' class='form-control' "
+                "style='display: inline-block; width: 260px; margin-right: 12px;' "
+                "placeholder='Filter labs…' "
+                "oninput=\"filterByText('labs', this, 'labscount')\">")
+    if former_count:
+        controls += ("<button class='btn btn-outline-secondary' "
+                     "onclick=\"toggleClass('labs', 'former', this, "
+                     f"'Show former labs ({former_count:,})', "
+                     f"'Hide former labs ({former_count:,})', 'labscount')\">"
+                     f"Hide former labs ({former_count:,})</button>")
+    controls += ("&nbsp;<span style='color: #6c757d;'>Showing "
+                 f"<span id='labscount'>{len(labs):,}</span> labs</span></div>")
+    table = render_table(['Name', 'ORCID', 'Group', 'Affiliations', 'DOIs'], trows,
+                         table_id='labs', css='tablesorter numberlast-scroll',
+                         row_classes=row_classes, data_attrs={"sortlist": "[[4,1]]"})
     endpoint_access()
-    return render_template('general.html', urlroot=request.url_root, title=f"Labs ({count:,})",
-                           html=html, navbar=generate_navbar('Tag/affiliation'))
+    return render_template('general.html', urlroot=request.url_root,
+                           title=f"Labs ({len(labs):,})",
+                           html=cards + controls + table,
+                           navbar=generate_navbar('Tag/affiliation'))
 
 # *****************************************************************************
 
