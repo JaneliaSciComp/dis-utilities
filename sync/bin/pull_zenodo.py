@@ -19,7 +19,7 @@ import requests
 import jrc_common.jrc_common as JRC
 import jrc_email.jrc_email as JE
 
-__version__ = '1.4.0'
+__version__ = '1.5.0'
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,logging-fstring-interpolation
 
@@ -100,6 +100,10 @@ def get_janelia_works():
     part = 1
     url = "https://zenodo.org/api/records"
     params = {'q': ARG.TERM, 'size': 100}
+    if ARG.ALL_VERSIONS:
+        # Zenodo returns only the latest version of each record concept by default;
+        # this asks for every version.
+        params['all_versions'] = 'true'
     while True:
         try:
             response = requests.get(url, params=params, timeout=20,
@@ -267,6 +271,9 @@ if __name__ == '__main__':
         description="Sync works from Zenodo into the MongoDB dois collection")
     PARSER.add_argument('--term', dest='TERM', action='store',
                         default='Janelia', help='Search term')
+    PARSER.add_argument('--all-versions', dest='ALL_VERSIONS', action='store_true',
+                        default=False,
+                        help='Flag, include all versions of each record (not just the latest)')
     PARSER.add_argument('--manifold', dest='MANIFOLD', action='store',
                         default='prod', choices=['dev', 'prod'],
                         help='MongoDB manifold (dev, prod)')
