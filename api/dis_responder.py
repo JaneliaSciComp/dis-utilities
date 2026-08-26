@@ -50,7 +50,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.19.1"
+__version__ = "120.19.2"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -2687,6 +2687,48 @@ def _register_openapi_components(spec):
             "rest": {"$ref": "#/components/schemas/Rest"},
             "data": {"type": "array",
                      "items": {"$ref": "#/components/schemas/OrcidPerson"}}}})
+    # --- Organizations / PubMed / People / Diagnostics groups ---
+    spec.components.schema("OrganizationList", {
+        "type": "object",
+        "properties": {
+            "rest": {"$ref": "#/components/schemas/Rest"},
+            "organizations": {"type": "array", "items": {"type": "string"},
+                              "description": "Organization (supervisory-org) names in the group"}}})
+    spec.components.schema("PubmedRecordResult", {
+        "type": "object",
+        "properties": {
+            "rest": {"$ref": "#/components/schemas/Rest"},
+            "data": {"type": "object", "additionalProperties": True,
+                     "description": "The source record - a PMC OAI-PMH GetRecord or a PubMed "
+                                    "PubmedArticleSet. An empty object if nothing was found."}}})
+    spec.components.schema("PeopleRecord", {
+        "type": "object",
+        "additionalProperties": True,
+        "description": "An HHMI People record (employeeId and managerId omitted from responses)."})
+    spec.components.schema("PeopleResult", {
+        "type": "object",
+        "properties": {
+            "rest": {"$ref": "#/components/schemas/Rest"},
+            "data": {"$ref": "#/components/schemas/PeopleRecord"}}})
+    spec.components.schema("Stats", {
+        "type": "object",
+        "description": "Server uptime and request statistics.",
+        "properties": {
+            "version": {"type": "string"},
+            "requests": {"type": "integer"},
+            "start_time": {"type": "string"},
+            "uptime": {"type": "string"},
+            "python": {"type": "string"},
+            "pid": {"type": "integer"},
+            "endpoint_counts": {"type": "object",
+                                "additionalProperties": {"type": "integer"},
+                                "description": "Per-endpoint request counts this run"},
+            "time_since_last_transaction": {"type": "number"}}})
+    spec.components.schema("StatsResult", {
+        "type": "object",
+        "properties": {
+            "rest": {"$ref": "#/components/schemas/Rest"},
+            "stats": {"$ref": "#/components/schemas/Stats"}}})
 
 
 def build_openapi_spec():
@@ -2784,15 +2826,18 @@ def show_swagger():
 def stats():
     '''
     Show stats
-    Show uptime/requests statistics
+    Server uptime, total requests, per-endpoint counts, and runtime info (version,
+    Python, PID). Always succeeds.
     ---
     tags:
       - Diagnostics
     responses:
-      200:
-        description: Stats
-      400:
-        description: Stats could not be calculated
+      '200':
+        description: Uptime and request statistics
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StatsResult'
     '''
     tbt = time() - app.config['LAST_TRANSACTION']
     result = initialize_result()
@@ -3936,20 +3981,36 @@ def show_orcidworks(oid):
 def show_organizations(grp):
     '''
     Return organizations in a group
-    Return organizations in a group
+    Return the organization (supervisory-org) names that belong to a named group.
     ---
     tags:
       - Organizations
     parameters:
       - in: path
         name: grp
+        required: true
         schema:
           type: string
-        required: true
         description: Group name
     responses:
-      200:
-        description: Organization data
+      '200':
+        description: Organization names in the group
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrganizationList'
+      '404':
+        description: Group not found
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
+      '500':
+        description: MongoDB error
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     result = initialize_result()
     data = []
@@ -7238,22 +7299,32 @@ def dois_recent(source='Crossref', limit=10):
 def show_doi_pmc(pmcid):
     '''
     Return a PubMed Central record
-    Return PubMed Central record information for a given PubMed Central ID.
+    Return the PubMed Central record for a PMC ID (as an OAI-PMH GetRecord). An unknown
+    ID yields an empty data object with a 200 status.
     ---
     tags:
       - PubMed
     parameters:
       - in: path
         name: pmcid
-        schema:
-          type: path
         required: true
-        description: PMCID
+        schema:
+          type: string
+          example: PMC6039720
+        description: PubMed Central ID
     responses:
-      200:
-        description: PMC data
-      500:
-        description: PMC error
+      '200':
+        description: PMC record (empty data object if not found)
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PubmedRecordResult'
+      '500':
+        description: Error fetching the PMC record
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     result = initialize_result()
     try:
@@ -7274,22 +7345,32 @@ def show_doi_pmc(pmcid):
 def show_doi_pubmed(pmid):
     '''
     Return a PubMed record
-    Return PubMed record information for a given PubMed ID.
+    Return the PubMed record for a PMID (as a PubmedArticleSet). An unknown ID yields
+    an empty data object with a 200 status.
     ---
     tags:
       - PubMed
     parameters:
       - in: path
         name: pmid
-        schema:
-          type: path
         required: true
-        description: PMID
+        schema:
+          type: string
+          example: '29622724'
+        description: PubMed ID
     responses:
-      200:
-        description: PubMed data
-      500:
-        description: PubMed error
+      '200':
+        description: PubMed record (empty data object if not found)
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PubmedRecordResult'
+      '500':
+        description: Error fetching the PubMed record
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     result = initialize_result()
     try:
@@ -14190,25 +14271,41 @@ def _people_record_html(rec):
 def peoplerec(eid):
     '''
     Show a single People record
-    Browsers (Accept: text/html) get the HTML page; other clients get the
-    People record as JSON (employeeId and managerId omitted).
+    Browsers (Accept: text/html) get the HTML page; other clients get the HHMI People
+    record as JSON (employeeId and managerId omitted).
     ---
     tags:
       - People
     parameters:
       - in: path
         name: eid
+        required: true
         schema:
           type: string
-        required: true
-        description: Employee ID (userIdO365, e.g. SMITHJ@hhmi.org)
+          example: SMITHJ@hhmi.org
+        description: Employee ID (userIdO365)
     responses:
-      200:
-        description: HTML page (browser) or People record as JSON
-      404:
+      '200':
+        description: HTML page (browser) or the People record as JSON
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PeopleResult'
+          text/html:
+            schema:
+              type: string
+      '404':
         description: People record not found
-      500:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
+      '500':
         description: People system error
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     expected = 'html' if 'Accept' in request.headers \
                          and 'html' in request.headers['Accept'] else 'json'
