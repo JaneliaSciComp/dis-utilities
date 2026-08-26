@@ -51,7 +51,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.21.1"
+__version__ = "120.21.2"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -16319,7 +16319,7 @@ def show_labs():
         glink = f"<a href='/tag/{row['group']}'>{row['group']}</a>" if grow else row['group']
         if row.get('orcid'):
             oid = row['orcid'].replace('https://orcid.org/', '')
-            orcid_cell = cell(safe(f"<a href='https://orcid.org/my-orcid?orcid={escape(oid)}' "
+            orcid_cell = cell(safe(f"<a href='https://orcid.org/{escape(oid)}' "
                                    f"target='_blank'>{escape(oid)}</a>"), style='width: 180px')
         else:
             orcid_cell = cell('', style='width: 180px')
