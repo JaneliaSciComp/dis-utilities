@@ -3,6 +3,7 @@
 '''
 
 import collections
+import copy
 from datetime import date, datetime, timedelta
 from html import escape
 import inspect
@@ -27,7 +28,8 @@ import dateutil.tz
 import bson
 from flask import (Flask, make_response, render_template, request, jsonify, redirect, send_file)
 from flask_cors import CORS
-from flask_swagger import swagger
+from apispec import APISpec
+from apispec.yaml_utils import load_yaml_from_docstring
 import pandas as pd
 from pymongo.collation import Collation, CollationStrength
 import requests
@@ -48,7 +50,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.18.6"
+__version__ = "120.19.4"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -2491,17 +2493,411 @@ def journal_buttons(show, prefix):
 # * Documentation                                                             *
 # *****************************************************************************
 
+OPENAPI_METHODS = ('get', 'post', 'put', 'delete', 'patch')
+
+
+def _flask_path_to_openapi(rule):
+    ''' Convert a Flask URL rule to an OpenAPI path template
+        (e.g. /doi/<int:x>/<path:doi> -> /doi/{x}/{doi}).
+        Keyword arguments:
+          rule: Flask rule string
+        Returns:
+          OpenAPI path string
+    '''
+    return re.sub(r"<(?:[^:<>]+:)?([^<>]+)>", r"{\1}", rule)
+
+
+VALID_SCHEMA_TYPES = ('string', 'number', 'integer', 'boolean', 'array', 'object', 'null')
+
+
+def _normalize_param_schema(param):
+    ''' Coerce a legacy hand-written parameter into valid OpenAPI 3 form: a non-body
+        parameter's schema type must be a JSON Schema type. In particular the historic
+        "type: path" (a Flask converter name, not a data type) becomes "string".
+        Mutates the parameter in place. A no-op once a group's docstrings are converted.
+        Keyword arguments:
+          param: an OpenAPI parameter dict
+        Returns:
+          None
+    '''
+    if not isinstance(param, dict):
+        return
+    schema = param.get('schema')
+    if isinstance(schema, dict):
+        stype = schema.get('type')
+        if isinstance(stype, str) and stype not in VALID_SCHEMA_TYPES:
+            schema['type'] = 'string'
+
+
+def _docstring_meta(docstring):
+    ''' Pull the summary/description from the text before the YAML "---" marker,
+        matching the flask-swagger convention (first line = summary, the rest =
+        description) so endpoints not yet converted keep their prose.
+        Keyword arguments:
+          docstring: a view function's docstring
+        Returns:
+          (summary, description) - either may be None
+    '''
+    head = docstring.split('---', 1)[0].strip()
+    if not head:
+        return None, None
+    lines = [ln.strip() for ln in head.splitlines() if ln.strip()]
+    summary = lines[0] if lines else None
+    description = ' '.join(lines[1:]) if len(lines) > 1 else None
+    return summary, description
+
+
+def _register_openapi_components(spec):
+    ''' Register the reusable component schemas and the (optional) Bearer security
+        scheme shared across the API. Endpoint docstrings $ref these.
+        Keyword arguments:
+          spec: an APISpec instance
+        Returns:
+          None
+    '''
+    spec.components.security_scheme(
+        "bearerAuth",
+        {"type": "http", "scheme": "bearer",
+         "description": "Optional API key supplied as a Bearer token. When present and "
+                        "valid it sets rest.authorized to true; endpoints that only read "
+                        "data do not require it."})
+    spec.components.schema("Rest", {
+        "type": "object",
+        "description": "Envelope of request metadata attached to every response.",
+        "properties": {
+            "requester": {"type": "string", "description": "Client IP address"},
+            "authorized": {"type": "boolean",
+                           "description": "True if a valid API key was supplied"},
+            "url": {"type": "string"},
+            "endpoint": {"type": "string"},
+            "error": {"type": "boolean"},
+            "elapsed_time": {"type": "string",
+                             "description": "Server processing time (H:MM:SS)"},
+            "row_count": {"type": "integer"},
+            "pid": {"type": "integer"}}})
+    spec.components.schema("Error", {
+        "type": "object",
+        "description": "Error response body.",
+        "properties": {
+            "rest": {
+                "type": "object",
+                "properties": {
+                    "status_code": {"type": "integer"},
+                    "error": {"type": "boolean"},
+                    "error_text": {"type": "string"}}}}})
+    spec.components.schema("Acknowledgement", {
+        "type": "object",
+        "description": "One DOI's stored acknowledgement record.",
+        "properties": {
+            "doi": {"type": "string"},
+            "doi_type": {"type": "string", "enum": ["internal", "external"],
+                         "description": "Source collection (dois vs external_dois)"},
+            "jrc_publishing_date": {"type": "string",
+                                    "description": "Publishing date (YYYY-MM-DD)"},
+            "jrc_acknowledgements": {"type": "string",
+                                     "description": "Acknowledgements text"},
+            "jrc_journal": {"type": "string"},
+            "title": {"type": "string"},
+            "jrc_ack_first_author": {
+                "description": "Acknowledged first author(s)",
+                "oneOf": [{"type": "string"},
+                          {"type": "array", "items": {"type": "string"}}]},
+            "jrc_ack_last_author": {
+                "description": "Acknowledged last author(s)",
+                "oneOf": [{"type": "string"},
+                          {"type": "array", "items": {"type": "string"}}]},
+            "is_preprint": {"type": "boolean"},
+            "jrc_tag": {"type": "array", "items": {"type": "string"},
+                        "description": "Project/lab tag names"},
+            "type": {"type": "string", "description": "Crossref work type"},
+            "subtype": {"type": "string"}}})
+    spec.components.schema("AcknowledgementList", {
+        "type": "object",
+        "properties": {
+            "rest": {"$ref": "#/components/schemas/Rest"},
+            "acknowledgements": {
+                "type": "array",
+                "items": {"$ref": "#/components/schemas/Acknowledgement"}}}})
+    # --- ORCID group ---
+    spec.components.schema("OrcidProfile", {
+        "type": "object",
+        "additionalProperties": True,
+        "description": "A public ORCID profile as returned by the ORCID API. For an "
+                       "unknown iD this instead carries ORCID's error payload (an "
+                       "'error-code' field), still with a 200 status."})
+    spec.components.schema("DoiDate", {
+        "type": "object",
+        "properties": {
+            "doi": {"type": "string"},
+            "jrc_publishing_date": {"type": "string",
+                                    "description": "Publishing date (YYYY-MM-DD)"}}})
+    spec.components.schema("AffiliationSummary", {
+        "type": "object",
+        "description": "Per-affiliation author counts and supervisory-org status.",
+        "properties": {
+            "affiliation": {"type": "string"},
+            "authors": {"type": "integer", "description": "Authors with this affiliation"},
+            "authors_with_orcid": {"type": "integer"},
+            "orcid_percent": {"type": "number",
+                              "description": "Percent of authors that have an ORCID iD"},
+            "suporg": {"type": "string",
+                       "enum": ["active", "inactive", "no code", "none"],
+                       "description": "Supervisory-org status of the affiliation"}}})
+    spec.components.schema("OrcidPerson", {
+        "type": "object",
+        "description": "An ORCID collection record (person). _id and employeeId are "
+                       "omitted from responses.",
+        "properties": {
+            "orcid": {"type": "string"},
+            "given": {"type": "array", "items": {"type": "string"},
+                      "description": "Given-name variants"},
+            "family": {"type": "array", "items": {"type": "string"},
+                       "description": "Family-name variants"},
+            "affiliations": {"type": "array", "items": {"type": "string"}},
+            "current_affiliations": {"type": "array", "items": {"type": "string"}},
+            "previous_affiliations": {"type": "array", "items": {"type": "string"}},
+            "department": {"type": "string"},
+            "group": {"type": "string", "description": "Group/lab name"},
+            "alumni": {"type": "boolean"},
+            "userIdO365": {"type": "string"}}})
+    spec.components.schema("OrcidApiResult", {
+        "type": "object",
+        "properties": {
+            "rest": {"$ref": "#/components/schemas/Rest"},
+            "data": {"$ref": "#/components/schemas/OrcidProfile"}}})
+    spec.components.schema("OrcidWorksResult", {
+        "type": "object",
+        "properties": {
+            "rest": {"$ref": "#/components/schemas/Rest"},
+            "janelia_dois": {"type": "array",
+                             "items": {"$ref": "#/components/schemas/DoiDate"}},
+            "last_janelia_doi": {"$ref": "#/components/schemas/DoiDate"},
+            "orcid": {"$ref": "#/components/schemas/OrcidProfile"},
+            "other_dois": {"type": "array", "items": {"type": "string"},
+                           "description": "DOIs found on ORCID not yet in the DIS database"}}})
+    spec.components.schema("AffiliationSummaryList", {
+        "type": "object",
+        "properties": {
+            "rest": {"$ref": "#/components/schemas/Rest"},
+            "data": {"type": "array",
+                     "items": {"$ref": "#/components/schemas/AffiliationSummary"}}}})
+    spec.components.schema("OrcidPersonList", {
+        "type": "object",
+        "properties": {
+            "rest": {"$ref": "#/components/schemas/Rest"},
+            "data": {"type": "array",
+                     "items": {"$ref": "#/components/schemas/OrcidPerson"}}}})
+    # --- Organizations / PubMed / People / Diagnostics groups ---
+    spec.components.schema("OrganizationList", {
+        "type": "object",
+        "properties": {
+            "rest": {"$ref": "#/components/schemas/Rest"},
+            "organizations": {"type": "array", "items": {"type": "string"},
+                              "description": "Organization (supervisory-org) names in the group"}}})
+    spec.components.schema("PubmedRecordResult", {
+        "type": "object",
+        "properties": {
+            "rest": {"$ref": "#/components/schemas/Rest"},
+            "data": {"type": "object", "additionalProperties": True,
+                     "description": "The source record - a PMC OAI-PMH GetRecord or a PubMed "
+                                    "PubmedArticleSet. An empty object if nothing was found."}}})
+    spec.components.schema("PeopleRecord", {
+        "type": "object",
+        "additionalProperties": True,
+        "description": "An HHMI People record (employeeId and managerId omitted from responses)."})
+    spec.components.schema("PeopleResult", {
+        "type": "object",
+        "properties": {
+            "rest": {"$ref": "#/components/schemas/Rest"},
+            "data": {"$ref": "#/components/schemas/PeopleRecord"}}})
+    spec.components.schema("Stats", {
+        "type": "object",
+        "description": "Server uptime and request statistics.",
+        "properties": {
+            "version": {"type": "string"},
+            "requests": {"type": "integer"},
+            "start_time": {"type": "string"},
+            "uptime": {"type": "string"},
+            "python": {"type": "string"},
+            "pid": {"type": "integer"},
+            "endpoint_counts": {"type": "object",
+                                "additionalProperties": {"type": "integer"},
+                                "description": "Per-endpoint request counts this run"},
+            "time_since_last_transaction": {"type": "number"}}})
+    spec.components.schema("StatsResult", {
+        "type": "object",
+        "properties": {
+            "rest": {"$ref": "#/components/schemas/Rest"},
+            "stats": {"$ref": "#/components/schemas/Stats"}}})
+    # --- DOI group ---
+    spec.components.schema("DoiRecord", {
+        "type": "object",
+        "additionalProperties": True,
+        "description": "A DOI record - Crossref/DataCite metadata plus jrc_* enrichment. "
+                       "For a DOI not yet stored, the raw Crossref message or DataCite "
+                       "attributes are returned instead."})
+    spec.components.schema("DoiRecordResult", {
+        "type": "object",
+        "properties": {
+            "rest": {"$ref": "#/components/schemas/Rest"},
+            "data": {"$ref": "#/components/schemas/DoiRecord"}}})
+    spec.components.schema("DoiRecordList", {
+        "type": "object",
+        "properties": {
+            "rest": {"$ref": "#/components/schemas/Rest"},
+            "data": {"type": "array",
+                     "items": {"$ref": "#/components/schemas/DoiRecord"}}}})
+    spec.components.schema("CitationResult", {
+        "type": "object",
+        "properties": {
+            "rest": {"$ref": "#/components/schemas/Rest"},
+            "data": {"type": "string", "description": "The formatted citation"},
+            "jrc_preprint": {"description": "Preprint linkage, if present on the record"}}})
+    spec.components.schema("CitationMap", {
+        "type": "object",
+        "properties": {
+            "rest": {"$ref": "#/components/schemas/Rest"},
+            "data": {"type": "object",
+                     "additionalProperties": {"type": "string"},
+                     "description": "Map of DOI to citation string ('' if the DOI was not found)"}}})
+    spec.components.schema("CitationComponents", {
+        "type": "object",
+        "description": "The parts of a DIS-style citation.",
+        "properties": {
+            "authors": {"type": "array", "items": {"type": "string"}},
+            "journal": {"type": "string"},
+            "publishing_date": {"type": "string"},
+            "title": {"type": "string"},
+            "abstract": {"type": "string",
+                         "description": "Present only for Crossref-sourced records"}}})
+    spec.components.schema("ComponentsResult", {
+        "type": "object",
+        "properties": {
+            "rest": {"$ref": "#/components/schemas/Rest"},
+            "data": {"$ref": "#/components/schemas/CitationComponents"}}})
+    spec.components.schema("ComponentsListResult", {
+        "type": "object",
+        "properties": {
+            "rest": {"$ref": "#/components/schemas/Rest"},
+            "data": {"type": "array",
+                     "items": {"allOf": [
+                         {"$ref": "#/components/schemas/CitationComponents"},
+                         {"type": "object",
+                          "properties": {"doi": {"type": "string"}}}]}}}})
+    spec.components.schema("TypesResult", {
+        "type": "object",
+        "properties": {
+            "rest": {"$ref": "#/components/schemas/Rest"},
+            "data": {"type": "object",
+                     "additionalProperties": {
+                         "type": "object",
+                         "properties": {
+                             "count": {"type": "integer"},
+                             "subtype": {"type": ["string", "null"]}}},
+                     "description": "Map of work type to its count and subtype"}}})
+    spec.components.schema("DoiTag", {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "code": {"type": ["string", "null"]},
+            "type": {"type": ["string", "null"]}}})
+    spec.components.schema("DoiAuthorsResult", {
+        "type": "object",
+        "properties": {
+            "rest": {"$ref": "#/components/schemas/Rest"},
+            "data": {"type": "array",
+                     "items": {"type": "object", "additionalProperties": True},
+                     "description": "Author detail objects; employeeId omitted unless authorized"},
+            "tags": {"type": "array",
+                     "items": {"$ref": "#/components/schemas/DoiTag"},
+                     "description": "Distinct Janelia tags across the authors, if any"}}})
+    spec.components.schema("JrcAuthorResult", {
+        "type": "object",
+        "properties": {
+            "rest": {"$ref": "#/components/schemas/Rest"},
+            "data": {"type": "array", "items": {"type": "string"},
+                     "description": "Employee IDs written to jrc_author"}}})
+
+
+def build_openapi_spec():
+    ''' Build the OpenAPI 3.1 document for the whole app by reading the YAML block
+        (after "---") from each route's docstring. Endpoints without a YAML block
+        are omitted. Runtime behaviour of the endpoints is untouched.
+        Returns:
+          OpenAPI 3.1 document as a dict
+    '''
+    spec = APISpec(title="Data and Information Services",
+                   version=__version__,
+                   openapi_version="3.1.0",
+                   info={"description": "REST API and UI for Janelia Data and "
+                                        "Information Services (DIS)."})
+    _register_openapi_components(spec)
+    for rule in app.url_map.iter_rules():
+        view = app.view_functions.get(rule.endpoint)
+        if view is None or not view.__doc__:
+            continue
+        try:
+            operation = load_yaml_from_docstring(view.__doc__)
+        except Exception:
+            operation = None
+        if not isinstance(operation, dict) or not operation:
+            continue
+        summary, description = _docstring_meta(view.__doc__)
+        if summary:
+            operation.setdefault('summary', summary)
+        if description:
+            operation.setdefault('description', description)
+        methods = [m.lower() for m in sorted(rule.methods or [])
+                   if m.lower() in OPENAPI_METHODS]
+        if not methods:
+            continue
+        path = _flask_path_to_openapi(rule.rule)
+        placeholders = set(re.findall(r"{([^{}]+)}", path))
+        operations = {}
+        for method in methods:
+            op_copy = copy.deepcopy(operation)
+            # Drop path parameters absent from this route's template. A docstring
+            # shared across several @app.route decorators (e.g. /acknowledgements
+            # and /acknowledgements/{which}) would otherwise leave a phantom path
+            # parameter on the parameter-less route, which is invalid in OpenAPI 3.
+            # Reconcile the operation's path parameters with this route's template.
+            # Shared docstrings (multiple @app.route decorators on one view) otherwise
+            # leave phantom path params on parameter-less routes, or omit a param a
+            # longer route needs - both invalid in OpenAPI 3. Drop the phantoms and
+            # synthesize any placeholder the docstring didn't declare.
+            raw_params = op_copy.get('parameters')
+            raw_params = raw_params if isinstance(raw_params, list) else []
+            kept = []
+            declared_path = set()
+            for prm in raw_params:
+                if isinstance(prm, dict) and prm.get('in') == 'path':
+                    if prm.get('name') not in placeholders:
+                        continue
+                    declared_path.add(prm.get('name'))
+                _normalize_param_schema(prm)
+                kept.append(prm)
+            for placeholder in sorted(placeholders - declared_path):
+                kept.append({"name": placeholder, "in": "path", "required": True,
+                             "schema": {"type": "string"}})
+            if kept or 'parameters' in op_copy:
+                op_copy['parameters'] = kept
+            operations[method] = op_copy
+        try:
+            spec.path(path=path, operations=operations)
+        except Exception:
+            continue
+    return spec.to_dict()
+
+
 @app.route('/doc')
 def get_doc_json():
-    ''' Show documentation
+    ''' Return the OpenAPI 3.1 specification (JSON) for the API.
     '''
     try:
-        swag = swagger(app)
+        spec = build_openapi_spec()
     except Exception as err:
-        return inspect_error(err, 'Could not parse swag')
-    swag['info']['version'] = __version__
-    swag['info']['title'] = "Data and Information Services"
-    return jsonify(swag)
+        return inspect_error(err, 'Could not build OpenAPI spec')
+    return jsonify(spec)
 
 
 @app.route('/help')
@@ -2518,15 +2914,18 @@ def show_swagger():
 def stats():
     '''
     Show stats
-    Show uptime/requests statistics
+    Server uptime, total requests, per-endpoint counts, and runtime info (version,
+    Python, PID). Always succeeds.
     ---
     tags:
       - Diagnostics
     responses:
-      200:
-        description: Stats
-      400:
-        description: Stats could not be calculated
+      '200':
+        description: Uptime and request statistics
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StatsResult'
     '''
     tbt = time() - app.config['LAST_TRANSACTION']
     result = initialize_result()
@@ -2551,28 +2950,38 @@ def stats():
 def get_incoming_citations(source, doi):
     '''
     Download a DOI's incoming citations
-    Download a file containing a DOI's incoming citations.
+    Download a CSV file of the incoming citations (citing works) for a DOI. Use
+    source "pubmed" to resolve via the DOI's jrc_pmid.
     ---
     tags:
       - DOI
     parameters:
       - in: path
         name: source
+        required: true
         schema:
           type: string
-        required: true
-        description: Source
+        description: Citation source (e.g. crossref, pubmed)
       - in: path
         name: doi
-        schema:
-          type: path
         required: true
+        schema:
+          type: string
         description: DOI
     responses:
-      200:
-        description: DOI data
-      500:
-        description: MongoDB error
+      '200':
+        description: CSV file of incoming citations (attachment)
+        content:
+          text/csv:
+            schema:
+              type: string
+              format: binary
+      '500':
+        description: Error building the citation file
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     doi = doi.lstrip('/').rstrip('/').lower()
     cinput = doi
@@ -2595,24 +3004,31 @@ def get_incoming_citations(source, doi):
 def get_doi_authors(doi):
     '''
     Return a DOI's authors
-    Return information on authors for a given DOI.
+    Return author details for a DOI. employeeId is included only for authorized
+    requests (a valid Bearer token). Any distinct Janelia tags are also returned.
     ---
-    tags:
-      - DOI
     tags:
       - DOI
     parameters:
       - in: path
         name: doi
-        schema:
-          type: path
         required: true
+        schema:
+          type: string
         description: DOI
     responses:
-      200:
-        description: DOI data
-      500:
+      '200':
+        description: Author details (and any Janelia tags)
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DoiAuthorsResult'
+      '500':
         description: MongoDB error
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     doi = doi.lstrip('/').rstrip('/').lower()
     result = initialize_result()
@@ -2849,23 +3265,31 @@ def get_published_dois(start, end):
 def get_doi_api(doi):
     '''
     Return a DOI
-    Return Crossref or DataCite information for a given DOI.
-    If it's not in the dois collection, it will be retrieved from Crossref or Datacite.
+    Return the stored record for a DOI. If it is not in the dois collection it is
+    fetched live from Crossref or DataCite (rest.source indicates which).
     ---
     tags:
       - DOI
     parameters:
       - in: path
         name: doi
-        schema:
-          type: path
         required: true
+        schema:
+          type: string
         description: DOI
     responses:
-      200:
-        description: DOI data
-      500:
-        description: MongoDB error
+      '200':
+        description: The DOI record (rest.source = mongo, crossref, or datacite)
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DoiRecordResult'
+      '500':
+        description: MongoDB or upstream fetch error
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     doi = doi.lstrip('/').rstrip('/').lower()
     result = initialize_result()
@@ -2891,24 +3315,38 @@ def get_doi_api(doi):
 def get_inserted(idate):
     '''
     Return DOIs inserted since a specified date
-    Return all DOIs that have been inserted since midnight on a specified date.
+    Return every DOI record inserted since midnight on the given date.
     ---
     tags:
       - DOI
     parameters:
       - in: path
         name: idate
+        required: true
         schema:
           type: string
-        required: true
-        description: Earliest insertion date in ISO format (YYYY-MM-DD)
+          format: date
+          example: '2026-01-01'
+        description: Earliest insertion date, ISO format (YYYY-MM-DD)
     responses:
-      200:
-        description: DOI data
-      400:
-        description: bad input data
-      500:
+      '200':
+        description: DOI records inserted on or after the date
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DoiRecordList'
+      '400':
+        description: Invalid date
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
+      '500':
         description: MongoDB error
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     result = initialize_result()
     try:
@@ -2933,24 +3371,37 @@ def get_inserted(idate):
 def get_citation(doi):
     '''
     Return a DIS-style citation
-    Return a DIS-style citation for a given DOI.
+    Return a DIS-style citation string for a DOI. Available at /citation/{doi} and the
+    equivalent /citation/dis/{doi}.
     ---
     tags:
       - DOI
     parameters:
       - in: path
         name: doi
-        schema:
-          type: path
         required: true
+        schema:
+          type: string
         description: DOI
     responses:
-      200:
-        description: DOI data
-      404:
+      '200':
+        description: The citation string
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CitationResult'
+      '404':
         description: DOI not found
-      500:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
+      '500':
         description: MongoDB or formatting error
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     doi = doi.lstrip('/').rstrip('/').lower()
     result = initialize_result()
@@ -2975,28 +3426,51 @@ def get_citation(doi):
 def show_multiple_citations(ctype='dis'):
     '''
     Return citations
-    Return a dictionary of citations for a list of given DOIs.
+    Return a map of DOI to citation string for a list of DOIs. The path segment sets
+    the style (dis, flylight, or full); /citations defaults to dis.
     ---
     tags:
       - DOI
     parameters:
       - in: path
         name: ctype
+        required: true
         schema:
           type: string
-        required: false
-        description: Citation type (dis, flylight, or full)
-      - in: query
-        name: dois
-        schema:
-          type: list
-        required: true
-        description: List of DOIs
+          enum: [dis, flylight, full]
+        description: Citation style (only on /citations/{ctype}; /citations uses dis)
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [dois]
+            properties:
+              dois:
+                type: array
+                items:
+                  type: string
+                description: DOIs to cite
     responses:
-      200:
-        description: DOI data
-      500:
+      '200':
+        description: Map of DOI to citation string
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CitationMap'
+      '400':
+        description: No DOI list supplied
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
+      '500':
         description: MongoDB or formatting error
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     result = initialize_result()
     ipd = receive_payload()
@@ -3006,7 +3480,7 @@ def show_multiple_citations(ctype='dis'):
     result['data'] = {}
     for doi in ipd['dois']:
         try:
-            row = DB['dis'].dois.find_one({"doi": doi.tolower()}, {'_id': 0})
+            row = DB['dis'].dois.find_one({"doi": doi.lower()}, {'_id': 0})
         except Exception as err:
             raise InvalidUsage(str(err), 500) from err
         if not row:
@@ -3028,24 +3502,36 @@ def show_multiple_citations(ctype='dis'):
 def show_flylight_citation(doi):
     '''
     Return a FlyLight-style citation
-    Return a FlyLight-style citation for a given DOI.
+    Return a FlyLight-style citation string for a DOI.
     ---
     tags:
       - DOI
     parameters:
       - in: path
         name: doi
-        schema:
-          type: path
         required: true
+        schema:
+          type: string
         description: DOI
     responses:
-      200:
-        description: DOI data
-      404:
+      '200':
+        description: The citation string
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CitationResult'
+      '404':
         description: DOI not found
-      500:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
+      '500':
         description: MongoDB or formatting error
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     doi = doi.lstrip('/').rstrip('/').lower()
     result = initialize_result()
@@ -3070,24 +3556,36 @@ def show_flylight_citation(doi):
 def show_full_citation(doi):
     '''
     Return a full citation
-    Return a full citation (DIS+journal) for a given DOI.
+    Return a full citation string (DIS style plus journal) for a DOI.
     ---
     tags:
       - DOI
     parameters:
       - in: path
         name: doi
-        schema:
-          type: path
         required: true
+        schema:
+          type: string
         description: DOI
     responses:
-      200:
-        description: DOI data
-      404:
+      '200':
+        description: The citation string
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CitationResult'
+      '404':
         description: DOI not found
-      500:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
+      '500':
         description: MongoDB or formatting error
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     doi = doi.lstrip('/').rstrip('/').lower()
     result = initialize_result()
@@ -3112,24 +3610,37 @@ def show_full_citation(doi):
 def show_components(doi):
     '''
     Return components of a DIS-style citation
-    Return components of a DIS-style citation for a given DOI.
+    Return the parts of a DIS-style citation (authors, title, journal, date, and -
+    for Crossref-sourced records - abstract) for a DOI.
     ---
     tags:
       - DOI
     parameters:
       - in: path
         name: doi
-        schema:
-          type: path
         required: true
+        schema:
+          type: string
         description: DOI
     responses:
-      200:
-        description: DOI data
-      404:
+      '200':
+        description: Citation components
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ComponentsResult'
+      '404':
         description: DOI not found
-      500:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
+      '500':
         description: MongoDB or formatting error
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     doi = doi.lstrip('/').rstrip('/').lower()
     result = initialize_result()
@@ -3155,22 +3666,41 @@ def show_components(doi):
 def show_dois_custom():
     '''
     Return DOIs for a given find query
-    Return a list of DOI records for a given query.
+    Return the DOI records matching a raw MongoDB find filter.
     ---
     tags:
       - DOI
-    parameters:
-      - in: query
-        name: query
-        schema:
-          type: string
-        required: true
-        description: MongoDB query
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [query]
+            properties:
+              query:
+                type: object
+                additionalProperties: true
+                description: A MongoDB find filter document
     responses:
-      200:
-        description: DOI data
-      500:
+      '200':
+        description: Matching DOI records (filter echoed in rest.query)
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DoiRecordList'
+      '400':
+        description: No query supplied
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
+      '500':
         description: MongoDB or formatting error
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     result = initialize_result()
     ipd = receive_payload()
@@ -3197,28 +3727,49 @@ def show_dois_custom():
 def show_multiple_components(ctype='dis'):
     '''
     Return DOI components for a given tag
-    Return a list of citation components for a given tag.
+    Return citation components for every DOI carrying a given jrc_tag. The path segment
+    sets the style (dis or flylight); /components defaults to dis.
     ---
     tags:
       - DOI
     parameters:
       - in: path
         name: ctype
-        schema:
-          type: string
-        required: false
-        description: Citation type (dis or flylight)
-      - in: query
-        name: tag
-        schema:
-          type: string
         required: true
-        description: Group tag
+        schema:
+          type: string
+          enum: [dis, flylight]
+        description: Citation style (only on /components/{ctype}; /components uses dis)
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [tag]
+            properties:
+              tag:
+                type: string
+                description: Group tag (matched against jrc_tag.name)
     responses:
-      200:
-        description: Component data
-      500:
+      '200':
+        description: Citation components per matching DOI
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ComponentsListResult'
+      '400':
+        description: No tag supplied
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
+      '500':
         description: MongoDB or formatting error
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     result = initialize_result()
     ipd = receive_payload()
@@ -3250,15 +3801,23 @@ def show_multiple_components(ctype='dis'):
 def show_types():
     '''
     Show data types
-    Return DOI data types, subtypes, and counts
+    Return the DOI work types (and DataCite), each with its subtype and count.
     ---
     tags:
       - DOI
     responses:
-      200:
-        description: types
-      500:
+      '200':
+        description: Map of work type to its count and subtype
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TypesResult'
+      '500':
         description: MongoDB error
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     result = initialize_result()
     payload = [{"$group": {"_id": {"type": "$type", "subtype": "$subtype"},"count": {"$sum": 1}}}]
@@ -3284,22 +3843,37 @@ def show_types():
 def set_jrc_author(doi):
     '''
     Update Janelia authors for a given DOI
-    Update Janelia authors (as employee IDs) in "jrc_author" for a given DOI.
+    Recompute the Janelia authors (their employee IDs) from the stored record and
+    write them to jrc_author. Returns the employee IDs written. Takes no request body.
     ---
     tags:
       - DOI
     parameters:
       - in: path
         name: doi
-        schema:
-          type: path
         required: true
+        schema:
+          type: string
         description: DOI
     responses:
-      200:
-        description: Success
-      500:
+      '200':
+        description: Employee IDs written to jrc_author (rest.rows_updated if modified)
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JrcAuthorResult'
+      '400':
+        description: DOI not found
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
+      '500':
         description: MongoDB or formatting error
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     doi = doi.lstrip('/').rstrip('/').lower()
     result = initialize_result()
@@ -3562,20 +4136,33 @@ def show_oid_works(oid):
 def show_oidapi(oid):
     '''
     Show an ORCID ID (using the ORCID API)
-    Return information for an ORCID ID (using the ORCID API)
+    Fetch the public ORCID profile for an ORCID iD directly from the ORCID API. An
+    unknown iD is not an error - ORCID's own error payload is returned in "data" with
+    a 200 status.
     ---
     tags:
       - ORCID
     parameters:
       - in: path
         name: oid
+        required: true
         schema:
           type: string
-        required: true
-        description: ORCID ID
+          example: 0000-0001-8090-2810
+        description: ORCID iD
     responses:
-      200:
-        description: ORCID data
+      '200':
+        description: ORCID profile (or ORCID's error payload for an unknown iD)
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrcidApiResult'
+      '500':
+        description: Error calling the ORCID API
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     result = initialize_result()
     try:
@@ -3592,20 +4179,33 @@ def show_oidapi(oid):
 def show_orcidworks(oid):
     '''
     Return works for an ORCID ID
-    Return works information for an ORCID ID (using the ORCID API)
+    For an ORCID iD, return its Janelia DOIs (with publishing dates), the most recent
+    Janelia DOI, the full ORCID profile, and any works found on ORCID that are not yet
+    in the DIS database.
     ---
     tags:
       - ORCID
     parameters:
       - in: path
         name: oid
+        required: true
         schema:
           type: string
-        required: true
-        description: ORCID ID
+          example: 0000-0001-8090-2810
+        description: ORCID iD
     responses:
-      200:
-        description: ORCID data
+      '200':
+        description: Janelia DOIs, latest Janelia DOI, ORCID profile, and other works
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrcidWorksResult'
+      '500':
+        description: Error querying the database or the ORCID API
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     result = initialize_result()
     try:
@@ -3644,20 +4244,36 @@ def show_orcidworks(oid):
 def show_organizations(grp):
     '''
     Return organizations in a group
-    Return organizations in a group
+    Return the organization (supervisory-org) names that belong to a named group.
     ---
     tags:
       - Organizations
     parameters:
       - in: path
         name: grp
+        required: true
         schema:
           type: string
-        required: true
         description: Group name
     responses:
-      200:
-        description: Organization data
+      '200':
+        description: Organization names in the group
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrganizationList'
+      '404':
+        description: Group not found
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
+      '500':
+        description: MongoDB error
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     result = initialize_result()
     data = []
@@ -3682,20 +4298,41 @@ def show_organizations(grp):
 def show_acknowledgements(which="journal"):
     '''
     Return acknowledgements
-    Return acknowledgements (jrc_acknowledgements) from the dois and external_dois collections
+    Return stored acknowledgement text (jrc_acknowledgements) for journal articles,
+    merged across the dois (internal) and external_dois collections and sorted by
+    publishing date, newest first. Pass "all" to include every DOI type. An optional
+    Bearer token (a configured API key) sets rest.authorized in the response.
     ---
     tags:
       - Acknowledgements
     parameters:
       - in: path
         name: which
+        required: true
         schema:
           type: string
-        required: true
-        description: Which acknowledgements to return (journal, all)
+          enum: [journal, all]
+          default: journal
+        description: Subset to return - "journal" (journal articles only, default) or "all"
     responses:
-      200:
-        description: Acknowledgements data
+      '200':
+        description: Acknowledgements, newest first
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AcknowledgementList'
+      '404':
+        description: No acknowledgements found
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
+      '500':
+        description: Error querying the database
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     result = initialize_result()
     data = []
@@ -6654,29 +7291,40 @@ def show_insert(idate, source='Crossref'):
 @app.route('/doiui/custom', methods=['OPTIONS', 'POST'])
 def show_doiui_custom(year='All'):
     '''
-    Return DOIs for a given find query
-    Return a list of DOI records for a given query.
+    Show a custom DOI query (UI)
+    UI endpoint: render the DOI records matching field/value (or a raw query) as an
+    HTML page. Optionally scope to a publishing year via the /doiui/custom/{year} form.
     ---
     tags:
       - DOI
     parameters:
-      - in: query
-        name: field
+      - in: path
+        name: year
+        required: true
         schema:
           type: string
-        required: true
-        description: MongoDB field
-      - in: query
-        name: value
-        schema:
-          type: string
-        required: true
-        description: field value
+        description: Publishing year to scope to (only on /doiui/custom/{year})
+    requestBody:
+      required: true
+      content:
+        application/x-www-form-urlencoded:
+          schema:
+            type: object
+            required: [field, value]
+            properties:
+              field:
+                type: string
+                description: DOI field to match
+              value:
+                type: string
+                description: Value to match (or the sentinels !EXISTS! / !NOTEXISTS!)
     responses:
-      200:
-        description: DOI data
-      500:
-        description: MongoDB or formatting error
+      '200':
+        description: HTML page of matching DOIs (or an HTML error/empty-result page)
+        content:
+          text/html:
+            schema:
+              type: string
     '''
     ipd = receive_payload()
     if request.form:
@@ -6925,22 +7573,32 @@ def dois_recent(source='Crossref', limit=10):
 def show_doi_pmc(pmcid):
     '''
     Return a PubMed Central record
-    Return PubMed Central record information for a given PubMed Central ID.
+    Return the PubMed Central record for a PMC ID (as an OAI-PMH GetRecord). An unknown
+    ID yields an empty data object with a 200 status.
     ---
     tags:
       - PubMed
     parameters:
       - in: path
         name: pmcid
-        schema:
-          type: path
         required: true
-        description: PMCID
+        schema:
+          type: string
+          example: PMC6039720
+        description: PubMed Central ID
     responses:
-      200:
-        description: PMC data
-      500:
-        description: PMC error
+      '200':
+        description: PMC record (empty data object if not found)
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PubmedRecordResult'
+      '500':
+        description: Error fetching the PMC record
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     result = initialize_result()
     try:
@@ -6961,22 +7619,32 @@ def show_doi_pmc(pmcid):
 def show_doi_pubmed(pmid):
     '''
     Return a PubMed record
-    Return PubMed record information for a given PubMed ID.
+    Return the PubMed record for a PMID (as a PubmedArticleSet). An unknown ID yields
+    an empty data object with a 200 status.
     ---
     tags:
       - PubMed
     parameters:
       - in: path
         name: pmid
-        schema:
-          type: path
         required: true
-        description: PMID
+        schema:
+          type: string
+          example: '29622724'
+        description: PubMed ID
     responses:
-      200:
-        description: PubMed data
-      500:
-        description: PubMed error
+      '200':
+        description: PubMed record (empty data object if not found)
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PubmedRecordResult'
+      '500':
+        description: Error fetching the PubMed record
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     result = initialize_result()
     try:
@@ -13877,25 +14545,41 @@ def _people_record_html(rec):
 def peoplerec(eid):
     '''
     Show a single People record
-    Browsers (Accept: text/html) get the HTML page; other clients get the
-    People record as JSON (employeeId and managerId omitted).
+    Browsers (Accept: text/html) get the HTML page; other clients get the HHMI People
+    record as JSON (employeeId and managerId omitted).
     ---
     tags:
       - People
     parameters:
       - in: path
         name: eid
+        required: true
         schema:
           type: string
-        required: true
-        description: Employee ID (userIdO365, e.g. SMITHJ@hhmi.org)
+          example: SMITHJ@hhmi.org
+        description: Employee ID (userIdO365)
     responses:
-      200:
-        description: HTML page (browser) or People record as JSON
-      404:
+      '200':
+        description: HTML page (browser) or the People record as JSON
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PeopleResult'
+          text/html:
+            schema:
+              type: string
+      '404':
         description: People record not found
-      500:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
+      '500':
         description: People system error
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     expected = 'html' if 'Accept' in request.headers \
                          and 'html' in request.headers['Accept'] else 'json'
@@ -14147,16 +14831,28 @@ def janelia_affiliations():
 def orcid_affiliations():
     '''
     Show ORCID affiliations with author counts
-    Browsers (Accept: text/html) get the HTML page; other clients get the
-    per-affiliation author/ORCID counts and SupOrg status as JSON.
+    Browsers (Accept: text/html) get the HTML page; other clients get one row per
+    affiliation - author count, how many have an ORCID iD, the ORCID percentage, and
+    the supervisory-org status - as JSON.
     ---
     tags:
       - ORCID
     responses:
-      200:
-        description: HTML page (browser) or affiliation summary as JSON
-      500:
+      '200':
+        description: HTML page (browser) or the per-affiliation summary as JSON
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AffiliationSummaryList'
+          text/html:
+            schema:
+              type: string
+      '500':
         description: MongoDB error
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     expected = 'html' if 'Accept' in request.headers \
                          and 'html' in request.headers['Accept'] else 'json'
@@ -14407,29 +15103,43 @@ def show_projects(option=None):
 def orcid_affiliation(aff, year='All'):
     '''
     Show ORCID tag (affiliation or project) information
-    Browsers (Accept: text/html) get the HTML page; other clients get the
-    matching orcid records as JSON (_id and employeeId omitted).
+    Browsers (Accept: text/html) get the HTML page; other clients get the matching
+    ORCID records as JSON (_id and employeeId omitted), split into current/previous
+    affiliations where the People system can resolve them.
     ---
     tags:
       - ORCID
     parameters:
       - in: path
         name: aff
+        required: true
         schema:
           type: string
-        required: true
-        description: Affiliation or project tag name (e.g. Biology)
+          example: Biology
+        description: Affiliation or project tag name
       - in: path
         name: year
+        required: true
         schema:
           type: string
-        required: false
-        description: Publishing year to filter on (defaults to All)
+          example: '2024'
+        description: Publishing year to filter on. Use the /tag/{aff} form (no year) for All.
     responses:
-      200:
-        description: HTML page (browser) or matching orcid records as JSON
-      500:
+      '200':
+        description: HTML page (browser) or matching ORCID records as JSON
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrcidPersonList'
+          text/html:
+            schema:
+              type: string
+      '500':
         description: MongoDB error
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     expected = 'html' if 'Accept' in request.headers \
                          and 'html' in request.headers['Accept'] else 'json'
@@ -15446,15 +16156,27 @@ def preprint_date_errors():
 def show_labs():
     '''
     Show group owners (labs) from ORCID
-    Return records whose ORCIDs have a group
+    Browsers (Accept: text/html) get the HTML table; other clients get the ORCID
+    records that have a group (lab) as JSON (_id and employeeId omitted).
     ---
     tags:
       - ORCID
     responses:
-      200:
-        description: labs
-      500:
+      '200':
+        description: HTML page (browser) or lab-owner ORCID records as JSON
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrcidPersonList'
+          text/html:
+            schema:
+              type: string
+      '500':
         description: MongoDB error
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     result = initialize_result()
     expected = 'html' if 'Accept' in request.headers \
