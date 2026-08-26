@@ -16,6 +16,7 @@ from operator import itemgetter
 import os
 import random
 import re
+import socket
 import statistics
 import string
 import sys
@@ -50,7 +51,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.19.4"
+__version__ = "120.19.5"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -2712,18 +2713,36 @@ def _register_openapi_components(spec):
             "data": {"$ref": "#/components/schemas/PeopleRecord"}}})
     spec.components.schema("Stats", {
         "type": "object",
-        "description": "Server uptime and request statistics.",
+        "description": "Server uptime and request statistics. Counters (requests, "
+                       "endpoint_counts, uptime, pid) are per worker process.",
         "properties": {
             "version": {"type": "string"},
             "requests": {"type": "integer"},
             "start_time": {"type": "string"},
             "uptime": {"type": "string"},
+            "current_time": {"type": "string",
+                             "description": "Current server time with UTC offset"},
             "python": {"type": "string"},
+            "hostname": {"type": "string", "description": "Host that served the request"},
+            "run_mode": {"type": "string", "description": "dev or prod"},
+            "debug": {"type": "boolean"},
             "pid": {"type": "integer"},
             "endpoint_counts": {"type": "object",
                                 "additionalProperties": {"type": "integer"},
                                 "description": "Per-endpoint request counts this run"},
-            "time_since_last_transaction": {"type": "number"}}})
+            "time_since_last_transaction": {"type": "number"},
+            "dependencies": {"type": "object",
+                             "additionalProperties": {"type": "string"},
+                             "description": "Key dependency versions"},
+            "database": {
+                "type": "object",
+                "description": "DIS MongoDB health",
+                "properties": {
+                    "reachable": {"type": "boolean"},
+                    "ping_ms": {"type": "number"},
+                    "server_version": {"type": "string"},
+                    "host": {"type": "string"},
+                    "error": {"type": "string"}}}}})
     spec.components.schema("StatsResult", {
         "type": "object",
         "properties": {
@@ -2910,6 +2929,50 @@ def show_swagger():
 # * Admin endpoints                                                           *
 # *****************************************************************************
 
+def _database_health():
+    ''' Ping the DIS MongoDB and report reachability, latency, server version, and the
+        connected host. Never raises - a down database is reported, not raised.
+        Returns:
+          dict with reachable plus (on success) ping_ms/server_version/host, else error
+    '''
+    info = {"reachable": False}
+    try:
+        client = DB['dis'].client
+        start = time()
+        client.admin.command('ping')
+        info['ping_ms'] = round((time() - start) * 1000, 2)
+        info['reachable'] = True
+        try:
+            info['server_version'] = client.server_info().get('version')
+        except Exception:
+            pass
+        if client.address:
+            info['host'] = f"{client.address[0]}:{client.address[1]}"
+    except Exception as err:
+        info['error'] = str(err)
+    return info
+
+
+def _dependency_versions():
+    ''' Report installed versions of the key runtime dependencies.
+        Returns:
+          dict of distribution name -> version string ('unknown' if undetermined)
+    '''
+    import importlib.metadata as md
+    out = {}
+    for dist in ('flask', 'pymongo', 'apispec'):
+        try:
+            out[dist] = md.version(dist)
+        except Exception:
+            out[dist] = 'unknown'
+    for dist, module in (('doi_common', DL), ('jrc_common', JRC)):
+        try:
+            out[dist] = md.version(dist)
+        except Exception:
+            out[dist] = getattr(module, '__version__', 'unknown')
+    return out
+
+
 @app.route("/stats")
 def stats():
     '''
@@ -2935,10 +2998,16 @@ def stats():
                        "requests": app.config['COUNTER'],
                        "start_time": start,
                        "uptime": str(up_time),
+                       "current_time": datetime.now().astimezone().strftime('%Y-%m-%d %H:%M:%S %z'),
                        "python": sys.version,
+                       "hostname": socket.gethostname(),
+                       "run_mode": app.config.get('RUN_MODE'),
+                       "debug": app.config.get('DEBUG'),
                        "pid": os.getpid(),
                        "endpoint_counts": app.config['ENDPOINTS'],
                        "time_since_last_transaction": tbt,
+                       "dependencies": _dependency_versions(),
+                       "database": _database_health(),
                       }
     return generate_response(result)
 
