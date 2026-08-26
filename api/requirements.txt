@@ -1,6 +1,6 @@
 Flask==3.0.3
 Flask-Cors
-flask-swagger
+apispec>=6.0
 pyOpenSSL
 gunicorn==22.0.0
 mysqlclient==2.1.1

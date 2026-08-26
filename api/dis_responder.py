@@ -3,6 +3,7 @@
 '''
 
 import collections
+import copy
 from datetime import date, datetime, timedelta
 from html import escape
 import inspect
@@ -27,7 +28,8 @@ import dateutil.tz
 import bson
 from flask import (Flask, make_response, render_template, request, jsonify, redirect, send_file)
 from flask_cors import CORS
-from flask_swagger import swagger
+from apispec import APISpec
+from apispec.yaml_utils import load_yaml_from_docstring
 import pandas as pd
 from pymongo.collation import Collation, CollationStrength
 import requests
@@ -48,7 +50,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.18.6"
+__version__ = "120.19.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -2491,17 +2493,212 @@ def journal_buttons(show, prefix):
 # * Documentation                                                             *
 # *****************************************************************************
 
+OPENAPI_METHODS = ('get', 'post', 'put', 'delete', 'patch')
+
+
+def _flask_path_to_openapi(rule):
+    ''' Convert a Flask URL rule to an OpenAPI path template
+        (e.g. /doi/<int:x>/<path:doi> -> /doi/{x}/{doi}).
+        Keyword arguments:
+          rule: Flask rule string
+        Returns:
+          OpenAPI path string
+    '''
+    return re.sub(r"<(?:[^:<>]+:)?([^<>]+)>", r"{\1}", rule)
+
+
+VALID_SCHEMA_TYPES = ('string', 'number', 'integer', 'boolean', 'array', 'object', 'null')
+
+
+def _normalize_param_schema(param):
+    ''' Coerce a legacy hand-written parameter into valid OpenAPI 3 form: a non-body
+        parameter's schema type must be a JSON Schema type. In particular the historic
+        "type: path" (a Flask converter name, not a data type) becomes "string".
+        Mutates the parameter in place. A no-op once a group's docstrings are converted.
+        Keyword arguments:
+          param: an OpenAPI parameter dict
+        Returns:
+          None
+    '''
+    if not isinstance(param, dict):
+        return
+    schema = param.get('schema')
+    if isinstance(schema, dict):
+        stype = schema.get('type')
+        if isinstance(stype, str) and stype not in VALID_SCHEMA_TYPES:
+            schema['type'] = 'string'
+
+
+def _docstring_meta(docstring):
+    ''' Pull the summary/description from the text before the YAML "---" marker,
+        matching the flask-swagger convention (first line = summary, the rest =
+        description) so endpoints not yet converted keep their prose.
+        Keyword arguments:
+          docstring: a view function's docstring
+        Returns:
+          (summary, description) - either may be None
+    '''
+    head = docstring.split('---', 1)[0].strip()
+    if not head:
+        return None, None
+    lines = [ln.strip() for ln in head.splitlines() if ln.strip()]
+    summary = lines[0] if lines else None
+    description = ' '.join(lines[1:]) if len(lines) > 1 else None
+    return summary, description
+
+
+def _register_openapi_components(spec):
+    ''' Register the reusable component schemas and the (optional) Bearer security
+        scheme shared across the API. Endpoint docstrings $ref these.
+        Keyword arguments:
+          spec: an APISpec instance
+        Returns:
+          None
+    '''
+    spec.components.security_scheme(
+        "bearerAuth",
+        {"type": "http", "scheme": "bearer",
+         "description": "Optional API key supplied as a Bearer token. When present and "
+                        "valid it sets rest.authorized to true; endpoints that only read "
+                        "data do not require it."})
+    spec.components.schema("Rest", {
+        "type": "object",
+        "description": "Envelope of request metadata attached to every response.",
+        "properties": {
+            "requester": {"type": "string", "description": "Client IP address"},
+            "authorized": {"type": "boolean",
+                           "description": "True if a valid API key was supplied"},
+            "url": {"type": "string"},
+            "endpoint": {"type": "string"},
+            "error": {"type": "boolean"},
+            "elapsed_time": {"type": "string",
+                             "description": "Server processing time (H:MM:SS)"},
+            "row_count": {"type": "integer"},
+            "pid": {"type": "integer"}}})
+    spec.components.schema("Error", {
+        "type": "object",
+        "description": "Error response body.",
+        "properties": {
+            "rest": {
+                "type": "object",
+                "properties": {
+                    "status_code": {"type": "integer"},
+                    "error": {"type": "boolean"},
+                    "error_text": {"type": "string"}}}}})
+    spec.components.schema("Acknowledgement", {
+        "type": "object",
+        "description": "One DOI's stored acknowledgement record.",
+        "properties": {
+            "doi": {"type": "string"},
+            "doi_type": {"type": "string", "enum": ["internal", "external"],
+                         "description": "Source collection (dois vs external_dois)"},
+            "jrc_publishing_date": {"type": "string",
+                                    "description": "Publishing date (YYYY-MM-DD)"},
+            "jrc_acknowledgements": {"type": "string",
+                                     "description": "Acknowledgements text"},
+            "jrc_journal": {"type": "string"},
+            "title": {"type": "string"},
+            "jrc_ack_first_author": {
+                "description": "Acknowledged first author(s)",
+                "oneOf": [{"type": "string"},
+                          {"type": "array", "items": {"type": "string"}}]},
+            "jrc_ack_last_author": {
+                "description": "Acknowledged last author(s)",
+                "oneOf": [{"type": "string"},
+                          {"type": "array", "items": {"type": "string"}}]},
+            "is_preprint": {"type": "boolean"},
+            "jrc_tag": {"type": "array", "items": {"type": "string"},
+                        "description": "Project/lab tag names"},
+            "type": {"type": "string", "description": "Crossref work type"},
+            "subtype": {"type": "string"}}})
+    spec.components.schema("AcknowledgementList", {
+        "type": "object",
+        "properties": {
+            "rest": {"$ref": "#/components/schemas/Rest"},
+            "acknowledgements": {
+                "type": "array",
+                "items": {"$ref": "#/components/schemas/Acknowledgement"}}}})
+
+
+def build_openapi_spec():
+    ''' Build the OpenAPI 3.1 document for the whole app by reading the YAML block
+        (after "---") from each route's docstring. Endpoints without a YAML block
+        are omitted. Runtime behaviour of the endpoints is untouched.
+        Returns:
+          OpenAPI 3.1 document as a dict
+    '''
+    spec = APISpec(title="Data and Information Services",
+                   version=__version__,
+                   openapi_version="3.1.0",
+                   info={"description": "REST API and UI for Janelia Data and "
+                                        "Information Services (DIS)."})
+    _register_openapi_components(spec)
+    for rule in app.url_map.iter_rules():
+        view = app.view_functions.get(rule.endpoint)
+        if view is None or not view.__doc__:
+            continue
+        try:
+            operation = load_yaml_from_docstring(view.__doc__)
+        except Exception:
+            operation = None
+        if not isinstance(operation, dict) or not operation:
+            continue
+        summary, description = _docstring_meta(view.__doc__)
+        if summary:
+            operation.setdefault('summary', summary)
+        if description:
+            operation.setdefault('description', description)
+        methods = [m.lower() for m in sorted(rule.methods or [])
+                   if m.lower() in OPENAPI_METHODS]
+        if not methods:
+            continue
+        path = _flask_path_to_openapi(rule.rule)
+        placeholders = set(re.findall(r"{([^{}]+)}", path))
+        operations = {}
+        for method in methods:
+            op_copy = copy.deepcopy(operation)
+            # Drop path parameters absent from this route's template. A docstring
+            # shared across several @app.route decorators (e.g. /acknowledgements
+            # and /acknowledgements/{which}) would otherwise leave a phantom path
+            # parameter on the parameter-less route, which is invalid in OpenAPI 3.
+            # Reconcile the operation's path parameters with this route's template.
+            # Shared docstrings (multiple @app.route decorators on one view) otherwise
+            # leave phantom path params on parameter-less routes, or omit a param a
+            # longer route needs - both invalid in OpenAPI 3. Drop the phantoms and
+            # synthesize any placeholder the docstring didn't declare.
+            raw_params = op_copy.get('parameters')
+            raw_params = raw_params if isinstance(raw_params, list) else []
+            kept = []
+            declared_path = set()
+            for prm in raw_params:
+                if isinstance(prm, dict) and prm.get('in') == 'path':
+                    if prm.get('name') not in placeholders:
+                        continue
+                    declared_path.add(prm.get('name'))
+                _normalize_param_schema(prm)
+                kept.append(prm)
+            for placeholder in sorted(placeholders - declared_path):
+                kept.append({"name": placeholder, "in": "path", "required": True,
+                             "schema": {"type": "string"}})
+            if kept or 'parameters' in op_copy:
+                op_copy['parameters'] = kept
+            operations[method] = op_copy
+        try:
+            spec.path(path=path, operations=operations)
+        except Exception:
+            continue
+    return spec.to_dict()
+
+
 @app.route('/doc')
 def get_doc_json():
-    ''' Show documentation
+    ''' Return the OpenAPI 3.1 specification (JSON) for the API.
     '''
     try:
-        swag = swagger(app)
+        spec = build_openapi_spec()
     except Exception as err:
-        return inspect_error(err, 'Could not parse swag')
-    swag['info']['version'] = __version__
-    swag['info']['title'] = "Data and Information Services"
-    return jsonify(swag)
+        return inspect_error(err, 'Could not build OpenAPI spec')
+    return jsonify(spec)
 
 
 @app.route('/help')
@@ -3682,20 +3879,41 @@ def show_organizations(grp):
 def show_acknowledgements(which="journal"):
     '''
     Return acknowledgements
-    Return acknowledgements (jrc_acknowledgements) from the dois and external_dois collections
+    Return stored acknowledgement text (jrc_acknowledgements) for journal articles,
+    merged across the dois (internal) and external_dois collections and sorted by
+    publishing date, newest first. Pass "all" to include every DOI type. An optional
+    Bearer token (a configured API key) sets rest.authorized in the response.
     ---
     tags:
       - Acknowledgements
     parameters:
       - in: path
         name: which
+        required: true
         schema:
           type: string
-        required: true
-        description: Which acknowledgements to return (journal, all)
+          enum: [journal, all]
+          default: journal
+        description: Subset to return - "journal" (journal articles only, default) or "all"
     responses:
-      200:
-        description: Acknowledgements data
+      '200':
+        description: Acknowledgements, newest first
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AcknowledgementList'
+      '404':
+        description: No acknowledgements found
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
+      '500':
+        description: Error querying the database
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     result = initialize_result()
     data = []
