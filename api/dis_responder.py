@@ -51,7 +51,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.21.4"
+__version__ = "120.21.5"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -15831,14 +15831,11 @@ def stats_database():
     db_index = dbstat.get('indexSize', 0)
     db_ratio = f"{db_data / db_storage:.2f}x" if db_storage else "N/A"
     frag_used = min(total_free_storage, db_storage)
-    summary_html = (
-        f"<p style='margin-bottom:1rem'>"
-        f"<strong>{dbstat.get('collections', 0)}</strong> collections &nbsp;|&nbsp; "
-        f"<strong>{dbstat.get('objects', 0):,}</strong> documents &nbsp;|&nbsp; "
-        f"<strong>{humansize(db_data, space='mem')}</strong> uncompressed &nbsp;|&nbsp; "
-        f"<strong>{humansize(db_storage, space='mem')}</strong> on-disk"
-        f"</p>"
-    )
+    summary_html = stat_cards([
+        ("Collections", f"{dbstat.get('collections', 0):,}"),
+        ("Documents", f"{dbstat.get('objects', 0):,}"),
+        ("Uncompressed", humansize(db_data, space='mem')),
+        ("On-disk", humansize(db_storage, space='mem'))])
     charts_html = (
         "<div style='display:flex;gap:2rem;align-items:flex-start;margin-bottom:1.5rem'>"
         + DP.donut_chart(dbstat.get('fsUsedSize', 0), dbstat.get('fsTotalSize', 0),
