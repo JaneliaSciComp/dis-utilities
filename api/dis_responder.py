@@ -48,7 +48,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.18.5"
+__version__ = "120.18.6"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -1665,7 +1665,7 @@ def highlight_subtext(text, subtext, is_regex=False):
     return re.sub(pattern, replace, text, flags=re.IGNORECASE)
 
 
-def standard_ack_table(rows, ack, is_regex=False, show_count=True):
+def standard_ack_table(rows, ack, is_regex=False, show_count=True, match_key=None):
     ''' Create a standard table of DOIs/acknowledgements
         Keyword arguments:
           rows: rows from dois collection
@@ -1674,6 +1674,10 @@ def standard_ack_table(rows, ack, is_regex=False, show_count=True):
                       the count themselves (e.g. via ack_stat_cards). That caller's
                       count element must carry id='totalrows' so the version/internal
                       -external filters still have something to update.
+          match_key: when set (a search_regex key), rows whose jrc_acknowledge carries a
+                     tag of that name get a 'haskeytag' class, and a "Show only untagged"
+                     button (which hides 'haskeytag') is added - surfacing DOIs that
+                     matched the key's regex but have no corresponding tag.
         Returns:
           html: HTML
           cnt: number of DOIs
@@ -1697,7 +1701,7 @@ def standard_ack_table(rows, ack, is_regex=False, show_count=True):
            + f"{initial_hide}data-counter='totalrows'><thead><tr>" \
            + ''.join([f"<th>{itm}</th>" for itm in header]) + "</tr></thead><tbody>"
     fileoutput = ""
-    cnt = oacnt = 0
+    cnt = oacnt = untagged_count = 0
     tag_counts = collections.Counter()
     # Tag name -> CSS class, assigned in first-seen order. An index rather than
     # a slugified name, so two names that only differ in punctuation/spacing/
@@ -1742,6 +1746,13 @@ def standard_ack_table(rows, ack, is_regex=False, show_count=True):
             cls.append('ver')
         # tagidx-N classes let the chip bar below filter rows client-side by tag
         cls.extend(tag_class[name] for name in tag_names)
+        # match_key "untagged" filter: flag rows that carry the key's tag; count those
+        # that matched the regex but don't (see the Show only untagged button below).
+        if match_key is not None:
+            if match_key in tag_names:
+                cls.append('haskeytag')
+            else:
+                untagged_count += 1
         html += f"<tr class=\'{' '.join(cls)}\'><td>" \
             + dloop(row, ['published', 'link', 'jrc_ack2', 'jrc_ack_tags'], "</td><td>") \
             + "</td></tr>"
@@ -1800,7 +1811,22 @@ def standard_ack_table(rows, ack, is_regex=False, show_count=True):
     cbutton = "<button id='verbtn' class=\"btn btn-outline-warning\" " \
               + "onclick=\"toggler('dois', 'ver', 'totalrows');\">" \
               + "Filter versioned DOIs</button>&nbsp;"
-    html = counter + cyclebtn + typebtn + cbutton \
+    # "Matched the key's regex but has no corresponding tag" filter - shown only for a
+    # match_key caller and only when some rows actually lack the tag. Hides 'haskeytag'
+    # rows (composing with the other filters), leaving the untagged matches to review.
+    untagbtn = ""
+    if match_key is not None:
+        if untagged_count:
+            untagbtn = ("<button class=\"btn btn-outline-secondary\" "
+                        "onclick=\"toggleClass('dois', 'haskeytag', this, 'Show all matches', "
+                        "'Show only untagged', 'totalrows');\">"
+                        f"Show only untagged ({untagged_count:,})</button>&nbsp;")
+        else:
+            # Every match already carries the tag - show the state (grey text, like the
+            # type-cycle "Showing X only" label) rather than hide the control entirely,
+            # so the filter is always discoverable and "0 untagged" is explicit.
+            untagbtn = "<span style='color: gray'>No untagged matches</span>&nbsp;"
+    html = counter + cyclebtn + typebtn + cbutton + untagbtn \
            + create_downloadable('standard', header, fileoutput) + chipbar + tagkey + html
     return html, cnt, oacnt
 
@@ -14876,7 +14902,8 @@ def show_doi_by_ack_regex_ui(group):
     union.sort(key=lambda x: x.get("jrc_publishing_date", ""), reverse=True)
     # show_count=False: the count is shown in the card below (with id 'totalrows',
     # which the version/internal-external filters update)
-    html, cnt, _ = standard_ack_table(union, regex, is_regex=True, show_count=False)
+    html, cnt, _ = standard_ack_table(union, regex, is_regex=True, show_count=False,
+                                      match_key=group)
     if not cnt:
         return render_template('warning.html', urlroot=request.url_root,
                                title=render_warning("Could not find DOIs", 'warning'),
