@@ -51,7 +51,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.21.2"
+__version__ = "120.21.3"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -16234,7 +16234,7 @@ def _affiliation_pills(affiliations):
              "border-radius: 10px; padding: 1px 9px; margin: 0 4px 3px 0; "
              "font-size: 0.82em; white-space: nowrap; text-decoration: none;")
     return ''.join(f"<a href='/tag/{quote(a, safe='')}' style='{style}'>{escape(a)}</a>"
-                   for a in (affiliations or []))
+                   for a in sorted(affiliations or [], key=str.lower))
 
 
 @app.route('/labs')
