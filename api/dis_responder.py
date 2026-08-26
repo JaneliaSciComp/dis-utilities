@@ -51,7 +51,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.21.0"
+__version__ = "120.21.1"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -16232,8 +16232,9 @@ def _affiliation_pills(affiliations):
         affiliations = [affiliations] if affiliations else []
     style = ("display: inline-block; background: #e9f3f3; color: #2e8b8c; "
              "border-radius: 10px; padding: 1px 9px; margin: 0 4px 3px 0; "
-             "font-size: 0.82em; white-space: nowrap;")
-    return ''.join(f"<span style='{style}'>{escape(a)}</span>" for a in (affiliations or []))
+             "font-size: 0.82em; white-space: nowrap; text-decoration: none;")
+    return ''.join(f"<a href='/tag/{quote(a, safe='')}' style='{style}'>{escape(a)}</a>"
+                   for a in (affiliations or []))
 
 
 @app.route('/labs')
@@ -16316,10 +16317,14 @@ def show_labs():
         except Exception:
             grow = None
         glink = f"<a href='/tag/{row['group']}'>{row['group']}</a>" if grow else row['group']
+        if row.get('orcid'):
+            oid = row['orcid'].replace('https://orcid.org/', '')
+            orcid_cell = cell(safe(f"<a href='https://orcid.org/my-orcid?orcid={escape(oid)}' "
+                                   f"target='_blank'>{escape(oid)}</a>"), style='width: 180px')
+        else:
+            orcid_cell = cell('', style='width: 180px')
         doi = tagcnt.get(row['group'], 0)
-        trows.append([safe(name),
-                      cell(row['orcid'] if 'orcid' in row else '', style='width: 180px'),
-                      safe(glink),
+        trows.append([safe(name), orcid_cell, safe(glink),
                       safe(_affiliation_pills(row.get('affiliations'))),
                       f"{doi:,}"])
         row_classes.append('former' if is_former else '')
@@ -16338,7 +16343,7 @@ def show_labs():
                 "placeholder='Filter labs…' "
                 "oninput=\"filterByText('labs', this, 'labscount')\">")
     if former_count:
-        controls += ("<button class='btn btn-outline-secondary' "
+        controls += ("<button class='btn btn-info' "
                      "onclick=\"toggleClass('labs', 'former', this, "
                      f"'Show former labs ({former_count:,})', "
                      f"'Hide former labs ({former_count:,})', 'labscount')\">"
