@@ -51,7 +51,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.21.3"
+__version__ = "120.21.4"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -16299,6 +16299,7 @@ def show_labs():
     for row in labs:
         group_names.append(row['group'])
         name = ' '.join([row['given'][0], row['family'][0]])
+        surname_key = f"{row['family'][0]} {row['given'][0]}"
         if row.get('userIdO365'):
             name = f"<a href='/userui/{row['userIdO365']}'>{name}</a>"
         elif row.get('orcid'):
@@ -16324,7 +16325,7 @@ def show_labs():
         else:
             orcid_cell = cell('', style='width: 180px')
         doi = tagcnt.get(row['group'], 0)
-        trows.append([safe(name), orcid_cell, safe(glink),
+        trows.append([cell(safe(name), sort=surname_key), orcid_cell, safe(glink),
                       safe(_affiliation_pills(row.get('affiliations'))),
                       f"{doi:,}"])
         row_classes.append('former' if is_former else '')
@@ -16352,7 +16353,7 @@ def show_labs():
                  f"<span id='labscount'>{len(labs):,}</span> labs</span></div>")
     table = render_table(['Name', 'ORCID', 'Group', 'Affiliations', 'DOIs'], trows,
                          table_id='labs', css='tablesorter numberlast-scroll',
-                         row_classes=row_classes, data_attrs={"sortlist": "[[4,1]]"})
+                         row_classes=row_classes, data_attrs={"sortlist": "[[0,0]]"})
     endpoint_access()
     return render_template('general.html', urlroot=request.url_root,
                            title=f"Labs ({len(labs):,})",
