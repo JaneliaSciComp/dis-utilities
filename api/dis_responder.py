@@ -12067,15 +12067,26 @@ def show_subscription_costs(provider=None):
         payload.insert(0, {"$match": {"provider": provider}})
         providers = []
     else:
+        # Per (provider, year): summed cost and the count of subscriptions active that
+        # year (any type - journal, database, repository, etc.), so the Providers table
+        # can show current-year subscriptions + cost next to the all-time total (a flat
+        # count would include subscriptions dropped years ago).
         pipeline = [{"$match": {"cost": {"$exists": True}}},
-                    {"$group": {"_id": None, "providers": {"$addToSet": "$provider"}}}]
+                    {"$project": {"provider": 1, "years": {"$objectToArray": "$cost"}}},
+                    {"$unwind": "$years"},
+                    {"$group": {"_id": {"provider": "$provider", "year": "$years.k"},
+                                "cost": {"$sum": {"$toDouble": "$years.v"}},
+                                "titles": {"$sum": 1}}}]
         try:
-            rows = DB['dis'].subscription.aggregate(pipeline)
+            provrows = list(DB['dis'].subscription.aggregate(pipeline))
         except Exception as err:
             return render_template('error.html', urlroot=request.url_root,
                                    title=render_warning(errmsg),
                                    message=error_message(err))
-        providers = sorted(list(rows)[0]['providers'], key=str.lower)
+        prov_year = collections.defaultdict(dict)
+        for row in provrows:
+            prov_year[row['_id']['provider']][row['_id']['year']] = row
+        providers = sorted(prov_year, key=str.lower)
     try:
         rows = DB['dis'].subscription.aggregate(payload)
     except Exception as err:
@@ -12124,9 +12135,28 @@ def show_subscription_costs(provider=None):
                                 table_id='costs', css='tablesorter numbers-scroll',
                                 footer=footer)
     if not provider:
+        curyear = data['Year'][-1]   # latest year present in the cost data
+        prows = []
+        tot_titles = tot_curcost = tot_all = 0
+        for pp in providers:
+            years = prov_year[pp]
+            all_cost = sum(val['cost'] for val in years.values())
+            cur = years.get(curyear, {})
+            ctitles, ccost = cur.get('titles', 0), cur.get('cost', 0)
+            tot_titles += ctitles
+            tot_curcost += ccost
+            tot_all += all_cost
+            prows.append([
+                safe(f"<a href='/subscription/cost/{quote(pp, safe='')}'>{escape(pp)}</a>"),
+                cell(f"{ctitles:,}", sort=ctitles),
+                cell(f"${ccost:,.2f}", sort=ccost),
+                cell(f"${all_cost:,.2f}", sort=all_cost)])
+        pfooter = [fcell('Total', align='right'), fcell(f"{tot_titles:,}"),
+                   fcell(f"${tot_curcost:,.2f}"), fcell(f"${tot_all:,.2f}")]
         html += "<br><br><h3>Providers</h3>"
-        html += '<br>'.join([f"<a href='/subscription/cost/{pp}'>{pp}</a>" \
-                for pp in providers])
+        html += render_table(['Provider', f'Subscriptions ({curyear})', f'{curyear} cost',
+                              'Total cost'], prows, table_id='providers',
+                             css='tablesorter numbers-scroll', footer=pfooter)
     # Bar/line chart; tap a year bar -> that year's costs (mirrors the year cell)
     ynav = {str(yr): f"/subscription/year/{yr}" for yr in data['Year']}
     chartscript, chartdiv = DP.dual_axis_chart(data, title=title,
