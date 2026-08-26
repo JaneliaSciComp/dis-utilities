@@ -50,17 +50,23 @@ function hiddenClasses(tid) {
 // above) to stay visible - see filterByTag().
 const requiredTag = {};
 
+// Shared free-text filter state: table id -> lowercased query string. A row must
+// also contain this substring in its text to stay visible - see filterByText().
+const textFilters = {};
+
 // Recompute row visibility in table tid from its hide set, then refresh the
 // visible-row counter (span id counter, if given) and any per-class counters
 // the page provides as elements with data-filter-count="<row class>".
 function applyRowFilters(tid, counter) {
   const hidden = hiddenClasses(tid);
   const required = requiredTag[tid];
+  const query = textFilters[tid];
   const classCounts = {};
   let visible = 0;
   $('#' + tid + ' > tbody > tr').each(function () {
     const classes = (this.className || '').split(/\s+/).filter(Boolean);
-    const show = !classes.some(cls => hidden.has(cls)) &&
+    const matchesText = !query || (this.textContent || '').toLowerCase().indexOf(query) !== -1;
+    const show = matchesText && !classes.some(cls => hidden.has(cls)) &&
                  (!required || classes.includes(required));
     $(this).toggle(show);
     if (show) {
@@ -75,6 +81,13 @@ function applyRowFilters(tid, counter) {
     const cls = $(this).attr('data-filter-count');
     $(this).text((classCounts[cls] || 0).toLocaleString());
   });
+}
+
+// Free-text row filter: keep only rows whose text contains the input's value.
+// Composes with the class/tag/toggle filters via applyRowFilters().
+function filterByText(tid, input, counter) {
+  textFilters[tid] = (input.value || '').trim().toLowerCase();
+  applyRowFilters(tid, counter);
 }
 
 // Filter a class-tagged table: hide/show body rows of class `cls` in table
