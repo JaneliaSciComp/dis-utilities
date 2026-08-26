@@ -50,7 +50,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.19.0"
+__version__ = "120.19.1"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -2618,6 +2618,75 @@ def _register_openapi_components(spec):
             "acknowledgements": {
                 "type": "array",
                 "items": {"$ref": "#/components/schemas/Acknowledgement"}}}})
+    # --- ORCID group ---
+    spec.components.schema("OrcidProfile", {
+        "type": "object",
+        "additionalProperties": True,
+        "description": "A public ORCID profile as returned by the ORCID API. For an "
+                       "unknown iD this instead carries ORCID's error payload (an "
+                       "'error-code' field), still with a 200 status."})
+    spec.components.schema("DoiDate", {
+        "type": "object",
+        "properties": {
+            "doi": {"type": "string"},
+            "jrc_publishing_date": {"type": "string",
+                                    "description": "Publishing date (YYYY-MM-DD)"}}})
+    spec.components.schema("AffiliationSummary", {
+        "type": "object",
+        "description": "Per-affiliation author counts and supervisory-org status.",
+        "properties": {
+            "affiliation": {"type": "string"},
+            "authors": {"type": "integer", "description": "Authors with this affiliation"},
+            "authors_with_orcid": {"type": "integer"},
+            "orcid_percent": {"type": "number",
+                              "description": "Percent of authors that have an ORCID iD"},
+            "suporg": {"type": "string",
+                       "enum": ["active", "inactive", "no code", "none"],
+                       "description": "Supervisory-org status of the affiliation"}}})
+    spec.components.schema("OrcidPerson", {
+        "type": "object",
+        "description": "An ORCID collection record (person). _id and employeeId are "
+                       "omitted from responses.",
+        "properties": {
+            "orcid": {"type": "string"},
+            "given": {"type": "array", "items": {"type": "string"},
+                      "description": "Given-name variants"},
+            "family": {"type": "array", "items": {"type": "string"},
+                       "description": "Family-name variants"},
+            "affiliations": {"type": "array", "items": {"type": "string"}},
+            "current_affiliations": {"type": "array", "items": {"type": "string"}},
+            "previous_affiliations": {"type": "array", "items": {"type": "string"}},
+            "department": {"type": "string"},
+            "group": {"type": "string", "description": "Group/lab name"},
+            "alumni": {"type": "boolean"},
+            "userIdO365": {"type": "string"}}})
+    spec.components.schema("OrcidApiResult", {
+        "type": "object",
+        "properties": {
+            "rest": {"$ref": "#/components/schemas/Rest"},
+            "data": {"$ref": "#/components/schemas/OrcidProfile"}}})
+    spec.components.schema("OrcidWorksResult", {
+        "type": "object",
+        "properties": {
+            "rest": {"$ref": "#/components/schemas/Rest"},
+            "janelia_dois": {"type": "array",
+                             "items": {"$ref": "#/components/schemas/DoiDate"}},
+            "last_janelia_doi": {"$ref": "#/components/schemas/DoiDate"},
+            "orcid": {"$ref": "#/components/schemas/OrcidProfile"},
+            "other_dois": {"type": "array", "items": {"type": "string"},
+                           "description": "DOIs found on ORCID not yet in the DIS database"}}})
+    spec.components.schema("AffiliationSummaryList", {
+        "type": "object",
+        "properties": {
+            "rest": {"$ref": "#/components/schemas/Rest"},
+            "data": {"type": "array",
+                     "items": {"$ref": "#/components/schemas/AffiliationSummary"}}}})
+    spec.components.schema("OrcidPersonList", {
+        "type": "object",
+        "properties": {
+            "rest": {"$ref": "#/components/schemas/Rest"},
+            "data": {"type": "array",
+                     "items": {"$ref": "#/components/schemas/OrcidPerson"}}}})
 
 
 def build_openapi_spec():
@@ -3759,20 +3828,33 @@ def show_oid_works(oid):
 def show_oidapi(oid):
     '''
     Show an ORCID ID (using the ORCID API)
-    Return information for an ORCID ID (using the ORCID API)
+    Fetch the public ORCID profile for an ORCID iD directly from the ORCID API. An
+    unknown iD is not an error - ORCID's own error payload is returned in "data" with
+    a 200 status.
     ---
     tags:
       - ORCID
     parameters:
       - in: path
         name: oid
+        required: true
         schema:
           type: string
-        required: true
-        description: ORCID ID
+          example: 0000-0001-8090-2810
+        description: ORCID iD
     responses:
-      200:
-        description: ORCID data
+      '200':
+        description: ORCID profile (or ORCID's error payload for an unknown iD)
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrcidApiResult'
+      '500':
+        description: Error calling the ORCID API
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     result = initialize_result()
     try:
@@ -3789,20 +3871,33 @@ def show_oidapi(oid):
 def show_orcidworks(oid):
     '''
     Return works for an ORCID ID
-    Return works information for an ORCID ID (using the ORCID API)
+    For an ORCID iD, return its Janelia DOIs (with publishing dates), the most recent
+    Janelia DOI, the full ORCID profile, and any works found on ORCID that are not yet
+    in the DIS database.
     ---
     tags:
       - ORCID
     parameters:
       - in: path
         name: oid
+        required: true
         schema:
           type: string
-        required: true
-        description: ORCID ID
+          example: 0000-0001-8090-2810
+        description: ORCID iD
     responses:
-      200:
-        description: ORCID data
+      '200':
+        description: Janelia DOIs, latest Janelia DOI, ORCID profile, and other works
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrcidWorksResult'
+      '500':
+        description: Error querying the database or the ORCID API
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     result = initialize_result()
     try:
@@ -14365,16 +14460,28 @@ def janelia_affiliations():
 def orcid_affiliations():
     '''
     Show ORCID affiliations with author counts
-    Browsers (Accept: text/html) get the HTML page; other clients get the
-    per-affiliation author/ORCID counts and SupOrg status as JSON.
+    Browsers (Accept: text/html) get the HTML page; other clients get one row per
+    affiliation - author count, how many have an ORCID iD, the ORCID percentage, and
+    the supervisory-org status - as JSON.
     ---
     tags:
       - ORCID
     responses:
-      200:
-        description: HTML page (browser) or affiliation summary as JSON
-      500:
+      '200':
+        description: HTML page (browser) or the per-affiliation summary as JSON
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AffiliationSummaryList'
+          text/html:
+            schema:
+              type: string
+      '500':
         description: MongoDB error
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     expected = 'html' if 'Accept' in request.headers \
                          and 'html' in request.headers['Accept'] else 'json'
@@ -14625,29 +14732,43 @@ def show_projects(option=None):
 def orcid_affiliation(aff, year='All'):
     '''
     Show ORCID tag (affiliation or project) information
-    Browsers (Accept: text/html) get the HTML page; other clients get the
-    matching orcid records as JSON (_id and employeeId omitted).
+    Browsers (Accept: text/html) get the HTML page; other clients get the matching
+    ORCID records as JSON (_id and employeeId omitted), split into current/previous
+    affiliations where the People system can resolve them.
     ---
     tags:
       - ORCID
     parameters:
       - in: path
         name: aff
+        required: true
         schema:
           type: string
-        required: true
-        description: Affiliation or project tag name (e.g. Biology)
+          example: Biology
+        description: Affiliation or project tag name
       - in: path
         name: year
+        required: true
         schema:
           type: string
-        required: false
-        description: Publishing year to filter on (defaults to All)
+          example: '2024'
+        description: Publishing year to filter on. Use the /tag/{aff} form (no year) for All.
     responses:
-      200:
-        description: HTML page (browser) or matching orcid records as JSON
-      500:
+      '200':
+        description: HTML page (browser) or matching ORCID records as JSON
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrcidPersonList'
+          text/html:
+            schema:
+              type: string
+      '500':
         description: MongoDB error
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     expected = 'html' if 'Accept' in request.headers \
                          and 'html' in request.headers['Accept'] else 'json'
@@ -15664,15 +15785,27 @@ def preprint_date_errors():
 def show_labs():
     '''
     Show group owners (labs) from ORCID
-    Return records whose ORCIDs have a group
+    Browsers (Accept: text/html) get the HTML table; other clients get the ORCID
+    records that have a group (lab) as JSON (_id and employeeId omitted).
     ---
     tags:
       - ORCID
     responses:
-      200:
-        description: labs
-      500:
+      '200':
+        description: HTML page (browser) or lab-owner ORCID records as JSON
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrcidPersonList'
+          text/html:
+            schema:
+              type: string
+      '500':
         description: MongoDB error
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     result = initialize_result()
     expected = 'html' if 'Accept' in request.headers \
