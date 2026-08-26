@@ -126,7 +126,7 @@ in your ORCID profile easily and still be connected to all your prior works.</li
 </ol>
 <br><br>
 To view the directions on how to obtain your ORCID with a Janelia affiliation please view
-<a href='https://hhmionline.sharepoint.com/SitePages/Janelia/DataInformationServices/ORCID.aspx#how-can-i-create-an-orcid'>this document</a>. 
+<a href='https://hhmionline.sharepoint.com/sites/DataInfo/SitePages/ORCID.aspx#how-can-i-create-an-orcid'>this document</a>. 
 <br><br>
 If you need assistance, please email datainfo@hhmi.org.
 <br><br>
