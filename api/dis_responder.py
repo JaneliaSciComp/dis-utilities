@@ -50,7 +50,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.19.2"
+__version__ = "120.19.3"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -2729,6 +2729,94 @@ def _register_openapi_components(spec):
         "properties": {
             "rest": {"$ref": "#/components/schemas/Rest"},
             "stats": {"$ref": "#/components/schemas/Stats"}}})
+    # --- DOI group ---
+    spec.components.schema("DoiRecord", {
+        "type": "object",
+        "additionalProperties": True,
+        "description": "A DOI record - Crossref/DataCite metadata plus jrc_* enrichment. "
+                       "For a DOI not yet stored, the raw Crossref message or DataCite "
+                       "attributes are returned instead."})
+    spec.components.schema("DoiRecordResult", {
+        "type": "object",
+        "properties": {
+            "rest": {"$ref": "#/components/schemas/Rest"},
+            "data": {"$ref": "#/components/schemas/DoiRecord"}}})
+    spec.components.schema("DoiRecordList", {
+        "type": "object",
+        "properties": {
+            "rest": {"$ref": "#/components/schemas/Rest"},
+            "data": {"type": "array",
+                     "items": {"$ref": "#/components/schemas/DoiRecord"}}}})
+    spec.components.schema("CitationResult", {
+        "type": "object",
+        "properties": {
+            "rest": {"$ref": "#/components/schemas/Rest"},
+            "data": {"type": "string", "description": "The formatted citation"},
+            "jrc_preprint": {"description": "Preprint linkage, if present on the record"}}})
+    spec.components.schema("CitationMap", {
+        "type": "object",
+        "properties": {
+            "rest": {"$ref": "#/components/schemas/Rest"},
+            "data": {"type": "object",
+                     "additionalProperties": {"type": "string"},
+                     "description": "Map of DOI to citation string ('' if the DOI was not found)"}}})
+    spec.components.schema("CitationComponents", {
+        "type": "object",
+        "description": "The parts of a DIS-style citation.",
+        "properties": {
+            "authors": {"type": "array", "items": {"type": "string"}},
+            "journal": {"type": "string"},
+            "publishing_date": {"type": "string"},
+            "title": {"type": "string"},
+            "abstract": {"type": "string",
+                         "description": "Present only for Crossref-sourced records"}}})
+    spec.components.schema("ComponentsResult", {
+        "type": "object",
+        "properties": {
+            "rest": {"$ref": "#/components/schemas/Rest"},
+            "data": {"$ref": "#/components/schemas/CitationComponents"}}})
+    spec.components.schema("ComponentsListResult", {
+        "type": "object",
+        "properties": {
+            "rest": {"$ref": "#/components/schemas/Rest"},
+            "data": {"type": "array",
+                     "items": {"allOf": [
+                         {"$ref": "#/components/schemas/CitationComponents"},
+                         {"type": "object",
+                          "properties": {"doi": {"type": "string"}}}]}}}})
+    spec.components.schema("TypesResult", {
+        "type": "object",
+        "properties": {
+            "rest": {"$ref": "#/components/schemas/Rest"},
+            "data": {"type": "object",
+                     "additionalProperties": {
+                         "type": "object",
+                         "properties": {
+                             "count": {"type": "integer"},
+                             "subtype": {"type": ["string", "null"]}}},
+                     "description": "Map of work type to its count and subtype"}}})
+    spec.components.schema("DoiTag", {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "code": {"type": ["string", "null"]},
+            "type": {"type": ["string", "null"]}}})
+    spec.components.schema("DoiAuthorsResult", {
+        "type": "object",
+        "properties": {
+            "rest": {"$ref": "#/components/schemas/Rest"},
+            "data": {"type": "array",
+                     "items": {"type": "object", "additionalProperties": True},
+                     "description": "Author detail objects; employeeId omitted unless authorized"},
+            "tags": {"type": "array",
+                     "items": {"$ref": "#/components/schemas/DoiTag"},
+                     "description": "Distinct Janelia tags across the authors, if any"}}})
+    spec.components.schema("JrcAuthorResult", {
+        "type": "object",
+        "properties": {
+            "rest": {"$ref": "#/components/schemas/Rest"},
+            "data": {"type": "array", "items": {"type": "string"},
+                     "description": "Employee IDs written to jrc_author"}}})
 
 
 def build_openapi_spec():
@@ -2862,28 +2950,38 @@ def stats():
 def get_incoming_citations(source, doi):
     '''
     Download a DOI's incoming citations
-    Download a file containing a DOI's incoming citations.
+    Download a CSV file of the incoming citations (citing works) for a DOI. Use
+    source "pubmed" to resolve via the DOI's jrc_pmid.
     ---
     tags:
       - DOI
     parameters:
       - in: path
         name: source
+        required: true
         schema:
           type: string
-        required: true
-        description: Source
+        description: Citation source (e.g. crossref, pubmed)
       - in: path
         name: doi
-        schema:
-          type: path
         required: true
+        schema:
+          type: string
         description: DOI
     responses:
-      200:
-        description: DOI data
-      500:
-        description: MongoDB error
+      '200':
+        description: CSV file of incoming citations (attachment)
+        content:
+          text/csv:
+            schema:
+              type: string
+              format: binary
+      '500':
+        description: Error building the citation file
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     doi = doi.lstrip('/').rstrip('/').lower()
     cinput = doi
@@ -2906,24 +3004,31 @@ def get_incoming_citations(source, doi):
 def get_doi_authors(doi):
     '''
     Return a DOI's authors
-    Return information on authors for a given DOI.
+    Return author details for a DOI. employeeId is included only for authorized
+    requests (a valid Bearer token). Any distinct Janelia tags are also returned.
     ---
-    tags:
-      - DOI
     tags:
       - DOI
     parameters:
       - in: path
         name: doi
-        schema:
-          type: path
         required: true
+        schema:
+          type: string
         description: DOI
     responses:
-      200:
-        description: DOI data
-      500:
+      '200':
+        description: Author details (and any Janelia tags)
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DoiAuthorsResult'
+      '500':
         description: MongoDB error
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     doi = doi.lstrip('/').rstrip('/').lower()
     result = initialize_result()
@@ -3160,23 +3265,31 @@ def get_published_dois(start, end):
 def get_doi_api(doi):
     '''
     Return a DOI
-    Return Crossref or DataCite information for a given DOI.
-    If it's not in the dois collection, it will be retrieved from Crossref or Datacite.
+    Return the stored record for a DOI. If it is not in the dois collection it is
+    fetched live from Crossref or DataCite (rest.source indicates which).
     ---
     tags:
       - DOI
     parameters:
       - in: path
         name: doi
-        schema:
-          type: path
         required: true
+        schema:
+          type: string
         description: DOI
     responses:
-      200:
-        description: DOI data
-      500:
-        description: MongoDB error
+      '200':
+        description: The DOI record (rest.source = mongo, crossref, or datacite)
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DoiRecordResult'
+      '500':
+        description: MongoDB or upstream fetch error
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     doi = doi.lstrip('/').rstrip('/').lower()
     result = initialize_result()
@@ -3202,24 +3315,38 @@ def get_doi_api(doi):
 def get_inserted(idate):
     '''
     Return DOIs inserted since a specified date
-    Return all DOIs that have been inserted since midnight on a specified date.
+    Return every DOI record inserted since midnight on the given date.
     ---
     tags:
       - DOI
     parameters:
       - in: path
         name: idate
+        required: true
         schema:
           type: string
-        required: true
-        description: Earliest insertion date in ISO format (YYYY-MM-DD)
+          format: date
+          example: '2026-01-01'
+        description: Earliest insertion date, ISO format (YYYY-MM-DD)
     responses:
-      200:
-        description: DOI data
-      400:
-        description: bad input data
-      500:
+      '200':
+        description: DOI records inserted on or after the date
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DoiRecordList'
+      '400':
+        description: Invalid date
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
+      '500':
         description: MongoDB error
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     result = initialize_result()
     try:
@@ -3244,24 +3371,37 @@ def get_inserted(idate):
 def get_citation(doi):
     '''
     Return a DIS-style citation
-    Return a DIS-style citation for a given DOI.
+    Return a DIS-style citation string for a DOI. Available at /citation/{doi} and the
+    equivalent /citation/dis/{doi}.
     ---
     tags:
       - DOI
     parameters:
       - in: path
         name: doi
-        schema:
-          type: path
         required: true
+        schema:
+          type: string
         description: DOI
     responses:
-      200:
-        description: DOI data
-      404:
+      '200':
+        description: The citation string
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CitationResult'
+      '404':
         description: DOI not found
-      500:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
+      '500':
         description: MongoDB or formatting error
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     doi = doi.lstrip('/').rstrip('/').lower()
     result = initialize_result()
@@ -3286,28 +3426,51 @@ def get_citation(doi):
 def show_multiple_citations(ctype='dis'):
     '''
     Return citations
-    Return a dictionary of citations for a list of given DOIs.
+    Return a map of DOI to citation string for a list of DOIs. The path segment sets
+    the style (dis, flylight, or full); /citations defaults to dis.
     ---
     tags:
       - DOI
     parameters:
       - in: path
         name: ctype
+        required: true
         schema:
           type: string
-        required: false
-        description: Citation type (dis, flylight, or full)
-      - in: query
-        name: dois
-        schema:
-          type: list
-        required: true
-        description: List of DOIs
+          enum: [dis, flylight, full]
+        description: Citation style (only on /citations/{ctype}; /citations uses dis)
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [dois]
+            properties:
+              dois:
+                type: array
+                items:
+                  type: string
+                description: DOIs to cite
     responses:
-      200:
-        description: DOI data
-      500:
+      '200':
+        description: Map of DOI to citation string
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CitationMap'
+      '400':
+        description: No DOI list supplied
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
+      '500':
         description: MongoDB or formatting error
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     result = initialize_result()
     ipd = receive_payload()
@@ -3339,24 +3502,36 @@ def show_multiple_citations(ctype='dis'):
 def show_flylight_citation(doi):
     '''
     Return a FlyLight-style citation
-    Return a FlyLight-style citation for a given DOI.
+    Return a FlyLight-style citation string for a DOI.
     ---
     tags:
       - DOI
     parameters:
       - in: path
         name: doi
-        schema:
-          type: path
         required: true
+        schema:
+          type: string
         description: DOI
     responses:
-      200:
-        description: DOI data
-      404:
+      '200':
+        description: The citation string
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CitationResult'
+      '404':
         description: DOI not found
-      500:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
+      '500':
         description: MongoDB or formatting error
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     doi = doi.lstrip('/').rstrip('/').lower()
     result = initialize_result()
@@ -3381,24 +3556,36 @@ def show_flylight_citation(doi):
 def show_full_citation(doi):
     '''
     Return a full citation
-    Return a full citation (DIS+journal) for a given DOI.
+    Return a full citation string (DIS style plus journal) for a DOI.
     ---
     tags:
       - DOI
     parameters:
       - in: path
         name: doi
-        schema:
-          type: path
         required: true
+        schema:
+          type: string
         description: DOI
     responses:
-      200:
-        description: DOI data
-      404:
+      '200':
+        description: The citation string
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CitationResult'
+      '404':
         description: DOI not found
-      500:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
+      '500':
         description: MongoDB or formatting error
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     doi = doi.lstrip('/').rstrip('/').lower()
     result = initialize_result()
@@ -3423,24 +3610,37 @@ def show_full_citation(doi):
 def show_components(doi):
     '''
     Return components of a DIS-style citation
-    Return components of a DIS-style citation for a given DOI.
+    Return the parts of a DIS-style citation (authors, title, journal, date, and -
+    for Crossref-sourced records - abstract) for a DOI.
     ---
     tags:
       - DOI
     parameters:
       - in: path
         name: doi
-        schema:
-          type: path
         required: true
+        schema:
+          type: string
         description: DOI
     responses:
-      200:
-        description: DOI data
-      404:
+      '200':
+        description: Citation components
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ComponentsResult'
+      '404':
         description: DOI not found
-      500:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
+      '500':
         description: MongoDB or formatting error
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     doi = doi.lstrip('/').rstrip('/').lower()
     result = initialize_result()
@@ -3466,22 +3666,41 @@ def show_components(doi):
 def show_dois_custom():
     '''
     Return DOIs for a given find query
-    Return a list of DOI records for a given query.
+    Return the DOI records matching a raw MongoDB find filter.
     ---
     tags:
       - DOI
-    parameters:
-      - in: query
-        name: query
-        schema:
-          type: string
-        required: true
-        description: MongoDB query
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [query]
+            properties:
+              query:
+                type: object
+                additionalProperties: true
+                description: A MongoDB find filter document
     responses:
-      200:
-        description: DOI data
-      500:
+      '200':
+        description: Matching DOI records (filter echoed in rest.query)
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DoiRecordList'
+      '400':
+        description: No query supplied
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
+      '500':
         description: MongoDB or formatting error
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     result = initialize_result()
     ipd = receive_payload()
@@ -3508,28 +3727,49 @@ def show_dois_custom():
 def show_multiple_components(ctype='dis'):
     '''
     Return DOI components for a given tag
-    Return a list of citation components for a given tag.
+    Return citation components for every DOI carrying a given jrc_tag. The path segment
+    sets the style (dis or flylight); /components defaults to dis.
     ---
     tags:
       - DOI
     parameters:
       - in: path
         name: ctype
-        schema:
-          type: string
-        required: false
-        description: Citation type (dis or flylight)
-      - in: query
-        name: tag
-        schema:
-          type: string
         required: true
-        description: Group tag
+        schema:
+          type: string
+          enum: [dis, flylight]
+        description: Citation style (only on /components/{ctype}; /components uses dis)
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [tag]
+            properties:
+              tag:
+                type: string
+                description: Group tag (matched against jrc_tag.name)
     responses:
-      200:
-        description: Component data
-      500:
+      '200':
+        description: Citation components per matching DOI
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ComponentsListResult'
+      '400':
+        description: No tag supplied
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
+      '500':
         description: MongoDB or formatting error
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     result = initialize_result()
     ipd = receive_payload()
@@ -3561,15 +3801,23 @@ def show_multiple_components(ctype='dis'):
 def show_types():
     '''
     Show data types
-    Return DOI data types, subtypes, and counts
+    Return the DOI work types (and DataCite), each with its subtype and count.
     ---
     tags:
       - DOI
     responses:
-      200:
-        description: types
-      500:
+      '200':
+        description: Map of work type to its count and subtype
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TypesResult'
+      '500':
         description: MongoDB error
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     result = initialize_result()
     payload = [{"$group": {"_id": {"type": "$type", "subtype": "$subtype"},"count": {"$sum": 1}}}]
@@ -3595,22 +3843,37 @@ def show_types():
 def set_jrc_author(doi):
     '''
     Update Janelia authors for a given DOI
-    Update Janelia authors (as employee IDs) in "jrc_author" for a given DOI.
+    Recompute the Janelia authors (their employee IDs) from the stored record and
+    write them to jrc_author. Returns the employee IDs written. Takes no request body.
     ---
     tags:
       - DOI
     parameters:
       - in: path
         name: doi
-        schema:
-          type: path
         required: true
+        schema:
+          type: string
         description: DOI
     responses:
-      200:
-        description: Success
-      500:
+      '200':
+        description: Employee IDs written to jrc_author (rest.rows_updated if modified)
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JrcAuthorResult'
+      '400':
+        description: DOI not found
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
+      '500':
         description: MongoDB or formatting error
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
     '''
     doi = doi.lstrip('/').rstrip('/').lower()
     result = initialize_result()
@@ -7028,29 +7291,40 @@ def show_insert(idate, source='Crossref'):
 @app.route('/doiui/custom', methods=['OPTIONS', 'POST'])
 def show_doiui_custom(year='All'):
     '''
-    Return DOIs for a given find query
-    Return a list of DOI records for a given query.
+    Show a custom DOI query (UI)
+    UI endpoint: render the DOI records matching field/value (or a raw query) as an
+    HTML page. Optionally scope to a publishing year via the /doiui/custom/{year} form.
     ---
     tags:
       - DOI
     parameters:
-      - in: query
-        name: field
+      - in: path
+        name: year
+        required: true
         schema:
           type: string
-        required: true
-        description: MongoDB field
-      - in: query
-        name: value
-        schema:
-          type: string
-        required: true
-        description: field value
+        description: Publishing year to scope to (only on /doiui/custom/{year})
+    requestBody:
+      required: true
+      content:
+        application/x-www-form-urlencoded:
+          schema:
+            type: object
+            required: [field, value]
+            properties:
+              field:
+                type: string
+                description: DOI field to match
+              value:
+                type: string
+                description: Value to match (or the sentinels !EXISTS! / !NOTEXISTS!)
     responses:
-      200:
-        description: DOI data
-      500:
-        description: MongoDB or formatting error
+      '200':
+        description: HTML page of matching DOIs (or an HTML error/empty-result page)
+        content:
+          text/html:
+            schema:
+              type: string
     '''
     ipd = receive_payload()
     if request.form:
