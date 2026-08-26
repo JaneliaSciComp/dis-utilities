@@ -50,7 +50,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.19.3"
+__version__ = "120.19.4"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -3480,7 +3480,7 @@ def show_multiple_citations(ctype='dis'):
     result['data'] = {}
     for doi in ipd['dois']:
         try:
-            row = DB['dis'].dois.find_one({"doi": doi.tolower()}, {'_id': 0})
+            row = DB['dis'].dois.find_one({"doi": doi.lower()}, {'_id': 0})
         except Exception as err:
             raise InvalidUsage(str(err), 500) from err
         if not row:

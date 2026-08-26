@@ -4,8 +4,8 @@
   <meta charset="UTF-8">
   <title>DIS Responder API</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <!-- Swagger UI 5.x renders OpenAPI 3.0/3.1 (served by /doc). -->
-  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
+  <!-- Swagger UI 5.32.14 (vendored under static/swagger-ui5/) renders the OpenAPI 3.1 spec served by /doc. -->
+  <link rel="stylesheet" href="{{ url_for('static', filename='swagger-ui5/swagger-ui.css') }}">
   <style>
     html { box-sizing: border-box; }
     *, *:before, *:after { box-sizing: inherit; }
@@ -14,8 +14,8 @@
 </head>
 <body>
   <div id="swagger-ui"></div>
-  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js" charset="UTF-8"></script>
-  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-standalone-preset.js" charset="UTF-8"></script>
+  <script src="{{ url_for('static', filename='swagger-ui5/swagger-ui-bundle.js') }}" charset="UTF-8"></script>
+  <script src="{{ url_for('static', filename='swagger-ui5/swagger-ui-standalone-preset.js') }}" charset="UTF-8"></script>
   <script>
     window.onload = function () {
       window.ui = SwaggerUIBundle({
