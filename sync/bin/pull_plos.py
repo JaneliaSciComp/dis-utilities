@@ -33,7 +33,7 @@ DEPENDENCIES
     jrc_common.jrc_common (JRC), doi_common.doi_common (DL), jrc_email.jrc_email (JE)
 """
 
-__version__ = '1.1.1'
+__version__ = '1.1.2'
 
 import argparse
 import collections
@@ -155,7 +155,7 @@ def search_plos():
         Keyword arguments:
           None
         Returns:
-          List of Solr docs ({id, title, author_display, affiliate})
+          List of Solr docs ({id, title, author_display})
     '''
     docs = []
     start = 0
@@ -179,7 +179,7 @@ def search_plos():
 
 
 # ---------------------------------------------------------------------------
-# Janelia author confirmation (PLOS affiliate field or Crossref)
+# Janelia author confirmation (PLOS JATS via /raw/plos, then Crossref fallback)
 # ---------------------------------------------------------------------------
 
 def get_crossref_record(doi):
