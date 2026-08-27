@@ -51,7 +51,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.21.5"
+__version__ = "120.21.6"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -2404,16 +2404,15 @@ def humansize(num, suffix='B', places=2, space='disk'):
 
 
 def last_thursday():
-    ''' Calculate the date of the most recent Thursday
+    ''' Calculate the date of the most recent Thursday strictly before today (so when
+        run on a Thursday it returns the previous week's Thursday).
         Keyword arguments:
           None
         Returns:
-          Date of the most recent Thursday
+          Date of the most recent Thursday before today
     '''
     today = date.today()
-    offset = (today.weekday() - 3) % 7
-    if offset:
-        offset = 7
+    offset = (today.weekday() - 3) % 7 or 7   # on a Thursday, go to the prior week's
     return today - timedelta(days=offset)
 
 
