@@ -5,21 +5,26 @@ Queries https://api.plos.org/search for affiliate:"Janelia" (restricted to full
 articles via doc_type:full), paging through every result. In PLOS Solr the `id`
 field IS the article DOI (10.1371/journal.*).
 
-Each candidate is confirmed to have a Janelia author using EITHER source:
-  - the PLOS record's `affiliate` field (the search already matched "Janelia"), and
-  - the Crossref record - an author matching a Janelia ORCID or carrying an asserted
-    Janelia affiliation (via doi_common.get_author_details), which also yields the
-    Janelian author names.
-A candidate confirmed by neither is set aside for manual review (should be rare).
+Each candidate is confirmed to have a Janelia AUTHOR - not merely a Janelia editor.
+(The PLOS search and its flat `affiliate` index both include editor affiliations, so
+a paper edited by a Janelian, e.g. a Janelia group leader, matches the search without
+being a Janelia-authored paper.) Confirmation:
+  - PRIMARY: the DIS /raw/plos JATS record - a contributor with contrib-type "author"
+    (not "editor") must carry a Janelia affiliation.
+  - FALLBACK: the Crossref record - an author matching a Janelia ORCID or asserted
+    Janelia affiliation (via doi_common.get_author_details). Crossref usually lacks
+    affiliations for PLOS, so this mainly catches ORCID matches.
+A candidate with a Janelia editor but no Janelia author (or confirmed by neither) is
+set aside for manual review.
 Candidates already in the dois / external_dois / to_ignore collections are skipped.
 
 OUTPUT (files only - this program never modifies the database)
 ------
     janelia_plos_dois.json    Confirmed records (doi, title, authors,
-                              janelia_authors_*, confirmed_by).
+                              janelia_authors, confirmed_by [plos|crossref]).
     plos_ready.txt            One confirmed DOI per line, ready for ingestion.
-    janelia_plos_review.txt   DOIs where neither PLOS nor Crossref confirmed a
-                              Janelia author.
+    janelia_plos_review.json  DOIs set aside, each with a reason (Janelia editor
+                              only, PLOS record unavailable, or no Janelia author).
 
 An HTML summary email is sent on --test (developer) or --write (receivers list).
 
@@ -28,7 +33,7 @@ DEPENDENCIES
     jrc_common.jrc_common (JRC), doi_common.doi_common (DL), jrc_email.jrc_email (JE)
 """
 
-__version__ = '1.0.0'
+__version__ = '1.1.0'
 
 import argparse
 import collections
@@ -58,6 +63,9 @@ PLOS_SEARCH_URL = "https://api.plos.org/search"
 JANELIA_QUERY = 'affiliate:"Janelia"'
 PAGE_SIZE = 100
 MAX_RETRY = 3
+# DIS /raw/plos returns the PLOS article JATS as JSON; used to check author (vs
+# editor) affiliations. Same DIS base other sync tools use (e.g. pull_figshare).
+DIS_RAW_PLOS = "https://dis.int.janelia.org/raw/plos/"
 
 
 def terminate_program(msg=None):
@@ -154,7 +162,7 @@ def search_plos():
     print(f"Querying PLOS: {JANELIA_QUERY!r}")
     while True:
         data = _get_json({'q': JANELIA_QUERY,
-                          'fl': 'id,title,author_display,affiliate',
+                          'fl': 'id,title,author_display',
                           'fq': 'doc_type:full', 'wt': 'json',
                           'rows': PAGE_SIZE, 'start': start})
         resp = data.get('response', {})
@@ -209,10 +217,76 @@ def janelia_authors(doi, msg):
     return janelians
 
 
-def plos_has_janelia(doc):
-    ''' True if the PLOS record's affiliate field names Janelia (the search matched
-        it, so this is the PLOS-side confirmation). '''
-    return any('janelia' in (aff or '').lower() for aff in (doc.get('affiliate') or []))
+def _aslist(value):
+    ''' Coerce an xmltodict node to a list (dict/None -> [dict]/[]). '''
+    return value if isinstance(value, list) else ([] if value is None else [value])
+
+
+def _alltext(node):
+    ''' Concatenate all non-attribute text under an xmltodict node. '''
+    if isinstance(node, str):
+        return node
+    if isinstance(node, dict):
+        return ' '.join(_alltext(v) for k, v in node.items() if not str(k).startswith('@'))
+    if isinstance(node, list):
+        return ' '.join(_alltext(v) for v in node)
+    return ''
+
+
+def plos_contributors(doi):
+    ''' Fetch the PLOS article via DIS /raw/plos (JATS-as-JSON) and return
+        (author_janelians, editor_janelians): contributor names whose affiliation
+        names Janelia, split by role. Editors are returned separately so an
+        editor-only match is flagged for review, never counted as a Janelia author.
+        Keyword arguments:
+          doi: DOI
+        Returns:
+          (list, list) on success; (None, None) if the record was unavailable
+    '''
+    try:
+        resp = requests.get(DIS_RAW_PLOS + doi, timeout=30,
+                            headers={'User-Agent': 'janelia-dis/pull_plos'})
+        if resp.status_code != 200:
+            return None, None
+        meta = (((resp.json() or {}).get('data') or {}).get('article') or {}) \
+               .get('front', {}).get('article-meta')
+    except Exception:
+        return None, None
+    if not isinstance(meta, dict):
+        return None, None
+    # id -> affiliation text, to resolve each contributor's <xref ref-type="aff">
+    idmap = {}
+    def _collect(node):
+        if isinstance(node, dict):
+            if '@id' in node:
+                idmap[node['@id']] = _alltext(node)
+            for val in node.values():
+                _collect(val)
+        elif isinstance(node, list):
+            for val in node:
+                _collect(val)
+    _collect(meta)
+
+    def _has_janelia(contrib):
+        texts = [idmap[x['@rid']] for x in _aslist(contrib.get('xref'))
+                 if isinstance(x, dict) and x.get('@ref-type') == 'aff'
+                 and x.get('@rid') in idmap]
+        texts += [_alltext(a) for a in _aslist(contrib.get('aff'))]
+        return any('janelia' in t.lower() for t in texts)
+
+    authors, editors = [], []
+    for group in _aslist(meta.get('contrib-group')):
+        for contrib in _aslist(group.get('contrib')):
+            if not isinstance(contrib, dict) or not _has_janelia(contrib):
+                continue
+            nm = contrib.get('name') or {}
+            name = (f"{(nm.get('given-names') or '').strip()} "
+                    f"{(nm.get('surname') or '').strip()}").strip()
+            if contrib.get('@contrib-type') == 'author':
+                authors.append(name)
+            elif contrib.get('@contrib-type') == 'editor':
+                editors.append(name)
+    return authors, editors
 
 
 def doc_title(doc):
@@ -223,26 +297,20 @@ def doc_title(doc):
     return title or ''
 
 
-def extract_record(doc, doi, janelians):
-    ''' Build a compact output record from a PLOS Solr doc and its Crossref Janelians.
-        confirmed_by is 'crossref' (Crossref found a Janelian author), 'plos' (only the
-        PLOS affiliate field names Janelia), or 'both'.
+def build_record(doc, doi, janelia_authors, confirmed_by):
+    ''' Compact output record for a confirmed Janelia-authored PLOS paper.
+        Keyword arguments:
+          doc: PLOS Solr doc
+          doi: DOI
+          janelia_authors: confirmed Janelian author names (list)
+          confirmed_by: 'plos' (author affiliation in the JATS) or 'crossref' (ORCID)
+        Returns:
+          Output record dict
     '''
-    record = {"doi": doi, "title": doc_title(doc),
-              "authors": doc.get('author_display') or []}
-    current = [f"{a['given']} {a['family']}" for a in janelians if a['match'] == 'ORCID']
-    asserted = [f"{a['given']} {a['family']}" for a in janelians if a['match'] == 'asserted']
-    if current:
-        record['janelia_authors_current'] = current
-    if asserted:
-        record['janelia_authors_asserted'] = asserted
-    if janelians and plos_has_janelia(doc):
-        record['confirmed_by'] = 'both'
-    elif janelians:
-        record['confirmed_by'] = 'crossref'
-    else:
-        record['confirmed_by'] = 'plos'
-    return record
+    return {"doi": doi, "title": doc_title(doc),
+            "authors": doc.get('author_display') or [],
+            "janelia_authors": janelia_authors,
+            "confirmed_by": confirmed_by}
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +329,8 @@ def generate_email(results, summary):   # pylint: disable=unused-argument
     kpis = ''.join([
         JE.kpi_card(f"{COUNT['total']:,}", "Read from PLOS"),
         JE.kpi_card(f"{COUNT['in_dois']:,}", "Already in DB"),
-        JE.kpi_card(f"{COUNT['ignored']:,}", "To ignore"),
+        JE.kpi_card(f"{COUNT['editor_only']:,}", "Janelia editor only",
+                    'warn' if COUNT['editor_only'] else 'neutral'),
         JE.kpi_card(f"{COUNT['review']:,}", "Needs review",
                     'warn' if COUNT['review'] else 'neutral'),
         JE.kpi_card(f"{len(results):,}", "Ready to add", 'good' if results else 'neutral'),
@@ -276,8 +345,8 @@ def generate_email(results, summary):   # pylint: disable=unused-argument
         body += JE.body_row(
             JE.section_header(f"&#9888; Needs review ({COUNT['review']:,})")
             + f'<div style="color:{JE.GRAY};font-size:12px;padding:2px 12px;">'
-            'Matched the PLOS Janelia search but neither the PLOS affiliations nor '
-            'Crossref confirmed a Janelia author - see janelia_plos_review.txt.</div>')
+            'Matched the PLOS Janelia search but no Janelia AUTHOR was confirmed - '
+            'includes papers with a Janelia editor only. See janelia_plos_review.json.</div>')
     msg = JE.render(os.path.basename(__file__), __version__, run_data,
                     mode_label, mode_tone, kpis, body)
     try:
@@ -318,13 +387,30 @@ def processing():
             else:
                 COUNT['ignored'] += 1
             continue
-        print(f"  Crossref lookup {idx}/{COUNT['total']}: {doi}          ", end="\r")
-        janelians = janelia_authors(doi, get_crossref_record(doi))
-        if janelians or plos_has_janelia(doc):
-            results.append(extract_record(doc, doi, janelians))
-            COUNT['confirmed_crossref' if janelians else 'confirmed_plos'] += 1
+        print(f"  Confirming {idx}/{COUNT['total']}: {doi}          ", end="\r")
+        # PRIMARY: a Janelia AUTHOR (not editor) in the PLOS JATS record.
+        authors, editors = plos_contributors(doi)
+        if authors:
+            results.append(build_record(doc, doi, authors, 'plos'))
+            COUNT['confirmed_plos'] += 1
+            continue
+        # FALLBACK: a Janelian author via Crossref (ORCID / asserted affiliation).
+        crossref_jan = janelia_authors(doi, get_crossref_record(doi))
+        if crossref_jan:
+            names = [f"{a['given']} {a['family']}" for a in crossref_jan]
+            results.append(build_record(doc, doi, names, 'crossref'))
+            COUNT['confirmed_crossref'] += 1
+            continue
+        # Neither confirmed a Janelia author - set aside for review.
+        if editors:
+            COUNT['editor_only'] += 1
+            reason = f"Janelia editor only: {', '.join(editors)}"
+        elif authors is None:
+            COUNT['lookup_failed'] += 1
+            reason = "PLOS record unavailable"
         else:
-            review.append(doi)
+            reason = "no Janelia author found"
+        review.append({"doi": doi, "reason": reason})
     COUNT['review'] = len(review)
     summary = (
         f"DOIs read from PLOS:            {COUNT['total']:,}\n"
@@ -332,9 +418,10 @@ def processing():
         f"Skipped (duplicate):           {COUNT['skipped_dup']:,}\n"
         f"DOIs already in database:      {COUNT['in_dois']:,}\n"
         f"DOIs to ignore:                {COUNT['ignored']:,}\n"
-        f"Confirmed via Crossref:        {COUNT['confirmed_crossref']:,}\n"
-        f"Confirmed via PLOS only:       {COUNT['confirmed_plos']:,}\n"
-        f"Needs review (neither):        {COUNT['review']:,}\n"
+        f"Confirmed via PLOS author:     {COUNT['confirmed_plos']:,}\n"
+        f"Confirmed via Crossref ORCID:  {COUNT['confirmed_crossref']:,}\n"
+        f"Review - Janelia editor only:  {COUNT['editor_only']:,}\n"
+        f"Review - other:                {COUNT['review'] - COUNT['editor_only']:,}\n"
         f"DOIs ready for processing:     {len(results):,}"
     )
     print("\n" + summary)
@@ -346,10 +433,9 @@ def processing():
                 fh.write(rec['doi'] + "\n")
         LOGGER.info("Wrote janelia_plos_dois.json and plos_ready.txt")
     if review:
-        with open('janelia_plos_review.txt', 'w', encoding='utf-8') as fh:
-            for doi in review:
-                fh.write(doi + "\n")
-        LOGGER.info("Wrote janelia_plos_review.txt")
+        with open('janelia_plos_review.json', 'w', encoding='utf-8') as fh:
+            json.dump(review, fh, indent=2, ensure_ascii=False)
+        LOGGER.info("Wrote janelia_plos_review.json")
     if ARG.TEST or ARG.WRITE:
         generate_email(results, summary)
 
