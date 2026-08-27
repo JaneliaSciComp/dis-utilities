@@ -33,7 +33,7 @@ DEPENDENCIES
     jrc_common.jrc_common (JRC), doi_common.doi_common (DL), jrc_email.jrc_email (JE)
 """
 
-__version__ = '1.1.0'
+__version__ = '1.1.1'
 
 import argparse
 import collections
@@ -412,18 +412,18 @@ def processing():
             reason = "no Janelia author found"
         review.append({"doi": doi, "reason": reason})
     COUNT['review'] = len(review)
-    summary = (
-        f"DOIs read from PLOS:            {COUNT['total']:,}\n"
-        f"Skipped (no DOI):              {COUNT['no_doi']:,}\n"
-        f"Skipped (duplicate):           {COUNT['skipped_dup']:,}\n"
-        f"DOIs already in database:      {COUNT['in_dois']:,}\n"
-        f"DOIs to ignore:                {COUNT['ignored']:,}\n"
-        f"Confirmed via PLOS author:     {COUNT['confirmed_plos']:,}\n"
-        f"Confirmed via Crossref ORCID:  {COUNT['confirmed_crossref']:,}\n"
-        f"Review - Janelia editor only:  {COUNT['editor_only']:,}\n"
-        f"Review - other:                {COUNT['review'] - COUNT['editor_only']:,}\n"
-        f"DOIs ready for processing:     {len(results):,}"
-    )
+    rows = [("DOIs read from PLOS", COUNT['total']),
+            ("Skipped (no DOI)", COUNT['no_doi']),
+            ("Skipped (duplicate)", COUNT['skipped_dup']),
+            ("DOIs already in database", COUNT['in_dois']),
+            ("DOIs to ignore", COUNT['ignored']),
+            ("Confirmed via PLOS author", COUNT['confirmed_plos']),
+            ("Confirmed via Crossref ORCID", COUNT['confirmed_crossref']),
+            ("Review - Janelia editor only", COUNT['editor_only']),
+            ("Review - other", COUNT['review'] - COUNT['editor_only']),
+            ("DOIs ready for processing", len(results))]
+    width = max(len(label) for label, _ in rows)
+    summary = "\n".join(f"{label + ':':<{width + 2}}{num:>6,}" for label, num in rows)
     print("\n" + summary)
     if results:
         with open('janelia_plos_dois.json', 'w', encoding='utf-8') as fh:
