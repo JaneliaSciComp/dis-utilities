@@ -178,6 +178,35 @@ function cycle_filter(btn, tid, ca, cb, la, lb, counter) {
   applyRowFilters(tid, counter);
 }
 
+// Live typeahead for the source_metrics tag pulldown: keep only the tag links
+// whose text contains the query (case-insensitive), and toggle a "no matching
+// tags" placeholder. Bound via oninput on the sticky search box; "All tags" and
+// the current selection are unaffected.
+function filterTagPulldown(input) {
+  const q = (input.value || '').trim().toLowerCase();
+  const menu = input.closest('.dropdown-menu');
+  if (!menu) { return; }
+  let shown = 0;
+  menu.querySelectorAll('.tag-pulldown-item').forEach(function (a) {
+    const match = (a.textContent || '').toLowerCase().indexOf(q) !== -1;
+    a.style.display = match ? '' : 'none';
+    if (match) { shown += 1; }
+  });
+  const empty = menu.querySelector('.tag-pulldown-empty');
+  if (empty) { empty.style.display = shown ? 'none' : ''; }
+}
+
+// When a tag pulldown opens, clear any stale filter (so the full list is shown)
+// and focus the search box so the user can type immediately.
+$(document).on('shown.bs.dropdown', function (e) {
+  const box = $(e.target).find('.tag-pulldown-search-box');
+  if (box.length) {
+    box.val('');
+    filterTagPulldown(box[0]);
+    box.trigger('focus');
+  }
+});
+
 // Copy text to the clipboard.
 async function copyText(textToCopy) {
   navigator.permissions.query({name: "clipboard-write"});

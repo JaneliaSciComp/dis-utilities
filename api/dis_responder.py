@@ -51,7 +51,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.21.6"
+__version__ = "120.22.8"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -284,6 +284,55 @@ def year_pulldown(prefix, all_years=True, suffix='', start_year=2006, query=Fals
         selected = "(all years)" if yr == 'All' else yr
     return _year_pulldown(prefix, all_years=all_years, suffix=suffix,
                           start_year=start_year, query=query, selected=selected)
+
+
+def tag_pulldown(prefix, year='All', selected=None):
+    ''' Generate a single-tag pulldown (the distinct jrc_tag.name values in the
+        dois collection). Each option keeps the current publishing-year path
+        segment and toggles a ?tag=<name> query param; "All tags" clears it.
+        Mirrors year_pulldown's selected-button style so the two filters read as
+        a matched pair, and carries a sticky typeahead box that live-filters the
+        list (see filterTagPulldown + the shown.bs.dropdown focus handler in dis.js).
+        Keyword arguments:
+          prefix: navigation prefix (e.g. 'source_metrics')
+          year: the currently-selected year, preserved in each tag link
+          selected: the currently-selected tag, or None for "all tags"
+        Returns:
+          Pulldown HTML
+    '''
+    try:
+        tags = sorted((t for t in DB['dis'].dois.distinct("jrc_tag.name") if t),
+                      key=str.lower)
+    except Exception:
+        tags = []
+    base = f"/{prefix}" if (not year or year == 'All') else f"/{prefix}/{year}"
+    shown = selected if selected else "(all tags)"
+    btn_label = ("<span style='opacity:0.85;'>Tag</span> "
+                 "<span style='opacity:0.85;'>&#9662;</span> "
+                 "<span style='opacity:0.5;'>|</span> "
+                 f"<span style='color:#ffffff;font-weight:700;'>{escape(shown)}</span>")
+    html = "<div class='dropdown'><button type='button' class='btn btn-info' " \
+           + "style='min-width:240px;' data-toggle='dropdown' aria-haspopup='true' " \
+           + f"aria-expanded='false'>{btn_label}</button>" \
+           + "<div class='dropdown-menu' style='max-height:460px; overflow-y:auto;'>"
+    # Sticky typeahead box. Clicks/keys inside an <input> in a BS4 dropdown-menu
+    # don't dismiss the menu, so the list filters in place as you type.
+    html += "<div style='position:sticky; top:0; background:#fff; z-index:2; " \
+            + "padding:6px 12px 8px 12px;'>" \
+            + "<input type='text' class='form-control form-control-sm " \
+            + "tag-pulldown-search-box' placeholder='Filter tags…' " \
+            + "autocomplete='off' oninput='filterTagPulldown(this)' " \
+            + "onclick='event.stopPropagation()'></div>"
+    html += f"<a class='dropdown-item{'' if selected else ' active'}' href='{base}'>" \
+            + "All tags</a><div class='dropdown-divider'></div>"
+    for tag in tags:
+        cls = 'dropdown-item active' if tag == selected else 'dropdown-item'
+        html += f"<a class='{cls} tag-pulldown-item' " \
+                + f"href='{base}?tag={quote(tag, safe='')}'>{escape(tag)}</a>"
+    html += "<span class='dropdown-item disabled tag-pulldown-empty' " \
+            + "style='display:none;'>No matching tags</span>"
+    html += "</div></div>"
+    return html
 
 
 def inspect_error(err, errtype):
@@ -1471,25 +1520,27 @@ def counts_by_type(rows):
     return typed
 
 
-def get_first_last_authors(year):
+def get_first_last_authors(year, tag=None):
     ''' Get first and last author counts
         Keyword arguments:
           year: year to get counts for
+          tag: optional jrc_tag.name to scope to
         Returns:
           First and last author counts
     '''
+    tmatch = {"jrc_tag.name": tag} if tag else {}
     stat = {'first': {}, 'last': {}, 'any': {}}
     for which in ("first", "last", "any"):
         if which == 'any':
             payload = [{"$match": {"jrc_publishing_date": {"$regex": "^"+ year},
-                                   "jrc_author": {"$exists": True}}},
+                                   "jrc_author": {"$exists": True}, **tmatch}},
                        {"$group": {"_id": {"type": "$type", "subtype": "$subtype",
                                            "DataCite": "$types.resourceTypeGeneral"},
                                    "count": {"$sum": 1}}}
                       ]
         else:
             payload = [{"$match": {"jrc_publishing_date": {"$regex": "^"+ year},
-                                   f"jrc_{which}_author": {"$exists": True}}},
+                                   f"jrc_{which}_author": {"$exists": True}, **tmatch}},
                        {"$group": {"_id": {"type": "$type", "subtype": "$subtype",
                                            "DataCite": "$types.resourceTypeGeneral"},
                                    "count": {"$sum": 1}}}
@@ -1571,10 +1622,11 @@ def get_preprint_stats(rows):
     return stat
 
 
-def get_source_data(year):
+def get_source_data(year, tag=None):
     ''' Get DOI data by source and type/subtype or resourceTypeGeneral
         Keyword arguments:
           year: year to get data for
+          tag: optional jrc_tag.name to scope to
         Returns:
           Data dictionary and html dictionary
     '''
@@ -1584,6 +1636,8 @@ def get_source_data(year):
                  "jrc_publishing_date": {"$regex": "^"+ year}}
     else:
         match = {"jrc_obtained_from": "Crossref"}
+    if tag:
+        match["jrc_tag.name"] = tag
     payload = [{"$match": match},
                {"$group": {"_id": {"source": "$jrc_obtained_from", "type": "$type",
                                    "subtype": "$subtype"},
@@ -2215,11 +2269,12 @@ def get_subscriptions(stype='Journal'):
     return sub
 
 
-def get_top_journals(year, maxpub=False, janelia=True, source=None):
+def get_top_journals(year, maxpub=False, janelia=True, source=None, tag=None):
     ''' Get top journals
         Keyword arguments:
           year: year to get data for
           maxpub: if True, get max publishing date
+          tag: optional jrc_tag.name to scope to
         Returns:
           Journal data
     '''
@@ -2232,6 +2287,8 @@ def get_top_journals(year, maxpub=False, janelia=True, source=None):
         match["jrc_publishing_date"] = {"$regex": "^"+ year}
     if source:
         match["jrc_obtained_from"] = source
+    if tag:
+        match["jrc_tag.name"] = tag
     payload = [{"$match": match},
                {"$group": {"_id": "$jrc_journal", "count":{"$sum": 1},
                            "maxpub": {"$max": "$jrc_publishing_date"}}}
@@ -5001,7 +5058,7 @@ def show_acknowledgement_metrics(limit=10):
             + '</div>')
     seealso = see_also([("DOI metrics", "/dois_metrics"),
                         ("Tags", "/tag_metrics"),
-                        ("Impact by source", "/source_metrics")])
+                        ("Publishing impact", "/source_metrics")])
     html = (coverage_html + tabs + seealso + m_chartscript + by_chartscript
             + s_chartscript + ent_chartscript + h_chartscript)
     endpoint_access()
@@ -5370,7 +5427,7 @@ def show_tag_metrics(limit=15):
             + '</div>')
     seealso = see_also([("DOI metrics", "/dois_metrics"),
                         ("Acknowledgements", "/acknowledgement_metrics"),
-                        ("Impact by source", "/source_metrics")])
+                        ("Publishing impact", "/source_metrics")])
     html = (coverage_html + tabs + seealso + tag_chartscript + cov_chartscript
             + by_chartscript + trend_chartscript + cooccur_chartscript)
     endpoint_access()
@@ -6247,7 +6304,9 @@ def show_doi_by_name_ui(family, given=None):
 @app.route('/doisui_type/<string:src>/<string:typ>/<string:sub>', defaults={'year': 'All'})
 @app.route('/doisui_type/<string:src>/<string:typ>/<string:sub>/<string:year>')
 def show_doi_by_type_ui(src, typ, sub, year):
-    ''' Show DOIs for a given type/subtype
+    ''' Show DOIs for a given type/subtype, optionally scoped to a single
+        jrc_tag.name via ?tag= (keeps the /dois_metrics Sources drill-down in
+        sync with that page's tag filter).
     '''
     payload = {"jrc_obtained_from": src,
                ("type" if src == 'Crossref' else 'types.resourceTypeGeneral'): typ}
@@ -6255,6 +6314,9 @@ def show_doi_by_type_ui(src, typ, sub, year):
         payload["subtype"] = sub
     if year != 'All':
         payload['jrc_publishing_date'] = {"$regex": "^" + year}
+    tag = request.args.get('tag') or None
+    if tag:
+        payload["jrc_tag.name"] = tag
     try:
         coll = DB['dis'].dois
         rows = coll.find(payload).collation({"locale": "en"}).sort("jrc_publishing_date", -1)
@@ -6269,10 +6331,14 @@ def show_doi_by_type_ui(src, typ, sub, year):
         desc += f"/{sub}"
     if year != 'All':
         desc += f" ({year})"
+    if tag:
+        desc += f" &middot; {escape(tag)}"
     if not cnt:
-        # No DOIs for this filter - advise but keep the year pulldown so another
-        # year can be chosen (also avoids a divide-by-zero in the OA percentage)
-        html = year_pulldown(prefix) + "<br><br>" \
+        # No DOIs for this filter - advise but keep the year pulldown (tag-aware,
+        # so switching years keeps the tag) so another year can be chosen (also
+        # avoids a divide-by-zero in the OA percentage)
+        html = year_pulldown(prefix, suffix=(f"?tag={quote(tag, safe='')}" if tag else '')) \
+               + "<br><br>" \
                + render_warning(f"No DOIs were found for {desc}", 'warning')
         return make_response(render_template('custom.html', urlroot=request.url_root,
                                              title=f"DOIs for {desc}", html=html, oamsg='',
@@ -6363,7 +6429,16 @@ def show_dois_metrics(year='All'):
     '''
     coll = DB['dis'].dois
     yr = {"jrc_publishing_date": {"$regex": "^" + year}} if year != 'All' else {}
-    ysfx = f" ({year})" if year != 'All' else ""
+    tag = request.args.get('tag') or None
+    if tag:
+        # Scope the whole page (every tab) to DOIs carrying this jrc_tag.name.
+        yr["jrc_tag.name"] = tag
+    # The "By year" tab intentionally spans all years, but should still honor a
+    # tag selection - so it carries the tag match on its own, not the year one.
+    tmatch = {"jrc_tag.name": tag} if tag else {}
+    year_suffix = f"?tag={quote(tag, safe='')}" if tag else ''
+    scope = ([escape(year)] if year != 'All' else []) + ([escape(tag)] if tag else [])
+    ysfx = f" ({', '.join(scope)})" if scope else ""
 
     def pctof(num, den):
         return f"{num / den * 100:.0f}%" if den else "0%"
@@ -6380,11 +6455,12 @@ def show_dois_metrics(year='All'):
               + stat_cards([("DOIs", f"{total:,}"),
                             ("Crossref", f"{by_src['Crossref']:,}"),
                             ("DataCite", f"{by_src['DataCite']:,}")], div_id='doi-stats')
-              + year_pulldown('dois_metrics'))
+              + year_pulldown('dois_metrics', suffix=year_suffix)
+              + "&nbsp;&nbsp;&nbsp;" + tag_pulldown('dois_metrics', year, tag))
     charts = ""
     # ----- Sources tab (registrar x type/subtype table + two pies) -----
     try:
-        sdata, hdict = get_source_data(year)
+        sdata, hdict = get_source_data(year, tag)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get source data"),
@@ -6397,6 +6473,8 @@ def show_dois_metrics(year='All'):
         stotal += val
         link = (f"/doisui_type/{src}/{typ}/{sub}/{year}" if year != 'All'
                 else f"/doisui_type/{src}/{typ}/{sub}")
+        # Carry the active tag so the drill-down list matches the (tag-scoped) count.
+        link += year_suffix
         srows.append([src, typ, sub if sub != 'None' else '',
                       safe(f"<a href='{link}'>{val:,}</a>")])
     src_table = render_table(['Source', 'Type', 'Subtype', 'Count'], srows,
@@ -6404,7 +6482,7 @@ def show_dois_metrics(year='All'):
                              footer=[fcell('Total', colspan=3), fcell(f"{stotal:,}")])
     s1, d1 = DP.pie_chart(sdata, f"DOIs by source", "source", width=450,
                           colors=DP.SOURCE_PALETTE)
-    lm_payload = ([{"$match": dict(yr)}] if year != 'All' else []) + \
+    lm_payload = ([{"$match": dict(yr)}] if yr else []) + \
                  [{"$group": {"_id": "$jrc_load_source", "count": {"$sum": 1}}},
                   {"$sort": {"count": -1}}]
     try:
@@ -6462,7 +6540,7 @@ def show_dois_metrics(year='All'):
     ymap = {}
     try:
         for row in coll.aggregate([
-                {"$match": {"jrc_publishing_date": {"$exists": True}}},
+                {"$match": {"jrc_publishing_date": {"$exists": True}, **tmatch}},
                 {"$group": {"_id": {"yr": {"$substr": ["$jrc_publishing_date", 0, 4]},
                                     "src": "$jrc_obtained_from"}, "n": {"$sum": 1}}}]):
             y = row['_id'].get('yr')
@@ -6571,7 +6649,7 @@ def show_dois_metrics(year='All'):
                         ("Publishers", "/dois_publisher"),
                         ("Licenses", "/dois_license"),
                         ("Citations", "/citation_metrics/crossref"),
-                        ("Impact by source", "/source_metrics")])
+                        ("Publishing impact", "/source_metrics")])
     html = header + tabs + seealso + charts
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
@@ -6598,7 +6676,8 @@ def dois_type(year='All'):
 @app.route('/dois_licenser/<string:source>/<string:lic>')
 @app.route('/dois_licenser/<string:source>')
 def dois_license_report(source, lic=None, year='All'):
-    ''' Show DOIs by license
+    ''' Show DOIs by license, optionally scoped to one jrc_tag.name via ?tag=
+        (keeps the /dois_license drill-down in sync with its tag filter).
     '''
     if lic == 'None':
         lic = None
@@ -6606,6 +6685,9 @@ def dois_license_report(source, lic=None, year='All'):
                {"$sort": {"count": -1}}]
     if year != 'All':
         payload[0]['$match']['jrc_publishing_date'] = {"$regex": "^"+ year}
+    tag = request.args.get('tag') or None
+    if tag:
+        payload[0]['$match']['jrc_tag.name'] = tag
     try:
         rows = DB['dis'].dois.aggregate(payload)
     except Exception as err:
@@ -6616,6 +6698,8 @@ def dois_license_report(source, lic=None, year='All'):
     title = f"{source} DOIs for license {lic}"
     if year != 'All':
         title += f" for {year}"
+    if tag:
+        title += f" &middot; {escape(tag)}"
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
                                          navbar=generate_navbar('DOIs')))
@@ -6624,9 +6708,14 @@ def dois_license_report(source, lic=None, year='All'):
 @app.route('/dois_license/<string:year>')
 @app.route('/dois_license')
 def dois_license(year='All'):
-    ''' Show DOIs by license
+    ''' Show DOIs by license, optionally scoped to one jrc_tag.name (?tag=)
+        alongside the year filter; drill-down links carry the tag through.
     '''
     ypayload = {} if year == 'All' else {"jrc_publishing_date": {"$regex": "^"+ year}}
+    tag = request.args.get('tag') or None
+    if tag:
+        ypayload["jrc_tag.name"] = tag
+    year_suffix = f"?tag={quote(tag, safe='')}" if tag else ''
     try:
         total = DB['dis'].dois.count_documents(ypayload)
     except Exception as err:
@@ -6636,7 +6725,7 @@ def dois_license(year='All'):
     payload = [{"$group": {"_id": {"source": "$jrc_obtained_from", "license": "$jrc_license"},
                            "count": {"$sum": 1}}},
                {"$sort": {"license": 1}}]
-    if year != 'All':
+    if ypayload:
         payload.insert(0, {"$match": ypayload})
     try:
         rows = DB['dis'].dois.aggregate(payload)
@@ -6644,7 +6733,8 @@ def dois_license(year='All'):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get license data from dois"),
                                message=error_message(err))
-    html = year_pulldown('dois_license')
+    html = year_pulldown('dois_license', suffix=year_suffix) \
+           + "&nbsp;&nbsp;&nbsp;" + tag_pulldown('dois_license', year, tag)
     trows = []
     cnt = {"Crossref": 0, "DataCite": 0}
     data = {}
@@ -6665,7 +6755,8 @@ def dois_license(year='All'):
     srt = sorted(data.items(), key=lambda item: item[1], reverse=True)
     data = dict(srt)
     if not data or not total:
-        html = year_pulldown('dois_license') + "<br><br>" \
+        html = year_pulldown('dois_license', suffix=year_suffix) \
+               + "&nbsp;&nbsp;&nbsp;" + tag_pulldown('dois_license', year, tag) + "<br><br>" \
                + render_warning(f"No DOIs were found for {year}.", 'warning')
         endpoint_access()
         return make_response(render_template('general.html', urlroot=request.url_root,
@@ -6673,9 +6764,9 @@ def dois_license(year='All'):
                                              navbar=generate_navbar('DOIs')))
     defcnt = cnt['Crossref'] + cnt['DataCite'] - data.get('Not found', 0)
     for lic in sorted(lines.keys(), key=str.casefold):
-        clink = f"<a href='/dois_licenser/Crossref{lines[lic]['orig']}/{year}'>" \
+        clink = f"<a href='/dois_licenser/Crossref{lines[lic]['orig']}/{year}{year_suffix}'>" \
                 + f"{lines[lic]['Crossref']}</a>" if lines[lic]['Crossref'] else '0'
-        dlink = f"<a href='/dois_licenser/DataCite{lines[lic]['orig']}/{year}'>" \
+        dlink = f"<a href='/dois_licenser/DataCite{lines[lic]['orig']}/{year}{year_suffix}'>" \
                 + f"{lines[lic]['DataCite']}</a>" if lines[lic]['DataCite'] else '0'
         trows.append([lic, safe(clink), safe(dlink)])
     html += render_table(['Source', 'Crossref', 'DataCite'], trows, table_id='license',
@@ -6686,15 +6777,16 @@ def dois_license(year='All'):
           + "<span style='font-size: 14pt'> of Janelia DOIs have a known license" \
           + f"</span><span style='font-size: 12pt'><br>{defcnt:,}/{total:,}</span><br>"
     html = pre + html
+    title = "DOIs by license"
+    scope = ([escape(year)] if year != 'All' else []) + ([escape(tag)] if tag else [])
+    if scope:
+        title += f" ({', '.join(scope)})"
     # Ranked categorical breakdown -> horizontal bar (audit chart policy). Colour
     # defaults to get_colors_by_count (SOURCE_PALETTE is reserved for the 2-way
     # registrar split); height scales with the number of licenses so bars stay legible.
     lic_height = max(360, 30 * len(data) + 90)
     chartscript, chartdiv = DP.hbar_chart(data, "DOIs by license", value_label="DOIs",
                                           width=700, height=lic_height, show_values=True)
-    title = "DOIs by license"
-    if year != 'All':
-        title += f" ({year})"
     endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title=title, html=html,
@@ -6996,17 +7088,21 @@ def dois_report(year=None):
 @app.route('/dois_yearly/<string:year>')
 @app.route('/dois_yearly')
 def dois_yearly(year=None):
-    ''' Show year in review
+    ''' Show year in review, optionally scoped to one jrc_tag.name (?tag=)
+        alongside the (per-year) year filter.
     '''
     # A "year in review" is inherently per-year (its pulldown offers no "All");
     # fall back to the current year for a missing or hand-typed "All" value.
     if year in (None, 'All'):
         year = str(datetime.now().year)
+    tag = request.args.get('tag') or None
+    tmatch = {"jrc_tag.name": tag} if tag else {}
+    year_suffix = f"?tag={quote(tag, safe='')}" if tag else ''
     pmap = {"journal-article": "Journal articles", "posted-content": "Posted content",
             "preprints": "Preprints", "proceedings-article": "Proceedings articles",
             "book-chapter": "Book chapters", "datasets": "Datasets",
             "peer-review": "Peer reviews", "grant": "Grants", "other": "Other"}
-    payload = [{"$match": {"jrc_publishing_date": {"$regex": "^"+ year}}},
+    payload = [{"$match": {"jrc_publishing_date": {"$regex": "^"+ year}, **tmatch}},
                {"$group": {"_id": {"type": "$type", "subtype": "$subtype",
                                    "DataCite": "$types.resourceTypeGeneral"}, "count": {"$sum": 1}}}
               ]
@@ -7019,14 +7115,14 @@ def dois_yearly(year=None):
                                                     + "from dois collection"),
                                message=error_message(err))
     typed = counts_by_type(rows)
-    first, last, anyauth = get_first_last_authors(year)
+    first, last, anyauth = get_first_last_authors(year, tag)
     # Pre-seed every type at 0 so a year with no data (e.g. a future year) still has
     # stat['Journal articles'] / stat['Preprints'] etc. for the summary and can't KeyError.
     stat = {val: f"{BOLD}0</span> {val.lower()}" for val in pmap.values()}
     # Journal count
     payload = [{"$unwind" : "$container-title"},
                {"$match": {"container-title": {"$exists": True}, "type": "journal-article",
-                           "jrc_publishing_date": {"$regex": "^"+ year}}},
+                           "jrc_publishing_date": {"$regex": "^"+ year}, **tmatch}},
                {"$group": {"_id": "$container-title", "count":{"$sum": 1}}}
               ]
     try:
@@ -7077,7 +7173,7 @@ def dois_yearly(year=None):
     for row in rows:
         if row.get('employeeId') and row.get('orcid'):
             orcs[row['employeeId']] = True
-    payload = [{"$match": {"jrc_publishing_date": {"$regex": "^"+ year}}},
+    payload = [{"$match": {"jrc_publishing_date": {"$regex": "^"+ year}, **tmatch}},
                {"$unwind": "$jrc_author"},
                {"$group": {"_id": "$jrc_author", "count": {"$sum": 1}}}
               ]
@@ -7097,7 +7193,7 @@ def dois_yearly(year=None):
                     + f"{BOLD}{orc:,}</span> " \
                     + f"({(orc / cnt * 100) if cnt else 0:.2f}%) with ORCIDs"
     # Journals
-    journal = get_top_journals(year)
+    journal = get_top_journals(year, tag=tag)
     cnt = 0
     stat['Topjournals'] = ""
     for key in sorted(journal, key=journal.get, reverse=True):
@@ -7111,19 +7207,22 @@ def dois_yearly(year=None):
            + f"<br><br><h2 class='green1'>Authors</h2>{stat['ORCID']}" \
            + "<br><br><h2 class='green1'>Top journals</h2>" \
            + f"<p style='font-size: 14pt;line-height:90%;'>{stat['Topjournals']}</p>"
-    html = f"<div class='titlestat'>{year} YEAR IN REVIEW</div><br>" \
+    tagsfx = f" &middot; {escape(tag)}" if tag else ''
+    html = f"<div class='titlestat'>{year} YEAR IN REVIEW{tagsfx}</div><br>" \
            + f"<div class='yearstat'>{html}</div>"
-    html += '<br>' + year_pulldown('dois_yearly', all_years=False)
+    html += '<br>' + year_pulldown('dois_yearly', all_years=False, suffix=year_suffix) \
+            + "&nbsp;&nbsp;&nbsp;" + tag_pulldown('dois_yearly', year, tag)
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title=f"{year}", html=html,
+                                         title=f"{year}{tagsfx}", html=html,
                                          navbar=generate_navbar('DOIs')))
 
 
 @app.route('/dois_time/<string:period>/<string:year>')
 @app.route('/dois_time/<string:period>')
 def dois_time(period, year=None):
-    ''' Show DOIs by year or month
+    ''' Show DOIs by year or month, optionally scoped to one jrc_tag.name (?tag=)
+        alongside the year filter.
         Keyword arguments:
           period: "year" or "month"
           year: year to filter (month only, defaults to current year)
@@ -7135,11 +7234,17 @@ def dois_time(period, year=None):
     if period == 'month' and year is None:
         year = str(datetime.now().year)
     substr_len = 7 if period == 'month' else 4
-    pipeline = []
+    tag = request.args.get('tag') or None
+    year_suffix = f"?tag={quote(tag, safe='')}" if tag else ''
+    tagsfx = f" &middot; {escape(tag)}" if tag else ''
+    match = {}
     # Treat an explicit 'All' like no year filter (it's a label, not a date prefix -
     # "^All" would match nothing); the month nav below is already guarded for 'All'.
     if year and year != 'All':
-        pipeline.append({"$match": {"jrc_publishing_date": {"$regex": "^" + year}}})
+        match["jrc_publishing_date"] = {"$regex": "^" + year}
+    if tag:
+        match["jrc_tag.name"] = tag
+    pipeline = [{"$match": match}] if match else []
     pipeline += [
         {"$group": {"_id": {period: {"$substrBytes": ["$jrc_publishing_date", 0, substr_len]},
                             "source": "$jrc_obtained_from"},
@@ -7182,9 +7287,10 @@ def dois_time(period, year=None):
             trows.append(cells)
         # Tap a year bar -> all DOIs published that year (mirrors the year cell)
         nav = {y: {"field": "publishing_year", "value": y} for y in data['years']}
-        title = "DOIs published by year"
+        title = "DOIs published by year" + tagsfx
         chart_title = "DOIs published by year/source"
-        pulldown = year_pulldown('dois_time/year')
+        pulldown = year_pulldown('dois_time/year', suffix=year_suffix) \
+                   + "&nbsp;&nbsp;&nbsp;" + tag_pulldown('dois_time/year', year, tag)
     else:
         data = {'months': [f"{mon:02}" for mon in range(1, 13)],
                 'Crossref': [0] * 12, 'DataCite': [0] * 12}
@@ -7206,9 +7312,10 @@ def dois_time(period, year=None):
         if year and year != 'All':
             nav = {m: {"field": "publishing_year", "value": f"{year}-{m}"}
                    for m in data['months']}
-        title = f"DOIs published by month ({year})"
+        title = f"DOIs published by month ({year})" + tagsfx
         chart_title = title
-        pulldown = year_pulldown('dois_time/month', all_years=False)
+        pulldown = year_pulldown('dois_time/month', all_years=False, suffix=year_suffix) \
+                   + "&nbsp;&nbsp;&nbsp;" + tag_pulldown('dois_time/month', year, tag)
     footer = [fcell('Total')] + [fcell(f"{counter[source]:,}", align='center')
                                  for source in SOURCES]
     html = render_table([period.capitalize(), 'Crossref', 'DataCite'], trows,
@@ -8653,9 +8760,15 @@ def source_metrics(year='All'):  # pylint: disable=too-many-locals
         (Crossref usage = eLife + protocols.io; DataCite = figshare + Zenodo).
     '''
     coll = DB['dis'].dois
+    # Shared filter merged into every population query (cited / all / usage) so
+    # the report is scoped uniformly. Holds the optional publishing-year regex
+    # and an optional single jrc_tag.name restriction from the ?tag= pulldown.
     ymatch = {}
     if year != 'All':
         ymatch["jrc_publishing_date"] = {"$regex": "^" + year}
+    tag = request.args.get('tag') or None
+    if tag:
+        ymatch["jrc_tag.name"] = tag
     cite = {}   # source -> citation metrics
     use = {}    # source -> usage metrics
     # h5-index = h-index over works from the last 5 COMPLETE calendar years (a
@@ -8750,6 +8863,8 @@ def source_metrics(year='All'):  # pylint: disable=too-many-locals
         result = initialize_result()
         result['data'] = {"citations": cite, "usage": use}
         result['rest']['source'] = 'mongo'
+        result['rest']['year'] = year
+        result['rest']['tag'] = tag
         result['rest']['row_count'] = cite['Combined']['dois'] + use['Combined']['dois']
         return generate_response(result)
     # ----- headline stat cards, grouped (h-index is the marquee combined impact
@@ -8913,9 +9028,10 @@ def source_metrics(year='All'):  # pylint: disable=too-many-locals
                + f"<div class='flexcol'>{section_html}</div>" \
                + "<div class='flexcol' style='margin: 10px 0 0 20px'>" \
                + f"{chart_div}</div></div>"
-    title = "Impact by source"
-    if year != 'All':
-        title += f" ({year})"
+    title = "Publishing impact"
+    bits = ([escape(year)] if year != 'All' else []) + ([escape(tag)] if tag else [])
+    if bits:
+        title += " (" + ", ".join(bits) + ")"
     # Tabbed layout, matching the sibling dashboards (dois_metrics / tag_metrics /
     # acknowledgement_metrics): the overview cards + intro are a shared header above
     # the tabs, and each metric section becomes a tab (content and table/chart
@@ -8939,7 +9055,12 @@ def source_metrics(year='All'):  # pylint: disable=too-many-locals
     seealso = see_also([("DOI metrics", "/dois_metrics"),
                         ("Citations", "/citation_metrics/crossref"),
                         ("Acknowledgements", "/acknowledgement_metrics")])
-    html = year_pulldown('source_metrics') + "<br><br>" + header + tabs + seealso + chartscript
+    # Year + tag filters side by side; each preserves the other's selection (the
+    # year links carry ?tag= as a suffix, the tag links keep the year path segment).
+    year_suffix = f"?tag={quote(tag, safe='')}" if tag else ''
+    filters = year_pulldown('source_metrics', suffix=year_suffix) \
+              + "&nbsp;&nbsp;&nbsp;" + tag_pulldown('source_metrics', year, tag)
+    html = filters + "<br><br>" + header + tabs + seealso + chartscript
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html, bokeh=True,
@@ -11773,12 +11894,16 @@ def show_preprint_relation(relation_type, year=None):
 @app.route('/dois_publisher/<string:year>')
 @app.route('/dois_publisher')
 def dois_publisher(year='All'):
-    ''' Show publishers with counts
+    ''' Show publishers with counts, optionally scoped to one jrc_tag.name (?tag=)
+        alongside the year filter.
     '''
     if year == 'All':
         match = {}
     else:
         match = {"jrc_publishing_date": {"$regex": "^"+ year}}
+    tag = request.args.get('tag') or None
+    if tag:
+        match["jrc_tag.name"] = tag
     payload = [{"$match": match},
                {"$group": {"_id": {"publisher": "$publisher", "source": "$jrc_obtained_from"},
                            "count":{"$sum": 1}}},
@@ -11820,11 +11945,14 @@ def dois_publisher(year='All'):
     cards = [("Total DOIs", f"{sum(total.values()):,}"),
              ("Publishers", f"{len(pubs):,}")] \
             + [(f"{src} DOIs", f"{total[src]:,}") for src in SOURCES]
+    year_suffix = f"?tag={quote(tag, safe='')}" if tag else ''
     html = stat_cards(cards, div_id='pub-stats') \
-           + year_pulldown('dois_publisher') + html
+           + year_pulldown('dois_publisher', suffix=year_suffix) \
+           + "&nbsp;&nbsp;&nbsp;" + tag_pulldown('dois_publisher', year, tag) + html
     title = "DOIs by publisher"
-    if year != 'All':
-        title += f" ({year})"
+    scope = ([escape(year)] if year != 'All' else []) + ([escape(tag)] if tag else [])
+    if scope:
+        title += f" ({', '.join(scope)})"
     # Ranked hbar of the top publishers by total DOIs (audit chart policy); the table
     # above lists every publisher. Default colour = get_colors_by_count (SOURCE_PALETTE
     # is reserved for the 2-way registrar split); height scales with the bar count.
@@ -12102,10 +12230,15 @@ def show_open_access_details(year='All'):
 @app.route('/journals_dois/<string:year>')
 @app.route('/journals_dois')
 def show_journals_dois(year=None):
-    ''' Show journals in a table
+    ''' Show journals in a table, optionally scoped to one jrc_tag.name (?tag=)
+        alongside the year filter. Defaults to the current year (pick "All" in the
+        pulldown for every year).
     '''
     if year is None:
-        year = 'All'
+        year = str(datetime.now().year)
+    tag = request.args.get('tag') or None
+    year_suffix = f"?tag={quote(tag, safe='')}" if tag else ''
+    yr_selected = "(all years)" if year == 'All' else year
     errmsg = "Could not get journal data from subscription collection"
     try:
         rows = DB['dis'].subscription.find({"type": {"$in": ["Journal", "Repository"]}})
@@ -12117,7 +12250,7 @@ def show_journals_dois(year=None):
     for row in rows:
         subscribed[row['title']] = row
     try:
-        journal = get_top_journals(year, maxpub=True)
+        journal = get_top_journals(year, maxpub=True, tag=tag)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning(errmsg),
@@ -12125,9 +12258,13 @@ def show_journals_dois(year=None):
     if not journal:
         # Empty result for a valid year: keep the year pulldown so another year can be
         # chosen, and show the standard inline warning instead of a full error page.
-        etitle = "DOIs by journal" + (f" ({year})" if year != 'All' else "")
+        escope = ([year] if year != 'All' else []) + ([tag] if tag else [])
+        etitle = "DOIs by journal" + (f" ({', '.join(escape(s) for s in escope)})"
+                                      if escope else "")
         emsg = "No journals were found" + (f" for {year}" if year != 'All' else "") + "."
-        ehtml = year_pulldown('journals_dois') + "<br><br>" + render_warning(emsg, 'warning')
+        ehtml = year_pulldown('journals_dois', selected=yr_selected, suffix=year_suffix) \
+                + "&nbsp;&nbsp;&nbsp;" + tag_pulldown('journals_dois', year, tag) \
+                + "<br><br>" + render_warning(emsg, 'warning')
         endpoint_access()
         return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                              title=etitle, html=ehtml, chartscript='',
@@ -12157,22 +12294,28 @@ def show_journals_dois(year=None):
             jcell = key
             subcell = ''
             try:
-                pubs = DB['dis'].dois.distinct('publisher', {'jrc_journal': key})
+                pubfilter = {'jrc_journal': key}
+                if tag:
+                    pubfilter['jrc_tag.name'] = tag
+                pubs = DB['dis'].dois.distinct('publisher', pubfilter)
                 pcell = safe('<br>'.join(escape(p) for p in sorted(pubs, key=str.lower)))
             except Exception:
                 pcell = ''
         ccount = journal[key]['count']
-        countcell = cell(safe(f"<a href='/journal/{key}/{year}'>{ccount:,}</a>"), sort=ccount)
+        countcell = cell(safe(f"<a href='/journal/{key}/{year}{year_suffix}'>{ccount:,}</a>"),
+                         sort=ccount)
         trows.append([jcell, pcell, countcell, journal[key]['maxpub'], subcell])
     html = render_table(['Journal', 'Publisher', 'Count', 'Last published to', 'Subscription'],
                         trows, table_id='journals', css='tablesorter numbers-scroll')
     title = "DOIs by journal"
-    if year != 'All':
-        title += f" ({year})"
+    scope = ([escape(year)] if year != 'All' else []) + ([escape(tag)] if tag else [])
+    if scope:
+        title += f" ({', '.join(scope)})"
     html = "Note: not all subscriptions are currently tracked - " \
            + "Subscription tracking is a work in process<br>" \
            + stat_cards(cards, div_id='jdois-stats') \
-           + year_pulldown('journals_dois') + html
+           + year_pulldown('journals_dois', selected=yr_selected, suffix=year_suffix) \
+           + "&nbsp;&nbsp;&nbsp;" + tag_pulldown('journals_dois', year, tag) + html
     # Ranked hbar of the top journals by DOI count (audit chart policy); the table
     # above lists every journal. Default colour = get_colors_by_count. The wide
     # 5-column table means this sits below the table rather than beside it.
@@ -12312,14 +12455,18 @@ def dois_nojournal():
 @app.route('/journal/<string:jname>/<string:year>')
 @app.route('/journal/<string:jname>')
 def show_journal_ui(jname, year='All'):
-    ''' Show journal DOIs
+    ''' Show journal DOIs, optionally scoped to one jrc_tag.name via ?tag=
+        (keeps the /journals_dois drill-down in sync with its tag filter).
     '''
+    tag = request.args.get('tag') or None
     try:
         payload = {"$or": [{"container-title": jname},
                            {"institution.name": jname}]}
         payload = {"jrc_journal": jname}
         if year != 'All':
             payload['jrc_publishing_date'] = {"$regex": "^"+ year}
+        if tag:
+            payload['jrc_tag.name'] = tag
         rows = DB['dis'].dois.find(payload).sort("jrc_publishing_date", -1)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
@@ -12350,6 +12497,8 @@ def show_journal_ui(jname, year='All'):
     title = f"DOIs for {jname}"
     if year != 'All':
         title += f" ({year})"
+    if tag:
+        title += f" &middot; {escape(tag)}"
     html = stat_cards(cards, div_id='journal-stats') + html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
