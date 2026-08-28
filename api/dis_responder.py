@@ -51,7 +51,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.22.4"
+__version__ = "120.22.5"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -7221,7 +7221,8 @@ def dois_yearly(year=None):
 @app.route('/dois_time/<string:period>/<string:year>')
 @app.route('/dois_time/<string:period>')
 def dois_time(period, year=None):
-    ''' Show DOIs by year or month
+    ''' Show DOIs by year or month, optionally scoped to one jrc_tag.name (?tag=)
+        alongside the year filter.
         Keyword arguments:
           period: "year" or "month"
           year: year to filter (month only, defaults to current year)
@@ -7233,11 +7234,17 @@ def dois_time(period, year=None):
     if period == 'month' and year is None:
         year = str(datetime.now().year)
     substr_len = 7 if period == 'month' else 4
-    pipeline = []
+    tag = request.args.get('tag') or None
+    year_suffix = f"?tag={quote(tag, safe='')}" if tag else ''
+    tagsfx = f" &middot; {escape(tag)}" if tag else ''
+    match = {}
     # Treat an explicit 'All' like no year filter (it's a label, not a date prefix -
     # "^All" would match nothing); the month nav below is already guarded for 'All'.
     if year and year != 'All':
-        pipeline.append({"$match": {"jrc_publishing_date": {"$regex": "^" + year}}})
+        match["jrc_publishing_date"] = {"$regex": "^" + year}
+    if tag:
+        match["jrc_tag.name"] = tag
+    pipeline = [{"$match": match}] if match else []
     pipeline += [
         {"$group": {"_id": {period: {"$substrBytes": ["$jrc_publishing_date", 0, substr_len]},
                             "source": "$jrc_obtained_from"},
@@ -7280,9 +7287,10 @@ def dois_time(period, year=None):
             trows.append(cells)
         # Tap a year bar -> all DOIs published that year (mirrors the year cell)
         nav = {y: {"field": "publishing_year", "value": y} for y in data['years']}
-        title = "DOIs published by year"
+        title = "DOIs published by year" + tagsfx
         chart_title = "DOIs published by year/source"
-        pulldown = year_pulldown('dois_time/year')
+        pulldown = year_pulldown('dois_time/year', suffix=year_suffix) \
+                   + "&nbsp;&nbsp;&nbsp;" + tag_pulldown('dois_time/year', year, tag)
     else:
         data = {'months': [f"{mon:02}" for mon in range(1, 13)],
                 'Crossref': [0] * 12, 'DataCite': [0] * 12}
@@ -7304,9 +7312,10 @@ def dois_time(period, year=None):
         if year and year != 'All':
             nav = {m: {"field": "publishing_year", "value": f"{year}-{m}"}
                    for m in data['months']}
-        title = f"DOIs published by month ({year})"
+        title = f"DOIs published by month ({year})" + tagsfx
         chart_title = title
-        pulldown = year_pulldown('dois_time/month', all_years=False)
+        pulldown = year_pulldown('dois_time/month', all_years=False, suffix=year_suffix) \
+                   + "&nbsp;&nbsp;&nbsp;" + tag_pulldown('dois_time/month', year, tag)
     footer = [fcell('Total')] + [fcell(f"{counter[source]:,}", align='center')
                                  for source in SOURCES]
     html = render_table([period.capitalize(), 'Crossref', 'DataCite'], trows,
