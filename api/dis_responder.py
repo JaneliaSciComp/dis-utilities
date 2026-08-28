@@ -51,7 +51,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.22.5"
+__version__ = "120.22.6"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -12230,10 +12230,15 @@ def show_open_access_details(year='All'):
 @app.route('/journals_dois/<string:year>')
 @app.route('/journals_dois')
 def show_journals_dois(year=None):
-    ''' Show journals in a table
+    ''' Show journals in a table, optionally scoped to one jrc_tag.name (?tag=)
+        alongside the year filter. Defaults to the current year (pick "All" in the
+        pulldown for every year).
     '''
     if year is None:
-        year = 'All'
+        year = str(datetime.now().year)
+    tag = request.args.get('tag') or None
+    year_suffix = f"?tag={quote(tag, safe='')}" if tag else ''
+    yr_selected = "(all years)" if year == 'All' else year
     errmsg = "Could not get journal data from subscription collection"
     try:
         rows = DB['dis'].subscription.find({"type": {"$in": ["Journal", "Repository"]}})
@@ -12245,7 +12250,7 @@ def show_journals_dois(year=None):
     for row in rows:
         subscribed[row['title']] = row
     try:
-        journal = get_top_journals(year, maxpub=True)
+        journal = get_top_journals(year, maxpub=True, tag=tag)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning(errmsg),
@@ -12253,9 +12258,13 @@ def show_journals_dois(year=None):
     if not journal:
         # Empty result for a valid year: keep the year pulldown so another year can be
         # chosen, and show the standard inline warning instead of a full error page.
-        etitle = "DOIs by journal" + (f" ({year})" if year != 'All' else "")
+        escope = ([year] if year != 'All' else []) + ([tag] if tag else [])
+        etitle = "DOIs by journal" + (f" ({', '.join(escape(s) for s in escope)})"
+                                      if escope else "")
         emsg = "No journals were found" + (f" for {year}" if year != 'All' else "") + "."
-        ehtml = year_pulldown('journals_dois') + "<br><br>" + render_warning(emsg, 'warning')
+        ehtml = year_pulldown('journals_dois', selected=yr_selected, suffix=year_suffix) \
+                + "&nbsp;&nbsp;&nbsp;" + tag_pulldown('journals_dois', year, tag) \
+                + "<br><br>" + render_warning(emsg, 'warning')
         endpoint_access()
         return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                              title=etitle, html=ehtml, chartscript='',
@@ -12285,22 +12294,28 @@ def show_journals_dois(year=None):
             jcell = key
             subcell = ''
             try:
-                pubs = DB['dis'].dois.distinct('publisher', {'jrc_journal': key})
+                pubfilter = {'jrc_journal': key}
+                if tag:
+                    pubfilter['jrc_tag.name'] = tag
+                pubs = DB['dis'].dois.distinct('publisher', pubfilter)
                 pcell = safe('<br>'.join(escape(p) for p in sorted(pubs, key=str.lower)))
             except Exception:
                 pcell = ''
         ccount = journal[key]['count']
-        countcell = cell(safe(f"<a href='/journal/{key}/{year}'>{ccount:,}</a>"), sort=ccount)
+        countcell = cell(safe(f"<a href='/journal/{key}/{year}{year_suffix}'>{ccount:,}</a>"),
+                         sort=ccount)
         trows.append([jcell, pcell, countcell, journal[key]['maxpub'], subcell])
     html = render_table(['Journal', 'Publisher', 'Count', 'Last published to', 'Subscription'],
                         trows, table_id='journals', css='tablesorter numbers-scroll')
     title = "DOIs by journal"
-    if year != 'All':
-        title += f" ({year})"
+    scope = ([escape(year)] if year != 'All' else []) + ([escape(tag)] if tag else [])
+    if scope:
+        title += f" ({', '.join(scope)})"
     html = "Note: not all subscriptions are currently tracked - " \
            + "Subscription tracking is a work in process<br>" \
            + stat_cards(cards, div_id='jdois-stats') \
-           + year_pulldown('journals_dois') + html
+           + year_pulldown('journals_dois', selected=yr_selected, suffix=year_suffix) \
+           + "&nbsp;&nbsp;&nbsp;" + tag_pulldown('journals_dois', year, tag) + html
     # Ranked hbar of the top journals by DOI count (audit chart policy); the table
     # above lists every journal. Default colour = get_colors_by_count. The wide
     # 5-column table means this sits below the table rather than beside it.
@@ -12440,14 +12455,18 @@ def dois_nojournal():
 @app.route('/journal/<string:jname>/<string:year>')
 @app.route('/journal/<string:jname>')
 def show_journal_ui(jname, year='All'):
-    ''' Show journal DOIs
+    ''' Show journal DOIs, optionally scoped to one jrc_tag.name via ?tag=
+        (keeps the /journals_dois drill-down in sync with its tag filter).
     '''
+    tag = request.args.get('tag') or None
     try:
         payload = {"$or": [{"container-title": jname},
                            {"institution.name": jname}]}
         payload = {"jrc_journal": jname}
         if year != 'All':
             payload['jrc_publishing_date'] = {"$regex": "^"+ year}
+        if tag:
+            payload['jrc_tag.name'] = tag
         rows = DB['dis'].dois.find(payload).sort("jrc_publishing_date", -1)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
@@ -12478,6 +12497,8 @@ def show_journal_ui(jname, year='All'):
     title = f"DOIs for {jname}"
     if year != 'All':
         title += f" ({year})"
+    if tag:
+        title += f" &middot; {escape(tag)}"
     html = stat_cards(cards, div_id='journal-stats') + html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
