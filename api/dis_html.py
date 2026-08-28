@@ -24,7 +24,7 @@ DOWNLOAD_ICON = '<i class="fa-solid fa-arrow-down" ' \
 NAV = {"Home": "",
        "DOIs": {"DOIs by insertion date": "dois_insertpicker",
                 "DOI metrics": "dois_metrics",
-                "Impact by source": "source_metrics",
+                "Publishing impact": "source_metrics",
                 "DOIs by": {"Month": "dois_time/month", "Year": "dois_time/year",
                             "Journal": "journals_dois", "License": "dois_license",
                             "Publisher": "dois_publisher",

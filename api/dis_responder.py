@@ -51,7 +51,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.22.7"
+__version__ = "120.22.8"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -5058,7 +5058,7 @@ def show_acknowledgement_metrics(limit=10):
             + '</div>')
     seealso = see_also([("DOI metrics", "/dois_metrics"),
                         ("Tags", "/tag_metrics"),
-                        ("Impact by source", "/source_metrics")])
+                        ("Publishing impact", "/source_metrics")])
     html = (coverage_html + tabs + seealso + m_chartscript + by_chartscript
             + s_chartscript + ent_chartscript + h_chartscript)
     endpoint_access()
@@ -5427,7 +5427,7 @@ def show_tag_metrics(limit=15):
             + '</div>')
     seealso = see_also([("DOI metrics", "/dois_metrics"),
                         ("Acknowledgements", "/acknowledgement_metrics"),
-                        ("Impact by source", "/source_metrics")])
+                        ("Publishing impact", "/source_metrics")])
     html = (coverage_html + tabs + seealso + tag_chartscript + cov_chartscript
             + by_chartscript + trend_chartscript + cooccur_chartscript)
     endpoint_access()
@@ -6649,7 +6649,7 @@ def show_dois_metrics(year='All'):
                         ("Publishers", "/dois_publisher"),
                         ("Licenses", "/dois_license"),
                         ("Citations", "/citation_metrics/crossref"),
-                        ("Impact by source", "/source_metrics")])
+                        ("Publishing impact", "/source_metrics")])
     html = header + tabs + seealso + charts
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
@@ -9028,7 +9028,7 @@ def source_metrics(year='All'):  # pylint: disable=too-many-locals
                + f"<div class='flexcol'>{section_html}</div>" \
                + "<div class='flexcol' style='margin: 10px 0 0 20px'>" \
                + f"{chart_div}</div></div>"
-    title = "Impact by source"
+    title = "Publishing impact"
     bits = ([escape(year)] if year != 'All' else []) + ([escape(tag)] if tag else [])
     if bits:
         title += " (" + ", ".join(bits) + ")"
