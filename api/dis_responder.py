@@ -51,7 +51,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.21.6"
+__version__ = "120.22.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -284,6 +284,44 @@ def year_pulldown(prefix, all_years=True, suffix='', start_year=2006, query=Fals
         selected = "(all years)" if yr == 'All' else yr
     return _year_pulldown(prefix, all_years=all_years, suffix=suffix,
                           start_year=start_year, query=query, selected=selected)
+
+
+def tag_pulldown(prefix, year='All', selected=None):
+    ''' Generate a single-tag pulldown (the distinct jrc_tag.name values in the
+        dois collection). Each option keeps the current publishing-year path
+        segment and toggles a ?tag=<name> query param; "All tags" clears it.
+        Mirrors year_pulldown's selected-button style so the two filters read as
+        a matched pair, and scrolls when the tag list is long.
+        Keyword arguments:
+          prefix: navigation prefix (e.g. 'source_metrics')
+          year: the currently-selected year, preserved in each tag link
+          selected: the currently-selected tag, or None for "all tags"
+        Returns:
+          Pulldown HTML
+    '''
+    try:
+        tags = sorted((t for t in DB['dis'].dois.distinct("jrc_tag.name") if t),
+                      key=str.lower)
+    except Exception:
+        tags = []
+    base = f"/{prefix}" if (not year or year == 'All') else f"/{prefix}/{year}"
+    shown = selected if selected else "(all tags)"
+    btn_label = ("<span style='opacity:0.85;'>Tag</span> "
+                 "<span style='opacity:0.85;'>&#9662;</span> "
+                 "<span style='opacity:0.5;'>|</span> "
+                 f"<span style='color:#ffffff;font-weight:700;'>{escape(shown)}</span>")
+    html = "<div class='dropdown'><button type='button' class='btn btn-info' " \
+           + "style='min-width:240px;' data-toggle='dropdown' aria-haspopup='true' " \
+           + f"aria-expanded='false'>{btn_label}</button>" \
+           + "<div class='dropdown-menu' style='max-height:420px; overflow-y:auto;'>"
+    html += f"<a class='dropdown-item{'' if selected else ' active'}' href='{base}'>" \
+            + "All tags</a><div class='dropdown-divider'></div>"
+    for tag in tags:
+        cls = 'dropdown-item active' if tag == selected else 'dropdown-item'
+        html += f"<a class='{cls}' href='{base}?tag={quote(tag, safe='')}'>" \
+                + f"{escape(tag)}</a>"
+    html += "</div></div>"
+    return html
 
 
 def inspect_error(err, errtype):
@@ -8653,9 +8691,15 @@ def source_metrics(year='All'):  # pylint: disable=too-many-locals
         (Crossref usage = eLife + protocols.io; DataCite = figshare + Zenodo).
     '''
     coll = DB['dis'].dois
+    # Shared filter merged into every population query (cited / all / usage) so
+    # the report is scoped uniformly. Holds the optional publishing-year regex
+    # and an optional single jrc_tag.name restriction from the ?tag= pulldown.
     ymatch = {}
     if year != 'All':
         ymatch["jrc_publishing_date"] = {"$regex": "^" + year}
+    tag = request.args.get('tag') or None
+    if tag:
+        ymatch["jrc_tag.name"] = tag
     cite = {}   # source -> citation metrics
     use = {}    # source -> usage metrics
     # h5-index = h-index over works from the last 5 COMPLETE calendar years (a
@@ -8750,6 +8794,8 @@ def source_metrics(year='All'):  # pylint: disable=too-many-locals
         result = initialize_result()
         result['data'] = {"citations": cite, "usage": use}
         result['rest']['source'] = 'mongo'
+        result['rest']['year'] = year
+        result['rest']['tag'] = tag
         result['rest']['row_count'] = cite['Combined']['dois'] + use['Combined']['dois']
         return generate_response(result)
     # ----- headline stat cards, grouped (h-index is the marquee combined impact
@@ -8914,8 +8960,9 @@ def source_metrics(year='All'):  # pylint: disable=too-many-locals
                + "<div class='flexcol' style='margin: 10px 0 0 20px'>" \
                + f"{chart_div}</div></div>"
     title = "Impact by source"
-    if year != 'All':
-        title += f" ({year})"
+    bits = ([escape(year)] if year != 'All' else []) + ([escape(tag)] if tag else [])
+    if bits:
+        title += " (" + ", ".join(bits) + ")"
     # Tabbed layout, matching the sibling dashboards (dois_metrics / tag_metrics /
     # acknowledgement_metrics): the overview cards + intro are a shared header above
     # the tabs, and each metric section becomes a tab (content and table/chart
@@ -8939,7 +8986,12 @@ def source_metrics(year='All'):  # pylint: disable=too-many-locals
     seealso = see_also([("DOI metrics", "/dois_metrics"),
                         ("Citations", "/citation_metrics/crossref"),
                         ("Acknowledgements", "/acknowledgement_metrics")])
-    html = year_pulldown('source_metrics') + "<br><br>" + header + tabs + seealso + chartscript
+    # Year + tag filters side by side; each preserves the other's selection (the
+    # year links carry ?tag= as a suffix, the tag links keep the year path segment).
+    year_suffix = f"?tag={quote(tag, safe='')}" if tag else ''
+    filters = year_pulldown('source_metrics', suffix=year_suffix) \
+              + "&nbsp;&nbsp;&nbsp;" + tag_pulldown('source_metrics', year, tag)
+    html = filters + "<br><br>" + header + tabs + seealso + chartscript
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html, bokeh=True,
