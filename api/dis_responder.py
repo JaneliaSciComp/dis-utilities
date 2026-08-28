@@ -51,7 +51,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.22.2"
+__version__ = "120.22.3"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -6299,7 +6299,9 @@ def show_doi_by_name_ui(family, given=None):
 @app.route('/doisui_type/<string:src>/<string:typ>/<string:sub>', defaults={'year': 'All'})
 @app.route('/doisui_type/<string:src>/<string:typ>/<string:sub>/<string:year>')
 def show_doi_by_type_ui(src, typ, sub, year):
-    ''' Show DOIs for a given type/subtype
+    ''' Show DOIs for a given type/subtype, optionally scoped to a single
+        jrc_tag.name via ?tag= (keeps the /dois_metrics Sources drill-down in
+        sync with that page's tag filter).
     '''
     payload = {"jrc_obtained_from": src,
                ("type" if src == 'Crossref' else 'types.resourceTypeGeneral'): typ}
@@ -6307,6 +6309,9 @@ def show_doi_by_type_ui(src, typ, sub, year):
         payload["subtype"] = sub
     if year != 'All':
         payload['jrc_publishing_date'] = {"$regex": "^" + year}
+    tag = request.args.get('tag') or None
+    if tag:
+        payload["jrc_tag.name"] = tag
     try:
         coll = DB['dis'].dois
         rows = coll.find(payload).collation({"locale": "en"}).sort("jrc_publishing_date", -1)
@@ -6321,10 +6326,14 @@ def show_doi_by_type_ui(src, typ, sub, year):
         desc += f"/{sub}"
     if year != 'All':
         desc += f" ({year})"
+    if tag:
+        desc += f" &middot; {escape(tag)}"
     if not cnt:
-        # No DOIs for this filter - advise but keep the year pulldown so another
-        # year can be chosen (also avoids a divide-by-zero in the OA percentage)
-        html = year_pulldown(prefix) + "<br><br>" \
+        # No DOIs for this filter - advise but keep the year pulldown (tag-aware,
+        # so switching years keeps the tag) so another year can be chosen (also
+        # avoids a divide-by-zero in the OA percentage)
+        html = year_pulldown(prefix, suffix=(f"?tag={quote(tag, safe='')}" if tag else '')) \
+               + "<br><br>" \
                + render_warning(f"No DOIs were found for {desc}", 'warning')
         return make_response(render_template('custom.html', urlroot=request.url_root,
                                              title=f"DOIs for {desc}", html=html, oamsg='',
@@ -6459,6 +6468,8 @@ def show_dois_metrics(year='All'):
         stotal += val
         link = (f"/doisui_type/{src}/{typ}/{sub}/{year}" if year != 'All'
                 else f"/doisui_type/{src}/{typ}/{sub}")
+        # Carry the active tag so the drill-down list matches the (tag-scoped) count.
+        link += year_suffix
         srows.append([src, typ, sub if sub != 'None' else '',
                       safe(f"<a href='{link}'>{val:,}</a>")])
     src_table = render_table(['Source', 'Type', 'Subtype', 'Count'], srows,
