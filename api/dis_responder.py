@@ -51,7 +51,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.22.1"
+__version__ = "120.22.2"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -1620,10 +1620,11 @@ def get_preprint_stats(rows):
     return stat
 
 
-def get_source_data(year):
+def get_source_data(year, tag=None):
     ''' Get DOI data by source and type/subtype or resourceTypeGeneral
         Keyword arguments:
           year: year to get data for
+          tag: optional jrc_tag.name to scope to
         Returns:
           Data dictionary and html dictionary
     '''
@@ -1633,6 +1634,8 @@ def get_source_data(year):
                  "jrc_publishing_date": {"$regex": "^"+ year}}
     else:
         match = {"jrc_obtained_from": "Crossref"}
+    if tag:
+        match["jrc_tag.name"] = tag
     payload = [{"$match": match},
                {"$group": {"_id": {"source": "$jrc_obtained_from", "type": "$type",
                                    "subtype": "$subtype"},
@@ -6412,7 +6415,16 @@ def show_dois_metrics(year='All'):
     '''
     coll = DB['dis'].dois
     yr = {"jrc_publishing_date": {"$regex": "^" + year}} if year != 'All' else {}
-    ysfx = f" ({year})" if year != 'All' else ""
+    tag = request.args.get('tag') or None
+    if tag:
+        # Scope the whole page (every tab) to DOIs carrying this jrc_tag.name.
+        yr["jrc_tag.name"] = tag
+    # The "By year" tab intentionally spans all years, but should still honor a
+    # tag selection - so it carries the tag match on its own, not the year one.
+    tmatch = {"jrc_tag.name": tag} if tag else {}
+    year_suffix = f"?tag={quote(tag, safe='')}" if tag else ''
+    scope = ([escape(year)] if year != 'All' else []) + ([escape(tag)] if tag else [])
+    ysfx = f" ({', '.join(scope)})" if scope else ""
 
     def pctof(num, den):
         return f"{num / den * 100:.0f}%" if den else "0%"
@@ -6429,11 +6441,12 @@ def show_dois_metrics(year='All'):
               + stat_cards([("DOIs", f"{total:,}"),
                             ("Crossref", f"{by_src['Crossref']:,}"),
                             ("DataCite", f"{by_src['DataCite']:,}")], div_id='doi-stats')
-              + year_pulldown('dois_metrics'))
+              + year_pulldown('dois_metrics', suffix=year_suffix)
+              + "&nbsp;&nbsp;&nbsp;" + tag_pulldown('dois_metrics', year, tag))
     charts = ""
     # ----- Sources tab (registrar x type/subtype table + two pies) -----
     try:
-        sdata, hdict = get_source_data(year)
+        sdata, hdict = get_source_data(year, tag)
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get source data"),
@@ -6453,7 +6466,7 @@ def show_dois_metrics(year='All'):
                              footer=[fcell('Total', colspan=3), fcell(f"{stotal:,}")])
     s1, d1 = DP.pie_chart(sdata, f"DOIs by source", "source", width=450,
                           colors=DP.SOURCE_PALETTE)
-    lm_payload = ([{"$match": dict(yr)}] if year != 'All' else []) + \
+    lm_payload = ([{"$match": dict(yr)}] if yr else []) + \
                  [{"$group": {"_id": "$jrc_load_source", "count": {"$sum": 1}}},
                   {"$sort": {"count": -1}}]
     try:
@@ -6511,7 +6524,7 @@ def show_dois_metrics(year='All'):
     ymap = {}
     try:
         for row in coll.aggregate([
-                {"$match": {"jrc_publishing_date": {"$exists": True}}},
+                {"$match": {"jrc_publishing_date": {"$exists": True}, **tmatch}},
                 {"$group": {"_id": {"yr": {"$substr": ["$jrc_publishing_date", 0, 4]},
                                     "src": "$jrc_obtained_from"}, "n": {"$sum": 1}}}]):
             y = row['_id'].get('yr')
