@@ -51,7 +51,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.22.0"
+__version__ = "120.22.1"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -291,7 +291,8 @@ def tag_pulldown(prefix, year='All', selected=None):
         dois collection). Each option keeps the current publishing-year path
         segment and toggles a ?tag=<name> query param; "All tags" clears it.
         Mirrors year_pulldown's selected-button style so the two filters read as
-        a matched pair, and scrolls when the tag list is long.
+        a matched pair, and carries a sticky typeahead box that live-filters the
+        list (see filterTagPulldown + the shown.bs.dropdown focus handler in dis.js).
         Keyword arguments:
           prefix: navigation prefix (e.g. 'source_metrics')
           year: the currently-selected year, preserved in each tag link
@@ -313,13 +314,23 @@ def tag_pulldown(prefix, year='All', selected=None):
     html = "<div class='dropdown'><button type='button' class='btn btn-info' " \
            + "style='min-width:240px;' data-toggle='dropdown' aria-haspopup='true' " \
            + f"aria-expanded='false'>{btn_label}</button>" \
-           + "<div class='dropdown-menu' style='max-height:420px; overflow-y:auto;'>"
+           + "<div class='dropdown-menu' style='max-height:460px; overflow-y:auto;'>"
+    # Sticky typeahead box. Clicks/keys inside an <input> in a BS4 dropdown-menu
+    # don't dismiss the menu, so the list filters in place as you type.
+    html += "<div style='position:sticky; top:0; background:#fff; z-index:2; " \
+            + "padding:6px 12px 8px 12px;'>" \
+            + "<input type='text' class='form-control form-control-sm " \
+            + "tag-pulldown-search-box' placeholder='Filter tags…' " \
+            + "autocomplete='off' oninput='filterTagPulldown(this)' " \
+            + "onclick='event.stopPropagation()'></div>"
     html += f"<a class='dropdown-item{'' if selected else ' active'}' href='{base}'>" \
             + "All tags</a><div class='dropdown-divider'></div>"
     for tag in tags:
         cls = 'dropdown-item active' if tag == selected else 'dropdown-item'
-        html += f"<a class='{cls}' href='{base}?tag={quote(tag, safe='')}'>" \
-                + f"{escape(tag)}</a>"
+        html += f"<a class='{cls} tag-pulldown-item' " \
+                + f"href='{base}?tag={quote(tag, safe='')}'>{escape(tag)}</a>"
+    html += "<span class='dropdown-item disabled tag-pulldown-empty' " \
+            + "style='display:none;'>No matching tags</span>"
     html += "</div></div>"
     return html
 
