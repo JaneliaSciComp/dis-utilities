@@ -51,7 +51,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.22.8"
+__version__ = "120.22.9"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -1287,17 +1287,6 @@ def get_separator(last, this):
         delta =  f"{delta:,} day{'s' if delta > 1 else ''}"
         return f" &rarr; {tiny_badge('delta', delta, size=10)} &rarr; "
     return "&nbsp;&nbsp;&rarr;&nbsp;&nbsp;"
-
-
-def is_ignored(doi):
-    ''' Check if a DOI is ignored
-        Keyword arguments:
-          doi: DOI
-        Returns:
-          True if the DOI is ignored, False otherwise
-    '''
-    row = DB['dis'].to_ignore.find_one({"type": "doi", "key": doi})
-    return row is not None
 
 
 def add_update_times(row):
@@ -6163,9 +6152,13 @@ def show_doi_ui(doi):
         else:
             recsec = "<h4 style='color:red'><i class='fa-solid fa-warning'></i> " \
                      + "This DOI is not saved locally in the Janelia database</h4><br>"
-        if is_ignored(doi):
+        ignored = DB['dis'].to_ignore.find_one({"type": "doi", "key": doi})
+        if ignored:
+            msg = "This DOI is in the ignore list"
+            if ignored.get('reason'):
+                msg += f" &mdash; reason: {escape(ignored['reason'])}"
             recsec += "<h4 style='color:red'><i class='fa-solid fa-warning'></i> " \
-                     + "This DOI is in the ignore list</h4><br>"
+                     + msg + "</h4><br>"
     try:
         _, data = get_doi(doi)
     except Exception as err:
