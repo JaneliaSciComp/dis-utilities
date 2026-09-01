@@ -26,11 +26,25 @@ This repository is split into four sections:
 
 The DIS system is based on a MongoDB database with collections to persist DOIs, ORCIDs, and project mappings. Python programs are used for ETL and updates. A Flask-based application provides user interface, visualizations, and a REST API.
 
-The DIS MongoDB database contains four collections:
+The DIS MongoDB database contains several collections:
 - *dois*: local persistence of records from Crossref or DataCite along with Janelia metadata
-- *dois_to_process*: transient storage for DOIs that are present in secondary systems (e.g. bioRxiv) but not yet available in Crossref/DataCite
 - *orcid*: Janelia authors. Data in this collection is drawn fro ORCID and the HHMI People system.
+- *api_endpoint_details*: calls per API endpoint
+- *cv*: controlled vocabularies
+- *cvterm*: terms for controlled vocabularies
+- *dois_to_process*: transient storage for DOIs that are present in secondary systems (e.g. bioRxiv) but not yet available in Crossref/DataCite
+- *external_dois*: DOIs not published by Janelia, but reference Janelia in the acknowledgements
+- *org_group*: organization groupings
+- *processing*: DOI processing event log
 - *project_map*: mapping of alternate project names to approved tags
+- *search_regex*: regexes for acknowledgement parsing
+- *subscription*: journal subscriptions
+- *suporg*: supervisory organizations
+- *to_ignore*: entities (including DOIs) to ignore
+
+### User interface
+Here's a sample DOI:
+![DOI page](sample_doi.png?raw=true "DOI page")
 
 ### Python command line programs
 The Python programs in the [sync](sync/README.md) and [utility](utility/README.md) sections of this repository are meant to be run from the Unix command line, preferably from inside a Python virtual environment. To see which command line parameters may be specified for programs, use --help:
