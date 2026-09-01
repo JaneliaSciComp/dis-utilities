@@ -51,7 +51,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.22.9"
+__version__ = "120.23.3"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -7185,7 +7185,7 @@ def dois_yearly(year=None):
                     + "distinct Janelia authors for all entries, " \
                     + f"{BOLD}{orc:,}</span> " \
                     + f"({(orc / cnt * 100) if cnt else 0:.2f}%) with ORCIDs"
-    # Journals
+    # Top journals
     journal = get_top_journals(year, tag=tag)
     cnt = 0
     stat['Topjournals'] = ""
@@ -7196,10 +7196,35 @@ def dois_yearly(year=None):
         cnt += 1
         if cnt >= 10:
             break
-    html = f"<h2 class='green1'>Articles</h2>{stat['Journal articles']}<br>{stat['Preprints']}" \
-           + f"<br><br><h2 class='green1'>Authors</h2>{stat['ORCID']}" \
-           + "<br><br><h2 class='green1'>Top journals</h2>" \
-           + f"<p style='font-size: 14pt;line-height:90%;'>{stat['Topjournals']}</p>"
+    # Top cited: the year's five most-cited journal articles and preprints, as a
+    # standard DOI/Title/Citations table, under the same year + tag scope as the
+    # rest of the page.
+    tcrows = []
+    try:
+        tcmatch = {"jrc_publishing_date": {"$regex": "^" + year},
+                   "jrc_obtained_from": "Crossref",
+                   "type": {"$in": ["journal-article", "posted-content"]},
+                   "jrc_citation_count": {"$gt": 0}, **tmatch}
+        for crow in coll.find(tcmatch).sort("jrc_citation_count", -1).limit(5):
+            num = crow.get('jrc_citation_count', 0)
+            tcrows.append([safe(doi_link(crow['doi'])),
+                           render_title_html(DL.get_title(crow)),
+                           cell(f"{num:,}", sort=num)])
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get top cited DOIs"),
+                               message=error_message(err))
+    topcited = render_table(['DOI', 'Title', 'Citations'], tcrows, table_id='topcited',
+                            css='tablesorter numberlast') if tcrows else \
+               "<p style='font-size: 14pt;'>No cited journal articles or preprints.</p>"
+    html = f"<h2 class='green1'>Articles and preprints</h2>{stat['Journal articles']}<br>{stat['Preprints']}" \
+           + f"<br><br><h2 class='green1'>Janelia authors</h2>{stat['ORCID']}" \
+           + "<br><br><h2 class='green1'>Top 10 journals (repositories excluded)</h2>" \
+           + f"<p style='font-size: 14pt;line-height:90%;'>{stat['Topjournals']}</p>" \
+           + "<h2 class='green1'>Top 5 cited Crossref journal articles/preprints</h2>" \
+           + topcited \
+           + "<div style='font-size: 14pt; margin-top: 8px;'>" \
+           + f"<a href='/citation_list/crossref?year={year}'>Show all cited works</a></div>"
     tagsfx = f" &middot; {escape(tag)}" if tag else ''
     html = f"<div class='titlestat'>{year} YEAR IN REVIEW{tagsfx}</div><br>" \
            + f"<div class='yearstat'>{html}</div>"
