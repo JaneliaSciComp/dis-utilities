@@ -53,6 +53,8 @@ UPDATED = {}
 MISSING = {}
 NO_AUTHOR = {}
 TO_BE_PROCESSED = []
+IGNORED_TO_PROCESS = []  # dois_to_process rows that are on the ignore list
+QUEUED = []              # every doi currently in dois_to_process, for reconciliation
 MAX_DOI_TRIES = 3
 # Crossref bulk (paginated) query rate-limit handling: retry a transient HTTP
 # 429 with exponential backoff and pace pages, so a single rate limit doesn't
@@ -316,6 +318,16 @@ def add_to_be_processed(dlist):
         terminate_program(err)
     for row in rows:
         doi = row['doi']
+        # Track every queue row. TO_BE_PROCESSED below only records rows not
+        # already discovered elsewhere, so it cannot be used to reconcile the
+        # queue - a queued DOI a sweep also found would never be dequeued.
+        QUEUED.append(doi)
+        if doi in IGNORE['doi']:
+            # On the ignore list, so it can never be persisted - left queued it
+            # would be re-read every run forever. Mark it for removal instead.
+            LOGGER.warning(f"{doi} is in dois_to_process but on the ignore list")
+            IGNORED_TO_PROCESS.append(doi)
+            continue
         if doi not in dlist:
             TO_BE_PROCESSED.append(doi)
             dlist.append(doi)
@@ -1108,11 +1120,6 @@ def update_mongodb(persist):
             if 'elife' in key and 'subtype' not in val:
                 LOGGER.warning(f"Removing subtype from {key}")
                 coll.update_one({"doi": key}, {"$unset": {"subtype": ""}})
-            if key in TO_BE_PROCESSED:
-                try:
-                    DB['dis'].dois_to_process.delete_one({"doi": key})
-                except Exception as err:
-                    LOGGER.error(f"Could not delete {key} from dois_to_process: {err}")
         if key in EXISTING:
             COUNT['update'] += 1
             if key not in UPDATED:
@@ -1120,6 +1127,32 @@ def update_mongodb(persist):
         else:
             COUNT['insert'] += 1
             INSERTED[key] = DL.get_publishing_date(val)
+
+
+def reconcile_to_process():
+    ''' Remove finished or ignored entries from the dois_to_process queue. An
+        entry used to be dropped only when the DOI was persisted in that same run,
+        so anything already stored (or on the ignore list) stayed queued forever
+        and kept being reported to the librarian as newly added.
+        Keyword arguments:
+          None
+        Returns:
+          None
+    '''
+    done = [doi for doi in QUEUED if doi in EXISTING or doi in INSERTED]
+    stale = list(dict.fromkeys(IGNORED_TO_PROCESS + done))
+    if not stale:
+        return
+    if not ARG.WRITE:
+        LOGGER.info(f"Would remove {len(stale):,} entries from dois_to_process")
+        return
+    for doi in stale:
+        try:
+            DB['dis'].dois_to_process.delete_one({"doi": doi})
+            COUNT['dequeued'] += 1
+        except Exception as err:
+            LOGGER.error(f"Could not delete {doi} from dois_to_process: {err}")
+    LOGGER.info(f"Removed {COUNT['dequeued']:,} entries from dois_to_process")
 
 
 def update_dois(specified, persist):
@@ -1138,6 +1171,7 @@ def update_dois(specified, persist):
     elif ARG.TARGET == 'dis':
         add_tags_and_authors(persist)
         update_mongodb(persist)
+        reconcile_to_process()
 
 
 def persist_if_updated(doi, msg, persist):
@@ -1266,12 +1300,13 @@ def generate_emails():
         JRC.send_email(msg, DISCONFIG['sender'], email, "New DOIs", mime='html')
     except Exception as err:
         LOGGER.error(err)
-    if not TO_BE_PROCESSED:
+    newly = [doi for doi in TO_BE_PROCESSED if doi in INSERTED]
+    if not newly:
         return
     msg = JRC.get_run_data(__file__, __version__)
     msg += "The following DOIs from a previous weekly cycle have been added to the database. " \
            + "Metadata should be updated as soon as possible."
-    for doi in TO_BE_PROCESSED:
+    for doi in newly:
         msg += f"\n{doi}"
     try:
         LOGGER.info(f"Sending email to {DISCONFIG['librarian']}")
@@ -1318,6 +1353,8 @@ def post_activities():
             print(f"DOIs fetched from DataCite:      {COUNT['datacite']:,}")
     print(f"DOIs specified:                  {COUNT['found']:,}")
     print(f"DOIs skipped:                    {COUNT['skipped']:,}")
+    if COUNT['dequeued']:
+        print(f"Removed from dois_to_process:    {COUNT['dequeued']:,}")
     if COUNT['skipped_registrar']:
         print(f"DOIs skipped (other registrar):  {COUNT['skipped_registrar']:,}")
     if COUNT['skipped_new']:
