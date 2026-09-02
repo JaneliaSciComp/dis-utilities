@@ -7,7 +7,7 @@
            to DIS MongoDB.
 """
 
-__version__ = '22.4.1'
+__version__ = '22.5.0'
 
 import argparse
 import collections
@@ -153,6 +153,22 @@ def initialize_program():
         SUPORG[key] = val
 
 
+def wanted_registrar(doi):
+    ''' Test a DOI against --registrar. Stored DOIs are judged on their recorded
+        jrc_obtained_from; anything we have not seen falls back to the
+        is_datacite() prefix heuristic the rest of the script routes on.
+        Keyword arguments:
+          doi: DOI
+        Returns:
+          True if the DOI belongs to the selected registrar
+    '''
+    if ARG.REGISTRAR == 'both':
+        return True
+    stored = (EXISTING or {}).get(doi, {}).get('jrc_obtained_from')
+    source = stored if stored else ('DataCite' if DL.is_datacite(doi) else 'Crossref')
+    return source.lower() == ARG.REGISTRAR
+
+
 def get_dis_dois_from_mongo():
     ''' Get DOIs from MongoDB
         Keyword arguments:
@@ -162,7 +178,7 @@ def get_dis_dois_from_mongo():
     '''
     coll = DB['dis'].dois
     result = {}
-    recs = coll.find({}, {"doi": 1, "updated": 1, "deposited": 1})
+    recs = coll.find({}, {"doi": 1, "updated": 1, "deposited": 1, "jrc_obtained_from": 1})
     for rec in recs:
         if DL.is_datacite(rec['doi']):
             if "updated" not in rec:
@@ -172,6 +188,9 @@ def get_dis_dois_from_mongo():
             if "deposited" not in rec:
                 terminate_program(f"Could not find deposited field for {rec['doi']} (Crossref)")
             result[rec['doi']] = {"deposited": {'date-time': rec['deposited']['date-time']}}
+        # Stored registrar - authoritative for --registrar filtering, unlike the
+        # is_datacite() prefix heuristic used for records we have not seen yet.
+        result[rec['doi']]['jrc_obtained_from'] = rec.get('jrc_obtained_from')
     LOGGER.info(f"Got {len(result):,} DOIs from DIS Mongo")
     return result
 
@@ -337,11 +356,14 @@ def get_dois_for_dis(flycore):
           Dict with a single "dois" key and value of a list of DOIs
     '''
     # Crossref
-    dlist = get_dois_from_crossref()
-    dlist.extend(get_dois_from_crossref("ror"))
+    dlist = []
+    if ARG.REGISTRAR in ('crossref', 'both'):
+        dlist.extend(get_dois_from_crossref())
+        dlist.extend(get_dois_from_crossref("ror"))
     # DataCite
-    dlist.extend(get_dois_from_datacite("janelia"))
-    dlist.extend(get_dois_from_datacite("affiliation"))
+    if ARG.REGISTRAR in ('datacite', 'both'):
+        dlist.extend(get_dois_from_datacite("janelia"))
+        dlist.extend(get_dois_from_datacite("affiliation"))
     # FlyCore
     for doistring in flycore['dois']:
         for doi in split_raw_doi(doistring):
@@ -415,6 +437,13 @@ def get_dois():
                 break
         if piped:
             return {"dois": inp.splitlines()}
+    if ARG.TARGET == 'dis' and ARG.MODE == 'update':
+        # Update-only: the population to refresh is exactly what we already have,
+        # and EXISTING is loaded before this runs - so skip the discovery sweeps
+        # (Crossref/DataCite/FLYF2/ALPS/EM/to-process) entirely.
+        dois = [doi for doi in EXISTING if wanted_registrar(doi)]
+        LOGGER.info(f"Refreshing {len(dois):,} DOIs already in the database")
+        return {"dois": dois}
     flycore = call_responder('flycore', '?request=doilist')
     LOGGER.info(f"Got {len(flycore['dois']):,} DOIs from FLYF2")
     if ARG.TARGET == 'dis':
@@ -1166,15 +1195,28 @@ def process_dois():
         if doi in specified:
             continue
         specified[doi] = True
-        if not ARG.INSERT:
-            sleep(0.25)
+        if not wanted_registrar(doi):
+            COUNT['skipped_registrar'] += 1
+            continue
+        known = doi in EXISTING
+        if ARG.MODE == 'insert' and known:
+            continue
+        if ARG.MODE == 'update' and not known:
+            # Update-only: never add something we do not already have. Matters
+            # for an explicit --doi/--file, which bypasses the population above.
+            COUNT['skipped_new'] += 1
+            continue
+        # Throttle where the API call actually happens, rather than per input DOI.
+        sleep(0.25)
         COUNT['found'] += 1
-        if ARG.INSERT:
-            if doi in EXISTING:
-                continue
+        if ARG.MODE == 'insert':
+            # foundc/foundd are counted on a successful fetch, including records
+            # that turn out to be too old - matching persist_if_updated(), which
+            # this branch bypasses.
             if DL.is_datacite(doi):
                 msg = get_doi_record(doi)
                 if msg:
+                    COUNT['foundd'] += 1
                     if too_old(doi, msg['data']['attributes']):
                         continue
                     persist[doi] = msg['data']['attributes']
@@ -1182,6 +1224,7 @@ def process_dois():
             else:
                 msg = get_doi_record(doi)
                 if msg:
+                    COUNT['foundc'] += 1
                     if too_old(doi, msg['message']):
                         continue
                     persist[doi] = msg['message']
@@ -1204,6 +1247,10 @@ def generate_emails():
     run_data = JRC.get_run_data(__file__, __version__).strip()
     if ARG.SOURCE:
         run_data += f" &middot; source: {ARG.SOURCE}"
+    if ARG.MODE != 'both':
+        run_data += f" &middot; mode: {ARG.MODE}"
+    if ARG.REGISTRAR != 'both':
+        run_data += f" &middot; registrar: {ARG.REGISTRAR}"
     mode_label = 'DEV' if ARG.MANIFOLD == 'dev' else 'PROD'
     mode_tone = 'warn' if ARG.MANIFOLD == 'dev' else 'good'
     kpis = JE.kpi_card(f"{len(INSERTED):,}", "DOIs inserted", 'good', width='25%')
@@ -1259,11 +1306,22 @@ def post_activities():
     # Report
     if ARG.SOURCE:
         print(f"Source:                          {ARG.SOURCE}")
-    if ARG.TARGET == 'dis' and (not ARG.DOI and not ARG.FILE):
-        print(f"DOIs fetched from Crossref:      {COUNT['crossref']:,}")
-        print(f"DOIs fetched from DataCite:      {COUNT['datacite']:,}")
+    print(f"Mode:                            {ARG.MODE}")
+    if ARG.REGISTRAR != 'both':
+        print(f"Registrar:                       {ARG.REGISTRAR}")
+    # These two count the discovery sweeps, which --mode update skips entirely -
+    # printing them there would report 0 for a run that refreshed thousands.
+    if ARG.TARGET == 'dis' and ARG.MODE != 'update' and (not ARG.DOI and not ARG.FILE):
+        if ARG.REGISTRAR in ('crossref', 'both'):
+            print(f"DOIs fetched from Crossref:      {COUNT['crossref']:,}")
+        if ARG.REGISTRAR in ('datacite', 'both'):
+            print(f"DOIs fetched from DataCite:      {COUNT['datacite']:,}")
     print(f"DOIs specified:                  {COUNT['found']:,}")
     print(f"DOIs skipped:                    {COUNT['skipped']:,}")
+    if COUNT['skipped_registrar']:
+        print(f"DOIs skipped (other registrar):  {COUNT['skipped_registrar']:,}")
+    if COUNT['skipped_new']:
+        print(f"DOIs skipped (not yet stored):   {COUNT['skipped_new']:,}")
     print(f"DOIs found in Crossref:          {COUNT['foundc']:,}")
     print(f"DOIs found in DataCite:          {COUNT['foundd']:,}")
     print(f"DOIs with no author:             {COUNT['noauthor']:,}")
@@ -1304,8 +1362,16 @@ if __name__ == '__main__':
     PARSER.add_argument('--manifold', dest='MANIFOLD', action='store',
                         default='prod', choices=['dev', 'prod'],
                         help='MongoDB manifold (dev, prod)')
+    PARSER.add_argument('--mode', dest='MODE', action='store',
+                        default='both', choices=['insert', 'update', 'both'],
+                        help='insert: only add DOIs we do not have; update: only '
+                             'refresh DOIs we already have; both (default)')
+    PARSER.add_argument('--registrar', dest='REGISTRAR', action='store',
+                        default='both', choices=['crossref', 'datacite', 'both'],
+                        help='Restrict the run to one registrar (default: both)')
     PARSER.add_argument('--insert', dest='INSERT', action='store_true',
-                        default=False, help='Only look for new records')
+                        default=False,
+                        help='DEPRECATED, use --mode insert')
     PARSER.add_argument('--force', dest='FORCE', action='store_true',
                         default=False, help='Force update')
     PARSER.add_argument('--output', dest='OUTPUT', action='store_true',
@@ -1318,6 +1384,13 @@ if __name__ == '__main__':
                         default=False, help='Flag, Very chatty')
     ARG = PARSER.parse_args()
     LOGGER = JRC.setup_logging(ARG)
+    if ARG.INSERT:
+        # Deprecated alias, kept so existing schedulers keep working.
+        if ARG.MODE != 'both':
+            LOGGER.critical("--insert cannot be combined with --mode")
+            sys.exit(-1)
+        ARG.MODE = 'insert'
+        LOGGER.warning("--insert is deprecated; use --mode insert")
     CONFIG = configparser.ConfigParser()
     CONFIG.read('config.ini')
     initialize_program()
