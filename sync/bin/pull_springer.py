@@ -4,7 +4,7 @@ write candidate DOIs to local files for downstream ingestion.
 
 Usage:
     python pull_springer.py [--api-key KEY] [--manifold dev|prod]
-                            [--start-year YEAR] [--year YEAR]
+                            [--year YEAR | --days N]
                             [--test] [--write] [--verbose] [--debug]
 
 Environment:
@@ -15,9 +15,10 @@ The Springer Meta API free tier caps at 1000 records per query window.
 When a date range exceeds that cap the search is automatically split into
 monthly sub-ranges. Years with no hits are skipped.
 
-Janelia Research Campus opened in 2006, so the default start year is 2006.
-Pass --year to restrict the search to a single calendar year, or --start-year
-to begin the year-by-year sweep from a different year.
+Janelia Research Campus opened in 2006, so a full sweep starts there. Pass
+--year to restrict the search to a single calendar year, or --days N to search
+only publications from the last N days (e.g. --days 30 for a routine
+incremental run). --year and --days are mutually exclusive.
 
 DOIs already present in the MongoDB dois, external_dois, or to_ignore
 collections are excluded from output.
@@ -44,7 +45,7 @@ import os
 import sys
 import time
 import traceback
-from datetime import date
+from datetime import date, timedelta
 import calendar
 from operator import attrgetter
 import requests
@@ -53,7 +54,7 @@ import doi_common.doi_common as DL
 import jrc_email.jrc_email as JE
 
 
-__version__ = '1.2.0'
+__version__ = '1.3.0'
 
 # Global variables
 ARG = DISCONFIG = LOGGER = None
@@ -67,6 +68,10 @@ API_BASE = "https://api.springernature.com/meta/v2/json"
 DEFAULT_API_KEY = os.environ.get("SPRINGER_META_API_KEY")
 PAGE_SIZE = 25
 MAX_START = 1000
+# In-place (carriage-return) progress lines are padded to this width so a
+# shorter line fully overwrites a longer predecessor instead of leaving its
+# tail on screen.
+PROGRESS_WIDTH = 100
 JANELIA_START_YEAR = 2006
 JANELIA_ROR = "013sk6x84"
 USEFUL_FIELDS = [
@@ -256,38 +261,63 @@ def fetch_year(query: str, api_key: str, year: int) -> list[dict]:
     return records
 
 
-def search_janelia(api_key: str, start_year: int = JANELIA_START_YEAR) -> list[dict]:
+def fetch_range(query: str, api_key: str, date_from: str, date_to: str) -> list[dict]:
+    ''' Retrieve all Springer records for a query within an arbitrary date range.
+        A window over MAX_START is capped with a warning; a short recent-days
+        window is not expected to approach the cap.
+        Keyword arguments:
+          query: Springer Meta API query string
+          api_key: Springer Nature API key
+          date_from: ISO date lower bound (YYYY-MM-DD)
+          date_to: ISO date upper bound (YYYY-MM-DD)
+        Returns:
+          List of raw Springer record dicts
+    '''
+    total = get_total_hits(query, api_key, date_from=date_from, date_to=date_to)
+    print(f"  {date_from} to {date_to}: {total} hit(s)")
+    if total == 0:
+        return []
+    if total > MAX_START:
+        print(f"  WARNING: exceeds the {MAX_START} cap, only the first "
+              f"{MAX_START} will be retrieved.")
+    return fetch_window(query, api_key, total, date_from=date_from, date_to=date_to)
+
+
+def search_janelia(api_key: str) -> list[dict]:
     ''' Query the Springer Meta API for all records mentioning "Janelia".
-        If the total hit count fits within MAX_START the results are fetched
-        in one pass; otherwise the search iterates year by year (or a single
-        year when ARG.YEAR is set).
+        --days restricts the search to a rolling recent window and --year to a
+        single calendar year. With neither, the full sweep is fetched in one
+        pass when it fits within MAX_START, otherwise year by year from
+        JANELIA_START_YEAR.
         Keyword arguments:
           api_key: Springer Nature API key
-          start_year: earliest year to include in the year-by-year sweep
         Returns:
           List of raw Springer record dicts
     '''
     query = "Janelia"
     current_year = date.today().year
     print(f"Querying Springer Meta API: q={query!r}")
+    if ARG.DAYS:
+        # Rolling recent window - the routine incremental run.
+        date_to = date.today()
+        date_from = date_to - timedelta(days=ARG.DAYS)
+        print(f"Searching the last {ARG.DAYS} day(s): {date_from} to {date_to}")
+        return fetch_range(query, api_key, date_from.isoformat(), date_to.isoformat())
     if ARG.YEAR:
         # A single explicit year always goes through the year-by-year path so
         # the date constraint is honored regardless of the total hit count.
         print(f"Searching for year: {ARG.YEAR}")
         return fetch_year(query, api_key, ARG.YEAR)
-    if start_year == JANELIA_START_YEAR:
-        # Full unconstrained sweep: try to grab everything in one window first.
-        total_all = get_total_hits(query, api_key)
-        print(f"Total hits (all years): {total_all:,}")
-        if total_all <= MAX_START:
-            print(f"Under {MAX_START:,} — fetching without date splitting\n")
-            return fetch_window(query, api_key, total_all)
-        print(f"Exceeds {MAX_START:,} — iterating year by year "
-              f"({start_year}–{current_year})\n")
-    else:
-        print(f"Iterating year by year ({start_year}–{current_year})\n")
+    # Full unconstrained sweep: try to grab everything in one window first.
+    total_all = get_total_hits(query, api_key)
+    print(f"Total hits (all years): {total_all:,}")
+    if total_all <= MAX_START:
+        print(f"Under {MAX_START:,} — fetching without date splitting\n")
+        return fetch_window(query, api_key, total_all)
+    print(f"Exceeds {MAX_START:,} — iterating year by year "
+          f"({JANELIA_START_YEAR}–{current_year})\n")
     all_records = []
-    for year in range(start_year, current_year + 1):
+    for year in range(JANELIA_START_YEAR, current_year + 1):
         all_records.extend(fetch_year(query, api_key, year))
     return all_records
 
@@ -450,7 +480,7 @@ def processing():
         Returns:
           None
     '''
-    raw_records = search_janelia(ARG.api_key, ARG.START_YEAR)
+    raw_records = search_janelia(ARG.api_key)
     seen: set[str] = set()
     ready = []
     review = []
@@ -469,7 +499,8 @@ def processing():
         if doi in DOI_CACHE:
             COUNT['skipped_db'] += 1
             continue
-        print(f"  Crossref lookup {idx}/{COUNT['total']}: {doi}", end="\r")
+        progress = f"  Crossref lookup {idx}/{COUNT['total']}: {doi}"
+        print(progress[:PROGRESS_WIDTH].ljust(PROGRESS_WIDTH), end="\r")
         crossref_msg = get_crossref_record(doi)
         janelians = janelia_authors(doi, crossref_msg)
         if not janelians:
@@ -480,6 +511,8 @@ def processing():
             ready.append(out)
         else:
             review.append(out)
+    # Erase the progress line so it can't bleed into the summary printed below.
+    print(" " * PROGRESS_WIDTH, end="\r")
     COUNT['noauthors'] = len(noauthors)
     summary = f"DOIs read from Springer:        {COUNT['total']:,}\n" \
               + f"Skipped (no DOI):               {COUNT['no_doi']:,}\n" \
@@ -514,7 +547,7 @@ def processing():
         with open(fname, "w", encoding="utf-8") as fh:
             for doi in noauthors:
                 fh.write(doi + "\n")
-        LOGGER.info(f"Noauthors written to {fname}")
+        LOGGER.info(f"No authors written to {fname}")
     if ARG.TEST or ARG.WRITE:
         generate_email(ready, review, summary)
 
@@ -526,10 +559,12 @@ if __name__ == "__main__":
     PARSER = argparse.ArgumentParser(description=__doc__)
     PARSER.add_argument("--api-key", dest="api_key", default=DEFAULT_API_KEY,
                         help="Springer Nature API key ($SPRINGER_META_API_KEY)")
-    PARSER.add_argument("--start-year", dest="START_YEAR", type=int,
-                        default=JANELIA_START_YEAR,
-                        help=f"First year to search (default: {JANELIA_START_YEAR})")
-    PARSER.add_argument("--year", dest="YEAR", type=int, help="Year to search")
+    # --year and --days are alternative ways to narrow the sweep; with neither,
+    # every year from JANELIA_START_YEAR to now is searched.
+    WINDOW = PARSER.add_mutually_exclusive_group()
+    WINDOW.add_argument("--year", dest="YEAR", type=int, help="Year to search")
+    WINDOW.add_argument("--days", dest="DAYS", type=int,
+                        help="Search publications from the last N days (e.g. 30)")
     PARSER.add_argument('--manifold', dest='MANIFOLD', default='prod',
                         choices=['dev', 'prod'],
                         help='MongoDB manifold (default: prod)')
