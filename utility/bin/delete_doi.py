@@ -1,6 +1,8 @@
-''' delete_dois.py
+''' delete_doi.py
     Delete DOIs from the dois collection
 '''
+
+__version__ = '1.3.2'
 
 import argparse
 import collections
@@ -23,6 +25,7 @@ COUNT = collections.defaultdict(lambda: 0, {})
 # Canned reasons offered by the interactive menu when --reason is omitted; the
 # chosen (or typed) value is stored as the to_ignore record's "reason".
 DELETE_REASONS = ["No Janelia authors",
+                  "Janelia authors with Present address",
                   "Janelia editor(s) only",
                   "Work not performed at Janelia"]
 OTHER_CHOICE = "Other (enter a reason)"
@@ -64,15 +67,18 @@ def initialize_program():
 
 
 def get_reason():
-    ''' Determine the (always required) deletion reason: use --reason if given,
-        otherwise present an interactive menu (the canned choices plus a free-text
-        "Other"). Aborts the run - deleting nothing - if no reason can be obtained.
+    ''' Determine the deletion reason, required for any run that writes: use
+        --reason if given, otherwise present an interactive menu (the canned
+        choices plus a free-text "Other"). Aborts the run - deleting nothing -
+        if no reason can be obtained.
         Keyword arguments:
           None
         Returns:
           Reason string (stripped, non-empty)
     '''
-    if ARG.REASON:
+    if ARG.REASON is not None:
+        # "is not None" so an explicit --reason "" is rejected here instead of
+        # falling through to the interactive menu.
         reason = ARG.REASON.strip()
         if not reason:
             terminate_program("--reason cannot be empty")
@@ -83,15 +89,23 @@ def get_reason():
     quest = [inquirer.List('reason', carousel=True,
                            message="Reason for deleting",
                            choices=DELETE_REASONS + [OTHER_CHOICE])]
-    ans = inquirer.prompt(quest, theme=BlueComposure())
+    try:
+        ans = inquirer.prompt(quest, theme=BlueComposure())
+    except (KeyboardInterrupt, EOFError):
+        terminate_program("User cancelled program")
     if not ans:
         # Cancelled (Ctrl-C / EOF) - abort before touching anything.
         terminate_program("No reason selected; aborting")
     reason = ans['reason']
     if reason == OTHER_CHOICE:
-        tans = inquirer.prompt([inquirer.Text('reason', message="Enter a reason")],
-                               theme=BlueComposure())
-        reason = (tans or {}).get('reason', '').strip()
+        try:
+            tans = inquirer.prompt([inquirer.Text('reason', message="Enter a reason")],
+                                   theme=BlueComposure())
+        except (KeyboardInterrupt, EOFError):
+            terminate_program("User cancelled program")
+        # "or ''" - the .get default only covers a missing key, but the renderer
+        # can hand back None for an empty submission.
+        reason = ((tans or {}).get('reason') or '').strip()
         if not reason:
             terminate_program("A reason is required; aborting")
     return reason
@@ -104,18 +118,28 @@ def process_ignore(doi):
         Returns:
           None
     '''
-    try:
-        resp = DB['dis'].to_ignore.find_one({"type": "doi", "key": doi})
-    except Exception as err:
-        terminate_program(err)
-    if not resp:
-        COUNT["missing"] += 1
+    if not ARG.WRITE:
+        # Dry run: report whether the DOI is on the list, change nothing. Matches
+        # the delete path, which likewise only writes under --write.
+        try:
+            resp = DB['dis'].to_ignore.find_one({"type": "doi", "key": doi})
+        except Exception as err:
+            terminate_program(err)
+        if resp:
+            COUNT["deleted"] += 1      # would be removed under --write
+        else:
+            COUNT["not_ignored"] += 1
         return
     try:
         resp = DB['dis'].to_ignore.delete_one({"type": "doi", "key": doi})
     except Exception as err:
         terminate_program(err)
-    COUNT["deleted"] += 1
+    if resp.deleted_count:
+        COUNT["deleted"] += resp.deleted_count
+    else:
+        # Counted separately from "not in the dois collection" - the two modes
+        # mean different things by "missing".
+        COUNT["not_ignored"] += 1
 
 
 def delete_dois():
@@ -127,21 +151,32 @@ def delete_dois():
     '''
     dois = []
     if ARG.DOI:
-        dois.append(ARG.DOI)
+        # Normalize exactly as the file path does - DOIs are stored lowercase, so
+        # an unnormalized --doi would miss the record and then write an
+        # unmatchable key to to_ignore. Test after stripping, so a whitespace-only
+        # --doi cannot become an empty key either.
+        doi = ARG.DOI.lower().strip()
+        if doi:
+            dois.append(doi)
     elif ARG.FILE:
         try:
-            with open(ARG.FILE, "r", encoding="ascii") as instream:
-                for doi in instream.read().splitlines():
-                    dois.append(doi.lower().strip())
+            with open(ARG.FILE, "r", encoding="utf-8-sig") as instream:
+                for line in instream.read().splitlines():
+                    doi = line.lower().strip()
+                    if doi:   # skip blank lines rather than ignoring an empty DOI
+                        dois.append(doi)
         except Exception as err:
             LOGGER.error(f"Could not process {ARG.FILE}")
             terminate_program(err)
-    # A reason is always required for a deletion (via --reason or the interactive
-    # menu). Resolve it once up front (before any writes) and apply it to every
-    # DOI in the run. --ignore only removes DOIs from the ignore list, so it needs
-    # no reason.
+    if not dois:
+        LOGGER.warning("No DOIs to process")
+    # A reason is required for any deletion that is actually recorded (via
+    # --reason or the interactive menu). Resolve it once up front, before any
+    # writes, and apply it to every DOI in the run. Dry runs write nothing so
+    # they do not prompt, and --ignore only removes DOIs from the ignore list,
+    # so it needs no reason either.
     reason = None
-    if dois and not ARG.IGNORE:
+    if dois and ARG.WRITE and not ARG.IGNORE:
         reason = get_reason()
     for doi in tqdm(dois):
         COUNT["read"] += 1
@@ -149,7 +184,7 @@ def delete_dois():
             process_ignore(doi)
             continue
         try:
-            row = DB['dis'].dois.find_one({"doi": doi})
+            row = DB['dis'].dois.find_one({"doi": doi}, {"_id": 1})
         except Exception as err:
             terminate_program(err)
         missing = False
@@ -165,20 +200,65 @@ def delete_dois():
                     LOGGER.warning(f"Deleted {doi}")
                 except Exception as err:
                     terminate_program(f"Could not delete {doi} from dois collection: {err}")
-            payload = {"type": "doi", "key": doi,
-                       "inserted": datetime.today().replace(microsecond=0),
-                       "reason": reason}
             try:
-                resp = DB['dis'].to_ignore.find_one({"type": "doi", "key": doi})
-                if not resp:
-                    resp = DB['dis'].to_ignore.insert_one(payload)
+                # Backfill-only upsert. A find/insert pair silently dropped the
+                # reason when the DOI was already listed; a blanket $set would go
+                # the other way and clobber a reason chosen deliberately in an
+                # earlier run. $ifNull fills only what is missing. $literal keeps
+                # a reason beginning with "$" from being read as a field path.
+                now = datetime.today().replace(microsecond=0)
+                resp = DB['dis'].to_ignore.update_one(
+                    {"type": "doi", "key": doi},
+                    [{"$set": {"reason": {"$ifNull": ["$reason", {"$literal": reason}]},
+                               "inserted": {"$ifNull": ["$inserted", now]}}}],
+                    upsert=True)
+                if resp.upserted_id:
                     COUNT['inserted'] += 1
+                elif resp.modified_count:
+                    COUNT['reason_backfilled'] += 1
+                else:
+                    # Matched but unchanged - already listed with a reason.
+                    COUNT['unchanged'] += 1
             except Exception as err:
-                terminate_program(f"Could not insert {doi} into to_ignore collection: {err}")
+                terminate_program(f"Could not add {doi} to to_ignore collection: {err}")
+        else:
+            # Dry run: report the same three outcomes the write path counts,
+            # without touching anything.
+            if not missing:
+                COUNT['deleted'] += 1
+            try:
+                listed = DB['dis'].to_ignore.find_one({"type": "doi", "key": doi},
+                                                      {"reason": 1})
+            except Exception as err:
+                terminate_program(err)
+            if not listed:
+                COUNT['inserted'] += 1
+            elif not listed.get('reason'):
+                COUNT['reason_backfilled'] += 1
+            else:
+                COUNT['unchanged'] += 1
     print(f"DOIs read:                 {COUNT['read']}")
-    print(f"DOIs not found:            {COUNT['missing']}")
-    print(f"DOIs deleted:              {COUNT['deleted']}")
-    print(f"DOIs added to ignore list: {COUNT['inserted']}")
+    if ARG.IGNORE:
+        print(f"DOIs not on ignore list:   {COUNT['not_ignored']}")
+        label = "DOIs removed from ignore" if ARG.WRITE else "Would remove from ignore"
+        print(f"{label + ':':<27}{COUNT['deleted']}")
+    else:
+        print(f"DOIs not found:            {COUNT['missing']}")
+        for done, would, key in (("DOIs deleted", "Would delete", 'deleted'),
+                                 ("DOIs added to ignore list", "Would add to ignore list",
+                                  'inserted'),
+                                 ("Ignore reasons backfilled", "Would backfill reason",
+                                  'reason_backfilled')):
+            print(f"{(done if ARG.WRITE else would) + ':':<27}{COUNT[key]}")
+        print(f"Already on ignore list:    {COUNT['unchanged']}")
+        if reason:
+            # "selected", not "applied": backfill-only keeps whatever reason an
+            # already-listed DOI carries, so the chosen one may not be recorded.
+            print(f"Reason selected:           {reason}")
+            if COUNT['unchanged']:
+                print(f"  ({COUNT['unchanged']} already listed - existing reason kept)")
+    if not ARG.WRITE:
+        LOGGER.warning("Dry run successful, no updates were made")
 
 
 # -----------------------------------------------------------------------------
@@ -198,16 +278,20 @@ if __name__ == '__main__':
                         help='Reason to delete DOI (if omitted, you are prompted '
                              'to choose one)')
     PARSER.add_argument('--ignore', dest='IGNORE', action='store_true',
-                        default=False, help='Remove from ignore list only')
+                        default=False,
+                        help='Remove DOIs from the ignore list instead of '
+                             'deleting them')
     PARSER.add_argument('--write', dest='WRITE', action='store_true',
-                        default=False, help='Actually delete DOIs')
+                        default=False,
+                        help='Actually apply changes (delete DOIs / remove from '
+                             'the ignore list)')
     PARSER.add_argument('--verbose', dest='VERBOSE', action='store_true',
                         default=False, help='Flag, Chatty')
     PARSER.add_argument('--debug', dest='DEBUG', action='store_true',
                         default=False, help='Flag, Very chatty')
     ARG = PARSER.parse_args()
     LOGGER = JRC.setup_logging(ARG)
-    DISCONFIG = JRC.simplenamespace_to_dict(JRC.get_config("dis"))
+    LOGGER.info(f"Started run (version {__version__})")
     initialize_program()
     delete_dois()
     terminate_program()
