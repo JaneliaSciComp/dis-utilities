@@ -12,7 +12,7 @@
         return;
       }
       var source = $('input[name="source"]:checked').val();
-      var url = "/doiui/insert/" + $("#start").val();
+      var url = "{{ target|default('/doiui/insert/', true) }}" + $("#start").val();
       if (source && source !== "Crossref") {
         url += "/" + source;
       }

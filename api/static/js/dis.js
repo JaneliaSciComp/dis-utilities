@@ -207,6 +207,29 @@ $(document).on('shown.bs.dropdown', function (e) {
   }
 });
 
+// Fetch a DOI's BibTeX from our /bibtex endpoint (which fronts
+// doi_common.get_bibtex) and copy it to the clipboard. Going through the server
+// keeps this independent of Crossref's CORS policy. The icon flips to a check
+// mark on success; a DOI with no BibTeX reports rather than copying nothing.
+async function copyBibtex(doi, btn) {
+  const icon = btn ? btn.querySelector('i') : null;
+  const original = icon ? icon.className : null;
+  try {
+    const resp = await fetch('/bibtex/' + encodeURI(doi));
+    if (!resp.ok) { throw new Error('HTTP ' + resp.status); }
+    const text = (await resp.text()).trim();
+    if (!text) { throw new Error('empty response'); }
+    await navigator.clipboard.writeText(text);
+    if (icon) {
+      icon.className = 'fas fa-check shadow';
+      setTimeout(function () { icon.className = original; }, 1200);
+    }
+  } catch (err) {
+    console.error('BibTeX copy failed for ' + doi + ':', err);
+    alert('Could not get BibTeX for ' + doi);
+  }
+}
+
 // Copy text to the clipboard.
 async function copyText(textToCopy) {
   navigator.permissions.query({name: "clipboard-write"});

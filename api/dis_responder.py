@@ -51,7 +51,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.24.0"
+__version__ = "120.28.1"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -6038,6 +6038,12 @@ def doi_tabs(doi, row, rowext, data, authors):
     return html
 
 
+# Default lookback for the newsletter-date picker
+NEWSLETTER_DEFAULT_DAYS = 30
+# Column header for the newsletter report's TSV download
+NEWSLETTER_TSV_HEADER = ['DOI', 'PMID', 'Published', 'Publisher', 'Newsletter', 'Tags']
+
+
 BATCH_MAX_BYTES = 2_000_000   # cap on an uploaded DOI/PMID list (~2 MB)
 BATCH_MAX_TOKENS = 5000       # cap on the number of ids processed per request
 BATCH_NOTFOUND_SHOWN = 200    # cap on how many not-found ids are listed (in a scrollbox)
@@ -7484,6 +7490,99 @@ def show_insert_picker():
                                          title="DOI lookup by insertion date", before=before,
                                          start=start, stop=str(date.today()),
                                          after=after, navbar=generate_navbar('DOIs')))
+
+
+@app.route('/bibtex/<path:doi>')
+def get_doi_bibtex(doi):
+    '''
+    Return a DOI's BibTeX as plain text (empty body + 404 when unavailable).
+    Fronts doi_common.get_bibtex so the browser calls us rather than Crossref
+    directly - which keeps the copy button independent of Crossref's CORS policy
+    and leaves room to add a DataCite route later.
+    '''
+    text = DL.get_bibtex(doi.lstrip('/').rstrip('/'))
+    resp = make_response(text, 200 if text else 404)
+    resp.mimetype = 'text/plain'
+    return resp
+
+
+@app.route('/dois_newsletterpicker')
+def show_newsletter_picker():
+    '''
+    Show a datepicker for selecting DOIs by newsletter date
+    '''
+    before = "Select a minimum DOI newsletter date"
+    start = date.today() - timedelta(days=NEWSLETTER_DEFAULT_DAYS)
+    after = '<a class="btn btn-success" role="button" onclick="startdate(); return False;">' \
+            + 'Look up DOIs</a>'
+    return make_response(render_template('picker.html', urlroot=request.url_root,
+                                         title="DOI lookup by newsletter date", before=before,
+                                         start=str(start), stop=str(date.today()),
+                                         target='/doiui/newsletter/',
+                                         after=after, navbar=generate_navbar('DOIs')))
+
+
+@app.route('/doiui/newsletter/<string:ndate>')
+@app.route('/doiui/newsletter/<string:ndate>/<string:source>')
+def show_newsletter(ndate, source='Crossref'):
+    '''
+    Return DOIs with a newsletter date on or after a specified date
+    '''
+    try:
+        datetime.strptime(ndate, '%Y-%m-%d')
+    except Exception as err:
+        raise InvalidUsage(str(err), 400) from err
+    try:
+        # jrc_newsletter is a "YYYY-MM-DD" string, so a string $gte is a date compare.
+        rows = DB['dis'].dois.find({"jrc_newsletter": {"$gte": ndate},
+                                    "jrc_obtained_from": source},
+                                   {'_id': 0}).sort([("jrc_newsletter", -1),
+                                                     ("jrc_publishing_date", -1)])
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get DOIs"),
+                               message=error_message(err))
+    trows = []
+    fileoutput = ""
+    for row in rows:
+        pmid = row.get('jrc_pmid') or ""
+        pcell = safe(f"<a href='{PMID}{pmid}/' target='_blank'>{pmid}</a>") if pmid else ""
+        pub = row.get('publisher') or ""
+        pdate = row.get('jrc_publishing_date') or ""
+        news = row.get('jrc_newsletter') or ""
+        tags = ', '.join(sorted(tag['name'] for tag in row['jrc_tag'])) \
+               if 'jrc_tag' in row else ""
+        # BibTeX comes from Crossref's transform endpoint, which serves any
+        # Crossref-registered DOI (verified across every row of a live window).
+        # DataCite DOIs are excluded deliberately: their only BibTeX route is
+        # doi.org content negotiation, whose DataCite target sends no
+        # Access-Control-Allow-Origin, so a browser fetch would be blocked.
+        bibtex = ""
+        if row.get('jrc_obtained_from') == 'Crossref':
+            bibtex = safe("<button style='background-color:transparent;border:none;' "
+                          + f"onclick=\"copyBibtex('{escape(row['doi'])}', this)\" "
+                          + "title='Copy BibTeX to the clipboard'>"
+                          + "<i class='fas fa-regular fa-copy shadow' "
+                          + "style='background-color:transparent'></i></button>")
+        trows.append([safe(doi_link(row['doi'])), pcell, pdate, pub, news,
+                      cell(bibtex, align='center'),
+                      safe(f"<span style='font-size: 10pt;'>{escape(tags)}</span>")])
+        fileoutput += "\t".join([row['doi'], str(pmid), pdate, pub, news, tags]) + "\n"
+    if not trows:
+        return render_template('warning.html', urlroot=request.url_root,
+                               title=render_warning("DOIs not found", 'warning'),
+                               message=f"No {source} DOIs have a newsletter date "
+                                       f"on or after {ndate}")
+    html = render_table(['DOI', 'PMID', 'Published', 'Publisher', 'Newsletter',
+                         'Copy BibTeX', 'Tags'], trows, table_id='newsletter',
+                        css='tablesorter standard-scroll')
+    # Header mirrors the TSV columns below, which omit the Copy BibTeX button.
+    html = f"{create_downloadable('jrc_newsletter', NEWSLETTER_TSV_HEADER, fileoutput)}{html}"
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=f"{source} DOIs ({len(trows):,}) with a "
+                                               f"newsletter date on or after {ndate}",
+                                         html=html, navbar=generate_navbar('DOIs')))
 
 
 @app.route('/doiui/insert/<string:idate>')
