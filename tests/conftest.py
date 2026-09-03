@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+import helpers
+
 MODULE_PATH = Path(__file__).resolve().parents[1] / 'sync' / 'bin' / 'update_dois.py'
 
 # Minimal stand-in for doi_common.is_datacite, used only when the real library
@@ -42,10 +44,17 @@ def _stub(name, **attrs):
 
 
 def _ensure(name, **attrs):
-    ''' Import `name`, stubbing it only if it is not installed. '''
+    ''' Import `name`, stubbing it if it is missing or fails to import.
+
+        The catch is deliberately broad. A dependency can be installed yet
+        unusable - MySQLdb whose _mysql extension is not linked raises
+        NameError, not ImportError - and update_dois only needs the name to
+        resolve, so a stub serves these tests either way.
+    '''
     try:
         return importlib.import_module(name)
-    except ImportError:
+    except Exception:                                  # pylint: disable=broad-except
+        sys.modules.pop(name, None)                    # drop a half-built module
         return _stub(name, **attrs)
 
 
@@ -54,19 +63,18 @@ def _prepare_imports():
     for name in ('MySQLdb', 'pymysql', 'pyalex', 'xmltodict', 'inquirer', 'bs4'):
         _ensure(name)
     _ensure('unidecode', unidecode=lambda s: s)
-    if 'tqdm' not in sys.modules:
-        try:
-            importlib.import_module('tqdm')
-        except ImportError:
-            _stub('tqdm', tqdm=lambda x, **kw: x)
+    _ensure('tqdm', tqdm=lambda x, **kw: x)
     for pkg, sub in (('jrc_common', 'jrc_common'), ('jrc_email', 'jrc_email'),
                      ('doi_common', 'doi_common')):
+        dotted = f'{pkg}.{sub}'
         try:
-            importlib.import_module(f'{pkg}.{sub}')
-        except ImportError:
-            _stub(pkg)
+            importlib.import_module(dotted)
+        except Exception:                              # pylint: disable=broad-except
+            sys.modules.pop(dotted, None)
+            _stub(pkg)                                 # parent must resolve too
+            # doi_common only needs the one function the registrar routing uses.
             attrs = {'is_datacite': _fallback_is_datacite} if pkg == 'doi_common' else {}
-            _stub(f'{pkg}.{sub}', **attrs)
+            _stub(dotted, **attrs)
 
 
 _prepare_imports()
@@ -93,9 +101,14 @@ def fixture_ud():
         (COUNT, QUEUED, TO_BE_PROCESSED, ...) start clean for every test.
         Throttling is disabled and sleep calls are recorded instead.
     '''
-    spec = importlib.util.spec_from_file_location('update_dois', MODULE_PATH)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # Compile from source rather than importing, so a cached .pyc can never be
+    # used. Python invalidates bytecode on (mtime, size), and an edit that keeps
+    # the size and lands in the same second - '2006' -> '2007', say - slips
+    # through, silently testing the previous version of the file.
+    module = types.ModuleType('update_dois')
+    module.__file__ = str(MODULE_PATH)
+    source = MODULE_PATH.read_text(encoding='utf-8')
+    exec(compile(source, str(MODULE_PATH), 'exec'), module.__dict__)  # pylint: disable=exec-used
     module.LOGGER = NullLogger()
     module.sleeps = []
     module.sleep = module.sleeps.append      # record instead of waiting
@@ -112,4 +125,139 @@ def fixture_arg():
                 'OUTPUT': False, 'INSERT': False}
         opts.update(overrides)
         return types.SimpleNamespace(**opts)
+    return build
+
+
+# ---------------------------------------------------------------------------
+# Builders that wire the loaded module for a scenario. These are fixtures
+# rather than plain functions because each needs the per-test `ud` module.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(name='sweeps')
+def fixture_sweeps(ud):
+    ''' Replace every outward call get_dois_for_dis() makes, recording them.
+        Returns the list the calls are appended to.
+    '''
+    calls = []
+    ud.get_dois_from_crossref = lambda flt='janelia': calls.append(f'crossref:{flt}') or []
+    ud.get_dois_from_datacite = lambda query: calls.append(f'datacite:{query}') or []
+    ud.call_responder = lambda *a, **k: calls.append('flycore') or {'dois': []}
+    ud.add_alps_releases = lambda dlist: calls.append('alps')
+    ud.add_to_be_processed = lambda dlist: calls.append('to_process')
+    return calls
+
+
+@pytest.fixture(name='fetches')
+def fixture_fetches(ud, arg):
+    ''' Run the loop over the given input, returning the DOIs the fetcher was
+        actually asked for. Used to assert on normalisation and skipping.
+    '''
+    def run(incoming, **argkw):
+        fetched = []
+        ud.ARG = arg(**argkw)
+        ud.IGNORE = {'doi': {}}
+        ud.EXISTING = {}
+        ud.get_dois = lambda: {'dois': list(incoming)}
+        ud.get_doi_record = lambda doi: fetched.append(doi) or None
+        ud.persist_if_updated = lambda *a: None
+        ud.update_dois = lambda *a: None
+        ud.process_dois()
+        return fetched
+    return run
+
+
+@pytest.fixture(name='routing')
+def fixture_routing(ud, arg):
+    ''' Drive process_dois over one known and one new DOI per registrar,
+        reporting which DOIs reached the insert and update paths.
+    '''
+    def run(mode, registrar='both'):
+        ud.ARG = arg(MODE=mode, REGISTRAR=registrar)
+        ud.IGNORE = {'doi': {}}
+        ud.EXISTING = {'10.1038/known': {'jrc_obtained_from': 'Crossref'},
+                       '10.5281/zenodo.known': {'jrc_obtained_from': 'DataCite'}}
+        ud.get_dois = lambda: {'dois': ['10.1038/known', '10.1038/new',
+                                        '10.5281/zenodo.known', '10.5281/zenodo.new']}
+        ud.get_doi_record = lambda doi: ({'data': {'attributes': {'updated': 'x'}}}
+                                         if 'zenodo' in doi
+                                         else {'message': {'deposited': {'date-time': 'x'}}})
+        ud.too_old = lambda doi, msg: False
+        seen = {'inserted': [], 'updated': []}
+        ud.persist_if_updated = lambda doi, msg, persist: seen['updated'].append(doi)
+        ud.update_dois = lambda spec, persist: seen['inserted'].extend(sorted(persist))
+        ud.process_dois()
+        return seen
+    return run
+
+
+@pytest.fixture(name='pipeline')
+def fixture_pipeline(ud, arg):
+    ''' Wire the real process_dois -> update_mongodb path, replacing only the
+        database and (optionally) the record fetcher. Returns the fake
+        collection so a test can assert on what was written.
+    '''
+    def build(existing, incoming, deposited=helpers.DEPOSITED_NEWER,
+              fetch=True, **argkw):
+        coll = helpers.FakeCollection()
+        ud.ARG = arg(**argkw)
+        ud.IGNORE = {'doi': {}}
+        ud.EXISTING = dict(existing)
+        ud.DB = {'dis': types.SimpleNamespace(dois=coll)}
+        ud.get_dois = lambda: {'dois': list(incoming)}
+        if fetch:
+            ud.get_doi_record = lambda doi: helpers.crossref_msg(deposited)
+        # Enrichment that reaches beyond what these tests assert on.
+        ud.add_first_last_authors = lambda val: None
+        ud.add_openalex = lambda val: None
+        ud.add_datacite = lambda val: None
+        ud.add_tags_and_authors = lambda persist: None
+        ud.DL = types.SimpleNamespace(
+            is_datacite=lambda doi: False,
+            get_publishing_date=lambda rec: '2024-05-01',
+            get_journal=lambda rec, name_only=False: 'Test Journal',
+            get_doi_record=lambda doi, coll=None: None)
+        return coll
+    return build
+
+
+@pytest.fixture(name='lookup')
+def fixture_lookup(ud, pipeline):
+    ''' As `pipeline`, but keeps the real record-lookup chain and fakes the
+        registrar call itself, so not-found accounting is genuinely exercised.
+        `found` maps DOI -> record; anything absent is unknown to the registrar.
+    '''
+    def build(existing, incoming, found, **argkw):
+        coll = pipeline(existing, incoming, fetch=False, **argkw)
+        ud.JRC = types.SimpleNamespace(call_crossref=lambda doi: found.get(doi),
+                                       call_datacite=lambda doi: found.get(doi),
+                                       get_user_name=lambda: 'tester')
+        return coll
+    return build
+
+
+@pytest.fixture(name='datacite_lookup')
+def fixture_datacite_lookup(ud, arg):
+    ''' Real lookup and persist path for one DataCite DOI, with only the
+        registrar call, the database and the enrichment helpers replaced.
+    '''
+    def build(record):
+        coll = helpers.FakeCollection()
+        ud.ARG = arg()
+        ud.IGNORE = {'doi': {}}
+        ud.EXISTING = {}
+        ud.DB = {'dis': types.SimpleNamespace(dois=coll)}
+        ud.DL = types.SimpleNamespace(
+            is_datacite=lambda doi: True,
+            get_publishing_date=lambda rec: '2024-05-01',
+            get_journal=lambda rec, name_only=False: None,
+            get_doi_record=lambda doi, coll=None: None)
+        ud.JRC = types.SimpleNamespace(call_datacite=lambda doi: record,
+                                       call_crossref=lambda doi: record,
+                                       get_user_name=lambda: 'tester')
+        ud.add_first_last_authors = lambda val: None
+        ud.add_openalex = lambda val: None
+        ud.add_datacite = lambda val: None
+        ud.add_tags_and_authors = lambda persist: None
+        ud.get_dois = lambda: {'dois': ['10.5281/zenodo.1']}
+        return coll
     return build
