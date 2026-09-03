@@ -51,7 +51,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.23.3"
+__version__ = "120.24.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -5772,6 +5772,81 @@ def curator_display(tag):
     return 'Human curated'
 
 
+# Login id (the local part of userIdO365, lowercased) -> display name. Filled on
+# first use by user_display_name(); one pass over the orcid collection serves
+# every later lookup, so pages showing many ids do not re-query per row.
+USER_NAME = {}
+
+
+def user_display_name(userid):
+    ''' Translate a login id (as recorded on processing events) to a person's
+        name. The orcid collection stores the id as "<USERID>@hhmi.org" in
+        userIdO365, and given/family as arrays of name variants - the first
+        entry of each is the preferred form.
+        Keyword arguments:
+          userid: login id, e.g. "svirskasr"
+        Returns:
+          "Given Family", or the id unchanged if it cannot be resolved
+    '''
+    if not userid:
+        return ''
+    if not USER_NAME:
+        try:
+            for row in DB['dis'].orcid.find({"userIdO365": {"$exists": True}},
+                                            {"userIdO365": 1, "given": 1, "family": 1}):
+                uid = str(row['userIdO365']).split('@')[0].strip().lower()
+                parts = []
+                for field in ('given', 'family'):
+                    val = row.get(field)
+                    val = val[0] if isinstance(val, list) and val else val
+                    if val and isinstance(val, str):
+                        parts.append(val)
+                if uid and parts:
+                    USER_NAME[uid] = ' '.join(parts)
+        except Exception:
+            return userid
+    return USER_NAME.get(str(userid).strip().lower(), userid)
+
+
+def get_processing_events(doi):
+    ''' Build the Processing tab: recorded processing events for a DOI. The
+        processing collection holds one record per DOI (type "doi", key <DOI>)
+        with the events in a "processes" array.
+        Keyword arguments:
+          doi: DOI
+        Returns:
+          HTML table of events, or "" if none are recorded
+    '''
+    try:
+        rec = DB['dis'].processing.find_one({"type": "doi", "key": doi})
+    except Exception:
+        return ""
+    if not rec:
+        return ""
+    # At least one record carries a null entry in the array, so drop non-dicts.
+    events = [evt for evt in (rec.get('processes') or []) if isinstance(evt, dict)]
+    if not events:
+        return ""
+    rows = []
+    for evt in sorted(events, key=lambda e: str(e.get('timestamp') or '')):
+        stamp = str(evt.get('timestamp') or '')
+        # Stored as an ISO 8601 string with microseconds. Show it to the second,
+        # but sort on a digits-only YYYYMMDDHHMMSS key: tablesorter picks a column
+        # parser by testing the sort value, and its shortDate test is unanchored,
+        # so an ISO timestamp is claimed by shortDate, whose new Date() then fails
+        # and scores every row 0. A bare integer is claimed by the digit parser.
+        rows.append([cell(stamp.split('.')[0].replace('T', ' '),
+                          sort=re.sub(r'\D', '', stamp)[:14]),
+                     evt.get('action') or '', evt.get('program') or '',
+                     evt.get('version') or '', user_display_name(evt.get('user')),
+                     evt.get('notes') or ''])
+    return f"<h4>Processing events ({len(rows):,})</h4>" \
+           + render_table(['Timestamp', 'Action', 'Program', 'Version', 'User', 'Notes'],
+                          rows, table_id='processing-events',
+                          css='tablesorter standard-scroll',
+                          data_attrs={"sortlist": "[[0,0]]"})
+
+
 def doi_tabs(doi, row, rowext, data, authors):
     ''' Generate DOI tabs
         Keyword arguments:
@@ -5787,7 +5862,7 @@ def doi_tabs(doi, row, rowext, data, authors):
     display_key = {'author': 'Author tags', 'citations': 'Citations',
                    'figshare': 'Figshare', 'abstract': 'Abstract',
                    'ack': 'Acknowledgements', 'subjects': 'Subjects', 'related': 'Related DOIs',
-                   'legal': 'Legal information'}
+                   'legal': 'Legal information', 'processing': 'Processing'}
     # Author tags
     if row and 'jrc_tag' in row:
         tags = []
@@ -5917,6 +5992,10 @@ def doi_tabs(doi, row, rowext, data, authors):
         ahtml = get_legal_information(row)
         if ahtml:
             content['legal'] = ahtml
+    # Processing events (own variable - ahtml is reused by the Authors pane below)
+    phtml = get_processing_events(doi)
+    if phtml:
+        content['processing'] = phtml
     # Authors
     ahtml = ""
     if authors:
