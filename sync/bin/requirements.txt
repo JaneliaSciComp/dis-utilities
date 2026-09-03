@@ -2,6 +2,7 @@ inquirer
 metapub
 openpyxl
 pandas
+pytest
 rapidfuzz
 tqdm
 unidecode

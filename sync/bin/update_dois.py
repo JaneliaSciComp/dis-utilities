@@ -7,7 +7,7 @@
            to DIS MongoDB.
 """
 
-__version__ = '22.5.0'
+__version__ = '22.6.0'
 
 import argparse
 import collections
@@ -586,6 +586,15 @@ def get_doi_record(doi):
                 LOGGER.warning(err)
             except Exception as err:
                 terminate_program(err)
+        if msg is not None:
+            # Guard the shape before callers index msg['data']['attributes'].
+            # A truncated response used to raise straight out of the run.
+            data = msg.get('data') if isinstance(msg, dict) else None
+            if not isinstance(data, dict) or 'attributes' not in data:
+                LOGGER.warning(f"No attributes for {doi}")
+                MISSING[f"No attributes for {doi}"] = True
+                COUNT['malformed'] += 1
+                return None
     else:
         # Crossref
         if doi in CROSSREF:
@@ -1220,8 +1229,18 @@ def process_dois():
     persist = {} # DOIs that will be persisted in a database (value is record)
     for odoi in tqdm(rows['dois'], desc='DOIs'):
         if '//' in odoi:
-            terminate_program(f"Invalid DOI: {odoi}")
+            # A URL-form DOI or similar. Skip it: this used to terminate the
+            # run, abandoning every DOI after the offending entry.
+            LOGGER.warning(f"Skipping invalid DOI {odoi}")
+            MISSING[f"Invalid DOI: {odoi}"] = True
+            COUNT['invalid'] += 1
+            continue
         doi = odoi if ARG.TARGET == 'flyboy' else odoi.lower().strip()
+        if not doi:
+            # A blank input line survives split_raw_doi() as "", and would
+            # otherwise be looked up as though it were a real DOI.
+            COUNT['blank'] += 1
+            continue
         if doi in IGNORE['doi']:
             LOGGER.warning(f"Skipping {doi} because it is in the ignore list")
             COUNT['skipped'] += 1
@@ -1353,6 +1372,12 @@ def post_activities():
             print(f"DOIs fetched from DataCite:      {COUNT['datacite']:,}")
     print(f"DOIs specified:                  {COUNT['found']:,}")
     print(f"DOIs skipped:                    {COUNT['skipped']:,}")
+    if COUNT['invalid']:
+        print(f"DOIs skipped (invalid):          {COUNT['invalid']:,}")
+    if COUNT['blank']:
+        print(f"DOIs skipped (blank):            {COUNT['blank']:,}")
+    if COUNT['malformed']:
+        print(f"DOIs skipped (bad record):       {COUNT['malformed']:,}")
     if COUNT['dequeued']:
         print(f"Removed from dois_to_process:    {COUNT['dequeued']:,}")
     if COUNT['skipped_registrar']:
