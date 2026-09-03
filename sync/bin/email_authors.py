@@ -2,12 +2,11 @@
     Email information on newly-added DOIs to authors
 '''
 
-__version__ = '1.7.0'
+__version__ = '1.8.0'
 
 import argparse
 from datetime import datetime, timedelta
 from operator import attrgetter
-import os
 import sys
 import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
@@ -223,13 +222,12 @@ def update_processing(doi):
         Returns:
           None
     '''
-    proc = {'action': 'notify_author',
-            'program': os.path.basename(__file__),
-            'version': __version__,
-            'timestamp': datetime.now().isoformat()}
     try:
-        DB['dis'].processing.update_one({'type': 'doi', 'key': doi},
-                                        {'$push': {'processes': proc}}, upsert=True)
+        # add_doi_process reads the program name and version from this
+        # module, and decides for itself whether the run has a user worth
+        # recording, so neither has to be passed.
+        DL.add_doi_process(doi, action='notify_author',
+                           coll=DB['dis'].processing)
     except Exception as err:
         terminate_program(err)
 

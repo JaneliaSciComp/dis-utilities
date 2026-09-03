@@ -16,11 +16,10 @@
     with sync_openalex.json attached.
 """
 
-__version__ = '4.2.2'
+__version__ = '4.3.0'
 
 import argparse
 import collections
-from datetime import datetime
 import html
 import json
 from operator import attrgetter
@@ -132,17 +131,13 @@ def update_processing(doi, action, notes=None):
         Returns:
           None
     '''
-    proc = {'action': action,
-            'program': os.path.basename(__file__),
-            'version': __version__,
-            'timestamp': datetime.now().isoformat()}
-    if notes is not None:
-        proc['notes'] = notes
     if not ARG.WRITE:
         return
     try:
-        DB['dis'].processing.update_one({'type': 'doi', 'key': doi},
-                                        {'$push': {'processes': proc}}, upsert=True)
+        # The --write gate stays here: add_doi_process has none, so a dry run
+        # must be stopped before the call, not inside it.
+        DL.add_doi_process(doi, action=action, coll=DB['dis'].processing,
+                           notes=notes)
     except Exception as err:
         terminate_program(err)
 
