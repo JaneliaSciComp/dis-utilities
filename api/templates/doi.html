@@ -20,6 +20,7 @@ onload="tableInitialize();"
   <div class="flexitem">
   <button id="toggle-to-short" type="button" class="btn btn-success btn-tiny">Show short citation</button>
   <button id="toggle-to-full" type="button" class="btn btn-success btn-tiny">Show full citation</button>
+  {{ citepull|safe }}
   </div>
   </div>
   </div>
@@ -31,7 +32,11 @@ const toggleTofull = document.getElementById("toggle-to-full");
 const divf = document.getElementById("div-full");
 const divs = document.getElementById("div-short");
 const hide = el => el.style.setProperty("display", "none");
-const show = el => el.style.setProperty("display", "block");
+// Clear the inline value rather than forcing "block", so each element falls
+// back to its own default: block for the citation divs, inline-block for the
+// buttons. Forcing block made a shown button a block-level element, which
+// pushed the Copy citation pulldown beside it onto the next line.
+const show = el => el.style.removeProperty("display");
 hide(toggleToshort);
 hide(divf);
 

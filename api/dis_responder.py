@@ -51,7 +51,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.28.1"
+__version__ = "120.29.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -6327,6 +6327,7 @@ def show_doi_ui(doi):
                                          title=doititle, banner=banner, recsec=recsec,
                                          #doisec=doisec,
                                          cittype=cittype, citsec=citsec,
+                                         citepull=citation_style_pulldown(doi),
                                          html=html,
                                          navbar=generate_navbar('DOIs')))
 
@@ -7506,6 +7507,84 @@ def get_doi_bibtex(doi):
     return resp
 
 
+# Labels for the citation styles doi_common can format, in the order the
+# pulldown shows them. Keyed by doi_common.CITATION_STYLES, so a style added
+# there is inert here until it is given a label - which is deliberate, since
+# the label is what the user reads.
+CITATION_STYLE_LABELS = (('apa', 'APA (7th)'),
+                         ('ama', 'AMA (11th)'),
+                         ('nature', 'Nature'),
+                         ('cell', 'Cell'),
+                         ('chicago', 'Chicago (author-date)'))
+# BibTeX is offered from the same pulldown but is not a CSL style - it is a
+# record for a reference manager, so it sits below a separator and is fetched
+# through get_bibtex rather than get_citation. The separate Copy BibTeX column
+# on the newsletter report is unaffected.
+BIBTEX_STYLE = ('bibtex', 'BibTeX')
+
+
+def citation_style_pulldown(doi):
+    ''' Generate the "Copy citation" pulldown for a DOI, shown beside the
+        full/short toggle buttons. Each item copies the DOI formatted in that
+        style to the clipboard; nothing is fetched until
+        an item is clicked, which keeps a page load from spending five calls on
+        a registrar's rate-limited formatter. The in-house full and short
+        citations above it are unaffected.
+        Keyword arguments:
+          doi: DOI
+        Returns:
+          Pulldown HTML
+    '''
+    # The DOI travels in a data attribute rather than interpolated into the
+    # onclick handler. An attribute is a single escaping context, whereas a JS
+    # string inside an attribute is two: the browser decodes entities before the
+    # script engine sees the value, so an escaped quote (&#x27;) becomes a real
+    # one and closes the string. copyCitation reads both values off the DOM.
+    # The names are cite-specific because the Dimensions badge on this same page
+    # carries its own data-doi and data-style.
+    html = f"<div class='btn-group' data-cite-doi='{escape(doi)}'>" \
+           + "<button type='button' class='btn btn-success btn-tiny dropdown-toggle' " \
+           + "data-toggle='dropdown' aria-haspopup='true' aria-expanded='false'>" \
+           + "<i class='fas fa-copy'></i> Copy citation</button>" \
+           + "<div class='dropdown-menu'>"
+    for style, label in CITATION_STYLE_LABELS:
+        if style not in DL.CITATION_STYLES:
+            continue
+        html += f"<a class='dropdown-item' href='#' data-cite-style='{escape(style)}' " \
+                + "onclick='copyCitation(this); return false;'>" \
+                + f"{escape(label)}</a>"
+    html += "<div class='dropdown-divider'></div>" \
+            + f"<a class='dropdown-item' href='#' data-cite-style='{escape(BIBTEX_STYLE[0])}' " \
+            + "onclick='copyCitation(this); return false;'>" \
+            + f"{escape(BIBTEX_STYLE[1])}</a>"
+    html += "</div></div>"
+    return html
+
+
+@app.route('/citation/style/<style>/<path:doi>')
+def get_doi_styled_citation(style, doi):
+    '''
+    Return a DOI formatted in a named citation style, as plain text (empty body
+    + 404 when unavailable). Fronts doi_common.get_citation for the same reason
+    /bibtex fronts get_bibtex: neither registrar's formatter sends an
+    Access-Control-Allow-Origin header, so the browser cannot call them itself.
+    The style must be one of doi_common's CITATION_STYLES, or 'bibtex';
+    anything else is a 404 rather than a pass-through, so an unknown value
+    cannot be relayed to a registrar.
+    '''
+    if style != 'bibtex' and style not in DL.CITATION_STYLES:
+        resp = make_response('', 404)
+        resp.mimetype = 'text/plain'
+        return resp
+    doi = doi.lstrip('/').rstrip('/')
+    # BibTeX is a record rather than a rendered style, so it comes from
+    # get_bibtex; everything else is a CSL style from get_citation.
+    text = DL.get_bibtex(doi) if style == 'bibtex' else DL.get_citation(doi, style)
+    resp = make_response(text, 200 if text else 404)
+    resp.mimetype = 'text/plain'
+    return resp
+
+
 @app.route('/dois_newsletterpicker')
 def show_newsletter_picker():
     '''
@@ -7552,18 +7631,17 @@ def show_newsletter(ndate, source='Crossref'):
         news = row.get('jrc_newsletter') or ""
         tags = ', '.join(sorted(tag['name'] for tag in row['jrc_tag'])) \
                if 'jrc_tag' in row else ""
-        # BibTeX comes from Crossref's transform endpoint, which serves any
-        # Crossref-registered DOI (verified across every row of a live window).
-        # DataCite DOIs are excluded deliberately: their only BibTeX route is
-        # doi.org content negotiation, whose DataCite target sends no
-        # Access-Control-Allow-Origin, so a browser fetch would be blocked.
-        bibtex = ""
-        if row.get('jrc_obtained_from') == 'Crossref':
-            bibtex = safe("<button style='background-color:transparent;border:none;' "
-                          + f"onclick=\"copyBibtex('{escape(row['doi'])}', this)\" "
-                          + "title='Copy BibTeX to the clipboard'>"
-                          + "<i class='fas fa-regular fa-copy shadow' "
-                          + "style='background-color:transparent'></i></button>")
+        # Every row gets the button: Crossref serves BibTeX from its transform
+        # endpoint and DataCite from its own bibtex route (doi_common 73.5.0).
+        # This was Crossref-only on the grounds that a browser could not fetch
+        # DataCite's for want of an Access-Control-Allow-Origin header, which
+        # stopped applying when the button started calling /bibtex on this
+        # server rather than a registrar directly.
+        bibtex = safe("<button style='background-color:transparent;border:none;' "
+                      + f"onclick=\"copyBibtex('{escape(row['doi'])}', this)\" "
+                      + "title='Copy BibTeX to the clipboard'>"
+                      + "<i class='fas fa-regular fa-copy shadow' "
+                      + "style='background-color:transparent'></i></button>")
         trows.append([safe(doi_link(row['doi'])), pcell, pdate, pub, news,
                       cell(bibtex, align='center'),
                       safe(f"<span style='font-size: 10pt;'>{escape(tags)}</span>")])
