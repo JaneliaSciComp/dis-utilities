@@ -143,3 +143,78 @@ def test_unreadable_publishing_date_is_treated_as_too_old(ud):
         raise ValueError('no date')
     ud.DL = types.SimpleNamespace(get_publishing_date=boom)
     assert ud.too_old('10.1038/x', {}) is True
+
+
+# --- processing events ----------------------------------------------------
+#
+# An event is only meaningful if it means "this DOI changed", so these check
+# both that events appear for what was written and that nothing is logged for
+# a DOI that was not.
+
+def events(ud):
+    ''' The processing events recorded this run, as (doi, action, notes). '''
+    out = []
+    for write in ud.DB['dis'].processing.updates:
+        payload = write['update']['$push']['processes']
+        out.append((write['doi'], payload['action'], payload.get('notes')))
+    return out
+
+
+def test_insert_and_update_log_their_own_action(ud, pipeline):
+    pipeline(existing=stored(), incoming=['10.1038/known', '10.1038/brandnew'],
+             WRITE=True)
+    ud.process_dois()
+    by_doi = {doi: action for doi, action, _ in events(ud)}
+    assert by_doi == {'10.1038/known': 'update_doi',
+                      '10.1038/brandnew': 'insert_doi'}
+    assert ud.COUNT['processing_logged'] == 2
+    assert ud.COUNT['processing_error'] == 0
+
+
+def test_update_event_carries_the_reason_it_was_updated(ud, pipeline):
+    pipeline(existing=stored(), incoming=['10.1038/known'], WRITE=True)
+    ud.process_dois()
+    notes = dict((doi, note) for doi, _, note in events(ud))
+    # the reason crossref_needs_update already worked out, not "Unknown".
+    # convert_timestamp only strips sub-second precision, so the stamps stay
+    # full ISO.
+    assert notes['10.1038/known'] == \
+        f'Deposited {DEPOSITED_STORED} -> {DEPOSITED_NEWER}'
+
+
+def test_insert_event_names_the_registrar(ud, pipeline):
+    pipeline(existing={}, incoming=['10.1038/brandnew'], WRITE=True)
+    ud.process_dois()
+    assert events(ud) == [('10.1038/brandnew', 'insert_doi',
+                           'Inserted from Crossref')]
+
+
+def test_dry_run_logs_no_events(ud, pipeline):
+    pipeline(existing=stored(), incoming=['10.1038/known', '10.1038/brandnew'],
+             WRITE=False)
+    ud.process_dois()
+    assert events(ud) == []
+    assert ud.COUNT['processing_logged'] == 0
+
+
+def test_an_unchanged_doi_gets_no_event(ud, pipeline):
+    # same deposited timestamp as stored: nothing to write, so nothing to log
+    pipeline(existing=stored(), incoming=['10.1038/known'],
+             deposited=DEPOSITED_STORED, WRITE=True)
+    ud.process_dois()
+    assert events(ud) == []
+
+
+def test_a_failed_event_is_counted_and_does_not_stop_the_run(ud, pipeline):
+    coll = pipeline(existing=stored(),
+                    incoming=['10.1038/known', '10.1038/brandnew'], WRITE=True)
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("processing collection unavailable")
+
+    ud.DB['dis'].processing.update_one = boom
+    ud.process_dois()
+    # the DOIs themselves are still stored, and the failure is visible
+    assert {w['doi'] for w in coll.updates} == {'10.1038/known', '10.1038/brandnew'}
+    assert ud.COUNT['processing_error'] == 2
+    assert ud.COUNT['processing_logged'] == 0

@@ -202,7 +202,8 @@ def fixture_pipeline(ud, arg):
         ud.ARG = arg(**argkw)
         ud.IGNORE = {'doi': {}}
         ud.EXISTING = dict(existing)
-        ud.DB = {'dis': types.SimpleNamespace(dois=coll)}
+        ud.DB = {'dis': types.SimpleNamespace(dois=coll,
+                                              processing=helpers.FakeCollection())}
         ud.get_dois = lambda: {'dois': list(incoming)}
         if fetch:
             ud.get_doi_record = lambda doi: helpers.crossref_msg(deposited)
@@ -215,7 +216,8 @@ def fixture_pipeline(ud, arg):
             is_datacite=lambda doi: False,
             get_publishing_date=lambda rec: '2024-05-01',
             get_journal=lambda rec, name_only=False: 'Test Journal',
-            get_doi_record=lambda doi, coll=None: None)
+            get_doi_record=lambda doi, coll=None: None,
+            add_doi_process=helpers.fake_add_doi_process)
         return coll
     return build
 
@@ -245,12 +247,14 @@ def fixture_datacite_lookup(ud, arg):
         ud.ARG = arg()
         ud.IGNORE = {'doi': {}}
         ud.EXISTING = {}
-        ud.DB = {'dis': types.SimpleNamespace(dois=coll)}
+        ud.DB = {'dis': types.SimpleNamespace(dois=coll,
+                                              processing=helpers.FakeCollection())}
         ud.DL = types.SimpleNamespace(
             is_datacite=lambda doi: True,
             get_publishing_date=lambda rec: '2024-05-01',
             get_journal=lambda rec, name_only=False: None,
-            get_doi_record=lambda doi, coll=None: None)
+            get_doi_record=lambda doi, coll=None: None,
+            add_doi_process=helpers.fake_add_doi_process)
         ud.JRC = types.SimpleNamespace(call_datacite=lambda doi: record,
                                        call_crossref=lambda doi: record,
                                        get_user_name=lambda: 'tester')

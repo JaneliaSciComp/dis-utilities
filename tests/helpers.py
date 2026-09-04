@@ -12,6 +12,20 @@ DEPOSITED_STORED = '2024-01-01T00:00:00Z'
 DEPOSITED_NEWER = '2025-06-01T00:00:00Z'
 
 
+def fake_add_doi_process(doi, action=None, coll=None, notes=None):
+    ''' Stand in for doi_common.add_doi_process, writing the same shape into
+        the supplied (fake) collection so a test can assert on the event. The
+        real one also derives program/version from the calling module and
+        decides whether to record a user; neither is what these tests are
+        checking.
+    '''
+    payload = {'action': action, 'program': 'update_dois.py'}
+    if notes is not None:
+        payload['notes'] = notes
+    coll.update_one({'type': 'doi', 'key': doi},
+                    {'$push': {'processes': payload}}, upsert=True)
+
+
 class FakeCollection:
     ''' Stands in for a MongoDB collection, recording what it was asked to do. '''
 
@@ -38,8 +52,10 @@ class FakeCollection:
         return types.SimpleNamespace(deleted_count=self.deleted)
 
     def update_one(self, query, update, upsert=False):
-        self.updates.append({'doi': query.get('doi'), 'update': update,
-                             'upsert': upsert})
+        # 'key' covers the processing collection, which is keyed {type, key}
+        # rather than by doi - same convention find_one already follows.
+        self.updates.append({'doi': query.get('doi') or query.get('key'),
+                             'update': update, 'upsert': upsert})
         return types.SimpleNamespace(matched_count=1, modified_count=1,
                                      upserted_id=None)
 

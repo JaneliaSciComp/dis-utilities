@@ -7,7 +7,7 @@
            to DIS MongoDB.
 """
 
-__version__ = '22.6.0'
+__version__ = '22.7.0'
 
 import argparse
 import collections
@@ -1084,6 +1084,41 @@ def add_datacite(rec):
     rec['jrc_is_oa'] = True
 
 
+def log_processing(doi, rec):
+    ''' Record a processing event for a DOI that was just written. Called under
+        --write only, and after the write, so an event never describes a change
+        that did not reach the database. Only DOIs that needed updating are
+        persisted at all, so an event always means the DOI changed.
+        An update reuses the reason the needs-update check already worked out
+        (UPDATED), e.g. "Deposited 2024-01-01 -> 2025-06-01"; an insert records
+        the registrar it came from. add_doi_process supplies the program, the
+        version, and the user - nobody for the nightly Jenkins run, the operator
+        for a --doi/--file run.
+        A failure here is logged and counted rather than fatal: the DOI itself is
+        already stored, and losing its event is not worth ending the sync.
+        Keyword arguments:
+          doi: DOI just written
+          rec: record persisted for it
+        Returns:
+          None
+    '''
+    if doi in EXISTING:
+        action = 'update_doi'
+        # UPDATED only holds a reason the check could name. The "Unknown"
+        # placeholder is assigned further down and is not worth storing.
+        notes = UPDATED.get(doi)
+    else:
+        action = 'insert_doi'
+        notes = f"Inserted from {rec.get('jrc_obtained_from') or 'an unknown source'}"
+    try:
+        DL.add_doi_process(doi, action=action, coll=DB['dis'].processing, notes=notes)
+    except Exception as err:
+        LOGGER.error(f"Could not log a processing event for {doi}: {err}")
+        COUNT['processing_error'] += 1
+        return
+    COUNT['processing_logged'] += 1
+
+
 def update_mongodb(persist):
     ''' Persist DOI records in MongoDB
         Keyword arguments:
@@ -1129,6 +1164,7 @@ def update_mongodb(persist):
             if 'elife' in key and 'subtype' not in val:
                 LOGGER.warning(f"Removing subtype from {key}")
                 coll.update_one({"doi": key}, {"$unset": {"subtype": ""}})
+            log_processing(key, val)
         if key in EXISTING:
             COUNT['update'] += 1
             if key not in UPDATED:
@@ -1395,6 +1431,10 @@ def post_activities():
         print(f"DOIs deleted from FlyBoy:        {COUNT['delete']:,}")
     print(f"DOIs inserted:                   {COUNT['insert']:,}")
     print(f"DOIs updated:                    {COUNT['update']:,}")
+    if COUNT['processing_logged']:
+        print(f"Processing events logged:        {COUNT['processing_logged']:,}")
+    if COUNT['processing_error']:
+        print(f"Processing events failed:        {COUNT['processing_error']:,}")
     print(f"Elapsed time: {datetime.now() - START_TIME}")
     print(f"DOI calls to Crossref: {len(CROSSREF_CALL):,}")
     print(f"DOI calls to DataCite: {len(DATACITE_CALL):,}")
