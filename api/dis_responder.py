@@ -7631,18 +7631,17 @@ def show_newsletter(ndate, source='Crossref'):
         news = row.get('jrc_newsletter') or ""
         tags = ', '.join(sorted(tag['name'] for tag in row['jrc_tag'])) \
                if 'jrc_tag' in row else ""
-        # BibTeX comes from Crossref's transform endpoint, which serves any
-        # Crossref-registered DOI (verified across every row of a live window).
-        # DataCite DOIs are excluded deliberately: their only BibTeX route is
-        # doi.org content negotiation, whose DataCite target sends no
-        # Access-Control-Allow-Origin, so a browser fetch would be blocked.
-        bibtex = ""
-        if row.get('jrc_obtained_from') == 'Crossref':
-            bibtex = safe("<button style='background-color:transparent;border:none;' "
-                          + f"onclick=\"copyBibtex('{escape(row['doi'])}', this)\" "
-                          + "title='Copy BibTeX to the clipboard'>"
-                          + "<i class='fas fa-regular fa-copy shadow' "
-                          + "style='background-color:transparent'></i></button>")
+        # Every row gets the button: Crossref serves BibTeX from its transform
+        # endpoint and DataCite from its own bibtex route (doi_common 73.5.0).
+        # This was Crossref-only on the grounds that a browser could not fetch
+        # DataCite's for want of an Access-Control-Allow-Origin header, which
+        # stopped applying when the button started calling /bibtex on this
+        # server rather than a registrar directly.
+        bibtex = safe("<button style='background-color:transparent;border:none;' "
+                      + f"onclick=\"copyBibtex('{escape(row['doi'])}', this)\" "
+                      + "title='Copy BibTeX to the clipboard'>"
+                      + "<i class='fas fa-regular fa-copy shadow' "
+                      + "style='background-color:transparent'></i></button>")
         trows.append([safe(doi_link(row['doi'])), pcell, pdate, pub, news,
                       cell(bibtex, align='center'),
                       safe(f"<span style='font-size: 10pt;'>{escape(tags)}</span>")])
