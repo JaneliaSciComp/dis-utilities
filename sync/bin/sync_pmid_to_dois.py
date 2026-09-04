@@ -3,7 +3,7 @@
     DOI needs to be in the PubMed or PubMed Central archive.
 '''
 
-__version__ = '6.3.1'
+__version__ = '6.4.0'
 
 import argparse
 import collections
@@ -18,6 +18,7 @@ import metapub.exceptions
 from tqdm import tqdm
 import jrc_common.jrc_common as JRC
 import jrc_email.jrc_email as JE
+import doi_common.doi_common as DL
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation
 
@@ -69,6 +70,35 @@ def initialize_program():
             terminate_program(err)
 
 
+def log_processing(doi, payload):
+    ''' Record a processing event for a DOI this run changed. Called after the
+        write and only when the record actually changed, so an event never
+        describes a no-op. add_doi_process supplies the program, version, and
+        user - none for an unattended run, the operator for a hand-run one.
+        A failure is logged and counted rather than fatal: the DOI is already
+        stored, and losing its event is not worth ending the run.
+        Keyword arguments:
+          doi: DOI just written
+          payload: the update that was applied
+        Returns:
+          None
+    '''
+    if "$unset" in payload:
+        action = 'remove_pmid'
+        notes = "Removed " + ", ".join(sorted(payload["$unset"]))
+    else:
+        action = 'add_pmid'
+        notes = "Set " + ", ".join(sorted(payload))
+    try:
+        DL.add_doi_process(doi, action=action, coll=DB['dis']['processing'],
+                           notes=notes)
+    except Exception as err:
+        LOGGER.error(f"Could not log a processing event for {doi}: {err}")
+        COUNT['processing_error'] += 1
+        return
+    COUNT['processing_logged'] += 1
+
+
 def write_record(row, payload):
     ''' Write record to database
         Keyword arguments:
@@ -82,8 +112,13 @@ def write_record(row, payload):
             result = DB['dis']['dois'].update_one({'_id': row['_id']}, payload)
         else:
             result = DB['dis']['dois'].update_one({'_id': row['_id']}, {"$set": payload})
-        if hasattr(result, 'matched_count') and result.matched_count:
-            COUNT['written'] += result.matched_count
+        # modified_count, not matched_count: the filter is on _id, so a match is
+        # guaranteed for any record we just read, and counting matches counted
+        # attempts rather than writes. A record that matched but already held
+        # these values has not changed - it is neither written nor an event.
+        if getattr(result, 'modified_count', 0):
+            COUNT['written'] += result.modified_count
+            log_processing(row['doi'], payload)
 
 
 def postprocessing(audit, error):
@@ -102,6 +137,10 @@ def postprocessing(audit, error):
           + f"  MeSH updates:      {COUNT['mesh']:,}\n" \
           + f"  PMIDs removed:     {COUNT['removed']:,}\n" \
           + f"DOIs written:        {COUNT['written']:,}"
+    if COUNT['processing_logged']:
+        msg += f"\nProcessing events:   {COUNT['processing_logged']:,}"
+    if COUNT['processing_error']:
+        msg += f"\n  failed to log:     {COUNT['processing_error']:,}"
     print(msg)
     if error:
         filename = 'pmid_dois_errors.json'

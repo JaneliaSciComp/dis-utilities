@@ -10,6 +10,7 @@ import sys
 from tqdm import tqdm
 import jrc_common.jrc_common as JRC
 import jrc_email.jrc_email as JE
+import doi_common.doi_common as DL
 import dis_license_lib as DISL
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation,duplicate-code
@@ -19,7 +20,7 @@ COUNT = collections.defaultdict(lambda: 0, {})
 ARG = DISCONFIG = LOGGER = None
 LICENSE = {}
 
-__version__ = '2.1.1'
+__version__ = '2.2.0'
 
 def terminate_program(msg=None):
     ''' Terminate the program gracefully
@@ -70,6 +71,28 @@ def initialize_program():
             LICENSE[row['name']] = row['name']
 
 
+def log_processing(doi, license_name):
+    ''' Record a processing event for a DOI whose licence was set. Called after
+        the write and only when the record actually changed, so an event never
+        describes a no-op.
+        A failure is logged and counted rather than fatal: the DOI is already
+        stored, and losing its event is not worth ending the run.
+        Keyword arguments:
+          doi: DOI just written
+          license_name: licence stored for it
+        Returns:
+          None
+    '''
+    try:
+        DL.add_doi_process(doi, action='sync_license', coll=DB['dis'].processing,
+                           notes=f"Licence set to {license_name}")
+    except Exception as err:
+        LOGGER.error(f"Could not log a processing event for {doi}: {err}")
+        COUNT['processing_error'] += 1
+        return
+    COUNT['processing_logged'] += 1
+
+
 def processing():
     ''' Processing
         Keyword arguments:
@@ -92,10 +115,15 @@ def processing():
             COUNT['updated'] += 1
             if ARG.WRITE:
                 try:
-                    DB['dis'].dois.update_one({"doi": row['doi']},
-                                               {"$set": {"jrc_license": row['jrc_license']}})
+                    resp = DB['dis'].dois.update_one(
+                        {"doi": row['doi']},
+                        {"$set": {"jrc_license": row['jrc_license']}})
                 except Exception as err:
                     terminate_program(err)
+                # A record already carrying this licence has not changed, and
+                # an event must mean a change.
+                if resp.modified_count:
+                    log_processing(row['doi'], row['jrc_license'])
         else:
             LOGGER.error(f"No license found for {row['doi']}")
             COUNT['no_license'] += 1
@@ -120,6 +148,10 @@ def processing():
     print(f"{'DOIs not indexed in Unpaywall:':<32}{COUNT['unpaywall_not_indexed']:,}")
     print(f"{'DOIs skipped (Unpaywall down):':<32}{COUNT['unpaywall_unreachable']:,}")
     print(f"{'DOIs skipped (OpenAlex down):':<32}{COUNT['openalex_unreachable']:,}")
+    if COUNT['processing_logged']:
+        print(f"{'Processing events logged:':<32}{COUNT['processing_logged']:,}")
+    if COUNT['processing_error']:
+        print(f"{'Processing events failed:':<32}{COUNT['processing_error']:,}")
 
 
 def generate_email():
