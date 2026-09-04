@@ -8,6 +8,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Lets the suite be run on demand from the Actions tab, against any branch.
+  # Useful for changes to this workflow itself, which the push/pull_request
+  # triggers only exercise once a PR exists.
+  workflow_dispatch:
 
 # A new push to a branch supersedes the run already in flight for it.
 concurrency:
