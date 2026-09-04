@@ -68,7 +68,7 @@
     reason when one is available, in place of a title.
 """
 
-__version__ = '2.1.1'
+__version__ = '2.2.0'
 
 import argparse
 import collections
@@ -932,8 +932,34 @@ def write_to_database():
             LOGGER.warning(f"{doi} was not found in the dois collection")
         elif result.modified_count:
             COUNT['dois_written'] += 1
+            log_processing(doi, sorted(set(merged) - set(current or [])))
         else:
             COUNT['dois_unchanged'] += 1
+
+
+def log_processing(doi, added):
+    ''' Record a processing event for a DOI whose preprint relations changed.
+        Called after the write and only when the record actually changed, so an
+        event never describes a no-op. The note names the relations gained this
+        run rather than the whole merged list, which is what the field already
+        holds.
+        A failure is logged and counted rather than fatal: the DOI is already
+        stored, and losing its event is not worth ending the run.
+        Keyword arguments:
+          doi: DOI just written
+          added: relations newly added this run
+        Returns:
+          None
+    '''
+    notes = f"Added {', '.join(added)}" if added else None
+    try:
+        DL.add_doi_process(doi, action='link_preprint',
+                           coll=DB['dis'].processing, notes=notes)
+    except Exception as err:
+        LOGGER.error(f"Could not log a processing event for {doi}: {err}")
+        COUNT['processing_error'] += 1
+        return
+    COUNT['processing_logged'] += 1
 
 
 def clear_shared_output(file_name):
@@ -1326,7 +1352,9 @@ def print_summary():
         rows.extend([("DOIs actually written (value changed)", COUNT['dois_written']),
                      ("DOIs actually already up to date", COUNT['dois_unchanged']),
                      ("DOIs not found in collection", COUNT['dois_not_found']),
-                     ("Write failures", COUNT['write_errors'])])
+                     ("Write failures", COUNT['write_errors']),
+                     ("Processing events logged", COUNT['processing_logged']),
+                     ("Processing events failed", COUNT['processing_error'])])
     width = max(len(label) for label, _ in rows) + 2
     for label, value in rows:
         print(f"{(label + ':'):<{width}}{value:,}")

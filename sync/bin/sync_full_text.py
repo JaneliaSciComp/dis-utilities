@@ -2,7 +2,7 @@
     Update links to full-text files for DOIs. PDFs are preferred.
 '''
 
-__version__ = '2.1.1'
+__version__ = '2.2.0'
 
 import argparse
 import collections
@@ -126,6 +126,29 @@ def find_full_text(doi, row):
     return "", None
 
 
+def log_processing(doi, url):
+    ''' Record a processing event for a DOI whose full-text URL was set. Called
+        after the write and only when the record actually changed, so an event never
+        describes a no-op. add_doi_process supplies the program, version, and
+        user - none for an unattended run, the operator for a hand-run one.
+        A failure is logged and counted rather than fatal: the DOI is already
+        stored, and losing its event is not worth ending the run.
+        Keyword arguments:
+          doi: DOI just written
+          url: full-text URL stored for it
+        Returns:
+          None
+    '''
+    try:
+        DL.add_doi_process(doi, action='add_fulltext', coll=DB['dis'].processing,
+                           notes=f"Full text at {url}")
+    except Exception as err:
+        LOGGER.error(f"Could not log a processing event for {doi}: {err}")
+        COUNT['processing_error'] += 1
+        return
+    COUNT['processing_logged'] += 1
+
+
 def download_file(doi, url):
     ''' Download a file
         Keyword arguments:
@@ -234,6 +257,7 @@ def processing():
                                                {"$set": {"jrc_fulltext_url": fulltext}})
             if result.modified_count:
                 COUNT['updated'] += result.modified_count
+                log_processing(doi, fulltext)
         else:
             notfound.append(f"{doi}\t{row['type']}\t{reason if reason else ''}")
             COUNT['not_found'] += 1
@@ -255,6 +279,10 @@ def processing():
     print(f"  OA.Report:     {COUNT['oa']:,}")
     print(f"  PMC:           {COUNT['pmc']:,}")
     print(f"DOIs updated:    {COUNT['updated']:,}")
+    if COUNT['processing_logged']:
+        print(f"Events logged:   {COUNT['processing_logged']:,}")
+    if COUNT['processing_error']:
+        print(f"Events failed:   {COUNT['processing_error']:,}")
     print(f"PDFs downloaded: {COUNT['downloaded']:,}")
     print(f"DOIs not found:  {COUNT['not_found']:,}")
     if ARG.TEST or (ARG.WRITE and COUNT['updated']):
