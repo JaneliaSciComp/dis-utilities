@@ -1,7 +1,7 @@
 # dis-utilities [![Picture](https://raw.github.com/janelia-flyem/janelia-flyem.github.com/master/images/HHMI_Janelia_Color_Alternate_180x40.png)](http://www.janelia.org)
 
 [![GitHub last commit](https://img.shields.io/github/last-commit/JaneliaSciComp/dis-utilities.svg)](https://github.com/JaneliaSciComp/dis-utilities)
-[![GitHub commit merge status](https://img.shields.io/github/commit-status/badges/shields/master/5d4ab86b1b5ddfb3c4a70a70bd19932c52603b8c.svg)](https://github.com/JaneliaSciComp/dis-utilities)
+[![tests](https://github.com/JaneliaSciComp/dis-utilities/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/JaneliaSciComp/dis-utilities/actions/workflows/tests.yml)
 
 [![Python](https://img.shields.io/badge/Python-FFD43B?style=for-the-badge&logo=python&logoColor=blue)](https://www.python.org/)
 [![Flask](https://img.shields.io/badge/Flask-000000?style=for-the-badge&logo=flask&logoColor=white)](https://flask.palletsprojects.com/)
