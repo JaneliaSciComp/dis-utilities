@@ -25,7 +25,10 @@ INPUTS
   read to resolve supervisory-organization codes for the tag objects.
 - Command-line flags:
     --doi DOI  Restrict processing to a single DOI (internal or external). The
-               aggregate output files are not rewritten for a single-DOI run.
+               value is lowercased and stripped, and the run aborts with a
+               message if the DOI is unknown or carries no acknowledgement
+               text, rather than reporting an empty run. The aggregate output
+               files are not rewritten for a single-DOI run.
     --untagged Print to stderr the DOI of every record that references Janelia/JFRC
                but matched no entity (for tuning the search_regex patterns).
     --write    Update jrc_acknowledge in the database, and log a processing
@@ -145,7 +148,7 @@ import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
 import jrc_email.jrc_email as JE
 
-__version__ = '1.7.0'
+__version__ = '1.8.0'
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation,line-too-long
 
@@ -214,11 +217,22 @@ def initialize_program():
     # (key, compiled-regex). Same flags as the patterns were authored with (DOTALL so
     # ".*?" co-occurrence gaps may span newlines).
     try:
-        rows = DB['dis'].search_regex.find({})
-        COMPILED[:] = [(row['key'], re.compile(row['regex'], re.IGNORECASE | re.DOTALL))
-                       for row in rows]
+        rows = list(DB['dis'].search_regex.find({}))
     except Exception as err:
         terminate_program(err)
+    # Compile one at a time so a bad pattern can be reported by entity name. These
+    # are editable through the UI (/acksregexui), so a malformed save is a routine
+    # failure mode, and "an exception of type error occurred" gives no way to find
+    # which of the patterns is at fault.
+    COMPILED.clear()
+    for row in rows:
+        key, pattern = row.get('key'), row.get('regex')
+        if not key or not pattern:
+            terminate_program(f"search_regex record {row.get('_id')} has no key or no regex")
+        try:
+            COMPILED.append((key, re.compile(pattern, re.IGNORECASE | re.DOTALL)))
+        except re.error as err:
+            terminate_program(f"Invalid regex for entity \"{key}\": {err}")
     if not COMPILED:
         terminate_program("No entity regexes found in the search_regex collection")
     LOGGER.info(f"Loaded {len(COMPILED):,} entity regexes from search_regex")
@@ -246,6 +260,11 @@ def ack_to_text(ack):
         return ack
     if not ack:
         return ''
+    if isinstance(ack, dict):
+        # Iterating a dict yields its keys, so a bare dict would flatten to its
+        # field names and the acknowledgement text would be silently dropped.
+        # Wrap it so the dict branch below reads its values instead.
+        ack = [ack]
     parts = []
     for item in ack:
         if isinstance(item, str):
@@ -371,7 +390,8 @@ def query_payload():
     '''
     payload = {"jrc_acknowledgements": {"$exists": True}}
     if ARG.DOI:
-        payload["doi"] = ARG.DOI.lower()
+        # Already lowercased and stripped in __main__.
+        payload["doi"] = ARG.DOI
     return payload
 
 
@@ -419,7 +439,11 @@ def apply_updates(pending):
             DB['dis'][collection].bulk_write(batch, ordered=False)
         except Exception as err:
             terminate_program(err)
-    log_processing(tagged['dois'])
+        # Log this collection's events before moving to the next one. Logging
+        # after the whole loop meant a failure writing external_dois discarded
+        # the events for the dois writes that had already succeeded.
+        if collection == 'dois':
+            log_processing(tagged['dois'])
 
 
 def log_processing(dois):
@@ -499,12 +523,19 @@ def report(rows):
     '''
     print(f"Records read (internal):       {COUNT['read_internal']:,}")
     print(f"Records read (external):       {COUNT['read_external']:,}")
-    print(f"Records with Janelia/JFRC:     {COUNT['janelia']:,}")
+    # Two independent partitions of the same set of considered records: how each
+    # one qualified (Janelia/JFRC mention vs. a bare entity match, the latter
+    # allowed for internal records only), and whether it ended up tagged. Both
+    # pairs sum to "Records considered" - printing tagged/untagged directly under
+    # "Records with Janelia/JFRC" implied they summed to that instead, which they
+    # do not whenever an entity-only record is present.
+    considered = COUNT['janelia'] + COUNT['entity_only']
+    print(f"Records considered:            {considered:,}")
+    print(f"  Matched Janelia/JFRC:        {COUNT['janelia']:,}")
+    if COUNT['entity_only']:
+        print(f"  Matched an entity only:      {COUNT['entity_only']:,}")
     print(f"  Tagged with specific entity: {COUNT['tagged']:,}")
     print(f"  No entity identified:        {COUNT['untagged']:,}")
-    if COUNT['entity_only']:
-        print(f"Internal, entity match only "
-              f"(no Janelia/JFRC mention): {COUNT['entity_only']:,}")
     if COUNT['already_tagged']:
         print(f"Human-curated matches:         {COUNT['already_tagged']:,}")
     action = "DOIs updated:" if ARG.WRITE else "DOIs to update (dry run):"
@@ -515,8 +546,12 @@ def report(rows):
         print(f"Processing events logged:      {COUNT['processing_logged']:,}")
     print(f"Records tagged (internal):     {COUNT['snapshot_internal']:,}")
     print(f"Records tagged (external):     {COUNT['snapshot_external']:,}")
-    print(f"Records written (internal):    {COUNT['written_internal']:,}  ({INTERNAL_OUTPUT_FILE})")
-    print(f"Records written (external):    {COUNT['written_external']:,}  ({EXTERNAL_OUTPUT_FILE})")
+    # A --doi run doesn't rewrite the aggregate files, so don't cite them as if
+    # it had.
+    for label, count, path in (("internal", COUNT['written_internal'], INTERNAL_OUTPUT_FILE),
+                               ("external", COUNT['written_external'], EXTERNAL_OUTPUT_FILE)):
+        suffix = '' if ARG.DOI else f"  ({path})"
+        print(f"{'Records written (' + label + '):':<31}{count:,}{suffix}")
     if rows:
         print()
         print(f"{'Entity':<40} {'New':>6} {'Human Curated':>14}")
@@ -581,7 +616,8 @@ def generate_email(rows):
     snapshot_total = COUNT['snapshot_internal'] + COUNT['snapshot_external']
     written_total = COUNT['written_internal'] + COUNT['written_external']
     kpis = ''.join([
-        JE.kpi_card(f"{COUNT['updated']:,}", "DOIs updated",
+        JE.kpi_card(f"{COUNT['updated']:,}",
+                    "DOIs updated" if ARG.WRITE else "DOIs to update",
                     'good' if COUNT['updated'] else 'neutral', '25%'),
         JE.kpi_card(f"{snapshot_total:,}", "Records tagged", 'neutral', '25%'),
         JE.kpi_card(f"{written_total:,}", "Records written", 'neutral', '25%'),
@@ -617,6 +653,19 @@ def processing():  # pylint: disable=too-many-locals,too-many-branches,too-many-
     already_tagged_counts = {}
     pending = []    # (doi, collection, merged) records to write in a second pass
     totals = record_totals()
+    if ARG.DOI and not sum(totals.values()):
+        # Otherwise this reports a full page of zeros, which is indistinguishable
+        # from "found it, nothing to do" - the wrong answer for a spot check.
+        # Say which of the two it is.
+        try:
+            exists = any(DB['dis'][coll].find_one({"doi": ARG.DOI}, {"_id": 1})
+                         for coll in COLLECTIONS)
+        except Exception as err:
+            terminate_program(err)
+        if exists:
+            terminate_program(f"DOI {ARG.DOI} has no jrc_acknowledgements to tag")
+        terminate_program(f"DOI {ARG.DOI} was not found in "
+                          f"{' or '.join(COLLECTIONS)}")
     LOGGER.info(f"Processing {sum(totals.values()):,} records with acknowledgements "
                 f"({totals.get('dois', 0):,} internal, {totals.get('external_dois', 0):,} external)")
     for rec in tqdm(load_records(), total=sum(totals.values()),
@@ -699,6 +748,13 @@ if __name__ == '__main__':
     PARSER.add_argument('--debug', dest='DEBUG', action='store_true', default=False,
                         help='Flag, Very chatty')
     ARG = PARSER.parse_args()
+    if ARG.DOI is not None:
+        # DOIs are stored lowercase, and a pasted value can carry whitespace that
+        # would otherwise silently match nothing. Normalise once here so every
+        # consumer (the query, the "not found" message, the email header) agrees.
+        ARG.DOI = ARG.DOI.lower().strip()
+        if not ARG.DOI:
+            PARSER.error("--doi cannot be empty")
     LOGGER = JRC.setup_logging(ARG)
     DISCONFIG = JRC.simplenamespace_to_dict(JRC.get_config("dis"))
     initialize_program()
