@@ -230,6 +230,36 @@ async function copyBibtex(doi, btn) {
   }
 }
 
+// Fetch a DOI formatted in a named citation style from our /citation/style
+// endpoint (which fronts doi_common.get_citation) and copy it to the clipboard.
+// Going through the server keeps this independent of the registrars' CORS
+// policies, exactly as copyBibtex does. Fetching happens on click, not on page
+// load, so a visit costs the rate-limited formatters nothing.
+async function copyCitation(el) {
+  const original = el ? el.innerHTML : null;
+  // Both values come off the DOM, not from interpolated arguments - see the
+  // comment on citation_style_pulldown for why.
+  const style = el.dataset.citeStyle;
+  const group = el.closest('[data-cite-doi]');
+  const doi = group ? group.dataset.citeDoi : '';
+  try {
+    if (!doi || !style) { throw new Error('missing doi or style'); }
+    const resp = await fetch('/citation/style/' + encodeURIComponent(style) +
+                             '/' + encodeURI(doi));
+    if (!resp.ok) { throw new Error('HTTP ' + resp.status); }
+    const text = (await resp.text()).trim();
+    if (!text) { throw new Error('empty response'); }
+    await navigator.clipboard.writeText(text);
+    if (el) {
+      el.innerHTML = '<i class="fas fa-check"></i> Copied';
+      setTimeout(function () { el.innerHTML = original; }, 1200);
+    }
+  } catch (err) {
+    console.error('Citation copy failed:', err);
+    alert('Could not get that citation for this DOI.');
+  }
+}
+
 // Copy text to the clipboard.
 async function copyText(textToCopy) {
   navigator.permissions.query({name: "clipboard-write"});
