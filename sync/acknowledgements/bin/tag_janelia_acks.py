@@ -28,7 +28,8 @@ INPUTS
                aggregate output files are not rewritten for a single-DOI run.
     --untagged Print to stderr the DOI of every record that references Janelia/JFRC
                but matched no entity (for tuning the search_regex patterns).
-    --write    Update jrc_acknowledge in the database (default: dry run).
+    --write    Update jrc_acknowledge in the database, and log a processing
+               event per newly-tagged internal DOI (default: dry run).
     --verbose  Increase logging verbosity.
     --debug    Maximum logging verbosity.
 
@@ -72,6 +73,11 @@ HIGH-LEVEL FLOW
 3. Database update (--write only)
    - For each DOI that gained at least one new tag, set jrc_acknowledge on its
      source collection (dois or external_dois).
+   - Then log a "tag_acknowledgement" processing event for each newly-tagged
+     DOI from the dois collection, recording the person who ran the program
+     (this is a hand-run tool). External DOIs get no event: the processing
+     collection is a history of internal DOIs. An event is written only after
+     the tags are stored, and only for a DOI that actually changed.
 4. Output
    - Write each record that gained at least one new tag this run (doi, matched
      entities, and the merged jrc_acknowledge value - existing tags included)
@@ -139,7 +145,7 @@ import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
 import jrc_email.jrc_email as JE
 
-__version__ = '1.6.2'
+__version__ = '1.7.0'
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation,line-too-long
 
@@ -398,12 +404,14 @@ def apply_updates(pending):
           None
     '''
     ops = collections.defaultdict(list)
+    tagged = collections.defaultdict(list)
     for doi, collection, tags in pending:
         if not doi:
             LOGGER.warning("Cannot write jrc_acknowledge: record has no DOI")
             continue
         COUNT['updated'] += 1
         ops[collection].append(UpdateOne({"doi": doi}, {"$set": {"jrc_acknowledge": tags}}))
+        tagged[collection].append(doi)
     if not ARG.WRITE:
         return
     for collection, batch in ops.items():
@@ -411,6 +419,32 @@ def apply_updates(pending):
             DB['dis'][collection].bulk_write(batch, ordered=False)
         except Exception as err:
             terminate_program(err)
+    log_processing(tagged['dois'])
+
+
+def log_processing(dois):
+    ''' Record a processing event for each newly-tagged DOI. Called after the
+        tags are written, so an event only ever describes a change that reached
+        the database. Only records that gained a tag this run are passed to
+        apply_updates(), so every DOI here really did change.
+        Restricted to the dois collection: the processing collection is a
+        history of internal DOIs and has never held an external-only one, and
+        the /doiui page that surfaces it is an internal-DOI page.
+        add_doi_process fills in the program, version, and - because this
+        program is run by hand - the login of the person who ran it.
+        Keyword arguments:
+          dois: DOIs from the dois collection that were tagged this run
+        Returns:
+          None
+    '''
+    for doi in dois:
+        try:
+            DL.add_doi_process(doi, action='tag_acknowledgement',
+                               coll=DB['dis']['processing'],
+                               notes='Auto-tag acknowledgements')
+        except Exception as err:
+            terminate_program(err)
+        COUNT['processing_logged'] += 1
 
 
 def write_output(internal, external):
@@ -475,6 +509,10 @@ def report(rows):
         print(f"Human-curated matches:         {COUNT['already_tagged']:,}")
     action = "DOIs updated:" if ARG.WRITE else "DOIs to update (dry run):"
     print(f"{action:<31}{COUNT['updated']:,}")
+    if COUNT['processing_logged']:
+        # Internal DOIs only, so this is below COUNT['updated'] whenever the run
+        # also tagged external records.
+        print(f"Processing events logged:      {COUNT['processing_logged']:,}")
     print(f"Records tagged (internal):     {COUNT['snapshot_internal']:,}")
     print(f"Records tagged (external):     {COUNT['snapshot_external']:,}")
     print(f"Records written (internal):    {COUNT['written_internal']:,}  ({INTERNAL_OUTPUT_FILE})")
