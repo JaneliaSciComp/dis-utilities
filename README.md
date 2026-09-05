@@ -22,7 +22,7 @@ This repository is split into four sections:
 - [utility](utility/README.md): utility programs to be run interactively on the command line, for CRUD operations on database collections
 
 ## DIS system architecture
-![DIS system architecture](DIS_architecture.png?raw=true "DIS system architecture")
+![DIS system architecture](DIS_architecture.png "DIS system architecture")
 
 The DIS system is based on a MongoDB database with collections to persist DOIs, ORCIDs, and project mappings. Python programs are used for ETL and updates. A Flask-based application provides user interface, visualizations, and a REST API.
 
@@ -44,7 +44,7 @@ The DIS MongoDB database contains several collections:
 
 ### User interface
 Here's a sample DOI:
-![DOI page](sample_doi.png?raw=true "DOI page")
+![DOI page](sample_doi.png "DOI page")
 
 ### Python command line programs
 The Python programs in the [sync](sync/README.md) and [utility](utility/README.md) sections of this repository are meant to be run from the Unix command line, preferably from inside a Python virtual environment. To see which command line parameters may be specified for programs, use --help:
