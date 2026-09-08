@@ -51,7 +51,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.31.0"
+__version__ = "120.32.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -7681,13 +7681,15 @@ def show_uncredited_authors():
                      {"creators.affiliation": {"$regex": "Janelia", "$options": "i"}}]}
     try:
         rows = DB['dis'].dois.find(query, {"_id": 0, "doi": 1, "author": 1, "creators": 1,
-                                           "jrc_author": 1, "jrc_publishing_date": 1}) \
+                                           "jrc_author": 1, "jrc_publishing_date": 1,
+                                           "jrc_obtained_from": 1}) \
                              .sort([("jrc_publishing_date", -1)])
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get DOIs"),
                                message=error_message(err))
     trows = []
+    rclasses = []
     fileoutput = ""
     scanned = 0
     for row in rows:
@@ -7713,20 +7715,31 @@ def show_uncredited_authors():
         if not missing:
             continue
         pdate = row.get('jrc_publishing_date') or ''
-        trows.append([safe(doi_link(row['doi'])), pdate,
+        registrar = row.get('jrc_obtained_from') or ''
+        trows.append([safe(doi_link(row['doi'])), pdate, registrar,
                       safe(f"<span style='font-size: 10pt;'>{escape(', '.join(missing))}</span>")])
-        fileoutput += f"{row['doi']}\t{pdate}\t{', '.join(missing)}\n"
-    header = ['DOI', 'Published', 'Uncredited authors']
+        # The cycle button filters on these, so they have to be per-row classes
+        # rather than a query - switching registrar must not re-run the scan.
+        rclasses.append(f"registrar-{registrar.lower()}" if registrar else '')
+        fileoutput += f"{row['doi']}\t{pdate}\t{registrar}\t{', '.join(missing)}\n"
+    header = ['DOI', 'Published', 'Registrar', 'Uncredited authors']
     html = "<div style='font-size:0.95em; max-width:760px; margin-bottom:10px'>" \
            + f"Of <b>{scanned:,}</b> DOIs carrying a Janelia affiliation, these have an " \
            + "author whose affiliation names Janelia, who is in the ORCID collection and " \
            + "is not an alumnus, but whose employee ID is absent from the DOI's " \
            + "<code>jrc_author</code>. Authors with no ORCID record at all are not listed " \
            + "here - that is a larger, separate gap.</div>"
+    # Starts showing both, which is cycle_filter's own state 0, so no data-state
+    # is needed: the first click gives Crossref only, then DataCite only.
+    html += "<button class=\"btn btn-outline-info\" " \
+            + "onclick=\"cycle_filter(this, 'uncredited', 'registrar-crossref', " \
+            + "'registrar-datacite', 'Crossref', 'DataCite', 'totalrows');\">" \
+            + "Showing Crossref &amp; DataCite</button>&nbsp;"
+    html += f"<p>Number of DOIs: <span id='totalrows'>{len(trows):,}</span></p>"
     if trows:
         html += create_downloadable('uncredited_authors', header, fileoutput)
     html += render_table(header, trows, table_id='uncredited',
-                         css='tablesorter standard-scroll',
+                         css='tablesorter standard-scroll', row_classes=rclasses,
                          data_attrs={"sortlist": "[[1,1]]"})
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=f"DOIs with uncredited Janelia authors "
