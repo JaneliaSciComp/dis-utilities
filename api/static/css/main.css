@@ -473,6 +473,26 @@ hr {border-color: var(--muted-border);
   color: #fff;
 }
 
+/* Brief "copied" state for a copy button, applied by flashToggle in dis.js and
+   removed when the label is restored. #89c242 is the palette's bright green
+   (also .badge-database and .yearstatd); it is light enough to need black text.
+   Loaded after Bootstrap, so this beats .btn-success on source order without
+   needing !important. The transition applies on the way in and on the way out,
+   so the button eases back rather than snapping. */
+.btn-copied,
+.btn-copied:hover,
+.btn-copied:focus,
+.btn-copied:active {
+    background-color: #89c242;
+    border-color: #89c242;
+    color: black;
+}
+
+.btn-success.dropdown-toggle {
+    transition: background-color .18s ease-in-out, border-color .18s ease-in-out,
+                color .18s ease-in-out;
+}
+
 .btn-tiny {
     padding: 2px 2px;
     font-size: 11px;

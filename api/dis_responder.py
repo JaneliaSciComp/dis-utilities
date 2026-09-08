@@ -51,7 +51,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.29.1"
+__version__ = "120.30.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -7544,6 +7544,7 @@ def citation_style_pulldown(doi):
     # carries its own data-doi and data-style.
     html = f"<div class='btn-group' data-cite-doi='{escape(doi)}'>" \
            + "<button type='button' class='btn btn-success btn-tiny dropdown-toggle' " \
+           + "style='min-width:11em' " \
            + "data-toggle='dropdown' aria-haspopup='true' aria-expanded='false'>" \
            + "<i class='fas fa-copy'></i> Copy citation</button>" \
            + "<div class='dropdown-menu'>"

@@ -235,8 +235,34 @@ async function copyBibtex(doi, btn) {
 // Going through the server keeps this independent of the registrars' CORS
 // policies, exactly as copyBibtex does. Fetching happens on click, not on page
 // load, so a visit costs the rate-limited formatters nothing.
+// Briefly report the outcome of a copy on a pulldown's toggle button, then put
+// it back. The original label and classes are stashed on the element, so
+// clicking a second style while a message is still showing cannot capture
+// "Copied APA" as the text to restore. A failure turns the button red and
+// lingers longer, since it has to be noticed rather than merely confirmed.
+function flashToggle(group, html, failed) {
+  const btn = group ? group.querySelector('.dropdown-toggle') : null;
+  if (!btn) { return; }
+  if (btn.dataset.restoreLabel === undefined) {
+    btn.dataset.restoreLabel = btn.innerHTML;
+    btn.dataset.restoreClass = btn.className;
+  }
+  clearTimeout(btn.flashTimer);
+  btn.innerHTML = html;
+  // Failure swaps green for red; success brightens the green instead of
+  // replacing it, so the button reads as the same control either way.
+  btn.className = failed
+    ? btn.dataset.restoreClass.replace('btn-success', 'btn-danger')
+    : btn.dataset.restoreClass + ' btn-copied';
+  btn.flashTimer = setTimeout(function () {
+    btn.innerHTML = btn.dataset.restoreLabel;
+    btn.className = btn.dataset.restoreClass;
+    delete btn.dataset.restoreLabel;
+    delete btn.dataset.restoreClass;
+  }, failed ? 2500 : 1500);
+}
+
 async function copyCitation(el) {
-  const original = el ? el.innerHTML : null;
   // Both values come off the DOM, not from interpolated arguments - see the
   // comment on citation_style_pulldown for why.
   const style = el.dataset.citeStyle;
@@ -250,13 +276,20 @@ async function copyCitation(el) {
     const text = (await resp.text()).trim();
     if (!text) { throw new Error('empty response'); }
     await navigator.clipboard.writeText(text);
-    if (el) {
-      el.innerHTML = '<i class="fas fa-check"></i> Copied';
-      setTimeout(function () { el.innerHTML = original; }, 1200);
-    }
+    // Confirm on the toggle button, not on the item that was clicked: Bootstrap
+    // closes the menu on click, so anything shown on the item is hidden before
+    // it can be read. Name the style, since six items share one button. The
+    // parenthetical is dropped ("APA (7th)" -> "APA") to keep the label from
+    // growing much wider than "Copy citation".
+    flashToggle(group, '<i class="fas fa-check"></i> Copied ' +
+                (el.textContent || '').replace(/\s*\(.*\)\s*$/, '').trim());
   } catch (err) {
+    // Reported on the button rather than through alert(): a modal dialog is a
+    // jarring answer to a click whose success is a quiet inline flash, and it
+    // has to be dismissed before anything else can be tried. The detail stays
+    // in the console.
     console.error('Citation copy failed:', err);
-    alert('Could not get that citation for this DOI.');
+    flashToggle(group, '<i class="fas fa-times"></i> Copy failed', true);
   }
 }
 
