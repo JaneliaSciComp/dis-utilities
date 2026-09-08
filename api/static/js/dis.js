@@ -235,8 +235,25 @@ async function copyBibtex(doi, btn) {
 // Going through the server keeps this independent of the registrars' CORS
 // policies, exactly as copyBibtex does. Fetching happens on click, not on page
 // load, so a visit costs the rate-limited formatters nothing.
+// Briefly confirm a copy on a pulldown's toggle button, then put its label
+// back. The first label seen is stashed on the element, so clicking a second
+// style while the confirmation is still showing cannot capture "Copied" as the
+// text to restore.
+function flashCopied(group, what) {
+  const btn = group ? group.querySelector('.dropdown-toggle') : null;
+  if (!btn) { return; }
+  if (btn.dataset.restoreLabel === undefined) {
+    btn.dataset.restoreLabel = btn.innerHTML;
+  }
+  clearTimeout(btn.flashTimer);
+  btn.innerHTML = '<i class="fas fa-check"></i> Copied' + (what ? ' ' + what : '');
+  btn.flashTimer = setTimeout(function () {
+    btn.innerHTML = btn.dataset.restoreLabel;
+    delete btn.dataset.restoreLabel;
+  }, 1500);
+}
+
 async function copyCitation(el) {
-  const original = el ? el.innerHTML : null;
   // Both values come off the DOM, not from interpolated arguments - see the
   // comment on citation_style_pulldown for why.
   const style = el.dataset.citeStyle;
@@ -250,10 +267,12 @@ async function copyCitation(el) {
     const text = (await resp.text()).trim();
     if (!text) { throw new Error('empty response'); }
     await navigator.clipboard.writeText(text);
-    if (el) {
-      el.innerHTML = '<i class="fas fa-check"></i> Copied';
-      setTimeout(function () { el.innerHTML = original; }, 1200);
-    }
+    // Confirm on the toggle button, not on the item that was clicked: Bootstrap
+    // closes the menu on click, so anything shown on the item is hidden before
+    // it can be read. Name the style, since six items share one button. The
+    // parenthetical is dropped ("APA (7th)" -> "APA") to keep the label from
+    // growing much wider than "Copy citation".
+    flashCopied(group, (el.textContent || '').replace(/\s*\(.*\)\s*$/, '').trim());
   } catch (err) {
     console.error('Citation copy failed:', err);
     alert('Could not get that citation for this DOI.');
