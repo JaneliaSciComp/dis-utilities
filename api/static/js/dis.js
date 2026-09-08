@@ -249,9 +249,11 @@ function flashToggle(group, html, failed) {
   }
   clearTimeout(btn.flashTimer);
   btn.innerHTML = html;
+  // Failure swaps green for red; success brightens the green instead of
+  // replacing it, so the button reads as the same control either way.
   btn.className = failed
     ? btn.dataset.restoreClass.replace('btn-success', 'btn-danger')
-    : btn.dataset.restoreClass;
+    : btn.dataset.restoreClass + ' btn-copied';
   btn.flashTimer = setTimeout(function () {
     btn.innerHTML = btn.dataset.restoreLabel;
     btn.className = btn.dataset.restoreClass;
