@@ -51,7 +51,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.29.0"
+__version__ = "120.29.1"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -9224,9 +9224,26 @@ def source_metrics(year='All'):  # pylint: disable=too-many-locals
         return sum(conc_sorted[:k]) / conc_total * 100 if conc_total else 0
     one_pct = max(1, round(conc_n * 0.01))
     ten_pct = max(1, round(conc_n * 0.10))
-    conc_pts = [("Top work", 1), ("Top 10 works", 10),
-                (f"Top 1% ({one_pct:,} works)", one_pct),
-                (f"Top 10% ({ten_pct:,} works)", ten_pct)]
+
+    def works_phrase(num):
+        ''' "1 work" / "12 works" - a percentile of a small corpus rounds to
+            one work, which read as "1 works". '''
+        return f"{num:,} work" if num == 1 else f"{num:,} works"
+
+    # Prune the cuts that say nothing for a small corpus. top_share clamps k to
+    # the number of cited works, so with nine of them "Top 10 works" silently
+    # became every work (100%) while claiming ten, and both percentiles rounded
+    # to one work and repeated "Top work" - three of the four rows carried the
+    # same number. A cut is dropped when it repeats an earlier one or when it
+    # already covers the whole corpus; the top work is always kept.
+    conc_pts = []
+    for label, k in (("Top work", 1),
+                     ("Top 10 works", 10),
+                     (f"Top 1% ({works_phrase(one_pct)})", one_pct),
+                     (f"Top 10% ({works_phrase(ten_pct)})", ten_pct)):
+        if conc_pts and (k >= conc_n or any(k == seen for _, seen in conc_pts)):
+            continue
+        conc_pts.append((label, k))
     # Shape context for the concentration numbers: mean-vs-median makes the
     # right-skew explicit, and the ">=100 citations" share is a breadth
     # counterweight (concentration at the top coexists with broad depth).
@@ -9240,19 +9257,27 @@ def source_metrics(year='All'):  # pylint: disable=too-many-locals
     # stays honest for a sparse single year, not just the heavy-tailed corpus.
     skew_phrase, depth_clause = citation_distribution_prose(conc_mean, conc_median, pct100)
     conchtml = "<h4>Citation concentration</h4>"
-    conchtml += "<div style='font-size:0.95em; max-width:620px; margin-bottom:8px'>" \
-                + f"Over <b>{conc_n:,}</b> cited works (versions merged, " \
-                + ("all years" if year == 'All' else str(year)) + "): " \
-                + f"mean <b>{conc_mean:,.0f}</b> vs. median <b>{conc_med_str}</b> " \
-                + f"citations/work - <i>{skew_phrase}</i>. " \
-                + f"<b>{n100:,}</b> works (<b>{pct100:.1f}%</b>) are cited " \
-                + f"&ge;100 times{depth_clause}</div>"
-    conchtml += render_table(['Most-cited works', 'Share of all citations'],
-                             [[label, f"{top_share(k):.1f}%"] for label, k in conc_pts],
-                             table_id='src-conc', css='tablesorter numberlast-scroll')
-    conchtml += "<div style='font-size:0.9em; color:#a8c4e0; max-width:620px'>" \
-                + "A high top-work share means overall impact leans on a few " \
-                + "landmark papers rather than being spread evenly.</div>"
+    if not conc_n:
+        # Nothing in scope has been cited, so every figure would be zero and the
+        # table would read "Top work 0.0%" over prose about a mean of 0. Say so
+        # once instead - a tag can easily have papers but no citations yet.
+        conchtml += "<div style='font-size:0.95em; max-width:620px'>" \
+                    + "No works in this selection have been cited, so there is " \
+                    + "no concentration to report.</div>"
+    else:
+        conchtml += "<div style='font-size:0.95em; max-width:620px; margin-bottom:8px'>" \
+                    + f"Over <b>{conc_n:,}</b> cited works (versions merged, " \
+                    + ("all years" if year == 'All' else str(year)) + "): " \
+                    + f"mean <b>{conc_mean:,.0f}</b> vs. median <b>{conc_med_str}</b> " \
+                    + f"citations/work - <i>{skew_phrase}</i>. " \
+                    + f"<b>{n100:,}</b> works (<b>{pct100:.1f}%</b>) are cited " \
+                    + f"&ge;100 times{depth_clause}</div>"
+        conchtml += render_table(['Most-cited works', 'Share of all citations'],
+                                 [[label, f"{top_share(k):.1f}%"] for label, k in conc_pts],
+                                 table_id='src-conc', css='tablesorter numberlast-scroll')
+        conchtml += "<div style='font-size:0.9em; color:#a8c4e0; max-width:620px'>" \
+                    + "A high top-work share means overall impact leans on a few " \
+                    + "landmark papers rather than being spread evenly.</div>"
     # ----- usage by source -----
     uhtml = "<h4>Usage by source</h4>"
     uhtml += render_table(['Metric', 'Combined', 'Crossref', 'DataCite'],
