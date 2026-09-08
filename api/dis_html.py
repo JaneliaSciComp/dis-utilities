@@ -24,6 +24,7 @@ DOWNLOAD_ICON = '<i class="fa-solid fa-arrow-down" ' \
 NAV = {"Home": "",
        "DOIs": {"DOIs by insertion date": "dois_insertpicker",
                 "DOIs by newsletter date": "dois_newsletterpicker",
+                "Uncredited Janelia authors": "dois_uncredited",
                 "DOI metrics": "dois_metrics",
                 "Publishing impact": "source_metrics",
                 "DOIs by": {"Month": "dois_time/month", "Year": "dois_time/year",

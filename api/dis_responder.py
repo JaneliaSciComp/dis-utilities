@@ -51,7 +51,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.30.0"
+__version__ = "120.31.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -7584,6 +7584,154 @@ def get_doi_styled_citation(style, doi):
     resp = make_response(text, 200 if text else 404)
     resp.mimetype = 'text/plain'
     return resp
+
+
+def _orcid_lookups():
+    ''' Index the orcid collection for in-memory author matching.
+        doi_common resolves an author with one query per author (an ORCID
+        lookup, then an exact given+family lookup). That is right for a single
+        DOI page and far too slow here: this report walks every DOI carrying a
+        Janelia affiliation, which is thousands of authors and so tens of
+        thousands of round trips. The collection is small enough to hold, so the
+        same two lookups are done against dicts instead.
+        Keyword arguments:
+          None
+        Returns:
+          (by_orcid, by_name) dicts
+    '''
+    by_orcid = {}
+    by_name = {}
+    try:
+        rows = DB['dis'].orcid.find({}, {"orcid": 1, "given": 1, "family": 1,
+                                         "employeeId": 1, "alumni": 1})
+    except Exception as err:
+        raise err
+    for row in rows:
+        if row.get('orcid'):
+            by_orcid[row['orcid']] = row
+        # given and family are lists of name variants, and Mongo matches a
+        # scalar against any element, so every pairing is a valid match.
+        for given in row.get('given') or []:
+            for family in row.get('family') or []:
+                by_name.setdefault((str(given), str(family)), []).append(row)
+    return by_orcid, by_name
+
+
+def _janelia_affiliated(auth):
+    ''' Whether an author's paper-supplied affiliation names Janelia. This is
+        doi_common's "gold standard" assertion match, and it reads only the
+        stored record - no OpenAlex or PubMed call - which is what makes a
+        corpus-wide report possible. Crossref holds {name: ...} dicts, DataCite
+        plain strings.
+        Keyword arguments:
+          auth: author/creator entry from the DOI record
+        Returns:
+          True if any affiliation mentions Janelia
+    '''
+    for aff in auth.get('affiliation') or []:
+        text = aff if isinstance(aff, str) else aff.get('name') or ''
+        if text and 'janelia' in str(text).lower():
+            return True
+    return False
+
+
+def _matched_person(auth, by_orcid, by_name):
+    ''' Resolve an author to an orcid record, mirroring doi_common: ORCID
+        first, then an exact given+family match. Deliberately no looser
+        fallback - a report that claimed a match the DOI page does not make
+        would disagree with /doiui about the same author.
+        Keyword arguments:
+          auth: author/creator entry
+          by_orcid: ORCID index
+          by_name: (given, family) index
+        Returns:
+          orcid record, or None
+    '''
+    oid = (auth.get('ORCID') or '').split('/')[-1]
+    if oid and oid in by_orcid:
+        return by_orcid[oid]
+    given = auth.get('given') or auth.get('givenName') or ''
+    family = auth.get('family') or auth.get('familyName') or ''
+    rows = by_name.get((str(given), str(family)))
+    return rows[0] if rows else None
+
+
+@app.route('/dois_uncredited')
+def show_uncredited_authors():
+    '''
+    Return DOIs carrying a Janelia affiliation for an author who is not credited
+    ---
+    tags:
+      - DOI
+    responses:
+      '200':
+        description: HTML report
+      '500':
+        description: MongoDB error
+    '''
+    try:
+        by_orcid, by_name = _orcid_lookups()
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not read the orcid collection"),
+                               message=error_message(err))
+    # Only DOIs with a Janelia affiliation string can qualify, so let Mongo do
+    # that cut rather than walking the whole collection.
+    query = {"$or": [{"author.affiliation.name": {"$regex": "Janelia", "$options": "i"}},
+                     {"creators.affiliation": {"$regex": "Janelia", "$options": "i"}}]}
+    try:
+        rows = DB['dis'].dois.find(query, {"_id": 0, "doi": 1, "author": 1, "creators": 1,
+                                           "jrc_author": 1, "jrc_publishing_date": 1}) \
+                             .sort([("jrc_publishing_date", -1)])
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get DOIs"),
+                               message=error_message(err))
+    trows = []
+    fileoutput = ""
+    scanned = 0
+    for row in rows:
+        scanned += 1
+        credited = set(row.get('jrc_author') or [])
+        missing = []
+        for auth in row.get('creators') or row.get('author') or []:
+            if not _janelia_affiliated(auth):
+                continue
+            person = _matched_person(auth, by_orcid, by_name)
+            if not person:
+                # No orcid record at all. A real gap, but a different problem
+                # (and a far larger list) - see find_unknown_affiliates.py.
+                continue
+            if person.get('alumni'):
+                continue
+            if person.get('employeeId') and person['employeeId'] in credited:
+                continue
+            name = " ".join(str(x) for x in
+                            (auth.get('given') or auth.get('givenName') or '',
+                             auth.get('family') or auth.get('familyName') or '') if x).strip()
+            missing.append(name or '(unnamed)')
+        if not missing:
+            continue
+        pdate = row.get('jrc_publishing_date') or ''
+        trows.append([safe(doi_link(row['doi'])), pdate,
+                      safe(f"<span style='font-size: 10pt;'>{escape(', '.join(missing))}</span>")])
+        fileoutput += f"{row['doi']}\t{pdate}\t{', '.join(missing)}\n"
+    header = ['DOI', 'Published', 'Uncredited authors']
+    html = "<div style='font-size:0.95em; max-width:760px; margin-bottom:10px'>" \
+           + f"Of <b>{scanned:,}</b> DOIs carrying a Janelia affiliation, these have an " \
+           + "author whose affiliation names Janelia, who is in the ORCID collection and " \
+           + "is not an alumnus, but whose employee ID is absent from the DOI's " \
+           + "<code>jrc_author</code>. Authors with no ORCID record at all are not listed " \
+           + "here - that is a larger, separate gap.</div>"
+    if trows:
+        html += create_downloadable('uncredited_authors', header, fileoutput)
+    html += render_table(header, trows, table_id='uncredited',
+                         css='tablesorter standard-scroll',
+                         data_attrs={"sortlist": "[[1,1]]"})
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=f"DOIs with uncredited Janelia authors "
+                                               f"({len(trows):,})",
+                                         html=html, navbar=generate_navbar('DOIs')))
 
 
 @app.route('/dois_newsletterpicker')
