@@ -235,22 +235,29 @@ async function copyBibtex(doi, btn) {
 // Going through the server keeps this independent of the registrars' CORS
 // policies, exactly as copyBibtex does. Fetching happens on click, not on page
 // load, so a visit costs the rate-limited formatters nothing.
-// Briefly confirm a copy on a pulldown's toggle button, then put its label
-// back. The first label seen is stashed on the element, so clicking a second
-// style while the confirmation is still showing cannot capture "Copied" as the
-// text to restore.
-function flashCopied(group, what) {
+// Briefly report the outcome of a copy on a pulldown's toggle button, then put
+// it back. The original label and classes are stashed on the element, so
+// clicking a second style while a message is still showing cannot capture
+// "Copied APA" as the text to restore. A failure turns the button red and
+// lingers longer, since it has to be noticed rather than merely confirmed.
+function flashToggle(group, html, failed) {
   const btn = group ? group.querySelector('.dropdown-toggle') : null;
   if (!btn) { return; }
   if (btn.dataset.restoreLabel === undefined) {
     btn.dataset.restoreLabel = btn.innerHTML;
+    btn.dataset.restoreClass = btn.className;
   }
   clearTimeout(btn.flashTimer);
-  btn.innerHTML = '<i class="fas fa-check"></i> Copied' + (what ? ' ' + what : '');
+  btn.innerHTML = html;
+  btn.className = failed
+    ? btn.dataset.restoreClass.replace('btn-success', 'btn-danger')
+    : btn.dataset.restoreClass;
   btn.flashTimer = setTimeout(function () {
     btn.innerHTML = btn.dataset.restoreLabel;
+    btn.className = btn.dataset.restoreClass;
     delete btn.dataset.restoreLabel;
-  }, 1500);
+    delete btn.dataset.restoreClass;
+  }, failed ? 2500 : 1500);
 }
 
 async function copyCitation(el) {
@@ -272,10 +279,15 @@ async function copyCitation(el) {
     // it can be read. Name the style, since six items share one button. The
     // parenthetical is dropped ("APA (7th)" -> "APA") to keep the label from
     // growing much wider than "Copy citation".
-    flashCopied(group, (el.textContent || '').replace(/\s*\(.*\)\s*$/, '').trim());
+    flashToggle(group, '<i class="fas fa-check"></i> Copied ' +
+                (el.textContent || '').replace(/\s*\(.*\)\s*$/, '').trim());
   } catch (err) {
+    // Reported on the button rather than through alert(): a modal dialog is a
+    // jarring answer to a click whose success is a quiet inline flash, and it
+    // has to be dismissed before anything else can be tried. The detail stays
+    // in the console.
     console.error('Citation copy failed:', err);
-    alert('Could not get that citation for this DOI.');
+    flashToggle(group, '<i class="fas fa-times"></i> Copy failed', true);
   }
 }
 
