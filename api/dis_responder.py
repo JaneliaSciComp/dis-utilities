@@ -51,7 +51,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.32.1"
+__version__ = "120.33.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -7745,6 +7745,175 @@ def show_uncredited_authors():
                                          title=f"DOIs with uncredited Janelia authors "
                                                f"({len(trows):,})",
                                          html=html, navbar=generate_navbar('Authorship')))
+
+
+def _credited_by_doi():
+    ''' Map every DOI to the set of employee IDs credited on it, in one read.
+        The comparisons below are all DOI-to-DOI, so doing them with a query per
+        partner would be thousands of round trips for no gain - the whole
+        collection projected to two fields is small.
+        Keyword arguments:
+          None
+        Returns:
+          (credited, published) dicts keyed by DOI
+    '''
+    credited = {}
+    published = {}
+    try:
+        rows = DB['dis'].dois.find({}, {"_id": 0, "doi": 1, "jrc_author": 1,
+                                        "jrc_publishing_date": 1})
+    except Exception as err:
+        raise err
+    for row in rows:
+        credited[row['doi']] = set(row.get('jrc_author') or [])
+        published[row['doi']] = row.get('jrc_publishing_date') or ''
+    return credited, published
+
+
+def _employee_names():
+    ''' Map employee ID to a display name, for reporting who is missing.
+        Keyword arguments:
+          None
+        Returns:
+          dict of employee ID -> name
+    '''
+    names = {}
+    try:
+        rows = DB['dis'].orcid.find({"employeeId": {"$exists": True}},
+                                    {"employeeId": 1, "given": 1, "family": 1})
+    except Exception as err:
+        raise err
+    for row in rows:
+        given = (row.get('given') or [''])[0]
+        family = (row.get('family') or [''])[0]
+        names[row['employeeId']] = f"{given} {family}".strip() or row['employeeId']
+    return names
+
+
+def _preprint_gaps(credited):
+    ''' DOIs missing an author that their linked preprint or journal version
+        credits. The two records are the same work, so the partner crediting
+        someone this one does not is a contradiction rather than an inference -
+        no affiliation or name matching is involved.
+        Keyword arguments:
+          credited: DOI -> set of employee IDs
+        Returns:
+          dict of DOI -> (missing IDs, partner DOIs)
+    '''
+    gaps = {}
+    try:
+        rows = DB['dis'].dois.find({"jrc_preprint": {"$exists": True}},
+                                   {"_id": 0, "doi": 1, "jrc_preprint": 1})
+    except Exception as err:
+        raise err
+    for row in rows:
+        mine = credited.get(row['doi'], set())
+        related = row['jrc_preprint'] if isinstance(row['jrc_preprint'], list) \
+                  else [row['jrc_preprint']]
+        for other in related:
+            other = str(other).lower()
+            if other not in credited:
+                continue
+            missing = credited[other] - mine
+            if not missing:
+                continue
+            have = gaps.setdefault(row['doi'], [set(), set()])
+            have[0] |= missing
+            have[1].add(other)
+    return gaps
+
+
+def _version_gaps(credited):
+    ''' DOIs missing an author that another version of the same deposit
+        credits. figshare mints a DOI per version, so ".v2" and its stem are one
+        record split in two, and a difference between them is an error.
+        Keyword arguments:
+          credited: DOI -> set of employee IDs
+        Returns:
+          dict of DOI -> (missing IDs, partner DOIs)
+    '''
+    groups = {}
+    for doi in credited:
+        stem = doi.rsplit('.v', 1)[0] if re.search(r'\.v\d+$', doi) else doi
+        groups.setdefault(stem, set()).add(doi)
+    gaps = {}
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        union = set()
+        for doi in members:
+            union |= credited[doi]
+        for doi in members:
+            missing = union - credited[doi]
+            if not missing:
+                continue
+            partners = {other for other in members
+                        if other != doi and credited[other] & missing}
+            gaps[doi] = [missing, partners]
+    return gaps
+
+
+@app.route('/dois_authorship_mismatch')
+def show_authorship_mismatch():
+    '''
+    Return DOIs credited differently from a linked record for the same work
+    ---
+    tags:
+      - DOI
+    responses:
+      '200':
+        description: HTML report
+      '500':
+        description: MongoDB error
+    '''
+    try:
+        credited, published = _credited_by_doi()
+        names = _employee_names()
+        found = {'preprint': _preprint_gaps(credited),
+                 'version': _version_gaps(credited)}
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get DOIs"),
+                               message=error_message(err))
+    trows = []
+    rclasses = []
+    fileoutput = ""
+    # A DOI can appear under both relationships; each row is one relationship,
+    # so the reader can see which record makes the claim.
+    for relation, gaps in found.items():
+        for doi, (missing, partners) in gaps.items():
+            who = sorted(names.get(eid, eid) for eid in missing)
+            plist = sorted(partners)
+            trows.append([safe(doi_link(doi)), published.get(doi, ''), relation.title(),
+                          safe(' '.join(doi_link(p) for p in plist)),
+                          safe(f"<span style='font-size: 10pt;'>{escape(', '.join(who))}</span>")])
+            rclasses.append(f"rel-{relation}")
+            fileoutput += f"{doi}\t{published.get(doi, '')}\t{relation}\t" \
+                          + f"{', '.join(plist)}\t{', '.join(who)}\n"
+    header = ['DOI', 'Published', 'Relationship', 'Linked DOI', 'Missing authors']
+    html = "<div style='font-size:0.95em; max-width:800px; margin-bottom:10px'>" \
+           + "These DOIs are credited differently from a record for the same work: a " \
+           + "preprint and its published version, or two versions of one deposit. The " \
+           + "linked record credits someone this one does not, so the difference is a " \
+           + "contradiction rather than a guess - no affiliation or name matching is " \
+           + "involved. Alumni and contingent workers are included, unlike the " \
+           + "<a href='/dois_uncredited'>uncredited authors</a> report: the linked " \
+           + "record already establishes the person was an author of this work.</div>"
+    html += "<button class=\"btn btn-outline-info\" " \
+            + "onclick=\"cycle_filter(this, 'mismatch', 'rel-preprint', 'rel-version', " \
+            + "'Preprint', 'Version', 'totalrows');\">" \
+            + "Showing Preprint &amp; Version</button>&nbsp;"
+    html += f"<p>Number of DOIs: <span id='totalrows'>{len(trows):,}</span></p>"
+    if trows:
+        html += create_downloadable('authorship_mismatch', header, fileoutput)
+    html += render_table(header, trows, table_id='mismatch',
+                         css='tablesorter standard-scroll', row_classes=rclasses,
+                         data_attrs={"sortlist": "[[1,1]]"})
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=f"DOIs with authorship mismatches "
+                                               f"({len(trows):,})",
+                                         html=html,
+                                         navbar=generate_navbar('Authorship')))
 
 
 @app.route('/dois_newsletterpicker')
