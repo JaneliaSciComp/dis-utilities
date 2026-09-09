@@ -51,7 +51,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.33.1"
+__version__ = "120.34.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -7832,6 +7832,85 @@ def show_authorship_mismatch():
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=f"DOIs with authorship mismatches "
                                                f"({len(trows):,})",
+                                         html=html,
+                                         navbar=generate_navbar('Authorship')))
+
+
+# How each kind of name mismatch is labelled and what it means, shown above the
+# table so the two are not read as one problem.
+NAME_MISMATCH_KINDS = (
+    ('punctuation', 'Punctuation',
+     'Identical to a roster name once spacing, accents and punctuation are set '
+     'aside - a doubled space, a missing one, a curly apostrophe. The person is '
+     'on the roster under this very name.'),
+    ('spelling', 'Spelling',
+     'Genuinely different from the nearest roster name. Some are typos in the '
+     'published record, some are a shortened or alternate given name, and some '
+     'will be a different person entirely.'))
+
+
+@app.route('/dois_name_mismatch')
+def show_name_mismatch():
+    '''
+    Return author names that nearly, but not exactly, match the ORCID roster
+    ---
+    tags:
+      - DOI
+    responses:
+      '200':
+        description: HTML report
+      '500':
+        description: MongoDB error
+    '''
+    try:
+        rows = DL.name_mismatches(DB['dis'].dois, DB['dis'].orcid)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not compare author names"),
+                               message=error_message(err))
+    trows = []
+    rclasses = []
+    fileoutput = ""
+    for row in rows:
+        dois = row['dois']
+        # The same name can appear on many DOIs; listing them all would swamp the
+        # row, so the count links to the first and the file carries the rest.
+        shown = ' '.join(doi_link(d) for d in dois[:3])
+        if len(dois) > 3:
+            shown += f" &hellip; (+{len(dois) - 3:,})"
+        trows.append([row['name'], row['roster'],
+                      safe(f"<span title='alumni'>{'&#9679;' if row['alumni'] else ''}</span>"),
+                      cell(f"{row['score']:.1f}", sort=f"{row['score']:06.1f}",
+                           align='right'),
+                      cell(f"{len(dois):,}", sort=f"{len(dois):09d}", align='right'),
+                      safe(shown)])
+        rclasses.append(f"kind-{row['kind']}")
+        fileoutput += f"{row['name']}\t{row['roster']}\t{row['kind']}\t" \
+                      + f"{'alumni' if row['alumni'] else ''}\t{row['score']}\t" \
+                      + f"{len(dois)}\t{', '.join(dois)}\n"
+    header = ['Name on the paper', 'Nearest roster name', 'Alum', 'Similarity',
+              'DOIs', 'Examples']
+    counts = collections.Counter(r['kind'] for r in rows)
+    html = "<div style='font-size:0.95em; max-width:820px; margin-bottom:10px'>" \
+           + "An author is credited only when their name resolves against the ORCID " \
+           + "roster, so a name the publisher rendered differently leaves work " \
+           + "uncredited. Case and accents are handled by the matcher itself and are " \
+           + "not listed here.<ul style='margin-top:6px'>"
+    for kind, label, blurb in NAME_MISMATCH_KINDS:
+        html += f"<li><b>{label}</b> ({counts.get(kind, 0):,}) &mdash; {blurb}</li>"
+    html += "</ul></div>"
+    html += "<button class=\"btn btn-outline-info\" " \
+            + "onclick=\"cycle_filter(this, 'namemismatch', 'kind-punctuation', " \
+            + "'kind-spelling', 'Punctuation', 'Spelling', 'totalrows');\">" \
+            + "Showing Punctuation &amp; Spelling</button>&nbsp;"
+    html += f"<p>Number of names: <span id='totalrows'>{len(trows):,}</span></p>"
+    if trows:
+        html += create_downloadable('name_mismatches', header, fileoutput)
+    html += render_table(header, trows, table_id='namemismatch',
+                         css='tablesorter numbers-scroll', row_classes=rclasses,
+                         data_attrs={"sortlist": "[[3,1]]"})
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=f"Author name mismatches ({len(trows):,})",
                                          html=html,
                                          navbar=generate_navbar('Authorship')))
 
