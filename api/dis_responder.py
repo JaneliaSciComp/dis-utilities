@@ -51,7 +51,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.32.1"
+__version__ = "120.33.1"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -7745,6 +7745,95 @@ def show_uncredited_authors():
                                          title=f"DOIs with uncredited Janelia authors "
                                                f"({len(trows):,})",
                                          html=html, navbar=generate_navbar('Authorship')))
+
+
+def _employee_names():
+    ''' Map employee ID to a display name, for reporting who is missing.
+        authorship_gaps returns IDs, being about which records disagree rather
+        than about people, so the naming is done here.
+        Keyword arguments:
+          None
+        Returns:
+          dict of employee ID -> name
+    '''
+    names = {}
+    try:
+        rows = DB['dis'].orcid.find({"employeeId": {"$exists": True}},
+                                    {"employeeId": 1, "given": 1, "family": 1})
+    except Exception as err:
+        raise err
+    for row in rows:
+        given = (row.get('given') or [''])[0]
+        family = (row.get('family') or [''])[0]
+        names[row['employeeId']] = f"{given} {family}".strip() or row['employeeId']
+    return names
+
+
+@app.route('/dois_authorship_mismatch')
+def show_authorship_mismatch():
+    '''
+    Return DOIs credited differently from a linked record for the same work
+    ---
+    tags:
+      - DOI
+    responses:
+      '200':
+        description: HTML report
+      '500':
+        description: MongoDB error
+    '''
+    try:
+        # Shared with utility/bin/fix_authorship_gaps.py, so the report and the
+        # tool that acts on it cannot disagree about what needs fixing.
+        gaps = DL.authorship_gaps(DB['dis'].dois)
+        names = _employee_names()
+        published = {row['doi']: row.get('jrc_publishing_date') or ''
+                     for row in DB['dis'].dois.find(
+                         {"doi": {"$in": [g['doi'] for g in gaps]}},
+                         {"_id": 0, "doi": 1, "jrc_publishing_date": 1})}
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get DOIs"),
+                               message=error_message(err))
+    trows = []
+    rclasses = []
+    fileoutput = ""
+    # A DOI can appear under both relationships; each row is one relationship,
+    # so the reader can see which record makes the claim.
+    for gap in gaps:
+        doi = gap['doi']
+        who = sorted(names.get(eid, eid) for eid in gap['missing'])
+        plist = gap['partners']
+        trows.append([safe(doi_link(doi)), published.get(doi, ''), gap['relation'].title(),
+                      safe(' '.join(doi_link(p) for p in plist)),
+                      safe(f"<span style='font-size: 10pt;'>{escape(', '.join(who))}</span>")])
+        rclasses.append(f"rel-{gap['relation']}")
+        fileoutput += f"{doi}\t{published.get(doi, '')}\t{gap['relation']}\t" \
+                      + f"{', '.join(plist)}\t{', '.join(who)}\n"
+    header = ['DOI', 'Published', 'Relationship', 'Linked DOI', 'Missing authors']
+    html = "<div style='font-size:0.95em; max-width:800px; margin-bottom:10px'>" \
+           + "These DOIs are credited differently from a record for the same work: a " \
+           + "preprint and its published version, or two versions of one deposit. The " \
+           + "linked record credits someone this one does not, so the difference is a " \
+           + "contradiction rather than a guess - no affiliation or name matching is " \
+           + "involved. Alumni and contingent workers are included, unlike the " \
+           + "<a href='/dois_uncredited'>uncredited authors</a> report: the linked " \
+           + "record already establishes the person was an author of this work.</div>"
+    html += "<button class=\"btn btn-outline-info\" " \
+            + "onclick=\"cycle_filter(this, 'mismatch', 'rel-preprint', 'rel-version', " \
+            + "'Preprint', 'Version', 'totalrows');\">" \
+            + "Showing Preprint &amp; Version</button>&nbsp;"
+    html += f"<p>Number of DOIs: <span id='totalrows'>{len(trows):,}</span></p>"
+    if trows:
+        html += create_downloadable('authorship_mismatch', header, fileoutput)
+    html += render_table(header, trows, table_id='mismatch',
+                         css='tablesorter standard-scroll', row_classes=rclasses,
+                         data_attrs={"sortlist": "[[1,1]]"})
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=f"DOIs with authorship mismatches "
+                                               f"({len(trows):,})",
+                                         html=html,
+                                         navbar=generate_navbar('Authorship')))
 
 
 @app.route('/dois_newsletterpicker')
