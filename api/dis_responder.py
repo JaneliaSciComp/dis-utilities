@@ -51,7 +51,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.32.0"
+__version__ = "120.32.1"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -7744,7 +7744,7 @@ def show_uncredited_authors():
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=f"DOIs with uncredited Janelia authors "
                                                f"({len(trows):,})",
-                                         html=html, navbar=generate_navbar('DOIs')))
+                                         html=html, navbar=generate_navbar('Authorship')))
 
 
 @app.route('/dois_newsletterpicker')
