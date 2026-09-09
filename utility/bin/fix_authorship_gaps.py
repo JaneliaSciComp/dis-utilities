@@ -17,7 +17,7 @@
     --doi spot check mails nothing.
 '''
 
-__version__ = '1.2.0'
+__version__ = '1.4.0'
 
 import argparse
 import collections
@@ -39,6 +39,13 @@ COUNT = collections.defaultdict(lambda: 0, {})
 NAMES = {}
 # (DOI, names) credited this run, for the summary email
 CLOSED = []
+# Distinct people credited this run, as opposed to (DOI, person) instances
+PEOPLE = set()
+# DOI -> set of credited employee IDs, held in memory and updated as gaps close.
+# Linked records form chains, so crediting one enlarges what the next is missing;
+# reading this instead of the collection lets a dry run show the same cascade a
+# real run produces, rather than a snapshot that understates it.
+CREDITED = {}
 # Global variables
 ARG = DISCONFIG = LOGGER = None
 # DOIs listed individually in the summary email before it defers to the report.
@@ -79,6 +86,11 @@ def initialize_program():
         DB['dis'] = JRC.connect_database(dbo)
     except Exception as err:
         terminate_program(err)
+    try:
+        for row in DB['dis'].dois.find({}, {"_id": 0, "doi": 1, "jrc_author": 1}):
+            CREDITED[row['doi']] = set(row.get('jrc_author') or [])
+    except Exception as err:
+        terminate_program(err)
     # authorship_gaps deals in employee IDs, being about which records disagree
     # rather than about people; the email needs names.
     try:
@@ -89,6 +101,68 @@ def initialize_program():
                 or row['employeeId']
     except Exception as err:
         terminate_program(err)
+
+
+def author_surnames(doi):
+    ''' Surnames on a DOI's author list, lowercased.
+        Both field orders are collected: some records have given and family
+        swapped (10.1101/400358 stores given="Campagner", family="Dario"), and
+        reading only one would make a legitimate pair look unrelated.
+        Keyword arguments:
+          doi: DOI
+        Returns:
+          set of lowercased name tokens, or None if the DOI is not stored
+    '''
+    try:
+        row = DB['dis'].dois.find_one({"doi": doi}, {"author": 1, "creators": 1})
+    except Exception as err:
+        raise err
+    if not row:
+        return None
+    names = set()
+    for auth in row.get('author') or row.get('creators') or []:
+        for key in ('family', 'familyName', 'given', 'givenName'):
+            if auth.get(key):
+                names.add(str(auth[key]).lower().strip())
+        if auth.get('name'):
+            names.update(str(auth['name']).lower().split())
+    return names
+
+
+def trusted_missing(gap):
+    ''' Narrow a gap to the authors a trustworthy linked record vouches for.
+        The premise of this program is that a linked record crediting someone
+        this one does not is a contradiction rather than a guess. That holds only
+        while the link is right, and some are not: 10.1101/2025.06.24.661379
+        ("rhodamine binders") links to 10.1038/s41467-026-69438-5 ("hippocampal
+        place codes"), and copying credits between them is simply wrong.
+        Judged per partner, not per gap. A DOI can be linked to several records,
+        and a good one must not vouch for a bad one sharing the list:
+        10.2139/ssrn.3155922 links to both its real preprint and an unrelated
+        paper, and only the former's authors may be transferred.
+        Sharing no name at all is the signal - a genuine preprint and its
+        published version differ by an author or two, never by all of them.
+        Version siblings are exempt: they are the same deposit by construction.
+        Keyword arguments:
+          gap: entry from DL.authorship_gaps
+        Returns:
+          (missing employee IDs to credit, rejected partner DOIs)
+    '''
+    if gap['relation'] != 'preprint':
+        return list(gap['missing']), []
+    mine = author_surnames(gap['doi'])
+    if not mine:
+        return list(gap['missing']), []
+    credited = CREDITED.get(gap['doi'], set())
+    keep = set()
+    rejected = []
+    for partner in gap['partners']:
+        theirs = author_surnames(partner)
+        if theirs is not None and not (mine & theirs):
+            rejected.append(partner)
+            continue
+        keep |= CREDITED.get(partner, set())
+    return sorted(keep - credited), rejected
 
 
 def generate_email(closed):
@@ -182,17 +256,29 @@ def apply_gap(gap):
           None
     '''
     doi = gap['doi']
-    LOGGER.info(f"{doi}: adding {', '.join(gap['missing'])} "
-                f"(credited by {', '.join(gap['partners'])})")
-    COUNT['authors_added'] += len(gap['missing'])
-    names = ', '.join(NAMES.get(eid, eid) for eid in gap['missing'])
+    missing, rejected = trusted_missing(gap)
+    for partner in rejected:
+        LOGGER.warning(f"Ignoring {partner} for {doi}: it shares no author with it, so "
+                       + "the link is wrong and its credits are not transferable")
+        COUNT['rejected_links'] += 1
+    if not missing:
+        COUNT['skipped_unrelated'] += 1
+        return
+    partners = [p for p in gap['partners'] if p not in rejected]
+    LOGGER.info(f"{doi}: adding {', '.join(missing)} (credited by {', '.join(partners)})")
+    COUNT['authors_added'] += len(missing)
+    PEOPLE.update(missing)
+    names = ', '.join(NAMES.get(eid, eid) for eid in missing)
+    # Record the credit whether or not it is written, so a later gap in the same
+    # chain sees it either way and the two modes agree.
+    CREDITED.setdefault(doi, set()).update(missing)
     if not ARG.WRITE:
         CLOSED.append((doi, names))
         return
     try:
         resp = DB['dis'].dois.update_one({"doi": doi},
                                          {"$addToSet": {"jrc_author":
-                                                        {"$each": gap['missing']}}})
+                                                        {"$each": missing}}})
     except Exception as err:
         LOGGER.error(f"Could not update {doi}: {err}")
         COUNT['write_error'] += 1
@@ -211,7 +297,7 @@ def apply_gap(gap):
         # in the log output, which only the operator sees.
         DL.add_doi_process(doi, action='credit_author', coll=DB['dis'].processing,
                            notes=f"Credited {names} from "
-                                 f"{gap['relation']} {', '.join(gap['partners'])}")
+                                 f"{gap['relation']} {', '.join(partners)}")
     except Exception as err:
         LOGGER.error(f"Could not log a processing event for {doi}: {err}")
         COUNT['processing_error'] += 1
@@ -245,6 +331,13 @@ def processing():
     # below already says nothing was written.
     label = "Authors credited:" if ARG.WRITE else "Authors to credit:"
     print(f"{label:<27}{COUNT['authors_added']:,}")
+    # The count above is (DOI, person) pairs: one person on three linked records
+    # is three of them.
+    print(f"{'Distinct people:':<27}{len(PEOPLE):,}")
+    if COUNT['rejected_links']:
+        print(f"{'Links rejected (unrelated):':<27}{COUNT['rejected_links']:,}")
+    if COUNT['skipped_unrelated']:
+        print(f"{'DOIs skipped entirely:':<27}{COUNT['skipped_unrelated']:,}")
     if ARG.WRITE:
         print(f"DOIs updated:              {COUNT['dois_updated']:,}")
         print(f"DOIs already current:      {COUNT['already_current']:,}")
@@ -255,6 +348,18 @@ def processing():
                           ('processing_error', 'Processing events failed:')):
             if COUNT[key]:
                 print(f"{text:<27}{COUNT[key]:,}")
+        # Linked records form chains, and a record processed before its partner
+        # gains an author is left short of it - one pass converges a chain only
+        # if the order happens to suit. Say so rather than leave a closed run
+        # looking complete.
+        try:
+            left = len(DL.authorship_gaps(DB['dis'].dois, ARG.RELATION))
+        except Exception as err:
+            LOGGER.error(f"Could not recheck for remaining gaps: {err}")
+            left = 0
+        if left:
+            print(f"{'Gaps still open:':<27}{left:,}")
+            LOGGER.warning(f"{left:,} gaps remain - run again to close them")
     else:
         LOGGER.warning("Dry run successful, no updates were made")
     # A --doi run is a spot check, so it reports to the terminal only - the same

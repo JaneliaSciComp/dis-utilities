@@ -1,8 +1,15 @@
 """ add_preprint.py
     Associate two DOIs with a preprint relationship.
+
+    The pair is checked for a shared author before the relation is written. This
+    is the only unguarded way into jrc_preprint - update_preprints.py requires an
+    author confirmation and a title match before it relates anything - and three
+    relations between entirely unrelated papers reached the database this way,
+    each of which then had to be found and unpicked. A mistyped DOI is the likely
+    cause, and it is silent otherwise.
 """
 
-__version__ = '1.1.0'
+__version__ = '1.2.0'
 
 import argparse
 import collections
@@ -84,6 +91,55 @@ def associate_dois(journal, preprint):
     return payloadj, payloadp
 
 
+def author_names(rec):
+    ''' Author names on a record, lowercased.
+        Given and family are both collected because some records store them
+        swapped - 10.1101/400358 has given="Campagner", family="Dario" - and
+        reading one field would make a legitimate pair look unrelated.
+        Keyword arguments:
+          rec: DOI record
+        Returns:
+          set of lowercased name tokens
+    '''
+    names = set()
+    for auth in rec.get('author') or rec.get('creators') or []:
+        for key in ('family', 'familyName', 'given', 'givenName'):
+            if auth.get(key):
+                names.add(str(auth[key]).lower().strip())
+        if auth.get('name'):
+            names.update(str(auth['name']).lower().split())
+    return names
+
+
+def check_same_work(journal, preprint):
+    ''' Refuse a pair that shares no author, unless --force is given.
+        A preprint and its published version differ by an author or two, never by
+        all of them, so sharing nothing means the DOIs are not two records of one
+        work. Checked on names rather than titles because a title can change
+        substantially during review - "Spatial organization of the 3D genome
+        encodes gene co-expression" became "Cohesin prevents cross-domain gene
+        coactivation" - while the author list does not empty out.
+        Keyword arguments:
+          journal: primary DOI record
+          preprint: preprint DOI record
+        Returns:
+          None
+    '''
+    shared = author_names(journal) & author_names(preprint)
+    if shared:
+        LOGGER.debug(f"Shared authors: {', '.join(sorted(shared))}")
+        return
+    if not author_names(journal) or not author_names(preprint):
+        LOGGER.warning("One record has no author list; cannot check that these are "
+                       "the same work")
+        return
+    msg = f"{journal['doi']} and {preprint['doi']} share no author, so they do not " \
+          + "look like two records of one work"
+    if not ARG.FORCE:
+        terminate_program(f"{msg}. Use --force to relate them anyway.")
+    LOGGER.warning(f"{msg} - relating them anyway (--force)")
+
+
 def add_jrc_preprint():
     """ Update jrc_preprint for specified DOIs
         Keyword arguments:
@@ -120,6 +176,7 @@ def add_jrc_preprint():
     except Exception as err:
         LOGGER.error(f"Could not check preprint status for preprint {ARG.PREPRINT}")
         terminate_program(err)
+    check_same_work(journal, preprint)
     # Associate DOIs
     payloadj, payloadp = associate_dois(journal, preprint)
     if ARG.WRITE:
@@ -149,6 +206,9 @@ if __name__ == '__main__':
     PARSER.add_argument('--manifold', dest='MANIFOLD', action='store',
                         default='prod', choices=['dev', 'prod'],
                         help='MongoDB manifold (dev, prod)')
+    PARSER.add_argument('--force', dest='FORCE', action='store_true',
+                        default=False,
+                        help='Relate the DOIs even if they share no author')
     PARSER.add_argument('--write', dest='WRITE', action='store_true',
                         default=False, help='Write to database/config system')
     PARSER.add_argument('--verbose', dest='VERBOSE', action='store_true',
