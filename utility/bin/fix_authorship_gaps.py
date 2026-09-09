@@ -17,7 +17,7 @@
     --doi spot check mails nothing.
 '''
 
-__version__ = '1.1.0'
+__version__ = '1.2.0'
 
 import argparse
 import collections
@@ -206,8 +206,11 @@ def apply_gap(gap):
     CLOSED.append((doi, names))
     update_first_last(doi)
     try:
+        # Names, never employee IDs: a processing event is shown on the DOI page
+        # to anyone who can reach it, and an employee ID is sensitive. IDs stay
+        # in the log output, which only the operator sees.
         DL.add_doi_process(doi, action='credit_author', coll=DB['dis'].processing,
-                           notes=f"Credited {', '.join(gap['missing'])} from "
+                           notes=f"Credited {names} from "
                                  f"{gap['relation']} {', '.join(gap['partners'])}")
     except Exception as err:
         LOGGER.error(f"Could not log a processing event for {doi}: {err}")
