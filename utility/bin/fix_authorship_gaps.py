@@ -17,7 +17,7 @@
     --doi spot check mails nothing.
 '''
 
-__version__ = '1.3.0'
+__version__ = '1.4.0'
 
 import argparse
 import collections
@@ -39,6 +39,13 @@ COUNT = collections.defaultdict(lambda: 0, {})
 NAMES = {}
 # (DOI, names) credited this run, for the summary email
 CLOSED = []
+# Distinct people credited this run, as opposed to (DOI, person) instances
+PEOPLE = set()
+# DOI -> set of credited employee IDs, held in memory and updated as gaps close.
+# Linked records form chains, so crediting one enlarges what the next is missing;
+# reading this instead of the collection lets a dry run show the same cascade a
+# real run produces, rather than a snapshot that understates it.
+CREDITED = {}
 # Global variables
 ARG = DISCONFIG = LOGGER = None
 # DOIs listed individually in the summary email before it defers to the report.
@@ -77,6 +84,11 @@ def initialize_program():
     LOGGER.info(f"Connecting to {dbo.name} {ARG.MANIFOLD} on {dbo.host} as {dbo.user}")
     try:
         DB['dis'] = JRC.connect_database(dbo)
+    except Exception as err:
+        terminate_program(err)
+    try:
+        for row in DB['dis'].dois.find({}, {"_id": 0, "doi": 1, "jrc_author": 1}):
+            CREDITED[row['doi']] = set(row.get('jrc_author') or [])
     except Exception as err:
         terminate_program(err)
     # authorship_gaps deals in employee IDs, being about which records disagree
@@ -141,11 +153,7 @@ def trusted_missing(gap):
     mine = author_surnames(gap['doi'])
     if not mine:
         return list(gap['missing']), []
-    try:
-        row = DB['dis'].dois.find_one({"doi": gap['doi']}, {"jrc_author": 1})
-    except Exception as err:
-        raise err
-    credited = set((row or {}).get('jrc_author') or [])
+    credited = CREDITED.get(gap['doi'], set())
     keep = set()
     rejected = []
     for partner in gap['partners']:
@@ -153,11 +161,7 @@ def trusted_missing(gap):
         if theirs is not None and not (mine & theirs):
             rejected.append(partner)
             continue
-        try:
-            prow = DB['dis'].dois.find_one({"doi": partner}, {"jrc_author": 1})
-        except Exception as err:
-            raise err
-        keep |= set((prow or {}).get('jrc_author') or [])
+        keep |= CREDITED.get(partner, set())
     return sorted(keep - credited), rejected
 
 
@@ -263,7 +267,11 @@ def apply_gap(gap):
     partners = [p for p in gap['partners'] if p not in rejected]
     LOGGER.info(f"{doi}: adding {', '.join(missing)} (credited by {', '.join(partners)})")
     COUNT['authors_added'] += len(missing)
+    PEOPLE.update(missing)
     names = ', '.join(NAMES.get(eid, eid) for eid in missing)
+    # Record the credit whether or not it is written, so a later gap in the same
+    # chain sees it either way and the two modes agree.
+    CREDITED.setdefault(doi, set()).update(missing)
     if not ARG.WRITE:
         CLOSED.append((doi, names))
         return
@@ -323,6 +331,9 @@ def processing():
     # below already says nothing was written.
     label = "Authors credited:" if ARG.WRITE else "Authors to credit:"
     print(f"{label:<27}{COUNT['authors_added']:,}")
+    # The count above is (DOI, person) pairs: one person on three linked records
+    # is three of them.
+    print(f"{'Distinct people:':<27}{len(PEOPLE):,}")
     if COUNT['rejected_links']:
         print(f"{'Links rejected (unrelated):':<27}{COUNT['rejected_links']:,}")
     if COUNT['skipped_unrelated']:
@@ -337,6 +348,18 @@ def processing():
                           ('processing_error', 'Processing events failed:')):
             if COUNT[key]:
                 print(f"{text:<27}{COUNT[key]:,}")
+        # Linked records form chains, and a record processed before its partner
+        # gains an author is left short of it - one pass converges a chain only
+        # if the order happens to suit. Say so rather than leave a closed run
+        # looking complete.
+        try:
+            left = len(DL.authorship_gaps(DB['dis'].dois, ARG.RELATION))
+        except Exception as err:
+            LOGGER.error(f"Could not recheck for remaining gaps: {err}")
+            left = 0
+        if left:
+            print(f"{'Gaps still open:':<27}{left:,}")
+            LOGGER.warning(f"{left:,} gaps remain - run again to close them")
     else:
         LOGGER.warning("Dry run successful, no updates were made")
     # A --doi run is a spot check, so it reports to the terminal only - the same
