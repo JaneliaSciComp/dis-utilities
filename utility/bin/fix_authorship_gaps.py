@@ -10,17 +10,24 @@
     The gaps come from doi_common.authorship_gaps, which is also what the
     /dois_authorship_mismatch report displays, so this tool and that page cannot
     disagree about what needs fixing.
+
+    A run summary is emailed to the configured receivers, or to the developer
+    alone with --test. A dry run mails the developer whatever the flags, badged
+    as a dry run, so the list can be reviewed without troubling anyone else; a
+    --doi spot check mails nothing.
 '''
 
-__version__ = '1.0.0'
+__version__ = '1.1.0'
 
 import argparse
 import collections
 from operator import attrgetter
+import os
 import sys
 from tqdm import tqdm
 import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
+import jrc_email.jrc_email as JE
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation
 
@@ -28,8 +35,17 @@ import doi_common.doi_common as DL
 DB = {}
 # Counters
 COUNT = collections.defaultdict(lambda: 0, {})
+# Employee ID -> name, for the summary email
+NAMES = {}
+# (DOI, names) credited this run, for the summary email
+CLOSED = []
 # Global variables
-ARG = LOGGER = None
+ARG = DISCONFIG = LOGGER = None
+# DOIs listed individually in the summary email before it defers to the report.
+# A full run can close hundreds of gaps, and a mail that long is skimmed, not read.
+EMAIL_DOI_LIMIT = 50
+# The report showing the same gaps, linked from the email.
+REPORT_URL = "https://dis.int.janelia.org/dois_authorship_mismatch"
 
 
 def terminate_program(msg=None):
@@ -63,6 +79,63 @@ def initialize_program():
         DB['dis'] = JRC.connect_database(dbo)
     except Exception as err:
         terminate_program(err)
+    # authorship_gaps deals in employee IDs, being about which records disagree
+    # rather than about people; the email needs names.
+    try:
+        for row in DB['dis'].orcid.find({"employeeId": {"$exists": True}},
+                                        {"employeeId": 1, "given": 1, "family": 1}):
+            NAMES[row['employeeId']] = \
+                f"{(row.get('given') or [''])[0]} {(row.get('family') or [''])[0]}".strip() \
+                or row['employeeId']
+    except Exception as err:
+        terminate_program(err)
+
+
+def generate_email(closed):
+    ''' Send the run summary. Goes to the configured receivers, or to the
+        developer alone with --test. Sent for a dry run too, badged as one, so
+        the list can be reviewed before anything is written - a --doi spot check
+        sends nothing, matching the other tools.
+        Keyword arguments:
+          closed: list of (doi, names) actually credited (or that would be)
+        Returns:
+          None
+    '''
+    run_data = JRC.get_run_data(__file__, __version__).strip()
+    if ARG.RELATION != 'both':
+        run_data += f" &middot; relation: {ARG.RELATION}"
+    mode_label = 'WRITE' if ARG.WRITE else 'DRY RUN'
+    mode_tone = 'good' if ARG.WRITE else 'warn'
+    kpis = ''.join([
+        JE.kpi_card(f"{COUNT['gaps']:,}", "Gaps found",
+                    'good' if COUNT['gaps'] else 'neutral', '25%'),
+        JE.kpi_card(f"{COUNT['authors_added']:,}",
+                    "Authors credited" if ARG.WRITE else "Authors to credit",
+                    'neutral', '25%'),
+        JE.kpi_card(f"{COUNT['relation_preprint']:,}", "By preprint", 'neutral', '25%'),
+        JE.kpi_card(f"{COUNT['relation_version']:,}", "By version", 'neutral', '25%'),
+    ])
+    shown = closed[:EMAIL_DOI_LIMIT]
+    body = JE.section_header(f"&#128100; Authors credited ({len(closed):,})") \
+           + JE.doi_card("Credited from a linked record", shown, 'good',
+                         second_header="Authors")
+    if len(closed) > len(shown):
+        body += f'<div style="font-size:13px;padding-top:6px;">' \
+                + f'{len(closed) - len(shown):,} more not listed &middot; ' \
+                + f'<a href="{REPORT_URL}">see the full report</a></div>'
+    msg = JE.render(os.path.basename(__file__), __version__, run_data,
+                    mode_label, mode_tone, kpis, JE.body_row(body))
+    # A dry run goes to the developer whatever the flags: it is exploratory, and
+    # nothing has changed for the receivers to hear about. --test then matters
+    # for a real run, where it holds the mail back to the developer as well.
+    email = DISCONFIG['developer'] if (ARG.TEST or not ARG.WRITE) \
+            else DISCONFIG['receivers']
+    try:
+        LOGGER.info(f"Sending email to {email}")
+        JRC.send_email(msg, DISCONFIG['sender'], email,
+                       "Authorship gaps closed", mime='html')
+    except Exception as err:
+        LOGGER.error(f"Could not send email: {err}")
 
 
 def update_first_last(doi):
@@ -112,7 +185,9 @@ def apply_gap(gap):
     LOGGER.info(f"{doi}: adding {', '.join(gap['missing'])} "
                 f"(credited by {', '.join(gap['partners'])})")
     COUNT['authors_added'] += len(gap['missing'])
+    names = ', '.join(NAMES.get(eid, eid) for eid in gap['missing'])
     if not ARG.WRITE:
+        CLOSED.append((doi, names))
         return
     try:
         resp = DB['dis'].dois.update_one({"doi": doi},
@@ -128,6 +203,7 @@ def apply_gap(gap):
         COUNT['already_current'] += 1
         return
     COUNT['dois_updated'] += 1
+    CLOSED.append((doi, names))
     update_first_last(doi)
     try:
         DL.add_doi_process(doi, action='credit_author', coll=DB['dis'].processing,
@@ -178,6 +254,12 @@ def processing():
                 print(f"{text:<27}{COUNT[key]:,}")
     else:
         LOGGER.warning("Dry run successful, no updates were made")
+    # A --doi run is a spot check, so it reports to the terminal only - the same
+    # exemption the acknowledgement tools make.
+    if ARG.DOI:
+        LOGGER.info("Single-DOI run (--doi): not sending summary email")
+    elif CLOSED:
+        generate_email(CLOSED)
 
 
 # -----------------------------------------------------------------------------
@@ -193,6 +275,9 @@ if __name__ == '__main__':
     PARSER.add_argument('--manifold', dest='MANIFOLD', action='store',
                         default='prod', choices=['dev', 'prod'],
                         help='MongoDB manifold (dev, prod)')
+    PARSER.add_argument('--test', dest='TEST', action='store_true',
+                        default=False, help='Flag, Send the summary email to the '
+                                            'developer only')
     PARSER.add_argument('--write', dest='WRITE', action='store_true',
                         default=False, help='Flag, Update database')
     PARSER.add_argument('--verbose', dest='VERBOSE', action='store_true',
@@ -201,6 +286,7 @@ if __name__ == '__main__':
                         default=False, help='Flag, Very chatty')
     ARG = PARSER.parse_args()
     LOGGER = JRC.setup_logging(ARG)
+    DISCONFIG = JRC.simplenamespace_to_dict(JRC.get_config("dis"))
     LOGGER.info(f"Started run (version {__version__})")
     initialize_program()
     processing()
