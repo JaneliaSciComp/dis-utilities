@@ -52,7 +52,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.36.0"
+__version__ = "120.36.1"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -236,8 +236,42 @@ def handle_invalid_usage(error):
     return response
 
 
+# Environment variables holding a credential. Several are put into query
+# strings, so a requests exception carries the URL - and the key with it -
+# into any message built from it.
+SECRET_ENV = ('DIS_JWT', 'ELSEVIER_API_KEY', 'LENS_API_KEY', 'NCBI_API_KEY',
+              'OPENALEX_API_KEY', 'PEOPLE_API_KEY', 'PROTOCOLS_API_TOKEN',
+              'S2_API_KEY', 'SPRINGER_META_API_KEY', 'WOS_API_KEY',
+              'ZENODO_API_KEY')
+
+
+def redact(text):
+    ''' Remove credentials from text that is about to be shown or logged.
+        A failed request raises with the URL it attempted, so an outage put the
+        NCBI key on the DOI page for anyone who happened to load it while PubMed
+        was unreachable. The values this process holds are replaced by name,
+        which catches them however they were embedded; the pattern afterwards
+        covers a credential this process does not hold, such as one from a
+        redirect or an upstream service.
+        Keyword arguments:
+          text: text to clean
+        Returns:
+          Text with credentials replaced
+    '''
+    text = str(text)
+    for name in SECRET_ENV:
+        value = os.environ.get(name)
+        if value and len(value) > 7:
+            text = text.replace(value, f"<{name} redacted>")
+    return re.sub(r'(?i)\b(api[-_]?key|apikey|access[-_]?token|token|password|secret)'
+                  r'=([^&\s\'"\\)]+)', r'\1=<redacted>', text)
+
+
 def error_message(err):
-    ''' Create an error message from an exception
+    ''' Create an error message from an exception.
+        Credentials are stripped: these messages are rendered to the user and
+        written to the log, and an exception raised by a failed request carries
+        the URL it tried, query string included.
         Keyword arguments:
           err: exception
         Returns:
@@ -248,7 +282,7 @@ def error_message(err):
         msg += f"An exception of type {err.original} occurred. Arguments:\n{err.args}"
     else:
         msg = f"An exception of type {type(err).__name__} occurred. Arguments:\n{err.args}"
-    return msg
+    return redact(msg)
 
 
 def year_pulldown(prefix, all_years=True, suffix='', start_year=2006, query=False,
