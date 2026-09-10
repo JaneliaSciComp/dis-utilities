@@ -51,7 +51,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.34.0"
+__version__ = "120.34.1"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -7731,13 +7731,19 @@ def show_uncredited_authors():
            + "here - that is a larger, separate gap.</div>"
     # Starts showing both, which is cycle_filter's own state 0, so no data-state
     # is needed: the first click gives Crossref only, then DataCite only.
+    if not trows:
+        # These are worklists, so finding nothing is the good outcome and will be
+        # the usual one once the backlog clears. A bare column header under a
+        # filter button that filters nothing reads as a broken page instead.
+        return render_template('warning.html', urlroot=request.url_root,
+                               title=render_warning("No uncredited authors", 'success'),
+                               message="No DOI has an author whose affiliation names Janelia, who is in the ORCID collection and not an alumnus, but who is missing from its jrc_author list.")
     html += "<button class=\"btn btn-outline-info\" " \
             + "onclick=\"cycle_filter(this, 'uncredited', 'registrar-crossref', " \
             + "'registrar-datacite', 'Crossref', 'DataCite', 'totalrows');\">" \
             + "Showing Crossref &amp; DataCite</button>&nbsp;"
     html += f"<p>Number of DOIs: <span id='totalrows'>{len(trows):,}</span></p>"
-    if trows:
-        html += create_downloadable('uncredited_authors', header, fileoutput)
+    html += create_downloadable('uncredited_authors', header, fileoutput)
     html += render_table(header, trows, table_id='uncredited',
                          css='tablesorter standard-scroll', row_classes=rclasses,
                          data_attrs={"sortlist": "[[1,1]]"})
@@ -7819,13 +7825,19 @@ def show_authorship_mismatch():
            + "involved. Alumni and contingent workers are included, unlike the " \
            + "<a href='/dois_uncredited'>uncredited authors</a> report: the linked " \
            + "record already establishes the person was an author of this work.</div>"
+    if not trows:
+        # These are worklists, so finding nothing is the good outcome and will be
+        # the usual one once the backlog clears. A bare column header under a
+        # filter button that filters nothing reads as a broken page instead.
+        return render_template('warning.html', urlroot=request.url_root,
+                               title=render_warning("No authorship mismatches", 'success'),
+                               message="Every DOI credits the same authors as the preprint, published version or sibling version linked to it.")
     html += "<button class=\"btn btn-outline-info\" " \
             + "onclick=\"cycle_filter(this, 'mismatch', 'rel-preprint', 'rel-version', " \
             + "'Preprint', 'Version', 'totalrows');\">" \
             + "Showing Preprint &amp; Version</button>&nbsp;"
     html += f"<p>Number of DOIs: <span id='totalrows'>{len(trows):,}</span></p>"
-    if trows:
-        html += create_downloadable('authorship_mismatch', header, fileoutput)
+    html += create_downloadable('authorship_mismatch', header, fileoutput)
     html += render_table(header, trows, table_id='mismatch',
                          css='tablesorter standard-scroll', row_classes=rclasses,
                          data_attrs={"sortlist": "[[1,1]]"})
@@ -7899,13 +7911,19 @@ def show_name_mismatch():
     for kind, label, blurb in NAME_MISMATCH_KINDS:
         html += f"<li><b>{label}</b> ({counts.get(kind, 0):,}) &mdash; {blurb}</li>"
     html += "</ul></div>"
+    if not trows:
+        # These are worklists, so finding nothing is the good outcome and will be
+        # the usual one once the backlog clears. A bare column header under a
+        # filter button that filters nothing reads as a broken page instead.
+        return render_template('warning.html', urlroot=request.url_root,
+                               title=render_warning("No name mismatches", 'success'),
+                               message="Every author name on a Janelia DOI either matches the ORCID roster or is too different from it to be a near miss.")
     html += "<button class=\"btn btn-outline-info\" " \
             + "onclick=\"cycle_filter(this, 'namemismatch', 'kind-punctuation', " \
             + "'kind-spelling', 'Punctuation', 'Spelling', 'totalrows');\">" \
             + "Showing Punctuation &amp; Spelling</button>&nbsp;"
     html += f"<p>Number of names: <span id='totalrows'>{len(trows):,}</span></p>"
-    if trows:
-        html += create_downloadable('name_mismatches', header, fileoutput)
+    html += create_downloadable('name_mismatches', header, fileoutput)
     html += render_table(header, trows, table_id='namemismatch',
                          css='tablesorter numbers-scroll', row_classes=rclasses,
                          data_attrs={"sortlist": "[[3,1]]"})
