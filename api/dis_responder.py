@@ -52,7 +52,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.36.1"
+__version__ = "120.37.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -1076,6 +1076,32 @@ def add_orcid_controls(orc, html):
     return html
 
 
+def janelia_tenure(orc):
+    ''' Describe when someone was at Janelia, for the person page.
+        The page tells the reader a checkmark means the author contributed to a
+        publication while they were a Janelia employee, then never says when
+        that was - the one fact needed to judge the list underneath. An end date
+        is given only when it is known: somebody still here reads as "since",
+        and an alumnus whose departure was never recorded is not given an
+        invented one.
+        Employee ID is deliberately absent from this page, here and everywhere
+        else on it. It is sensitive and anyone can reach this page.
+        Keyword arguments:
+          orc: record from the orcid collection
+        Returns:
+          HTML, or "" when no hire date is recorded
+    '''
+    hired = str(orc.get('hireDate') or '')[:10]
+    if not hired:
+        return ""
+    left = str(orc.get('alumni_date') or '')[:10]
+    if left:
+        return f"{escape(hired)} &ndash; {escape(left)}"
+    if orc.get('alumni'):
+        return f"{escape(hired)} &ndash; <span style='color:#a8c4e0'>unknown</span>"
+    return f"since {escape(hired)}"
+
+
 def get_orcid_from_db(oid, use_eid=False, bare=False, show="full"):
     ''' Generate HTML for an ORCID or employeeId that is in the orcid collection
         Keyword arguments:
@@ -1110,6 +1136,9 @@ def get_orcid_from_db(oid, use_eid=False, bare=False, show="full"):
         link = "<a href='" + f"{WORKDAY}{orc['userIdO365']}" \
                + f"' target='_blank'>{orc['userIdO365']}</a>"
         html += f"<tr><td>User ID:</td><td>{link}</td></tr>"
+    tenure = janelia_tenure(orc)
+    if tenure:
+        html += f"<tr><td>At Janelia:</td><td>{tenure}</td></tr>"
     if 'affiliations' in orc:
         alinks = ', '.join(f"<a href='/tag/{requests.utils.quote(a)}'>{a}</a>"
                            for a in orc['affiliations'])
