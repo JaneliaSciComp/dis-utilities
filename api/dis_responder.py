@@ -51,7 +51,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.34.1"
+__version__ = "120.35.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -7603,7 +7603,8 @@ def _orcid_lookups():
     by_name = {}
     try:
         rows = DB['dis'].orcid.find({}, {"orcid": 1, "given": 1, "family": 1,
-                                         "employeeId": 1, "alumni": 1})
+                                         "employeeId": 1, "alumni": 1,
+                                         "workerType": 1})
     except Exception as err:
         raise err
     for row in rows:
@@ -7711,18 +7712,32 @@ def show_uncredited_authors():
             name = " ".join(str(x) for x in
                             (auth.get('given') or auth.get('givenName') or '',
                              auth.get('family') or auth.get('familyName') or '') if x).strip()
-            missing.append(name or '(unnamed)')
+            # Contingent workers are deliberately not filtered out, unlike
+            # find_uncredited_authors.py. That works from the roster outward, so
+            # a collaborator's every unrelated paper would surface; here the
+            # paper itself names Janelia in the affiliation, and 12% of all
+            # existing credits are contingent workers, so excluding them would
+            # hide real findings. Naming the type lets the reader judge instead.
+            missing.append((name or '(unnamed)', person.get('workerType') or ''))
         if not missing:
             continue
         pdate = row.get('jrc_publishing_date') or ''
         registrar = row.get('jrc_obtained_from') or ''
+        who = ', '.join(n for n, _ in missing)
+        # "Employee" is the unremarkable case, and naming it on nearly every row
+        # would bury the one that matters, so only the exceptions are shown.
+        types = sorted({t for _, t in missing if t and t != 'Employee'})
         trows.append([safe(doi_link(row['doi'])), pdate, registrar,
-                      safe(f"<span style='font-size: 10pt;'>{escape(', '.join(missing))}</span>")])
+                      safe(f"<span style='font-size: 10pt;'>{escape(who)}</span>"),
+                      safe(f"<span style='font-size: 10pt;'>{escape(', '.join(types))}</span>")])
         # The cycle button filters on these, so they have to be per-row classes
         # rather than a query - switching registrar must not re-run the scan.
         rclasses.append(f"registrar-{registrar.lower()}" if registrar else '')
-        fileoutput += f"{row['doi']}\t{pdate}\t{registrar}\t{', '.join(missing)}\n"
-    header = ['DOI', 'Published', 'Registrar', 'Uncredited authors']
+        # The file spells out every type, Employee included: a column of blanks
+        # is ambiguous once it is out of the page's context.
+        fileoutput += f"{row['doi']}\t{pdate}\t{registrar}\t{who}\t" \
+                      + f"{', '.join(t or 'unknown' for _, t in missing)}\n"
+    header = ['DOI', 'Published', 'Registrar', 'Uncredited authors', 'Worker type']
     html = "<div style='font-size:0.95em; max-width:760px; margin-bottom:10px'>" \
            + f"Of <b>{scanned:,}</b> DOIs carrying a Janelia affiliation, these have an " \
            + "author whose affiliation names Janelia, who is in the ORCID collection and " \
