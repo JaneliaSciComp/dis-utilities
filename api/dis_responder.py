@@ -34,6 +34,7 @@ from apispec.yaml_utils import load_yaml_from_docstring
 import pandas as pd
 from pymongo.collation import Collation, CollationStrength
 import requests
+from packaging.version import Version
 import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
 import dis_plots as DP
@@ -51,7 +52,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.35.0"
+__version__ = "120.36.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -7946,6 +7947,122 @@ def show_name_mismatch():
                                          title=f"Author name mismatches ({len(trows):,})",
                                          html=html,
                                          navbar=generate_navbar('Authorship')))
+
+
+# In-house libraries, with the repository their released version comes from.
+# Everything else is public and upgraded deliberately; these are the ones that
+# go stale silently, because a venv keeps whatever was installed when it was
+# built and nothing announces that main has moved on.
+INHOUSE_LIBRARIES = {'doi_common': 'doi_common',
+                     'jrc_common': 'jrc_common',
+                     'jrc_email': 'jrc_email'}
+GITHUB_RAW = "https://raw.githubusercontent.com/JaneliaSciComp"
+
+
+def released_version(repo):
+    ''' Read a library's current version from its repository.
+        The version in pyproject.toml on main is what an install would pick up,
+        which is the thing worth comparing against - a tag could be behind it.
+        Keyword arguments:
+          repo: repository name
+        Returns:
+          Version string, or None if it could not be read
+    '''
+    try:
+        resp = requests.get(f"{GITHUB_RAW}/{repo}/main/pyproject.toml", timeout=6)
+    except Exception:
+        return None
+    if resp.status_code != 200:
+        return None
+    match = re.search(r'^version\s*=\s*["\']([^"\']+)["\']', resp.text, re.M)
+    return match.group(1) if match else None
+
+
+def loaded_distributions():
+    ''' Distributions backing the modules this process has actually imported.
+        Derived rather than listed, so a new dependency appears here without
+        anyone remembering to add it.
+        Keyword arguments:
+          None
+        Returns:
+          dict of distribution name -> installed version
+    '''
+    import importlib.metadata as md
+    try:
+        bymod = md.packages_distributions()
+    except Exception:
+        return {}
+    found = set()
+    for module in list(sys.modules):
+        for dist in bymod.get(module.split('.')[0], []):
+            found.add(dist)
+    out = {}
+    for dist in found:
+        try:
+            out[dist] = md.version(dist)
+        except Exception:
+            out[dist] = 'unknown'
+    return out
+
+
+@app.route('/system_versions')
+def show_system_versions():
+    '''
+    Show the versions of the libraries this instance is running
+    ---
+    tags:
+      - Diagnostics
+    responses:
+      '200':
+        description: HTML report
+    '''
+    installed = loaded_distributions()
+    trows = []
+    rclasses = []
+    stale = 0
+    for dist in sorted(installed, key=str.lower):
+        have = installed[dist]
+        repo = INHOUSE_LIBRARIES.get(dist)
+        latest = released_version(repo) if repo else None
+        if latest is None:
+            status = safe("<span style='color:#a8c4e0'>&mdash;</span>") if not repo \
+                     else safe("<span style='color:goldenrod'>could not check</span>")
+            kind = 'lib-public' if not repo else 'lib-inhouse'
+        else:
+            try:
+                behind = Version(have) < Version(latest)
+            except Exception:
+                behind = have != latest
+            if behind:
+                stale += 1
+                status = safe("<span style='color:#e74c3c'>"
+                              "<i class='fas fa-triangle-exclamation'></i> outdated</span>")
+            else:
+                status = safe("<span style='color:#89c242'>"
+                              "<i class='fas fa-check'></i> current</span>")
+            kind = 'lib-inhouse'
+        trows.append([dist, have, latest or '', status])
+        rclasses.append(kind)
+    header = ['Library', 'Installed', 'Latest released', 'Status']
+    html = "<div style='font-size:0.95em; max-width:780px; margin-bottom:10px'>" \
+           + "Libraries loaded by this instance, taken from the running process " \
+           + "rather than a list, so a new dependency appears here on its own. The " \
+           + "in-house libraries are checked against the version on their repository's " \
+           + "main branch, which is what an install would pick up. A venv keeps " \
+           + "whatever it was built with, so nothing else announces that one has " \
+           + "fallen behind.</div>"
+    if stale:
+        html += render_warning(f"{stale} in-house librar" + ("y is" if stale == 1 else "ies are")
+                               + " behind the released version", 'warning', size='sm') + "<br>"
+    html += f"<p>Python {sys.version.split()[0]} &middot; " \
+            + f"dis_responder {__version__} &middot; " \
+            + f"{len(trows):,} libraries</p>"
+    html += render_table(header, trows, table_id='versions',
+                         css='tablesorter standard-scroll', row_classes=rclasses,
+                         data_attrs={"sortlist": "[[0,0]]"})
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="Library versions", html=html,
+                                         navbar=generate_navbar('System')))
 
 
 @app.route('/dois_newsletterpicker')
