@@ -982,14 +982,16 @@ def get_dois_for_orcid(oid, orc):
 # column and /doiui describe the same match with the same word. The label is what the
 # reader sees; the rank drives the column sort, so the weakest evidence - the kind worth
 # a second look - sorts to one end.
-# Only "Janelia affiliation" is colored. The other two are not warnings - a bare name
-# in the deposit usually means the publisher collected nothing else, which says nothing
-# about the author - so they wear ordinary ink. An amber "Name" read as "this one looks
-# wrong", which is the opposite of true: sampled against get_author_details, two thirds
-# of name-only rows are affiliation matches the publisher simply never deposited.
+# A three-step ramp, strongest to weakest: green for a deposited Janelia affiliation,
+# ordinary ink for an ORCID, amber for a name and nothing else. The amber is deliberate
+# - a name-only deposit is the one that can pick up a namesake, and it should catch the
+# eye. It flags a thin deposit, not a doubtful paper: sampled against get_author_details,
+# two thirds of name-only rows turn out to be affiliation matches that the publisher
+# never deposited. That is what the per-row "check" button is for, and why every amber
+# row carries one.
 EVIDENCE = {'asserted': ('Janelia affiliation', '#89c242', 3),
             'ORCID': ('ORCID', '#a8c4e0', 2),
-            'name': ('Name', '#a8c4e0', 1)}
+            'name': ('Name', '#d8a657', 1)}
 
 
 def author_orcid(auth):
@@ -14746,7 +14748,7 @@ def my_papers_body(orc, show):
     on that paper - nothing more. <span style='color:#89c242;'>Janelia affiliation</span>
     means they listed you with a Janelia affiliation, which is the strongest thing a
     deposit can say. <span style='color:#a8c4e0;'>ORCID</span> means they sent your ORCID,
-    <span style='color:#a8c4e0;'>Name</span> means they sent a name and nothing else, and
+    <span style='color:#d8a657;'>Name</span> means they sent a name and nothing else, and
     <span style='color:#8a9bab;'>Nothing deposited</span> means the record names no
     evidence at all and a person credited you by hand.</p>
     <p>A thin deposit is not a doubt about your paper - it usually just means the publisher
