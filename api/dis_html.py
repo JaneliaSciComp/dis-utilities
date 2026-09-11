@@ -497,13 +497,12 @@ def random_string(strlen=8):
     return ''.join(random.choice(cmps) for i in range(strlen))
 
 
-def create_downloadable(name, header, content, size='btn-med', label=None):
+def create_downloadable(name, header, content, label=None):
     ''' Generate a downloadable content file
         Keyword arguments:
           name: base file name
           header: table header (list of strings)
           content: table content (string)
-          size: button size class (default btn-med)
           label: button text (default "Download tab-delimited file")
         Returns:
           File name
@@ -514,7 +513,11 @@ def create_downloadable(name, header, content, size='btn-med', label=None):
             content = "\t".join(header) + "\n" + content
         text_file.write(content)
     label = label or "Download tab-delimited file"
-    return f'<a class="btn btn-outline-success {size}" href="/download/{fname}" ' \
+    # No size class: btn-med was never defined in main.css or Bootstrap, so every
+    # download button in the app was carrying a class that did nothing, and the size
+    # argument was a knob no caller ever turned. Bootstrap's default is the size we
+    # want anyway.
+    return f'<a class="btn btn-outline-success" href="/download/{fname}" ' \
                 + f'role="button">{DOWNLOAD_ICON}{label}</a>'
 
 

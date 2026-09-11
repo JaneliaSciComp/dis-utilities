@@ -52,7 +52,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.39.1"
+__version__ = "120.39.2"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -13812,7 +13812,7 @@ def show_subscription_summary_by_provider(prov):
               + [fcell(f"{cnt:,}", header=False)])
     html += render_table(headers, trows, table_id='journals',
                          css='tablesorter numbers-scroll', footer=footer)
-    html += "<br><a class='btn btn-outline-info btn-med' " \
+    html += "<br><a class='btn btn-outline-info' " \
             + f"href='/subscriptionlist/{prov}/provider'" \
             + " role='button'>Show details</a>"
     endpoint_access()
@@ -14543,8 +14543,12 @@ def show_subscription(sid):
                 else:
                     label += f" ({dlio if dlio else 'unknown'})"
             idx += 1
-            html += '<br><div><button id="toggle-to-all" type="button" ' \
-                    + 'class="btn btn-success btn-small"' \
+            # btn-small is not a class anyone defines - not main.css, not Bootstrap,
+            # which spells it btn-sm - so this rendered full size. The id was a
+            # copy-paste leftover from the journal toggle and, emitted inside this
+            # loop, repeated on any subscription with more than one URL.
+            html += f'<br><div><button id="access-{idx}" type="button" ' \
+                    + 'class="btn btn-success btn-sm" ' \
                     + f"onclick=\"{link}\">Access {label}</button></div>"
     try:
         rows = DB['dis'].dois.find({"jrc_journal": row['title']}) \
