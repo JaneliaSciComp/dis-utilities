@@ -52,7 +52,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.37.0"
+__version__ = "120.37.1"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -8874,6 +8874,11 @@ def datacite_scheme(scheme, year='All'):
                                          navbar=generate_navbar('DOIs')))
 
 
+# Stands in for an empty or absent types.resourceType in a URL path. No DataCite
+# record uses it as a real subtype, so it cannot collide with one.
+NO_SUBTYPE = 'None'
+
+
 @app.route('/datacite_dois')
 def datacite_dois():
     ''' Show DataCite DOIs
@@ -8935,7 +8940,10 @@ def datacite_dois():
             for pub, cnt in pub_dict.items():
                 total += cnt
                 publishers.add(pub)
-                link = f"/datacite_dois/{typ}/{detail}/{pub}"
+                # An empty subtype cannot be a path segment - the URL would carry
+                # an empty one and match no route at all - so it travels as a name.
+                link = f"/datacite_dois/{typ}/{quote(str(detail) or NO_SUBTYPE)}" \
+                       + f"/{quote(str(pub))}"
                 trows.append([typ, detail, pub, safe(f"<a href='{link}'>{cnt}</a>")])
     inner = render_table(['Type', 'Subtype', 'Publisher', 'Count'], trows, table_id='details',
                          css='tablesorter numberlast-scroll',
@@ -8952,17 +8960,39 @@ def datacite_dois():
                                          navbar=generate_navbar('DataCite')))
 
 
-@app.route('/datacite_dois/<string:dtype>/<string:pub>/<string:year>')
+@app.route('/datacite_dois/<string:dtype>/<string(minlength=0):subtype>'
+           + '/<string:pub>/<string:year>')
+@app.route('/datacite_dois/<string:dtype>/<string(minlength=0):subtype>/<string:pub>')
 @app.route('/datacite_dois/<string:dtype>/<string:pub>')
-def datacite_doisd(dtype=None, pub=None, year='All'):
+def datacite_doisd(dtype=None, pub=None, subtype=None, year='All'):
     ''' Show data DOIs
+        The summary page groups by type, subtype and publisher and has always built
+        its links with all three, but this route used to read the third segment as a
+        year - so every one of its 69 links bound the subtype as the publisher and the
+        publisher as the year, and returned nothing. The subtype is a real parameter
+        now, which also puts the year back in the segment year_pulldown builds.
     '''
     if pub == 'protocols.io':
+        # Crossref rows, grouped by subtype rather than by DataCite resource type
         payload = {"jrc_obtained_from": "Crossref",
                    "doi": {"$regex": "/protocols.io"}}
     else:
         payload = {"jrc_obtained_from": "DataCite",
                    "types.resourceTypeGeneral": dtype, "publisher": pub}
+        if subtype is None:
+            # Two-segment form: every subtype for this type and publisher
+            pass
+        elif subtype in ('', NO_SUBTYPE):
+            # 635 records carry an empty subtype and 451 have no such field; the
+            # summary counts them as one row, so the drill-down has to as well.
+            # The bare empty segment is the shape the old links had - minlength=0
+            # keeps those working rather than letting them fall through to the
+            # catch-all DOI route, which answered "Could not find DOI".
+            payload['$or'] = [{"types.resourceType": ""},
+                              {"types.resourceType": None},
+                              {"types.resourceType": {"$exists": 0}}]
+        else:
+            payload['types.resourceType'] = subtype
     if year != 'All':
         payload['jrc_publishing_date'] = {"$regex": "^"+ year}
     coll = DB['dis'].dois
@@ -8972,9 +9002,13 @@ def datacite_doisd(dtype=None, pub=None, year='All'):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get data DOIs"),
                                message=error_message(err))
-    html, cnt, oacnt = standard_doi_table(rows, prefix=f"datacite_dois/{dtype}/{pub}",
-                                          count_card=True)
+    # Year links use the named form, so they never carry an empty path segment
+    prefix = f"datacite_dois/{dtype}/{subtype or NO_SUBTYPE}/{pub}" if subtype is not None \
+             else f"datacite_dois/{dtype}/{pub}"
+    html, cnt, oacnt = standard_doi_table(rows, prefix=prefix, count_card=True)
     title = f"DOIs for {pub} {dtype} ({cnt:,})"
+    if subtype and subtype not in (NO_SUBTYPE, dtype):
+        title = f"DOIs for {pub} {dtype}/{subtype} ({cnt:,})"
     if year != 'All':
         title += f" ({year})"
     chartscript, chartdiv = DP.wedge_chart({'shown': oacnt, 'total': cnt}) if oacnt else ['', '']
