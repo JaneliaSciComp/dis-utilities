@@ -52,7 +52,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.39.2"
+__version__ = "120.40.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -1087,11 +1087,12 @@ def evidence_cell(kind, pid=None, doi=None):
     '''
     if kind in EVIDENCE:
         label, color, rank = EVIDENCE[kind]
+        html = f"<span style='color:{color};'>{label}</span>"
     else:
         # The works query matched on employee ID, so the deposited author list holds
-        # no evidence of its own - somebody credited this by hand.
-        label, color, rank = 'Nothing deposited', '#8a9bab', 0
-    html = f"<span style='color:{color};'>{label}</span>"
+        # no evidence of its own. Rare and worth noticing, so it gets the maroon chip.
+        rank = 0
+        html = "<span class='evidence-none'>Nothing deposited</span>"
     if kind != 'asserted' and pid and doi:
         html += " <button class='btn btn-tiny btn-outline-info evidence-check' " \
                 + f"data-pid='{escape(pid)}' data-doi='{escape(doi)}' " \
@@ -14757,8 +14758,10 @@ def my_papers_body(orc, show):
     means they listed you with a Janelia affiliation, which is the strongest thing a
     deposit can say. <span style='color:#a8c4e0;'>ORCID</span> means they sent your ORCID,
     <span style='color:#d8a657;'>Name</span> means they sent a name and nothing else, and
-    <span style='color:#8a9bab;'>Nothing deposited</span> means the record names no
-    evidence at all and a person credited you by hand.</p>
+    <span class='evidence-none'>Nothing deposited</span> means the record itself names no
+    evidence at all. That is not a doubt about the paper - on a preprint it usually just
+    means you were added to the author list before it was published, and the credit comes
+    from the published version.</p>
     <p>A thin deposit is not a doubt about your paper - it usually just means the publisher
     collected less. Where that happened, OpenAlex or PubMed often holds the affiliation the
     publisher left out: press <b>check</b> on any row to ask them, or <b>Check all</b> to
@@ -14819,9 +14822,25 @@ def author_evidence(pid, doi):
         rank = EVIDENCE.get(auth.get('match') or '', ('', '', 0))[2]
         if rank > EVIDENCE.get(best, ('', '', 0))[2]:
             best, notes = auth.get('match') or '', auth.get('match_notes') or ''
-    label = EVIDENCE[best][0] if best in EVIDENCE else 'Nothing found'
-    return jsonify({"match": best, "label": label, "notes": notes,
-                    "color": EVIDENCE[best][1] if best in EVIDENCE else '#8a9bab'})
+    if best in EVIDENCE:
+        return jsonify({"match": best, "label": EVIDENCE[best][0], "notes": notes,
+                        "color": EVIDENCE[best][1]})
+    # Nothing found is not the same as "not your paper". The commonest reason by far
+    # is a preprint: authors are routinely added between posting and publication, so
+    # the credit can be perfectly good and simply live on the other version of the
+    # work. jrc_preprint is symmetric, so name whichever version this record is not.
+    notes = "Nothing in this record's own author list names you."
+    partner = (row.get('jrc_preprint') or [None])[0]
+    if partner:
+        preprint = row.get('type') == 'posted-content' or row.get('subtype') == 'preprint'
+        notes += f" This work is also published as {partner}" \
+                 + (", and authors are often added between a preprint and the published "
+                    "version - the credit may well come from there." if preprint
+                    else ", and the credit may come from that version.")
+    else:
+        notes += " The credit came from curation rather than from the deposit."
+    return jsonify({"match": "", "label": "Nothing found", "notes": notes,
+                    "cls": "evidence-none"})
 
 
 @app.route('/mypapers/<string:oid>/<string:show>')

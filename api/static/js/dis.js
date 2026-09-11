@@ -317,12 +317,15 @@ async function copyText(textToCopy) {
 // Replace one cell's contents with a checked result. `notes` becomes the cell
 // title so the reader can see WHY it changed ("Upgraded match to asserted using
 // OpenAlex affiliation") without another round trip.
-function renderEvidence(cell, label, color, notes, checked) {
+function renderEvidence(cell, data, checked) {
+  const notes = data.notes || '';
   const title = notes ? ' title="' + notes.replace(/"/g, '&quot;') + '"' : '';
+  // A result carries either a class (the maroon "nothing" chip) or a text color.
+  const style = data.cls ? ' class="' + data.cls + '"'
+                         : " style='color:" + data.color + ";'";
   const mark = checked ? " <span style='color:#8a9bab;' title='Checked against " +
                          "OpenAlex and PubMed just now'>&#10003;</span>" : '';
-  cell.innerHTML = "<span style='color:" + color + ";'" + title + '>' + label +
-                   '</span>' + mark;
+  cell.innerHTML = '<span' + style + title + '>' + data.label + '</span>' + mark;
 }
 
 // Check a single row. Returns a promise so checkAllEvidence can pace itself.
@@ -336,7 +339,7 @@ function checkEvidence(btn) {
     .then(resp => resp.json().then(data => ({ok: resp.ok, data: data})))
     .then(res => {
       if (!res.ok) { throw new Error(res.data.error || 'check failed'); }
-      renderEvidence(cell, res.data.label, res.data.color, res.data.notes, true);
+      renderEvidence(cell, res.data, true);
     })
     .catch(err => {
       btn.disabled = false;
