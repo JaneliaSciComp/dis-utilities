@@ -52,7 +52,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.39.0"
+__version__ = "120.39.1"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -2734,14 +2734,18 @@ def journal_buttons(show, prefix):
         Returns:
           Button HTML
     '''
+    # Full-size outline button, matching the version filter and the evidence check it
+    # sits beside. btn-tiny rendered this as a small pill next to rounded rectangles;
+    # green outline and green text keep it distinguishable without the size change.
+    # (The class attribute also ran straight into onclick with no space between them.)
     if show == 'journal':
         full = f"window.location.href='{prefix}/full'"
-        html = '<div><button id="toggle-to-all" type="button" class="btn btn-success btn-tiny"' \
+        html = '<div><button id="toggle-to-all" type="button" class="btn btn-outline-success" ' \
                + f'onclick="{full}">Show all resource types</button></div>'
     else:
         jour = f"window.location.href='{prefix}/journal'"
         html = '<div><button id="toggle-to-journal" type="button" ' \
-               + 'class="btn btn-success btn-tiny"' \
+               + 'class="btn btn-outline-success" ' \
                + f'onclick="{jour}">Show journals/preprints only</button></div>'
     return html
 
