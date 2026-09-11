@@ -52,7 +52,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.40.2"
+__version__ = "120.40.3"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -9064,10 +9064,15 @@ def datacite_dois():
                                message=error_message(err))
     types = {}
     dois = {}
+    # Which publishers contribute each type. The protocols.io rows are unioned in from
+    # Crossref and grouped by subtype, so a type reached only through them is not a
+    # DataCite resource type at all and must not be linked as one.
+    type_pubs = {}
     for row in rows:
         if row['_id']['type'] not in types:
             types[row['_id']['type']] = 0
         types[row['_id']['type']] += row['count']
+        type_pubs.setdefault(row['_id']['type'], set()).add(row['_id'].get('pub'))
         if 'detail' not in row['_id']:
             row['_id']['detail'] = ""
         if row['_id']['type'] not in dois:
@@ -9080,7 +9085,13 @@ def datacite_dois():
     # Summary
     trows = []
     for key, val in sorted(types.items(), key=itemgetter(1), reverse=True):
-        link = f"/doisui_type/DataCite/{key}/None"
+        if type_pubs.get(key) == {'protocols.io'}:
+            # Crossref records; /doisui_type/DataCite/preprint/None asked DataCite for a
+            # lowercase "preprint" resource type, which nothing has - 57 rows, no table.
+            # This is the same drill-down the Details table below already links to.
+            link = f"/datacite_dois/{quote(str(key))}/{NO_SUBTYPE}/protocols.io"
+        else:
+            link = f"/doisui_type/DataCite/{quote(str(key))}/None"
         trows.append([key, safe(f"<a href='{link}'>{val}</a>")])
     inner = render_table(['Type', 'Count'], trows, table_id='types',
                          css='tablesorter numberlast-scroll')
