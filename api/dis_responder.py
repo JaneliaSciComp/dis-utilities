@@ -52,7 +52,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.38.0"
+__version__ = "120.39.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -982,9 +982,14 @@ def get_dois_for_orcid(oid, orc):
 # column and /doiui describe the same match with the same word. The label is what the
 # reader sees; the rank drives the column sort, so the weakest evidence - the kind worth
 # a second look - sorts to one end.
-EVIDENCE = {'asserted': ('Affiliation', '#89c242', 3),
-            'ORCID': ('ORCID', '#7eb8e8', 2),
-            'name': ('Name', '#d8a657', 1)}
+# Only "Janelia affiliation" is colored. The other two are not warnings - a bare name
+# in the deposit usually means the publisher collected nothing else, which says nothing
+# about the author - so they wear ordinary ink. An amber "Name" read as "this one looks
+# wrong", which is the opposite of true: sampled against get_author_details, two thirds
+# of name-only rows are affiliation matches the publisher simply never deposited.
+EVIDENCE = {'asserted': ('Janelia affiliation', '#89c242', 3),
+            'ORCID': ('ORCID', '#a8c4e0', 2),
+            'name': ('Name', '#a8c4e0', 1)}
 
 
 def author_orcid(auth):
@@ -1063,19 +1068,33 @@ def match_evidence(row, orc):
     return best
 
 
-def evidence_cell(kind):
-    ''' Render the "Identified by" cell for one work.
+def evidence_cell(kind, pid=None, doi=None):
+    ''' Render the "In the deposit" cell for one work.
+        Anything short of a deposited Janelia affiliation gets a "check" button, because
+        that is exactly the gap this column cannot close on its own: OpenAlex and PubMed
+        often hold an affiliation the publisher never deposited. The check is on demand
+        and nothing it learns is written down - OpenAlex revises its author lists, so a
+        stored answer would rot into a confident overstatement, while an answer fetched
+        when asked is current by construction.
         Keyword arguments:
-          kind: key from EVIDENCE, or '' when the stored record shows no match
+          kind: key from EVIDENCE, or '' when the deposit shows no match
+          pid: person's ORCID or user ID, for the check button [optional]
+          doi: DOI, for the check button [optional]
         Returns:
           a sortable table cell
     '''
-    if kind not in EVIDENCE:
-        # The works query matched on employee ID (curated), so the paper-supplied
-        # author list holds no evidence of its own.
-        return cell(safe("<span style='color:#a8c4e0;'>Curated</span>"), sort=0)
-    label, color, rank = EVIDENCE[kind]
-    return cell(safe(f"<span style='color:{color};'>{label}</span>"), sort=rank)
+    if kind in EVIDENCE:
+        label, color, rank = EVIDENCE[kind]
+    else:
+        # The works query matched on employee ID, so the deposited author list holds
+        # no evidence of its own - somebody credited this by hand.
+        label, color, rank = 'Nothing deposited', '#8a9bab', 0
+    html = f"<span style='color:{color};'>{label}</span>"
+    if kind != 'asserted' and pid and doi:
+        html += " <button class='btn btn-tiny btn-outline-info evidence-check' " \
+                + f"data-pid='{escape(pid)}' data-doi='{escape(doi)}' " \
+                + "onclick='checkEvidence(this);'>check</button>"
+    return cell(safe(html), sort=rank)
 
 
 def journal_or_preprint(row):
@@ -1138,8 +1157,10 @@ def generate_works_table(rows, name=None, show="full", eid=None, orc=None):
         if 'jrc_author' in row and eid in row['jrc_author']:
             return "<i class='fa-solid fa-circle-check' style='color: lime'></i> "
         return "&nbsp;&nbsp;&nbsp;&nbsp;"
-    extra_headers = ['Identified by'] if orc else None
-    extra_fn = (lambda row: [evidence_cell(match_evidence(row, orc))]) if orc else None
+    extra_headers = ['In the deposit'] if orc else None
+    pid = (orc or {}).get('orcid') or (orc or {}).get('userIdO365')
+    extra_fn = (lambda row: [evidence_cell(match_evidence(row, orc), pid,
+                                           row['doi'])]) if orc else None
     table, _, _ = standard_doi_table(works, mark_fn=mark_fn, download_name='works',
                                      extra_headers=extra_headers, extra_fn=extra_fn)
     if authors:
@@ -14620,6 +14641,47 @@ def show_user_ui(eid, show='full'):
     return _render_person(orciddata, full_name, show, f"/userui/{eid}")
 
 
+def merge_roster_records(recs):
+    ''' Fold roster records carrying one ORCID into a single person - but only when
+        they really are one person.
+        Five ORCIDs in the orcid collection sit on more than one record, and they are
+        two different faults. 0000-0001-7858-944X is one person written twice, "Kai
+        Wang" (J0444, alumni) and "Kaiyu Wang" (52078); find_one picks whichever comes
+        first, so an ORCID-keyed page can show the shorter list - 8 works instead of 29.
+        But 0009-0000-2304-3124 carries Bryan Hooks, Daniel Feliciano AND Mayank Kabra,
+        three different people on one ORCID. Merging that would hand one of them the
+        other two's publications, credited, on a page built to be shown to the author.
+        The test is the family name: shared (allowing for case and a trailing space)
+        means one person written twice, and the union is right; otherwise the roster is
+        wrong in a way this page must not paper over, and the caller has to say so.
+        Keyword arguments:
+          recs: roster records sharing an ORCID (at least one)
+        Returns:
+          a single merged record, or None when the records name different people
+    '''
+    merged = dict(recs[0])
+    if len(recs) > 1:
+        families = [{DL.tidy_name(str(v)).lower() for v in rec.get('family') or []}
+                    for rec in recs]
+        if not set.intersection(*families):
+            return None
+        for field in ('given', 'family'):
+            merged[field] = sorted({v for rec in recs for v in rec.get(field) or []})
+        hires = sorted(str(rec['hireDate'])[:10] for rec in recs if rec.get('hireDate'))
+        if hires:
+            merged['hireDate'] = hires[0]
+        left = sorted(str(rec['alumni_date'])[:10] for rec in recs if rec.get('alumni_date'))
+        merged['alumni'] = all(rec.get('alumni') for rec in recs)
+        if merged['alumni'] and left:
+            merged['alumni_date'] = left[-1]
+        else:
+            merged.pop('alumni_date', None)
+    # Every employee ID the person has ever had - any one of them in jrc_author is
+    # a credit, and the works query has to search for all of them.
+    merged['employeeIds'] = [rec['employeeId'] for rec in recs if rec.get('employeeId')]
+    return merged
+
+
 def my_papers_body(orc, show):
     ''' Build the body of the self-service publication list for one person.
         This is the author-facing counterpart to /userui: same works, same green
@@ -14634,13 +14696,17 @@ def my_papers_body(orc, show):
           HTML
     '''
     oid = orc['orcid']
-    eid = orc.get('employeeId')
-    rows = [row for row in get_dois_for_orcid(oid, orc)
+    eids = orc.get('employeeIds') or ([orc['employeeId']] if orc.get('employeeId') else [])
+    seen = {}
+    for eid in eids or [None]:
+        for row in get_dois_for_orcid(oid, {**orc, 'employeeId': eid} if eid else orc):
+            seen.setdefault(row['doi'], row)
+    rows = [row for row in seen.values()
             if show != 'journal' or journal_or_preprint(row)]
     rows.sort(key=DL.get_publishing_date, reverse=True)
-    credited = sum(1 for row in rows if eid and eid in (row.get('jrc_author') or []))
     def is_credited(row):
-        return bool(eid and eid in (row.get('jrc_author') or []))
+        return bool(set(eids) & set(row.get('jrc_author') or []))
+    credited = sum(1 for row in rows if is_credited(row))
     def mark_fn(row):
         if is_credited(row):
             return "<i class='fa-solid fa-circle-check' style='color: lime'></i> "
@@ -14665,7 +14731,7 @@ def my_papers_body(orc, show):
               f"<span data-filter-count='credited'>{credited:,}</span>"),
              ("No Janelia credit",
               f"<span data-filter-count='nocredit'>{len(rows) - credited:,}</span>")]
-    if not eid:
+    if not eids:
         note = render_warning("You have no employee ID on file, so no publication here can "
                               + "be marked as credited to you at Janelia.", 'info')
     else:
@@ -14676,16 +14742,18 @@ def my_papers_body(orc, show):
     under your ORCID or your name, but could not tie to your Janelia employment, usually
     because affiliation or ORCID information was never sent to Crossref or DataCite. Missing
     checkmarks are common for work published before or after your time here.</p>
-    <p>"Identified by" says how we tied you to each paper, strongest first.
-    <span style='color:#89c242;'>Affiliation</span> means the paper itself lists you with a
-    Janelia affiliation - the best evidence there is.
-    <span style='color:#7eb8e8;'>ORCID</span> means the paper carries your ORCID, which
-    identifies you but says nothing about where you worked.
-    <span style='color:#d8a657;'>Name</span> means we matched on your name alone, which is
-    the weakest of the three and the one that can pick up a different person who shares your
-    name. <span style='color:#a8c4e0;'>Curated</span> means the paper itself names no
-    evidence and a person credited you by hand. This column reads only what the publisher
-    deposited to Crossref or DataCite, so it can understate a paper - never overstate it.</p>
+    <p>"In the deposit" says what the publisher sent to Crossref or DataCite about you
+    on that paper - nothing more. <span style='color:#89c242;'>Janelia affiliation</span>
+    means they listed you with a Janelia affiliation, which is the strongest thing a
+    deposit can say. <span style='color:#a8c4e0;'>ORCID</span> means they sent your ORCID,
+    <span style='color:#a8c4e0;'>Name</span> means they sent a name and nothing else, and
+    <span style='color:#8a9bab;'>Nothing deposited</span> means the record names no
+    evidence at all and a person credited you by hand.</p>
+    <p>A thin deposit is not a doubt about your paper - it usually just means the publisher
+    collected less. Where that happened, OpenAlex or PubMed often holds the affiliation the
+    publisher left out: press <b>check</b> on any row to ask them, or <b>Check all</b> to
+    work through every row at once. That takes about a second per paper, so it runs only
+    when you ask, and the answer is fetched fresh each time rather than stored.</p>
     <p>If a publication below is missing a checkmark, or one of your publications is missing
     from the list entirely, email the DOI to the Library at {LIBRARY} and we will look into
     it.</p>
@@ -14694,12 +14762,56 @@ def my_papers_body(orc, show):
               + "onclick=\"cycle_filter(this, 'dois', 'credited', 'nocredit', " \
               + "'credited', 'no credit', 'totalrows');\">" \
               + "Showing credited &amp; no credit</button>&nbsp;"
+    cbutton += "<button class='btn btn-outline-info' " \
+               + "onclick=\"checkAllEvidence(this, 'dois');\">Check all</button>&nbsp;"
     table, _, _ = standard_doi_table(rows, mark_fn=mark_fn, class_fn=class_fn,
                                      show_count=False, download_name='my_papers',
-                                     extra_headers=['Identified by'],
-                                     extra_fn=lambda row: [evidence_cell(match_evidence(row, orc))])
+                                     extra_headers=['In the deposit'],
+                                     extra_fn=lambda row: [evidence_cell(match_evidence(row, orc),
+                                                                         oid, row['doi'])])
     return ident + stat_cards(cards, div_id='mypapers-stats') + note \
            + journal_buttons(show, f"/mypapers/{oid}") + cbutton + table
+
+
+@app.route('/author_evidence/<string:pid>/<path:doi>')
+def author_evidence(pid, doi):
+    ''' Ask doi_common what it really knows about one person on one DOI.
+        The "In the deposit" column reads only the stored Crossref/DataCite record;
+        this is the authoritative answer, which consults OpenAlex and PubMed too.
+        It costs about 0.6s, so it is fetched per row on demand rather than for a
+        whole page, and deliberately not stored: OpenAlex revises author lists, and
+        a cached answer would silently drift from overstating nothing to overstating
+        something. Returns only the match and its note - never an employee ID.
+    '''
+    try:
+        recs = list(DB['dis'].orcid.find({"$or": [{"orcid": pid}, {"userIdO365": pid}]}))
+        row = DB['dis'].dois.find_one({"doi": doi.lower()})
+    except Exception as err:
+        return jsonify({"error": str(err)}), 500
+    if not recs or not row:
+        return jsonify({"error": "Unknown person or DOI"}), 404
+    orc = merge_roster_records(recs)
+    if not orc:
+        return jsonify({"error": "More than one person is on this ORCID"}), 409
+    try:
+        authors = DL.get_author_details(row, DB['dis'].orcid)
+    except Exception as err:
+        return jsonify({"error": f"Could not reach the enrichment sources: {err}"}), 502
+    oid = orc.get('orcid')
+    givens = {DL.tidy_name(str(g)).lower() for g in orc.get('given') or []}
+    families = {DL.tidy_name(str(f)).lower() for f in orc.get('family') or []}
+    best, notes = '', ''
+    for auth in authors:
+        given = DL.tidy_name(str(auth.get('given') or '')).lower()
+        family = DL.tidy_name(str(auth.get('family') or '')).lower()
+        if not ((oid and auth.get('orcid') == oid) or (family in families and given in givens)):
+            continue
+        rank = EVIDENCE.get(auth.get('match') or '', ('', '', 0))[2]
+        if rank > EVIDENCE.get(best, ('', '', 0))[2]:
+            best, notes = auth.get('match') or '', auth.get('match_notes') or ''
+    label = EVIDENCE[best][0] if best in EVIDENCE else 'Nothing found'
+    return jsonify({"match": best, "label": label, "notes": notes,
+                    "color": EVIDENCE[best][1] if best in EVIDENCE else '#8a9bab'})
 
 
 @app.route('/mypapers/<string:oid>/<string:show>')
@@ -14708,16 +14820,30 @@ def show_my_papers(oid, show='full'):
     ''' Show one author their own publications, keyed by ORCID
     '''
     try:
-        orc = DB['dis'].orcid.find_one({"orcid": oid})
+        recs = list(DB['dis'].orcid.find({"orcid": oid}))
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not search the orcid collection"),
                                message=error_message(err))
-    if not orc:
+    if not recs:
         return render_template('warning.html', urlroot=request.url_root,
                                title=render_warning(f"Could not find ORCID {oid}", 'warning'),
                                message="This page is looked up by ORCID. If yours is missing "
                                        + f"or wrong, email the Library at {LIBRARY}.")
+    orc = merge_roster_records(recs)
+    if not orc:
+        # More than one person is on this ORCID. Guessing would show somebody else's
+        # publications to whoever asked, so name the problem instead.
+        who = ''.join(f"<li>{escape(' '.join([r['given'][0], r['family'][0]]))} "
+                      + (f"&ndash; <a href='/userui/{escape(r['userIdO365'])}'>their page</a>"
+                         if r.get('userIdO365') else '') + "</li>" for r in recs)
+        return render_template('warning.html', urlroot=request.url_root,
+                               title=render_warning(f"More than one person is on ORCID {oid}",
+                                                    'warning'),
+                               message=f"Our records put these people on that ORCID:<ul>{who}"
+                                       + "</ul>That is a mistake on our side, and we cannot "
+                                       + "tell which one of them asked for this page. Please "
+                                       + f"email the Library at {LIBRARY} so we can fix it.")
     full_name = " ".join([orc['given'][0], orc['family'][0]])
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,

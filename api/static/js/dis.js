@@ -302,3 +302,72 @@ async function copyText(textToCopy) {
     console.error('Failed to copy text: ', err);
   }
 }
+
+// ---------------------------------------------------------------------------
+// "In the deposit" column: on-demand evidence check.
+//
+// The column is rendered from the stored Crossref/DataCite record alone, which
+// is instant but understates - publishers routinely omit an affiliation that
+// OpenAlex or PubMed holds. /author_evidence asks doi_common for the real
+// answer (~0.6s per DOI), so it runs per row when the reader asks, and nothing
+// it returns is stored: OpenAlex revises author lists, and a cached answer
+// would quietly turn into an overstatement.
+// ---------------------------------------------------------------------------
+
+// Replace one cell's contents with a checked result. `notes` becomes the cell
+// title so the reader can see WHY it changed ("Upgraded match to asserted using
+// OpenAlex affiliation") without another round trip.
+function renderEvidence(cell, label, color, notes, checked) {
+  const title = notes ? ' title="' + notes.replace(/"/g, '&quot;') + '"' : '';
+  const mark = checked ? " <span style='color:#8a9bab;' title='Checked against " +
+                         "OpenAlex and PubMed just now'>&#10003;</span>" : '';
+  cell.innerHTML = "<span style='color:" + color + ";'" + title + '>' + label +
+                   '</span>' + mark;
+}
+
+// Check a single row. Returns a promise so checkAllEvidence can pace itself.
+function checkEvidence(btn) {
+  const cell = btn.closest('td');
+  const pid = btn.getAttribute('data-pid');
+  const doi = btn.getAttribute('data-doi');
+  btn.disabled = true;
+  btn.textContent = '...';
+  return fetch('/author_evidence/' + encodeURIComponent(pid) + '/' + doi)
+    .then(resp => resp.json().then(data => ({ok: resp.ok, data: data})))
+    .then(res => {
+      if (!res.ok) { throw new Error(res.data.error || 'check failed'); }
+      renderEvidence(cell, res.data.label, res.data.color, res.data.notes, true);
+    })
+    .catch(err => {
+      btn.disabled = false;
+      btn.textContent = 'retry';
+      btn.classList.add('btn-outline-danger');
+      btn.title = String(err.message || err);
+    });
+}
+
+// Check every remaining row, a few at a time. Serial would be a minute on a
+// long list and all-at-once would open a hundred sockets, so walk the queue
+// with a small fixed number of workers and count down on the button.
+function checkAllEvidence(btn, tid) {
+  const queue = Array.prototype.slice.call(
+    document.querySelectorAll('#' + tid + ' .evidence-check'));
+  if (!queue.length) { return; }
+  const total = queue.length;
+  let done = 0;
+  btn.disabled = true;
+  const worker = function () {
+    const next = queue.shift();
+    if (!next) { return Promise.resolve(); }
+    return checkEvidence(next).then(function () {
+      done += 1;
+      btn.textContent = 'Checking... ' + done + ' of ' + total;
+      return worker();
+    });
+  };
+  const workers = [];
+  for (let i = 0; i < Math.min(5, total); i += 1) { workers.push(worker()); }
+  Promise.all(workers).then(function () {
+    btn.textContent = 'Checked ' + done + ' of ' + total;
+  });
+}
