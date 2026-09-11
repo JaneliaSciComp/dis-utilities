@@ -52,7 +52,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.41.1"
+__version__ = "120.41.2"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -9109,13 +9109,15 @@ def datacite_dois():
                 link = f"/datacite_dois/{quote(str(typ))}" \
                        + f"/{quote(str(detail) or NO_SUBTYPE)}/All"
             subrows.append((cnt, typ, detail, link))
-    # By the count on the row, like the Type table above it. The aggregation arrives
-    # sorted by the finest grouping's count, so insertion order ranked a type by its
-    # largest single publisher rather than by its total - which put Collection (87)
-    # below PhysicalObject (42) here and above it there, and left Text's own subtypes
-    # reading 12, 12, 5, 6, 4, 4, 1.
+    # Grouped like the Type/Subtype/Publisher table: a type's rows stay together, in
+    # the order that table lists its types, so flipping between the two views does not
+    # reshuffle them. Within a type the subtypes go by their own count, which the
+    # aggregation order does not do - it ranks a subtype by its largest single
+    # publisher, and left Text reading 12, 12, 5, 6, 4, 4, 1.
+    type_order = {typ: i for i, typ in enumerate(dois)}
     trows = [[typ, detail, safe(f"<a href='{link}'>{cnt}</a>")]
-             for cnt, typ, detail, link in sorted(subrows, key=itemgetter(0), reverse=True)]
+             for cnt, typ, detail, link in sorted(subrows,
+                                                  key=lambda r: (type_order[r[1]], -r[0]))]
     sub_table = render_table(['Type', 'Subtype', 'Count'], trows, table_id='typesub',
                              css='tablesorter numberlast-scroll',
                              footer=[fcell('Total', colspan=2),
