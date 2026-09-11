@@ -52,7 +52,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.41.0"
+__version__ = "120.41.1"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -9099,7 +9099,7 @@ def datacite_dois():
                               footer=[fcell('Total'), fcell(f"{type_total:,}", align='center')])
     # Type/subtype: the same records as the Type table, cut one level finer. Publishers
     # are summed away, so the row links to the publisher-wide form of the drill-down.
-    trows = []
+    subrows = []
     for typ, detail_dict in dois.items():
         for detail, pub_dict in detail_dict.items():
             cnt = sum(pub_dict.values())
@@ -9108,7 +9108,14 @@ def datacite_dois():
             else:
                 link = f"/datacite_dois/{quote(str(typ))}" \
                        + f"/{quote(str(detail) or NO_SUBTYPE)}/All"
-            trows.append([typ, detail, safe(f"<a href='{link}'>{cnt}</a>")])
+            subrows.append((cnt, typ, detail, link))
+    # By the count on the row, like the Type table above it. The aggregation arrives
+    # sorted by the finest grouping's count, so insertion order ranked a type by its
+    # largest single publisher rather than by its total - which put Collection (87)
+    # below PhysicalObject (42) here and above it there, and left Text's own subtypes
+    # reading 12, 12, 5, 6, 4, 4, 1.
+    trows = [[typ, detail, safe(f"<a href='{link}'>{cnt}</a>")]
+             for cnt, typ, detail, link in sorted(subrows, key=itemgetter(0), reverse=True)]
     sub_table = render_table(['Type', 'Subtype', 'Count'], trows, table_id='typesub',
                              css='tablesorter numberlast-scroll',
                              footer=[fcell('Total', colspan=2),
