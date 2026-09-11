@@ -52,7 +52,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.40.1"
+__version__ = "120.40.2"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -6605,7 +6605,11 @@ def show_doi_by_type_ui(src, typ, sub, year):
     payload = {"jrc_obtained_from": src,
                ("type" if src == 'Crossref' else 'types.resourceTypeGeneral'): typ}
     if sub != 'None':
-        payload["subtype"] = sub
+        # The line above already picks the type field by registrar; the subtype needs
+        # the same treatment. "subtype" is Crossref's; DataCite records keep theirs in
+        # types.resourceType, the field /datacite_dois groups by. Asking DataCite for
+        # a "subtype" matched nothing at all, so no DataCite subtype was reachable here.
+        payload["subtype" if src == 'Crossref' else 'types.resourceType'] = sub
     if year != 'All':
         payload['jrc_publishing_date'] = {"$regex": "^" + year}
     tag = request.args.get('tag') or None
