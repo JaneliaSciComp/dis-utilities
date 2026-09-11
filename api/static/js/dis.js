@@ -374,3 +374,15 @@ function checkAllEvidence(btn, tid) {
     btn.textContent = 'Checked ' + done + ' of ' + total;
   });
 }
+
+// Cycle a set of stacked views, showing one at a time. `ids` is a comma-separated
+// list of element ids and `labels` a |-separated list of names in the same order;
+// the button reads as the view currently on screen, not the next one.
+function cycle_view(btn, ids, labels) {
+  const list = ids.split(',');
+  const names = labels.split('|');
+  const state = (parseInt($(btn).attr('data-state') || '0') + 1) % list.length;
+  $(btn).attr('data-state', state);
+  list.forEach(function (id, i) { $('#' + id).toggle(i === state); });
+  $(btn).text('Grouped by ' + names[state]);
+}

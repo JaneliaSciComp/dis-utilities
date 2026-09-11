@@ -52,7 +52,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.40.3"
+__version__ = "120.41.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -9093,10 +9093,27 @@ def datacite_dois():
         else:
             link = f"/doisui_type/DataCite/{quote(str(key))}/None"
         trows.append([key, safe(f"<a href='{link}'>{val}</a>")])
-    inner = render_table(['Type', 'Count'], trows, table_id='types',
-                         css='tablesorter numberlast-scroll')
-    html = f"<div class='flexrow'><div class='flexcol'>{inner}</div>" \
-           + "<div class='flexcol' style='margin-left: 50px'>"
+    type_total = sum(types.values())
+    type_table = render_table(['Type', 'Count'], trows, table_id='types',
+                              css='tablesorter numberlast-scroll',
+                              footer=[fcell('Total'), fcell(f"{type_total:,}", align='center')])
+    # Type/subtype: the same records as the Type table, cut one level finer. Publishers
+    # are summed away, so the row links to the publisher-wide form of the drill-down.
+    trows = []
+    for typ, detail_dict in dois.items():
+        for detail, pub_dict in detail_dict.items():
+            cnt = sum(pub_dict.values())
+            if set(pub_dict) == {'protocols.io'}:
+                link = f"/datacite_dois/{quote(str(typ))}/{NO_SUBTYPE}/protocols.io"
+            else:
+                link = f"/datacite_dois/{quote(str(typ))}" \
+                       + f"/{quote(str(detail) or NO_SUBTYPE)}/All"
+            trows.append([typ, detail, safe(f"<a href='{link}'>{cnt}</a>")])
+    sub_table = render_table(['Type', 'Subtype', 'Count'], trows, table_id='typesub',
+                             css='tablesorter numberlast-scroll',
+                             footer=[fcell('Total', colspan=2),
+                                     fcell(f"{type_total:,}", align='center')])
+    html = ""
     # Details
     trows = []
     total = 0
@@ -9111,11 +9128,20 @@ def datacite_dois():
                 link = f"/datacite_dois/{typ}/{quote(str(detail) or NO_SUBTYPE)}" \
                        + f"/{quote(str(pub))}"
                 trows.append([typ, detail, pub, safe(f"<a href='{link}'>{cnt}</a>")])
-    inner = render_table(['Type', 'Subtype', 'Publisher', 'Count'], trows, table_id='details',
-                         css='tablesorter numberlast-scroll',
-                         footer=[fcell('Total', colspan=3),
-                                 fcell(f"{total:,}", align='center')])
-    html += f"{inner}</div></div>"
+    detail_table = render_table(['Type', 'Subtype', 'Publisher', 'Count'], trows,
+                                table_id='details', css='tablesorter numberlast-scroll',
+                                footer=[fcell('Total', colspan=3),
+                                        fcell(f"{total:,}", align='center')])
+    # One grouping at a time. All three are the same records cut at different depths -
+    # their totals agree - so showing all three at once was three answers to one
+    # question. The button names the grouping on screen rather than the next one.
+    html += "<button id='groupbtn' class='btn btn-outline-warning' data-state='0' " \
+            + "onclick=\"cycle_view(this, 'g-types,g-typesub,g-details', " \
+            + "'Type|Type/Subtype|Type/Subtype/Publisher');\">" \
+            + "Grouped by Type</button><br><br>" \
+            + f"<div id='g-types'>{type_table}</div>" \
+            + f"<div id='g-typesub' style='display:none'>{sub_table}</div>" \
+            + f"<div id='g-details' style='display:none'>{detail_table}</div>"
     cards = stat_cards([("DataCite DOIs", f"{total:,}"),
                         ("Publishers", f"{len(publishers):,}"),
                         ("Resource types", f"{len(types):,}")], div_id='dcdois-stats')
@@ -9144,7 +9170,11 @@ def datacite_doisd(dtype=None, pub=None, subtype=None, year='All'):
                    "doi": {"$regex": "/protocols.io"}}
     else:
         payload = {"jrc_obtained_from": "DataCite",
-                   "types.resourceTypeGeneral": dtype, "publisher": pub}
+                   "types.resourceTypeGeneral": dtype}
+        # 'All' is the publisher-wide form, used by the Type/Subtype grouping, which
+        # has no publisher to name. Matches the 'All' year sentinel below.
+        if pub != 'All':
+            payload['publisher'] = pub
         if subtype is None:
             # Two-segment form: every subtype for this type and publisher
             pass
@@ -9172,9 +9202,10 @@ def datacite_doisd(dtype=None, pub=None, subtype=None, year='All'):
     prefix = f"datacite_dois/{dtype}/{subtype or NO_SUBTYPE}/{pub}" if subtype is not None \
              else f"datacite_dois/{dtype}/{pub}"
     html, cnt, oacnt = standard_doi_table(rows, prefix=prefix, count_card=True)
-    title = f"DOIs for {pub} {dtype} ({cnt:,})"
+    who = '' if pub == 'All' else f"{pub} "
+    title = f"DOIs for {who}{dtype} ({cnt:,})"
     if subtype and subtype not in (NO_SUBTYPE, dtype):
-        title = f"DOIs for {pub} {dtype}/{subtype} ({cnt:,})"
+        title = f"DOIs for {who}{dtype}/{subtype} ({cnt:,})"
     if year != 'All':
         title += f" ({year})"
     chartscript, chartdiv = DP.wedge_chart({'shown': oacnt, 'total': cnt}) if oacnt else ['', '']
