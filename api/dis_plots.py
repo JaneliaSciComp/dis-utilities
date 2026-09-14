@@ -113,6 +113,22 @@ def _darken_color(color, factor=0.7):
 
 OA_COLORS = {"Bronze": "#CD7F32", "Closed": "red", "Diamond": "lightgray",
              "Gold": "#FFD700", "Green": "green", "Hybrid": "cyan"}
+# Citation sources keep one colour wherever they appear. get_colors_by_count assigns
+# by position, so a source's colour moved with its rank and with how many sources a page
+# happened to show - OpenAlex was blue on /citation_metrics/crossref and orange on
+# /citation_metrics/datacite, ScholeXplorer green on one and blue on the other.
+# Okabe-Ito, which is colourblind-safe by construction; measured against the #222 page
+# its faintest entry is 4.11:1 (Category10's was 2.69:1) and its closest pair is 33
+# CIE76 apart, comfortably above the ~25 where two colours start to read as one.
+CITATION_SOURCE_COLORS = {"OpenAlex": "#56B4E9",
+                          "Crossref": "#E69F00",
+                          "ScholeXplorer": "#009E73",
+                          "DataCite": "#CC79A7",
+                          "Web of Science": "#F0E442",
+                          "Dimensions": "#D55E00"}
+# For a source that appears before it has been given a colour above
+CITATION_SOURCE_SPARE = ["#0072B2", "#999999", "#B07AA1"]
+
 SOURCE_PALETTE = ["mediumblue", "darkorange"]
 SOURCE3_PALETTE = ["mediumblue", "darkorange", "wheat"]
 TYPE_PALETTE = ["mediumblue", "darkorange", "wheat", "darkgray"]
@@ -222,6 +238,26 @@ def preprint_pie_charts(data, year, coll):
         chartscript += script2
         chartdiv += div2
     return chartscript, chartdiv
+
+def colors_for_sources(labels):
+    ''' Colours for a citation-source chart, one fixed colour per source.
+        Pass the labels in the order the chart will draw them; the same source then
+        keeps its colour from page to page regardless of how it ranks or how many
+        sources appear beside it.
+        Keyword arguments:
+          labels: iterable of source labels, in chart order
+        Returns:
+          List of colours, in the same order
+    '''
+    spare = list(CITATION_SOURCE_SPARE)
+    colors = []
+    for label in labels:
+        color = CITATION_SOURCE_COLORS.get(label)
+        if not color:
+            color = spare.pop(0) if spare else "#7f7f7f"
+        colors.append(color)
+    return colors
+
 
 def get_colors_by_count(cnt):
     ''' Get colors by count
