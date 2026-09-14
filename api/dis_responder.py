@@ -52,7 +52,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.41.2"
+__version__ = "120.41.3"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -13171,6 +13171,13 @@ def show_open_access():
     '''
     html = '''
     <ul>
+    <li>Everything on this page comes from OpenAlex's record for Janelia as an
+    institution, counted live. It is <b>not</b> our DOI collection, so these figures do
+    not reconcile with
+    <a href='/citation_metrics/crossref'>Crossref</a> or
+    <a href='/citation_metrics/datacite'>DataCite</a> citation metrics, which count the
+    DOIs we curate, split by registrar, using citation counts harvested from several
+    sources. The two answer different questions and will not agree.</li>
     <li>Citation counts are available starting 2010. These counts represent the number of
     DOIs (from any source) published that year that cite any Janelia DOI (from any year).</li>
     <li>Closed DOIs are DOIs that are in a non-Open Access journal that we cannot find
@@ -13231,8 +13238,17 @@ def show_open_access():
         adjusted.append({"year": int(key), "org_closed": 0, "org_open": 0,
                          "cited_by_count": 0, "closed": row['closed'], "open": row['open']})
     adjusted = sorted(adjusted, key=lambda x: x['year'])
-    html += f"<h5>Total citations for Janelia DOIs since {counts[0]['year']}: " \
-            + f"{results['cited_by_count']:,}" + "</h5>"
+    # The number the chart below actually adds up to. results['cited_by_count'] is
+    # OpenAlex's all-time institution total and counts_by_year is only a window - for
+    # Janelia, 2,098,704 all-time against 405,222 across the charted years - so
+    # printing the all-time figure under a "since <year>" label disagreed with the
+    # chart beneath it five-fold.
+    charted = sum(row['cited_by_count'] for row in counts)
+    html += f"<h5>Citations received {counts[0]['year']}&ndash;{counts[-1]['year']}: " \
+            + f"{charted:,}</h5>" \
+            + "<div style='color:#a8c4e0;font-size:0.9em;margin-bottom:10px;'>" \
+            + f"OpenAlex also reports {results['cited_by_count']:,} citations all time, " \
+            + "over a longer span than the years charted here.</div>"
     data = {'years': [str(itm['year']) for itm in adjusted],
             'Closed': [itm['closed'] for itm in adjusted],
             'Open': [itm['open'] for itm in adjusted],
