@@ -52,7 +52,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.41.3"
+__version__ = "120.42.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -9682,7 +9682,7 @@ def citation_metrics(source='datacite'):
         return generate_response(result)
     chartscript = cite_div = year_div = close_div = rtype_div = ''
     if cite_data:
-        colors = DP.get_colors_by_count(len(cite_data))
+        colors = DP.colors_for_sources(cite_data)
         script, cite_div = DP.pie_chart(cite_data, "Citations by source", "source",
                                         width=500, colors=colors)
         chartscript += script
@@ -10407,7 +10407,7 @@ def figshare_metrics(year='All'):  # pylint: disable=too-many-locals,too-many-br
                                    width=500, fmt="{0,0}")
     chartscript += script
     if src_data:
-        colors = DP.get_colors_by_count(len(src_data))
+        colors = DP.colors_for_sources(src_data)
         script, src_div = DP.pie_chart(src_data, "Citations by source", "source",
                                        width=500, colors=colors, fmt="{0,0}")
         chartscript += script
@@ -11119,7 +11119,7 @@ def zenodo_stats(year='All'):  # pylint: disable=too-many-locals,too-many-branch
                                      value_format="0,0", show_values=True)
     chartscript += script
     if src_data:
-        colors = DP.get_colors_by_count(len(src_data))
+        colors = DP.colors_for_sources(src_data)
         script, src_div = DP.pie_chart(src_data, "Citations by source", "source",
                                        width=500, colors=colors, fmt="{0,0}")
         chartscript += script
@@ -11361,7 +11361,7 @@ def protocolsio_stats(year='All'):  # pylint: disable=too-many-locals,too-many-b
             line_format="0,0", width=650, height=400, nav=ynav)
         chartscript += script
     if src_data:
-        colors = DP.get_colors_by_count(len(src_data))
+        colors = DP.colors_for_sources(src_data)
         script, src_div = DP.pie_chart(src_data, "Citations by source", "source",
                                        width=500, colors=colors, fmt="{0,0}")
         chartscript += script
@@ -11811,7 +11811,7 @@ def elife_stats(year='All'):  # pylint: disable=too-many-locals,too-many-branche
                                      show_values=True)
     chartscript += script
     if src_data:
-        colors = DP.get_colors_by_count(len(src_data))
+        colors = DP.colors_for_sources(src_data)
         script, src_div = DP.pie_chart(src_data, "Citations by source", "source",
                                        width=500, colors=colors, fmt="{0,0}")
         chartscript += script
