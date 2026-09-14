@@ -52,7 +52,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.42.0"
+__version__ = "120.42.1"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -9687,9 +9687,13 @@ def citation_metrics(source='datacite'):
                                         width=500, colors=colors)
         chartscript += script
     if close_data:
+        # Keyed by source, like the pie beside it - and ordered by win share rather
+        # than by total, so rank-assigned colours gave every source a different colour
+        # in the two charts on one page.
         script, close_div = DP.hbar_chart(close_data, "Nearest to the unique total",
                                           value_label="Closest on", value_format="0,0",
-                                          width=500, height=300, show_values=True)
+                                          width=500, height=300, show_values=True,
+                                          color=DP.colors_for_sources(close_data))
         chartscript += script
     if rtype_data:
         script, rtype_div = DP.hbar_chart(rtype_data, "Citations by resource type",
