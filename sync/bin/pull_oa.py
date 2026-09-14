@@ -12,10 +12,15 @@ import doi_common.doi_common as DL
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation
 
+__version__ = '1.1.0'
+
+ARG = LOGGER = None
 # Database
 DB = {}
 # Counters
 COUNT = collections.defaultdict(lambda: 0, {})
+# Known DOIs: doi -> source collection name
+DOI_CACHE = {}
 
 
 def terminate_program(msg=None):
@@ -55,18 +60,39 @@ def initialize_program():
             terminate_program(err)
 
 
+def build_doi_cache():
+    ''' Pre-load known DOIs from dois, external_dois, and to_ignore collections
+        Every other puller excludes all three; this one checked dois alone, so DOIs
+        somebody had deliberately put on the ignore list came back in oa_ready.txt on
+        every run, as did DOIs already tracked as external.
+        Keyword arguments:
+          None
+        Returns:
+          None
+    '''
+    try:
+        for rec in DB['dis']['dois'].find({}, {"doi": 1}):
+            if rec.get('doi'):
+                DOI_CACHE[rec['doi'].lower()] = 'dois'
+        for rec in DB['dis']['external_dois'].find({}, {"doi": 1}):
+            if rec.get('doi'):
+                DOI_CACHE[rec['doi'].lower()] = 'external_dois'
+        for rec in DB['dis']['to_ignore'].find({"type": "doi"}, {"key": 1}):
+            if rec.get('key'):
+                DOI_CACHE[rec['key'].lower()] = 'to_ignore'
+    except Exception as err:
+        terminate_program(err)
+    LOGGER.info(f"Loaded {len(DOI_CACHE):,} known DOIs into cache")
+
+
 def doi_exists(doi):
-    ''' Check if DOI exists in the database
+    ''' Check if DOI is already known
         Keyword arguments:
           doi: DOI to check
         Returns:
           True if exists, False otherwise
     '''
-    try:
-        row = DB['dis']['dois'].find_one({"doi": doi})
-    except Exception as err:
-        terminate_program(err)
-    return bool(row)
+    return doi in DOI_CACHE
 
 
 def get_dois_from_oa():
@@ -93,10 +119,17 @@ def get_dois_from_oa():
             terminate_program(f"Error in response from OA: {response}")
         for hit in response['hits']['hits']:
             COUNT['read'] += 1
-            if '_source' in hit and 'DOI' in hit['_source'] and hit['_source']['DOI']:
-                doi = hit['_source']['DOI'].lower()
-            if doi_exists(doi.lower()):
-                COUNT['in_dois'] += 1
+            doi = (hit.get('_source') or {}).get('DOI')
+            if not doi:
+                # doi used to be assigned inside this guard and read outside it, so a
+                # hit with no DOI silently reprocessed the previous hit's DOI - and the
+                # first such hit raised NameError.
+                COUNT['no_doi'] += 1
+                continue
+            doi = doi.lower()
+            known = DOI_CACHE.get(doi)
+            if known:
+                COUNT[f"in_{known}"] += 1
                 continue
             check[doi] = hit
         if 'hits' in response and 'hits' in response['hits'] and len(response['hits']['hits']) > 0:
@@ -165,7 +198,10 @@ def run_search():
             for item in no_janelians:
                 outstream.write(f"{item}\n")
     print(f"DOIs read from OA:               {COUNT['read']:,}")
-    print(f"DOIs already in database:        {COUNT['in_dois']:,}")
+    print(f"DOIs with no DOI in the record:  {COUNT['no_doi']:,}")
+    print(f"DOIs already in dois:            {COUNT['in_dois']:,}")
+    print(f"DOIs already in external_dois:   {COUNT['in_external_dois']:,}")
+    print(f"DOIs on the ignore list:         {COUNT['in_to_ignore']:,}")
     print(f"DOIs not in Crossref (asserted): {COUNT['asserted_crossref']:,}")
     print(f"DOIs not in Crossref:            {COUNT['no_crossref']:,}")
     print(f"DOIs with no Janelian authors:   {COUNT['no_janelians']:,}")
@@ -186,5 +222,6 @@ if __name__ == "__main__":
     ARG = PARSER.parse_args()
     LOGGER = JRC.setup_logging(ARG)
     initialize_program()
+    build_doi_cache()
     run_search()
     terminate_program()

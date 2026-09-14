@@ -19,7 +19,7 @@ import requests
 import jrc_common.jrc_common as JRC
 import jrc_email.jrc_email as JE
 
-__version__ = '1.5.0'
+__version__ = '1.6.0'
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,logging-fstring-interpolation
 
@@ -71,7 +71,7 @@ def initialize_program():
 
 
 def build_doi_cache():
-    ''' Pre-load known DOIs from the dois and to_ignore collections
+    ''' Pre-load known DOIs from the dois, external_dois and to_ignore collections
         Keyword arguments:
           None
         Returns:
@@ -81,6 +81,9 @@ def build_doi_cache():
         for rec in DB['dis']['dois'].find({}, {"doi": 1}):
             if rec.get('doi'):
                 DOI_CACHE[rec['doi'].lower()] = 'dois'
+        for rec in DB['dis']['external_dois'].find({}, {"doi": 1}):
+            if rec.get('doi'):
+                DOI_CACHE[rec['doi'].lower()] = 'external_dois'
         for rec in DB['dis']['to_ignore'].find({"type": "doi"}, {"key": 1}):
             if rec.get('key'):
                 DOI_CACHE[rec['key'].lower()] = 'to_ignore'
