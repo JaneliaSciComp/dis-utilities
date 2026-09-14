@@ -52,7 +52,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.40.1"
+__version__ = "120.41.2"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -6605,7 +6605,11 @@ def show_doi_by_type_ui(src, typ, sub, year):
     payload = {"jrc_obtained_from": src,
                ("type" if src == 'Crossref' else 'types.resourceTypeGeneral'): typ}
     if sub != 'None':
-        payload["subtype"] = sub
+        # The line above already picks the type field by registrar; the subtype needs
+        # the same treatment. "subtype" is Crossref's; DataCite records keep theirs in
+        # types.resourceType, the field /datacite_dois groups by. Asking DataCite for
+        # a "subtype" matched nothing at all, so no DataCite subtype was reachable here.
+        payload["subtype" if src == 'Crossref' else 'types.resourceType'] = sub
     if year != 'All':
         payload['jrc_publishing_date'] = {"$regex": "^" + year}
     tag = request.args.get('tag') or None
@@ -9060,10 +9064,15 @@ def datacite_dois():
                                message=error_message(err))
     types = {}
     dois = {}
+    # Which publishers contribute each type. The protocols.io rows are unioned in from
+    # Crossref and grouped by subtype, so a type reached only through them is not a
+    # DataCite resource type at all and must not be linked as one.
+    type_pubs = {}
     for row in rows:
         if row['_id']['type'] not in types:
             types[row['_id']['type']] = 0
         types[row['_id']['type']] += row['count']
+        type_pubs.setdefault(row['_id']['type'], set()).add(row['_id'].get('pub'))
         if 'detail' not in row['_id']:
             row['_id']['detail'] = ""
         if row['_id']['type'] not in dois:
@@ -9076,12 +9085,44 @@ def datacite_dois():
     # Summary
     trows = []
     for key, val in sorted(types.items(), key=itemgetter(1), reverse=True):
-        link = f"/doisui_type/DataCite/{key}/None"
+        if type_pubs.get(key) == {'protocols.io'}:
+            # Crossref records; /doisui_type/DataCite/preprint/None asked DataCite for a
+            # lowercase "preprint" resource type, which nothing has - 57 rows, no table.
+            # This is the same drill-down the Details table below already links to.
+            link = f"/datacite_dois/{quote(str(key))}/{NO_SUBTYPE}/protocols.io"
+        else:
+            link = f"/doisui_type/DataCite/{quote(str(key))}/None"
         trows.append([key, safe(f"<a href='{link}'>{val}</a>")])
-    inner = render_table(['Type', 'Count'], trows, table_id='types',
-                         css='tablesorter numberlast-scroll')
-    html = f"<div class='flexrow'><div class='flexcol'>{inner}</div>" \
-           + "<div class='flexcol' style='margin-left: 50px'>"
+    type_total = sum(types.values())
+    type_table = render_table(['Type', 'Count'], trows, table_id='types',
+                              css='tablesorter numberlast-scroll',
+                              footer=[fcell('Total'), fcell(f"{type_total:,}", align='center')])
+    # Type/subtype: the same records as the Type table, cut one level finer. Publishers
+    # are summed away, so the row links to the publisher-wide form of the drill-down.
+    subrows = []
+    for typ, detail_dict in dois.items():
+        for detail, pub_dict in detail_dict.items():
+            cnt = sum(pub_dict.values())
+            if set(pub_dict) == {'protocols.io'}:
+                link = f"/datacite_dois/{quote(str(typ))}/{NO_SUBTYPE}/protocols.io"
+            else:
+                link = f"/datacite_dois/{quote(str(typ))}" \
+                       + f"/{quote(str(detail) or NO_SUBTYPE)}/All"
+            subrows.append((cnt, typ, detail, link))
+    # Grouped like the Type/Subtype/Publisher table: a type's rows stay together, in
+    # the order that table lists its types, so flipping between the two views does not
+    # reshuffle them. Within a type the subtypes go by their own count, which the
+    # aggregation order does not do - it ranks a subtype by its largest single
+    # publisher, and left Text reading 12, 12, 5, 6, 4, 4, 1.
+    type_order = {typ: i for i, typ in enumerate(dois)}
+    trows = [[typ, detail, safe(f"<a href='{link}'>{cnt}</a>")]
+             for cnt, typ, detail, link in sorted(subrows,
+                                                  key=lambda r: (type_order[r[1]], -r[0]))]
+    sub_table = render_table(['Type', 'Subtype', 'Count'], trows, table_id='typesub',
+                             css='tablesorter numberlast-scroll',
+                             footer=[fcell('Total', colspan=2),
+                                     fcell(f"{type_total:,}", align='center')])
+    html = ""
     # Details
     trows = []
     total = 0
@@ -9096,11 +9137,20 @@ def datacite_dois():
                 link = f"/datacite_dois/{typ}/{quote(str(detail) or NO_SUBTYPE)}" \
                        + f"/{quote(str(pub))}"
                 trows.append([typ, detail, pub, safe(f"<a href='{link}'>{cnt}</a>")])
-    inner = render_table(['Type', 'Subtype', 'Publisher', 'Count'], trows, table_id='details',
-                         css='tablesorter numberlast-scroll',
-                         footer=[fcell('Total', colspan=3),
-                                 fcell(f"{total:,}", align='center')])
-    html += f"{inner}</div></div>"
+    detail_table = render_table(['Type', 'Subtype', 'Publisher', 'Count'], trows,
+                                table_id='details', css='tablesorter numberlast-scroll',
+                                footer=[fcell('Total', colspan=3),
+                                        fcell(f"{total:,}", align='center')])
+    # One grouping at a time. All three are the same records cut at different depths -
+    # their totals agree - so showing all three at once was three answers to one
+    # question. The button names the grouping on screen rather than the next one.
+    html += "<button id='groupbtn' class='btn btn-outline-warning' data-state='0' " \
+            + "onclick=\"cycle_view(this, 'g-types,g-typesub,g-details', " \
+            + "'Type|Type/Subtype|Type/Subtype/Publisher');\">" \
+            + "Grouped by Type</button><br><br>" \
+            + f"<div id='g-types'>{type_table}</div>" \
+            + f"<div id='g-typesub' style='display:none'>{sub_table}</div>" \
+            + f"<div id='g-details' style='display:none'>{detail_table}</div>"
     cards = stat_cards([("DataCite DOIs", f"{total:,}"),
                         ("Publishers", f"{len(publishers):,}"),
                         ("Resource types", f"{len(types):,}")], div_id='dcdois-stats')
@@ -9129,7 +9179,11 @@ def datacite_doisd(dtype=None, pub=None, subtype=None, year='All'):
                    "doi": {"$regex": "/protocols.io"}}
     else:
         payload = {"jrc_obtained_from": "DataCite",
-                   "types.resourceTypeGeneral": dtype, "publisher": pub}
+                   "types.resourceTypeGeneral": dtype}
+        # 'All' is the publisher-wide form, used by the Type/Subtype grouping, which
+        # has no publisher to name. Matches the 'All' year sentinel below.
+        if pub != 'All':
+            payload['publisher'] = pub
         if subtype is None:
             # Two-segment form: every subtype for this type and publisher
             pass
@@ -9157,9 +9211,10 @@ def datacite_doisd(dtype=None, pub=None, subtype=None, year='All'):
     prefix = f"datacite_dois/{dtype}/{subtype or NO_SUBTYPE}/{pub}" if subtype is not None \
              else f"datacite_dois/{dtype}/{pub}"
     html, cnt, oacnt = standard_doi_table(rows, prefix=prefix, count_card=True)
-    title = f"DOIs for {pub} {dtype} ({cnt:,})"
+    who = '' if pub == 'All' else f"{pub} "
+    title = f"DOIs for {who}{dtype} ({cnt:,})"
     if subtype and subtype not in (NO_SUBTYPE, dtype):
-        title = f"DOIs for {pub} {dtype}/{subtype} ({cnt:,})"
+        title = f"DOIs for {who}{dtype}/{subtype} ({cnt:,})"
     if year != 'All':
         title += f" ({year})"
     chartscript, chartdiv = DP.wedge_chart({'shown': oacnt, 'total': cnt}) if oacnt else ['', '']
