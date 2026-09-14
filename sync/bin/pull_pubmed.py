@@ -12,7 +12,8 @@ INPUTS
 - NCBI_API_KEY environment variable (required): API key for the NCBI E-utilities
   API (raises the rate limit to ~10 requests/second).
 - DIS MongoDB database (read-only): the `dois` collection (to skip DOIs already
-  held) and the `to_ignore` collection (type="doi", DOIs to never add).
+  held), the `external_dois` collection, and the `to_ignore` collection
+  (type="doi", DOIs to never add).
 - Command-line flags:
     --test     Send the run-summary email to the developer only.
     --write    Send the run-summary email to the full receivers list (only when
@@ -28,7 +29,8 @@ HIGH-LEVEL FLOW
 1. Initialization (initialize_program)
    - Connects to the DIS MongoDB database (read-only).
    - Loads the to_ignore DOIs (type="doi") and every DOI already in the `dois`
-     collection into in-memory, lower-cased sets for fast lookup.
+     and `external_dois` collections into in-memory, lower-cased sets for fast
+     lookup.
 2. PubMed search (search_janelia_dois)
    - esearch for "Janelia[Affiliation]" using the NCBI history server, then pages
      the FULL result set off it via efetch in batches of 200. (A bare esearch
@@ -37,7 +39,8 @@ HIGH-LEVEL FLOW
      only - not a DOI buried in the reference list), title, first author, year,
      and the Janelia authors (those whose <Affiliation> text contains "Janelia").
 3. Classification (processing)
-   - Skips records with no DOI, DOIs on the ignore list, DOIs already in the
+   - Skips records with no DOI, DOIs on the ignore list, DOIs already tracked
+     in external_dois, DOIs already in the
      database, and duplicate DOIs (two PMIDs can share one DOI).
    - A remaining new DOI with at least one Janelia author is "ready to add"; one
      with none is set aside as "no Janelia author found" for manual review (the
@@ -106,7 +109,7 @@ from tqdm import tqdm
 import jrc_common.jrc_common as JRC
 import jrc_email.jrc_email as JE
 
-__version__ = '1.0.0'
+__version__ = '1.1.0'
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation
 
@@ -118,6 +121,7 @@ COUNT = collections.defaultdict(lambda: 0, {})
 ARG = DISCONFIG = LOGGER = None
 IGNORE = set()
 PRESENT = set()
+EXTERNAL = set()
 
 
 def terminate_program(msg=None):
@@ -155,23 +159,30 @@ def initialize_program():
             DB[source] = JRC.connect_database(dbo)
         except Exception as err:
             terminate_program(err)
-    try:
-        rows = DB['dis']['to_ignore'].find({"type": "doi"})
-    except Exception as err:
-        terminate_program(err)
+    build_doi_sets()
+
+
+def build_doi_sets():
+    ''' Load the DOIs a PubMed hit should not be proposed against: already in dois,
+        already tracked in external_dois, or on the ignore list.
+        Keyword arguments:
+          None
+        Returns:
+          None
+    '''
     # DOIs are stored/compared lower-case; a set keeps the membership test O(1).
-    for row in rows:
-        if row.get('key'):
-            IGNORE.add(row['key'].lower())
-    LOGGER.info(f"Found {len(IGNORE):,} DOIs to ignore")
-    try:
-        rows = DB['dis'].dois.find({}, {"doi": 1})
-    except Exception as err:
-        terminate_program(err)
-    for row in rows:
-        if row.get('doi'):
-            PRESENT.add(row['doi'].lower())
-    LOGGER.info(f"Found {len(PRESENT):,} DOIs in dois collection")
+    for coll, field, query, target, label in (
+            ('to_ignore', 'key', {"type": "doi"}, IGNORE, 'to ignore'),
+            ('dois', 'doi', {}, PRESENT, 'in dois collection'),
+            ('external_dois', 'doi', {}, EXTERNAL, 'in external_dois collection')):
+        try:
+            rows = DB['dis'][coll].find(query, {field: 1})
+        except Exception as err:
+            terminate_program(err)
+        for row in rows:
+            if row.get(field):
+                target.add(row[field].lower())
+        LOGGER.info(f"Found {len(target):,} DOIs {label}")
 
 
 def get_janelia_authors(auth):
@@ -339,6 +350,7 @@ def generate_email(details, noauthors_doi):
     kpis = ''.join([
         JE.kpi_card(f"{COUNT['found']:,}", "Found in PubMed"),
         JE.kpi_card(f"{COUNT['in_database']:,}", "Already in DB"),
+        JE.kpi_card(f"{COUNT['in_external']:,}", "External"),
         JE.kpi_card(f"{COUNT['ignored']:,}", "Ignored"),
         JE.kpi_card(f"{len(noauthors_doi):,}", "No Janelia author",
                     'warn' if noauthors_doi else 'neutral'),
@@ -410,6 +422,11 @@ def processing():
         if doi in PRESENT:
             COUNT['in_database'] += 1
             continue
+        if doi in EXTERNAL:
+            # Already tracked as an external DOI; proposing it again would ask for a
+            # decision that has been made.
+            COUNT['in_external'] += 1
+            continue
         if doi in queued:
             # Two PMIDs can carry the same DOI (e.g. a correction); keep it once.
             COUNT['duplicate'] += 1
@@ -426,6 +443,7 @@ def processing():
     print(f"DOIs returned from PubMed:    {COUNT['found']:,}")
     print(f"DOIs ignored:                 {COUNT['ignored']:,}")
     print(f"DOIs in database:             {COUNT['in_database']:,}")
+    print(f"DOIs in external_dois:        {COUNT['in_external']:,}")
     print(f"Duplicate DOIs skipped:       {COUNT['duplicate']:,}")
     print(f"PMIDs with no DOI:            {COUNT['no_doi']:,}")
     print(f"DOIs to check for Janelians:  {COUNT['to_check']:,}")
