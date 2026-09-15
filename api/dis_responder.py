@@ -52,7 +52,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.42.1"
+__version__ = "120.43.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -8124,18 +8124,35 @@ def show_name_mismatch():
         shown = ' '.join(doi_link(d) for d in dois[:3])
         if len(dois) > 3:
             shown += f" &hellip; (+{len(dois) - 3:,})"
+        # A name can sit on DOIs from both registrars, unlike the one-DOI-per-row
+        # reports. cycle_filter hides a row carrying the hidden class, so tagging a
+        # mixed name with both would hide it under either filter; it gets its own
+        # class instead and stays visible whichever registrar is selected. A name
+        # whose registrar we do not know is treated the same way, rather than
+        # disappearing from a filter it was never classified for.
+        regs = row.get('registrars') or []
+        if regs == ['Crossref']:
+            rclass, rlabel = 'registrar-crossref', 'Crossref'
+        elif regs == ['DataCite']:
+            rclass, rlabel = 'registrar-datacite', 'DataCite'
+        else:
+            rclass, rlabel = 'registrar-both', ('Both' if regs else '&mdash;')
         trows.append([row['name'], row['roster'],
                       safe(f"<span title='alumni'>{'&#9679;' if row['alumni'] else ''}</span>"),
                       cell(f"{row['score']:.1f}", sort=f"{row['score']:06.1f}",
                            align='right'),
+                      safe(rlabel),
                       cell(f"{len(dois):,}", sort=f"{len(dois):09d}", align='right'),
                       safe(shown)])
-        rclasses.append(f"kind-{row['kind']}")
+        rclasses.append(f"kind-{row['kind']} {rclass}")
         fileoutput += f"{row['name']}\t{row['roster']}\t{row['kind']}\t" \
                       + f"{'alumni' if row['alumni'] else ''}\t{row['score']}\t" \
+                      + f"{'/'.join(regs) if regs else ''}\t" \
                       + f"{len(dois)}\t{', '.join(dois)}\n"
+    # Registrar goes after Similarity: the sortlist below addresses Similarity by
+    # index, so inserting ahead of it would silently sort the wrong column.
     header = ['Name on the paper', 'Nearest roster name', 'Alum', 'Similarity',
-              'DOIs', 'Examples']
+              'Registrar', 'DOIs', 'Examples']
     counts = collections.Counter(r['kind'] for r in rows)
     html = "<div style='font-size:0.95em; max-width:820px; margin-bottom:10px'>" \
            + "An author is credited only when their name resolves against the ORCID " \
@@ -8156,6 +8173,12 @@ def show_name_mismatch():
             + "onclick=\"cycle_filter(this, 'namemismatch', 'kind-punctuation', " \
             + "'kind-spelling', 'Punctuation', 'Spelling', 'totalrows');\">" \
             + "Showing Punctuation &amp; Spelling</button>&nbsp;"
+    # Shares dis.js's hide set with the button above, so the two filters compose:
+    # Spelling-only and Crossref-only together leave the Crossref spelling rows.
+    html += "<button class=\"btn btn-outline-info\" " \
+            + "onclick=\"cycle_filter(this, 'namemismatch', 'registrar-crossref', " \
+            + "'registrar-datacite', 'Crossref', 'DataCite', 'totalrows');\">" \
+            + "Showing Crossref &amp; DataCite</button>&nbsp;"
     html += f"<p>Number of names: <span id='totalrows'>{len(trows):,}</span></p>"
     html += create_downloadable('name_mismatches', header, fileoutput)
     html += render_table(header, trows, table_id='namemismatch',
