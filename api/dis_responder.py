@@ -52,7 +52,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.43.5"
+__version__ = "120.43.6"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -6167,13 +6167,8 @@ def doi_tabs(doi, row, rowext, data, authors):
                 asrc = 'PMC'
             elif 'arxiv' in doi:
                 asrc = 'arXiv'
-        highlight = ""
         try:
-            highlight = DL.highlight_acknowledgments(acktext, DB['dis'])
-            if acktext != highlight:
-                acktext = highlight
-            else:
-                highlight = ""
+            acktext = DL.highlight_acknowledgments(acktext, DB['dis'])
         except Exception:
             pass
         ahtml += f"<h4 style='margin-top:22px;'>Acknowledgements</h4><div class='abstract'>{acktext}"
@@ -6181,9 +6176,6 @@ def doi_tabs(doi, row, rowext, data, authors):
             ahtml += "<br><span style='font-size:10pt;background-color:#777;" \
                      + f"color:aqua;'>Source: {asrc}</span>"
         ahtml += "</div>"
-        if highlight:
-            ahtml += "<br><span style='color:goldenrod'><i class='fa-solid fa-warning'></i>" \
-                     + " Acknowledgment highlighting is an experimental feature</span>"
     if ahtml:
         content['ack'] = ahtml
     # Subjects
