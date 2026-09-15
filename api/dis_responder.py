@@ -52,7 +52,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.43.0"
+__version__ = "120.43.1"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -17111,7 +17111,11 @@ def show_acks_regex_search():
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not read search_regex"),
                                message=error_message(err))
+    # Labs get their own pulldown. They are the bulk of the collection - 48 of 78 -
+    # and every one reads "<Head> Lab", so mixed in they buried the thirty projects
+    # and departments among a long alphabetical run of people's names.
     keys = '<option value="">Select a project or department</option>'
+    labs = '<option value="">Select a lab</option>'
     for row in rows:
         key = row.get('key')
         if not key:
@@ -17119,10 +17123,14 @@ def show_acks_regex_search():
         # description, when present, is shown as a hover tooltip on the option
         desc = row.get('description', '')
         title = f' title="{escape(desc)}"' if desc else ''
-        keys += f'<option value="{escape(key)}"{title}>{escape(key)}</option>'
+        option = f'<option value="{escape(key)}"{title}>{escape(key)}</option>'
+        if key.endswith(' Lab'):
+            labs += option
+        else:
+            keys += option
     endpoint_access()
     return make_response(render_template('acks_search.html', urlroot=request.url_root,
-                                         keys=keys,
+                                         keys=keys, labs=labs,
                                          navbar=generate_navbar('Acknowledgements')))
 
 
