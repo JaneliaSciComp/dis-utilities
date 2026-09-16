@@ -52,7 +52,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.44.1"
+__version__ = "120.45.1"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -5019,6 +5019,32 @@ def _build_ack_byyear():
     return caption, chartscript, chartdiv
 
 
+def _build_ack_curators():
+    ''' Build the "Curators" tab: who tagged acknowledgements, and how many DOIs each
+        of them tagged. Each count links to that curator's DOI list, which is still
+        served by /acks_by_curator/<curator>.
+        Keyword arguments:
+          None
+        Returns:
+          HTML
+    '''
+    try:
+        counts = curator_doi_counts()
+    except Exception as err:
+        return render_warning(f"Could not aggregate curators: {error_message(err)}")
+    if not counts:
+        return render_warning("No acknowledgement tags carry a curator yet.", 'warning')
+    trows = []
+    for cur, cnt in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0].lower())):
+        link = f"/acks_by_curator/{quote(cur, safe='')}"
+        trows.append([curator_display_name(cur), safe(f"<a href='{link}'>{cnt:,}</a>")])
+    return (stat_cards([("Curators", f"{len(counts):,}"),
+                        ("DOIs curated", f"{sum(counts.values()):,}")],
+                       div_id='curator-stats')
+            + render_table(['Curator', 'DOIs curated'], trows, table_id='curators',
+                           css='tablesorter numberlast-scroll'))
+
+
 def _build_ack_heatmap():
     ''' Build the "Heatmap" tab: an acknowledgement-entity (row) x publishing-year
         (column) heat map. Each cell is the total number of acknowledgements of that
@@ -5230,9 +5256,10 @@ def show_acknowledgement_metrics(limit=10):
     by_html, by_chartscript, by_chartdiv = _build_ack_byyear()
     s_html, s_chartscript, s_chartdiv = _build_ack_sources()
     h_html, h_chartscript, h_chartdiv = _build_ack_heatmap()
+    curators_body = _build_ack_curators()
     # Tabs
     active_tab = request.args.get('tab')
-    if active_tab not in ('metrics', 'byyear', 'sources', 'tags', 'heatmap'):
+    if active_tab not in ('metrics', 'byyear', 'sources', 'tags', 'heatmap', 'curators'):
         active_tab = 'metrics'
     metrics_body = m_html + m_chartdiv
     byyear_body = by_html + by_chartdiv
@@ -5252,12 +5279,14 @@ def show_acknowledgement_metrics(limit=10):
             + tab_button('byyear', 'By year', active_tab == 'byyear')
             + tab_button('sources', 'Sources', active_tab == 'sources')
             + tab_button('tags', 'Tags', active_tab == 'tags')
+            + tab_button('curators', 'Curators', active_tab == 'curators')
             + tab_button('heatmap', 'Heatmap', active_tab == 'heatmap')
             + '</ul><div class="tab-content">'
             + tab_pane('metrics', metrics_body, active_tab == 'metrics')
             + tab_pane('byyear', byyear_body, active_tab == 'byyear')
             + tab_pane('sources', sources_body, active_tab == 'sources')
             + tab_pane('tags', tags_body, active_tab == 'tags')
+            + tab_pane('curators', curators_body, active_tab == 'curators')
             + tab_pane('heatmap', heatmap_body, active_tab == 'heatmap')
             + '</div>')
     seealso = see_also([("DOI metrics", "/dois_metrics"),
@@ -16937,33 +16966,17 @@ def curator_doi_counts():
 @app.route('/acks_by_curator')
 @app.route('/acks_by_curator/<path:curator>')
 def show_acks_by_curator(curator=None):
-    ''' Acknowledgements by curator. With no curator, show a table of each curator and
-        the number of DOIs they curated, each count linking to that curator's DOI list.
-        With a curator, show the standard acknowledgement table of every DOI that
-        curator tagged (dois + external_dois).
+    ''' Acknowledgements for one curator: the standard acknowledgement table of every
+        DOI that curator tagged, across dois and external_dois. With no curator, redirect
+        to the Curators tab on /acknowledgement_metrics, which now holds the table of
+        who curated how many.
     '''
     if not curator:
-        try:
-            counts = curator_doi_counts()
-        except Exception as err:
-            return inspect_error(err, 'Could not aggregate curators')
-        if not counts:
-            return render_template('warning.html', urlroot=request.url_root,
-                                   title=render_warning("No curated acknowledgements", 'warning'),
-                                   message="No acknowledgement tags carry a curator yet.")
-        trows = []
-        for cur, cnt in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0].lower())):
-            link = f"/acks_by_curator/{quote(cur, safe='')}"
-            trows.append([curator_display_name(cur), safe(f"<a href='{link}'>{cnt:,}</a>")])
-        html = stat_cards([("Curators", f"{len(counts):,}"),
-                           ("DOIs curated", f"{sum(counts.values()):,}")],
-                          div_id='curator-stats')
-        html += render_table(['Curator', 'DOIs curated'], trows, table_id='curators')
-        endpoint_access()
-        return make_response(render_template('general.html', urlroot=request.url_root,
-                                             title="Acknowledgements by curator", html=html,
-                                             navbar=generate_navbar('Acknowledgements')))
-    # Per-curator DOI list.
+        # The curator table now lives as a tab on /acknowledgement_metrics, beside the
+        # other views of the same corpus. This route kept its own copy of it; the
+        # redirect keeps existing links and bookmarks working.
+        return redirect('/acknowledgement_metrics?tab=curators')
+    # Per-curator DOI list, which the counts in that tab link to.
     payload = {"jrc_acknowledge.curator": curator}
     union = []
     internal = external = 0
