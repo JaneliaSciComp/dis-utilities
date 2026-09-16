@@ -52,7 +52,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.45.0"
+__version__ = "120.45.1"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -5279,15 +5279,15 @@ def show_acknowledgement_metrics(limit=10):
             + tab_button('byyear', 'By year', active_tab == 'byyear')
             + tab_button('sources', 'Sources', active_tab == 'sources')
             + tab_button('tags', 'Tags', active_tab == 'tags')
-            + tab_button('heatmap', 'Heatmap', active_tab == 'heatmap')
             + tab_button('curators', 'Curators', active_tab == 'curators')
+            + tab_button('heatmap', 'Heatmap', active_tab == 'heatmap')
             + '</ul><div class="tab-content">'
             + tab_pane('metrics', metrics_body, active_tab == 'metrics')
             + tab_pane('byyear', byyear_body, active_tab == 'byyear')
             + tab_pane('sources', sources_body, active_tab == 'sources')
             + tab_pane('tags', tags_body, active_tab == 'tags')
-            + tab_pane('heatmap', heatmap_body, active_tab == 'heatmap')
             + tab_pane('curators', curators_body, active_tab == 'curators')
+            + tab_pane('heatmap', heatmap_body, active_tab == 'heatmap')
             + '</div>')
     seealso = see_also([("DOI metrics", "/dois_metrics"),
                         ("Tags", "/tag_metrics"),
