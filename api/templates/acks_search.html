@@ -8,8 +8,20 @@
   function go_to_acks_regex(sel) {
     var key = sel.value;
     if (!key) { return; }
+    // The two modes do not find the same DOIs, so the choice travels with the
+    // search rather than being decided for the reader on the results page.
+    var modes = [];
+    if ($("#match_text").is(":checked")) { modes.push("text"); }
+    if ($("#match_tag").is(":checked")) { modes.push("tag"); }
+    if (!modes.length) {
+      alert("Choose at least one of \"Acknowledgement text mentions it\" or " +
+            "\"Tagged with this entity\".");
+      sel.value = "";
+      return;
+    }
     $("select.acksregexkey").not(sel).val("");
-    window.location = "/acksregexui/" + encodeURIComponent(key);
+    window.location = "/acksregexui/" + encodeURIComponent(key) +
+                      "?match=" + modes.join(",");
   }
 </script>
 {% endblock %}
@@ -35,6 +47,24 @@
     <select class="form-control form-control-lg acksregexkey" id="acksregexlab" onchange="go_to_acks_regex(this);">
       {{ labs | safe }}
     </select>
+  </div>
+</div>
+<div style="margin-top:18px;">
+  <div style="margin-bottom:6px;">Search for:</div>
+  <div class="form-check">
+    <input class="form-check-input" type="checkbox" id="match_text" checked>
+    <label class="form-check-label" for="match_text">
+      <b>Mentions in the acknowledgement</b> &mdash; the acknowledgement text we hold
+      names the project, department or lab.
+    </label>
+  </div>
+  <div class="form-check">
+    <input class="form-check-input" type="checkbox" id="match_tag" checked>
+    <label class="form-check-label" for="match_tag">
+      <b>Tagged with it</b> &mdash; the entity was recorded on the DOI, by the tagger or
+      by a curator. This also finds DOIs whose acknowledgement text we do not hold, and
+      ones tagged before the search pattern last changed.
+    </label>
   </div>
 </div>
 </form>

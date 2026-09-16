@@ -715,3 +715,17 @@ a.tag-iris { color: var(--curator-iris); }
     font-size: 0.9em;
     white-space: nowrap;
 }
+
+/* "Matched by" on the acknowledgement search: a row found by only one of the two
+   modes the reader asked for. Amber chip rather than coloured text, because the
+   point is that this row is different from the ones around it - the same amber the
+   deposit column uses for its weakest evidence. Black on #d8a657 is 9.51:1, and the
+   chip reads 5.60:1 against the #334 cell it sits in. */
+.match-partial {
+    background-color: #d8a657;
+    color: #000;
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-size: 0.9em;
+    white-space: nowrap;
+}
