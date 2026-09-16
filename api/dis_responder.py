@@ -52,7 +52,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.46.0"
+__version__ = "120.46.1"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -17237,11 +17237,16 @@ def show_doi_by_ack_regex_ui(group):
                 found[row['doi']] = row
     union = list(found.values())
     for row in union:
-        both = len(row['matched_modes']) > 1
-        label = 'Text &amp; tag' if both else ('Text' if 'text' in row['matched_modes'] else 'Tag')
-        row['matched_by'] = label if both else \
-            f"<span style='color:#a8c4e0;'>{label}</span>"
-        row['matched_by_plain'] = 'text and tag' if both else label.lower()
+        if len(row['matched_modes']) > 1:
+            row['matched_by'] = 'Text &amp; tag'
+            row['matched_by_plain'] = 'text and tag'
+        else:
+            # Found by only one of the two modes asked for, which is the interesting
+            # case: a row the other mode would have missed. Flagged rather than merely
+            # labelled, so it is visible while scanning a long table.
+            label = 'Text only' if 'text' in row['matched_modes'] else 'Tag only'
+            row['matched_by'] = f"<span class='match-partial'>{label}</span>"
+            row['matched_by_plain'] = label.lower()
     internal = sum(1 for row in union if row['doi_type'] == 'internal')
     external = sum(1 for row in union if row['doi_type'] == 'external')
     union.sort(key=lambda x: x.get("jrc_publishing_date", ""), reverse=True)
