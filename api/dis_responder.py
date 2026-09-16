@@ -52,7 +52,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.45.1"
+__version__ = "120.46.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -1916,7 +1916,8 @@ def highlight_subtext(text, subtext, is_regex=False):
     return re.sub(pattern, replace, text, flags=re.IGNORECASE)
 
 
-def standard_ack_table(rows, ack, is_regex=False, show_count=True, match_key=None):
+def standard_ack_table(rows, ack, is_regex=False, show_count=True, match_key=None,  # pylint: disable=too-many-arguments,too-many-positional-arguments
+                       show_match=False):
     ''' Create a standard table of DOIs/acknowledgements
         Keyword arguments:
           rows: rows from dois collection
@@ -1929,6 +1930,9 @@ def standard_ack_table(rows, ack, is_regex=False, show_count=True, match_key=Non
                      tag of that name get a 'haskeytag' class, and a "Show only untagged"
                      button (which hides 'haskeytag') is added - surfacing DOIs that
                      matched the key's regex but have no corresponding tag.
+          show_match: add a "Matched by" column, read from each row's matched_by field.
+                      For a search run over more than one mode, where a reader needs to
+                      know which of them put a row in front of them.
         Returns:
           html: HTML
           cnt: number of DOIs
@@ -1945,6 +1949,12 @@ def standard_ack_table(rows, ack, is_regex=False, show_count=True, match_key=Non
     doi_types = {row.get('doi_type', 'internal') for row in rows}
     restricted = len(doi_types) == 1
     header = ['Published', 'DOI', 'Acknowledgements', 'Tags']
+    fields = ['published', 'link', 'jrc_ack2', 'jrc_ack_tags']
+    plain_fields = ['published', 'doi', 'jrc_acknowledgements', 'jrc_ack_tags_plain']
+    if show_match:
+        header.append('Matched by')
+        fields.append('matched_by')
+        plain_fields.append('matched_by_plain')
     # data-initial-hide/data-counter: default the view to journal-articles/preprints
     # only (hide 'other' rows on load); the type cycle button below reveals all types.
     initial_hide = "" if restricted else "data-initial-hide='other' "
@@ -2005,13 +2015,12 @@ def standard_ack_table(rows, ack, is_regex=False, show_count=True, match_key=Non
             else:
                 untagged_count += 1
         html += f"<tr class=\'{' '.join(cls)}\'><td>" \
-            + dloop(row, ['published', 'link', 'jrc_ack2', 'jrc_ack_tags'], "</td><td>") \
+            + dloop(row, fields, "</td><td>") \
             + "</td></tr>"
         cnt += 1
         row['jrc_acknowledgements'] = row['jrc_acknowledgements'].replace('\n', ' ')
         row['jrc_ack_tags_plain'] = ", ".join(tag_names)
-        fileoutput += dloop(row, ['published', 'doi', 'jrc_acknowledgements',
-                                  'jrc_ack_tags_plain']) + "\n"
+        fileoutput += dloop(row, plain_fields) + "\n"
     html += '</tbody></table>'
     chipbar = tagkey = ""
     if tag_counts:
@@ -17157,10 +17166,13 @@ def show_acks_regex_search():
 
 @app.route('/acksregexui/<string:group>')
 def show_doi_by_ack_regex_ui(group):
-    ''' Show DOIs with acknowledgements matching a group's configured regex
+    ''' Show DOIs for a search_regex key, by acknowledgement text, by tag, or both.
         Keyword arguments:
           group: search_regex key
         Query arguments:
+          match: comma-separated subset of "text" (the acknowledgement text matches
+                 the key's regex) and "tag" (jrc_acknowledge carries the key).
+                 Absent means both, matching the search page's defaults.
           doi_type: optional "internal" or "external" - restrict to just the
                     dois or external_dois collection instead of both
     '''
@@ -17177,55 +17189,84 @@ def show_doi_by_ack_regex_ui(group):
                                title=render_warning("No search regex", 'warning'),
                                message=f"No search regex is configured for {group}")
     regex = entry['regex']
+    # Two ways a DOI can belong to a key, and they do not find the same rows. The
+    # text search reads what the publisher wrote; the tag search reads what we
+    # concluded, which also reaches DOIs whose acknowledgement text we never stored,
+    # and DOIs whose text stopped matching when a regex was tightened.
+    # Absent means both, matching the search page's defaults. Present but empty means
+    # the reader cleared both boxes and hand-edited the URL, which is a request for
+    # nothing rather than a request for everything.
+    raw = request.args.get('match')
+    modes = {m for m in (raw if raw is not None else 'text,tag').split(',')
+             if m in ('text', 'tag')}
+    if not modes:
+        return render_template('warning.html', urlroot=request.url_root,
+                               title=render_warning("No search mode selected", 'warning'),
+                               message="Choose at least one of acknowledgement text or tag.")
     # Optional ?doi_type=internal|external restricts to just that collection
     # (e.g. from an acknowledgement-coverage click-through) - any other value, or no
     # param at all, keeps the default union-of-both behavior.
     doi_type = request.args.get('doi_type')
-    union = []
-    # Search all DOI types; the type cycle button in standard_ack_table defaults
-    # the view to journal-articles/preprints and lets the user reveal the rest.
-    payload = {}
-    payload["jrc_acknowledgements"] = {"$regex": regex, "$options" : "i"}
-    internal = 0
-    if doi_type != 'external':
-        try:
-            rows = DB['dis'].dois.find(payload).sort("jrc_publishing_date", -1)
-        except Exception as err:
-            return render_template('error.html', urlroot=request.url_root,
-                                   title=render_warning("Could not get DOIs from dois " \
-                                                        + "collection"),
-                                   message=error_message(err))
-        for row in rows:
-            row['doi_type'] = 'internal'
-            union.append(row)
-            internal += 1
-    # External DOIs
-    external = 0
-    if doi_type != 'internal':
-        try:
-            rows = DB['dis'].external_dois.find(payload).sort("jrc_publishing_date", -1)
-        except Exception as err:
-            return render_template('error.html', urlroot=request.url_root,
-                                   title=render_warning("Could not get DOIs from external_dois " \
-                                                        + "collection"),
-                                   message=error_message(err))
-        for row in rows:
-            row['doi_type'] = 'external'
-            union.append(row)
-            external += 1
+    queries = []
+    if 'text' in modes:
+        queries.append(('text', {"jrc_acknowledgements": {"$regex": regex, "$options": "i"}}))
+    if 'tag' in modes:
+        queries.append(('tag', {"jrc_acknowledge.name": group}))
+    # Merged on the DOI, so a row found both ways appears once and says so
+    found = {}
+    for mode, payload in queries:
+        for coll, dtype in (('dois', 'internal'), ('external_dois', 'external')):
+            if doi_type and doi_type != dtype:
+                continue
+            try:
+                rows = DB['dis'][coll].find(payload)
+            except Exception as err:
+                return render_template('error.html', urlroot=request.url_root,
+                                       title=render_warning(f"Could not get DOIs from {coll}"),
+                                       message=error_message(err))
+            for row in rows:
+                seen = found.get(row['doi'])
+                if seen:
+                    seen['matched_modes'].add(mode)
+                    continue
+                row['doi_type'] = dtype
+                # A tagged DOI need not carry acknowledgement text at all, and
+                # standard_ack_table reads the field unconditionally.
+                row.setdefault('jrc_acknowledgements', '')
+                row['matched_modes'] = {mode}
+                found[row['doi']] = row
+    union = list(found.values())
+    for row in union:
+        both = len(row['matched_modes']) > 1
+        label = 'Text &amp; tag' if both else ('Text' if 'text' in row['matched_modes'] else 'Tag')
+        row['matched_by'] = label if both else \
+            f"<span style='color:#a8c4e0;'>{label}</span>"
+        row['matched_by_plain'] = 'text and tag' if both else label.lower()
+    internal = sum(1 for row in union if row['doi_type'] == 'internal')
+    external = sum(1 for row in union if row['doi_type'] == 'external')
     union.sort(key=lambda x: x.get("jrc_publishing_date", ""), reverse=True)
     # show_count=False: the count is shown in the card below (with id 'totalrows',
     # which the version/internal-external filters update)
     html, cnt, _ = standard_ack_table(union, regex, is_regex=True, show_count=False,
-                                      match_key=group)
+                                      match_key=group, show_match=len(modes) > 1)
     if not cnt:
         return render_template('warning.html', urlroot=request.url_root,
                                title=render_warning("Could not find DOIs", 'warning'),
                                message=f"Could not find any DOIs with acknowledgements for {group}")
     html = ack_stat_cards(cnt, internal, external) + html
     if entry.get('description'):
-        html = f"<p><i>Acknowledgements matching {entry['description']} " \
-               + "(case-insensitive)</i></p>" + html
+        # Built whole rather than joined from fragments: "whose text matches" and
+        # "tagged with" take the description in different grammatical positions.
+        # Descriptions are written as sentences and mostly end in a full stop; this
+        # embeds one mid-sentence, so trim it and punctuate the whole thing here.
+        desc = entry['description'].strip().rstrip('.')
+        if modes == {'text'}:
+            how = f"DOIs whose acknowledgement text matches {desc}"
+        elif modes == {'tag'}:
+            how = f"DOIs tagged with {desc}"
+        else:
+            how = f"DOIs tagged with {desc}, or whose acknowledgement text matches it"
+        html = f"<p><i>{how}.</i></p>" + html
     title = f"DOIs with acknowledgements for <span style='color:#51b447 !important'>{group}</span>"
     if doi_type in ('internal', 'external'):
         title += f" ({doi_type.capitalize()} only)"
