@@ -52,7 +52,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.43.6"
+__version__ = "120.44.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -17099,6 +17099,16 @@ def show_acks_regex_search():
     # the tag_janelia_acks.py tagger). Each doc is {key, regex, description}.
     try:
         rows = DB['dis'].search_regex.find({}).collation({"locale": "en"}).sort("key", 1)
+        # Only offer an entry that leads somewhere. Half the labs match no
+        # acknowledgement at all, and selecting one lands on an empty results page.
+        # Asked live rather than stored on the entry: a flag could only be maintained
+        # by the taggers, which add tags and never learn that the last one for a key
+        # has gone - a DOI deleted, a tag swept - so it would drift true and the
+        # pulldown would quietly go back to offering dead ends. Measured at ~57ms
+        # over both collections, against a page that otherwise takes 70ms.
+        populated = set()
+        for coll in ('dois', 'external_dois'):
+            populated |= set(DB['dis'][coll].distinct("jrc_acknowledge.name"))
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not read search_regex"),
@@ -17110,7 +17120,7 @@ def show_acks_regex_search():
     labs = '<option value="">Select a lab</option>'
     for row in rows:
         key = row.get('key')
-        if not key:
+        if not key or key not in populated:
             continue
         # description, when present, is shown as a hover tooltip on the option
         desc = row.get('description', '')
