@@ -52,7 +52,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.46.1"
+__version__ = "120.46.2"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -2014,6 +2014,9 @@ def standard_ack_table(rows, ack, is_regex=False, show_count=True, match_key=Non
                 cls.append('haskeytag')
             else:
                 untagged_count += 1
+        # Caller-supplied row class, so a count card can be wired to it
+        if row.get('match_class'):
+            cls.append(row['match_class'])
         html += f"<tr class=\'{' '.join(cls)}\'><td>" \
             + dloop(row, fields, "</td><td>") \
             + "</td></tr>"
@@ -2091,7 +2094,7 @@ def standard_ack_table(rows, ack, is_regex=False, show_count=True, match_key=Non
     return html, cnt, oacnt
 
 
-def ack_stat_cards(cnt, internal, external):
+def ack_stat_cards(cnt, internal, external, extra=None):
     ''' Build stat cards for an acknowledgement DOI table. The card values
         carry ids/attributes that the dis.js row filters (toggler/cycle_filter)
         keep up to date.
@@ -2099,13 +2102,18 @@ def ack_stat_cards(cnt, internal, external):
           cnt: total number of DOIs
           internal: number of internal DOIs
           external: number of external DOIs
+          extra: optional list of (label, row class, count) appended as further cards.
+                 The count is wired to that row class, so it follows the filters like
+                 Internal and External do rather than freezing at the page-load value.
         Returns:
           HTML to prepend to the table
     '''
-    return stat_cards([("DOIs", f"<span id='totalrows'>{cnt:,}</span>"),
-                       ("Internal", f"<span data-filter-count='internal'>{internal:,}</span>"),
-                       ("External", f"<span data-filter-count='external'>{external:,}</span>")],
-                      div_id='acks-stats')
+    cards = [("DOIs", f"<span id='totalrows'>{cnt:,}</span>"),
+             ("Internal", f"<span data-filter-count='internal'>{internal:,}</span>"),
+             ("External", f"<span data-filter-count='external'>{external:,}</span>")]
+    for label, cls, num in extra or []:
+        cards.append((label, f"<span data-filter-count='{cls}'>{num:,}</span>"))
+    return stat_cards(cards, div_id='acks-stats')
 
 
 # Inline formatting tags publisher titles legitimately use (italic species names,
@@ -17236,6 +17244,7 @@ def show_doi_by_ack_regex_ui(group):
                 row['matched_modes'] = {mode}
                 found[row['doi']] = row
     union = list(found.values())
+    only = {'text': 0, 'tag': 0}
     for row in union:
         if len(row['matched_modes']) > 1:
             row['matched_by'] = 'Text &amp; tag'
@@ -17243,10 +17252,15 @@ def show_doi_by_ack_regex_ui(group):
         else:
             # Found by only one of the two modes asked for, which is the interesting
             # case: a row the other mode would have missed. Flagged rather than merely
-            # labelled, so it is visible while scanning a long table.
-            label = 'Text only' if 'text' in row['matched_modes'] else 'Tag only'
+            # labelled so it is visible while scanning a long table, counted so the
+            # total is visible without scanning at all, and classed so that count
+            # follows the row filters.
+            mode = 'text' if 'text' in row['matched_modes'] else 'tag'
+            only[mode] += 1
+            label = f"{mode.capitalize()} only"
             row['matched_by'] = f"<span class='match-partial'>{label}</span>"
             row['matched_by_plain'] = label.lower()
+            row['match_class'] = f"only-{mode}"
     internal = sum(1 for row in union if row['doi_type'] == 'internal')
     external = sum(1 for row in union if row['doi_type'] == 'external')
     union.sort(key=lambda x: x.get("jrc_publishing_date", ""), reverse=True)
@@ -17258,7 +17272,14 @@ def show_doi_by_ack_regex_ui(group):
         return render_template('warning.html', urlroot=request.url_root,
                                title=render_warning("Could not find DOIs", 'warning'),
                                message=f"Could not find any DOIs with acknowledgements for {group}")
-    html = ack_stat_cards(cnt, internal, external) + html
+    # A card per one-sided match, only when there is one to report and only when
+    # both modes were asked for - with a single mode every row is "only" that mode,
+    # and the card would restate the total.
+    extra = []
+    if len(modes) > 1:
+        extra = [(f"{mode.capitalize()} only", f"only-{mode}", only[mode])
+                 for mode in ('text', 'tag') if only[mode]]
+    html = ack_stat_cards(cnt, internal, external, extra=extra) + html
     if entry.get('description'):
         # Built whole rather than joined from fragments: "whose text matches" and
         # "tagged with" take the description in different grammatical positions.
