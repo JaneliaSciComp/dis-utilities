@@ -52,7 +52,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.44.0"
+__version__ = "120.44.1"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -13262,12 +13262,18 @@ def show_open_access():
     # Janelia, 2,098,704 all-time against 405,222 across the charted years - so
     # printing the all-time figure under a "since <year>" label disagreed with the
     # chart beneath it five-fold.
-    charted = sum(row['cited_by_count'] for row in counts)
-    html += f"<h5>Citations received {counts[0]['year']}&ndash;{counts[-1]['year']}: " \
-            + f"{charted:,}</h5>" \
-            + "<div style='color:#a8c4e0;font-size:0.9em;margin-bottom:10px;'>" \
-            + f"OpenAlex also reports {results['cited_by_count']:,} citations all time, " \
-            + "over a longer span than the years charted here.</div>"
+    # counts can come back empty - an institution OpenAlex holds no per-year data for,
+    # or a thin response during an outage. The rest of the page copes with that; only
+    # the headline indexed into it, and did so before this wording too.
+    if counts:
+        charted = sum(row['cited_by_count'] for row in counts)
+        html += f"<h5>Citations received {counts[0]['year']}&ndash;{counts[-1]['year']}: " \
+                + f"{charted:,}</h5>"
+    html += "<div style='color:#a8c4e0;font-size:0.9em;margin-bottom:10px;'>" \
+            + f"OpenAlex also reports {results['cited_by_count']:,} citations all time" \
+            + (", over a longer span than the years charted here." if counts
+               else ", but no year-by-year breakdown.") \
+            + "</div>"
     data = {'years': [str(itm['year']) for itm in adjusted],
             'Closed': [itm['closed'] for itm in adjusted],
             'Open': [itm['open'] for itm in adjusted],
