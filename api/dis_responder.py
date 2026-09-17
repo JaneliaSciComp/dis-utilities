@@ -44,7 +44,7 @@ from dis_html import (DOWNLOAD_ICON, add_jrc_fields, add_subjects, cell,
                       oa_status_rank, registrar_switch, render_table, render_warning,
                       safe, see_also, stat_cards, tab_button, tab_pane, tiny_badge,
                       two_col, year_pulldown as _year_pulldown)
-from dis_config import (ARTICLES, DATACITE, DOI, DO_NOT_DISPLAY, EMAIL,
+from dis_config import (ARTICLES, CITATION_SOURCE_NAME, DATACITE, DOI, DO_NOT_DISPLAY, EMAIL,
                         EPT_ONE, EPT_TWO, LIBRARY, NCBI_MESH, OAREPORT,
                         OPENALEX, ORCID, PMCID, PMID, PREFERRED_AFF,
                         REPOSITORY, ROR, S2, S2_GRAPH, SOURCES, WORKDAY)
@@ -52,7 +52,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.46.2"
+__version__ = "120.46.3"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -5964,12 +5964,12 @@ def get_citation_counts(doi, row, partial=True):
     citcnt = s2_citation_count(doi, fmt='html')
     if citcnt:
         tblrow.append(f"<td>Semantic Scholar: {citcnt}</td>")
-    # Web of Science
-    citcnt, url = DL.get_citation_count(doi, 'wos',
-                                        bool(row['jrc_obtained_from'] == 'DataCite'))
-    if citcnt:
-        tblrow.append(f"<td>Web of Science: <a href='{url}' target='_blank'>" \
-                      + f"{citcnt:,}</a></td>")
+    # Web of Science - commented out 9/17/2026 - we are cancelling the subscription
+    #citcnt, url = DL.get_citation_count(doi, 'wos',
+    #                                    bool(row['jrc_obtained_from'] == 'DataCite'))
+    #if citcnt:
+    #    tblrow.append(f"<td>Web of Science: <a href='{url}' target='_blank'>" \
+    #                  + f"{citcnt:,}</a></td>")
     if tblrow:
         doisec += "<table id='citations' class='citations'><thead>" \
                   + f"<tr><th colspan={len(tblrow)}>Citation counts&nbsp;" \
@@ -9453,9 +9453,6 @@ def citation_metrics(source='datacite'):
                                        + " or ".join(sorted(obtained_from)))
     obtained = obtained_from[source]
     coll = DB['dis'].dois
-    source_name = {"datacite": "DataCite", "openalex": "OpenAlex",
-                   "scholexplorer": "ScholeXplorer", "crossref": "Crossref",
-                   "wos": "Web of Science", "dimensions": "Dimensions"}
     # Citations by source
     payload = [{"$match": {"jrc_citation_sources": {"$exists": True},
                            "jrc_obtained_from": obtained}},
@@ -9520,7 +9517,7 @@ def citation_metrics(source='datacite'):
     best_single_sum = 0
     for row in cited_rows:
         cnt = row.get('jrc_citation_count', 0) or 0
-        pairs = [(source_name.get(key, key.capitalize()), val)
+        pairs = [(CITATION_SOURCE_NAME.get(key, key.capitalize()), val)
                  for key, val in (row.get('jrc_citation_sources') or {}).items()
                  if isinstance(val, int)]
         if cnt <= 0 or not pairs:
@@ -9550,7 +9547,7 @@ def citation_metrics(source='datacite'):
     trows = []
     cite_total = 0
     for row in rows:
-        label = source_name.get(row['_id'], row['_id'].capitalize())
+        label = CITATION_SOURCE_NAME.get(row['_id'], row['_id'].capitalize())
         cite_data[label] = row['total']
         cite_total += row['total']
         trows.append([label, cell(f"{row['dois']:,}", sort=row['dois']),
@@ -10321,8 +10318,6 @@ def figshare_metrics(year='All'):  # pylint: disable=too-many-locals,too-many-br
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get figshare DOIs"),
                                message=error_message(err))
-    source_name = {"datacite": "DataCite", "openalex": "OpenAlex",
-                   "scholexplorer": "ScholeXplorer", "crossref": "Crossref"}
     total = len(docs)
     usage = {'Views': 0, 'Downloads': 0, 'Shares': 0}
     usage_dois = nonver = cited_dois = cite_total = 0
@@ -10352,7 +10347,7 @@ def figshare_metrics(year='All'):  # pylint: disable=too-many-locals,too-many-br
             cite_total += ccount
             counts.append(ccount)
         for src, val in (row.get('jrc_citation_sources') or {}).items():
-            cite_src[source_name.get(src, src.capitalize())] += val
+            cite_src[CITATION_SOURCE_NAME.get(src, src.capitalize())] += val
         yname = (row.get('jrc_publishing_date') or '')[:4]
         if yname.isdigit():
             rec = by_year.setdefault(yname, {'dois': 0, 'views': 0,
@@ -11042,8 +11037,6 @@ def zenodo_stats(year='All'):  # pylint: disable=too-many-locals,too-many-branch
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get Zenodo DOIs"),
                                message=error_message(err))
-    source_name = {"datacite": "DataCite", "openalex": "OpenAlex",
-                   "scholexplorer": "ScholeXplorer", "crossref": "Crossref"}
     total = len(docs)
     usage = {'Views': 0, 'Downloads': 0}
     uniq = {'Unique views': 0, 'Unique downloads': 0}
@@ -11070,7 +11063,7 @@ def zenodo_stats(year='All'):  # pylint: disable=too-many-locals,too-many-branch
             cite_total += ccount
             counts.append(ccount)
         for src, val in (row.get('jrc_citation_sources') or {}).items():
-            cite_src[source_name.get(src, src.capitalize())] += val
+            cite_src[CITATION_SOURCE_NAME.get(src, src.capitalize())] += val
         yname = (row.get('jrc_publishing_date') or '')[:4]
         if yname.isdigit():
             rec = by_year.setdefault(yname, {'dois': 0, 'views': 0,
@@ -11296,8 +11289,6 @@ def protocolsio_stats(year='All'):  # pylint: disable=too-many-locals,too-many-b
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get protocols.io DOIs"),
                                message=error_message(err))
-    source_name = {"crossref": "Crossref", "openalex": "OpenAlex",
-                   "scholexplorer": "ScholeXplorer", "wos": "Web of Science"}
     total = len(docs)
     usage = {'Views': 0, 'Exports': 0, 'Runs': 0, 'Bookmarks': 0, 'Comments': 0,
              'Forks (public)': 0, 'Forks (private)': 0}
@@ -11324,7 +11315,7 @@ def protocolsio_stats(year='All'):  # pylint: disable=too-many-locals,too-many-b
             cite_total += ccount
             counts.append(ccount)
         for src, val in (row.get('jrc_citation_sources') or {}).items():
-            cite_src[source_name.get(src, src.capitalize())] += val
+            cite_src[CITATION_SOURCE_NAME.get(src, src.capitalize())] += val
         yname = (row.get('jrc_publishing_date') or '')[:4]
         if yname.isdigit():
             rec = by_year.setdefault(yname, {'dois': 0, 'views': 0,
@@ -11740,8 +11731,6 @@ def elife_stats(year='All'):  # pylint: disable=too-many-locals,too-many-branche
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get eLife DOIs"),
                                message=error_message(err))
-    source_name = {"crossref": "Crossref", "openalex": "OpenAlex",
-                   "scholexplorer": "ScholeXplorer", "wos": "Web of Science"}
     total = len(docs)
     usage = {'Views': 0, 'Downloads': 0}
     usage_dois = cited_dois = cite_total = 0
@@ -11764,7 +11753,7 @@ def elife_stats(year='All'):  # pylint: disable=too-many-locals,too-many-branche
             cite_total += ccount
             counts.append(ccount)
         for src, val in (row.get('jrc_citation_sources') or {}).items():
-            cite_src[source_name.get(src, src.capitalize())] += val
+            cite_src[CITATION_SOURCE_NAME.get(src, src.capitalize())] += val
         yname = (row.get('jrc_publishing_date') or '')[:4]
         if yname.isdigit():
             rec = by_year.setdefault(yname, {'dois': 0, 'views': 0,
