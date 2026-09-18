@@ -52,7 +52,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.46.3"
+__version__ = "120.47.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -9463,13 +9463,16 @@ def citation_metrics(source='datacite'):
     try:
         rows = list(coll.aggregate(payload))
         # Per-DOI records drive the unique total, median, freshness, version
-        # exclusion, and per-year breakdown (doi/relation are for DL.is_version)
-        cited_rows = list(coll.find({"jrc_citation_sources": {"$exists": True},
-                                     "jrc_obtained_from": obtained},
-                                    {"doi": 1, "relation": 1,
-                                     "jrc_citation_count": 1, "jrc_citation_sources": 1,
-                                     "jrc_citation_updated": 1, "jrc_publishing_date": 1,
-                                     "types": 1}))
+        # exclusion, and per-year breakdown (doi/relation are for DL.is_version).
+        # This is every DOI that has been LOOKED AT, cited or not - sync_citations
+        # records a zero rather than leaving the fields off, so "has citation fields"
+        # means checked, not cited. The two are separated below.
+        checked_rows = list(coll.find({"jrc_citation_sources": {"$exists": True},
+                                       "jrc_obtained_from": obtained},
+                                      {"doi": 1, "relation": 1,
+                                       "jrc_citation_count": 1, "jrc_citation_sources": 1,
+                                       "jrc_citation_updated": 1, "jrc_publishing_date": 1,
+                                       "types": 1}))
         all_dois = coll.count_documents({"jrc_obtained_from": obtained})
         year_all = {rec['_id']: rec['dois'] for rec in coll.aggregate(
             [{"$match": {"jrc_obtained_from": obtained,
@@ -9481,10 +9484,17 @@ def citation_metrics(source='datacite'):
                                title=render_warning("Could not get citation sources " \
                                                     + "from dois collection"),
                                message=error_message(err))
+    # Checked vs cited. Before zeros were stored these were the same set, so one
+    # name served both and "% DOIs cited" was right by accident; now a checked DOI
+    # with no citations is a real, recorded finding and the two must not be confused.
+    checked_dois = len(checked_rows)
+    cited_rows = [row for row in checked_rows if (row.get('jrc_citation_count') or 0) > 0]
     cite_dois = len(cited_rows)
     counts = [row.get('jrc_citation_count', 0) for row in cited_rows]
     unique_total = sum(counts)
-    updated = [row['jrc_citation_updated'] for row in cited_rows
+    # Freshness is about the last time anything was looked at, so it reads the
+    # checked set rather than the cited one.
+    updated = [row['jrc_citation_updated'] for row in checked_rows
                if row.get('jrc_citation_updated')]
     # Version-deduped view: dataset .v1/.v2/... are separate dois records counted
     # separately upstream, so per-work impact metrics and the most-cited list use
@@ -9552,13 +9562,21 @@ def citation_metrics(source='datacite'):
         cite_total += row['total']
         trows.append([label, cell(f"{row['dois']:,}", sort=row['dois']),
                       cell(f"{row['total']:,}", sort=row['total'])])
-    card_list = [("DOIs with citation sources",
-                  f"<a href='/citation_list/{source}'>{cite_dois:,}</a>"),
-                 ("% DOIs cited", f"{cite_dois/all_dois*100:,.1f}%" if all_dois else "0%"),
+    # Checked and cited are now different numbers, so both are shown and the
+    # percentage says which denominator it uses. "% checked" is the backfill's
+    # progress; "% of checked that are cited" is the finding.
+    card_list = [("DOIs", f"{all_dois:,}"),
+                 ("Checked for citations",
+                  f"{checked_dois:,}"
+                  + (f" ({checked_dois/all_dois*100:,.0f}%)" if all_dois else "")),
+                 ("Cited", f"<a href='/citation_list/{source}'>{cite_dois:,}</a>"),
+                 ("% of checked that are cited",
+                  f"{cite_dois/checked_dois*100:,.1f}%" if checked_dois else "0%"),
                  ("Total citations", f"{cite_total:,}"),
                  ("Total unique citations", f"{unique_total:,}"),
-                 ("Avg. per DOI", f"{unique_total/cite_dois:,.1f}" if cite_dois else "0"),
-                 ("Median per DOI",
+                 ("Avg. per cited DOI",
+                  f"{unique_total/cite_dois:,.1f}" if cite_dois else "0"),
+                 ("Median per cited DOI",
                   f"{statistics.median(counts):,.1f}" if counts else "0"),
                  ("h-index / i10-index", f"{h_index:,} / {i10_index:,}")]
     if close_winner:
@@ -9697,8 +9715,14 @@ def citation_metrics(source='datacite'):
         result = initialize_result()
         result['data'] = {"source": obtained,
                           "dois": all_dois,
+                          "checked_dois": checked_dois,
                           "cited_dois": cite_dois,
-                          "pct_cited": round(cite_dois/all_dois*100, 2) if all_dois else 0,
+                          # of the DOIs actually checked, not of the whole corpus -
+                          # they differ while a backfill is still running
+                          "pct_cited": round(cite_dois/checked_dois*100, 2)
+                                       if checked_dois else 0,
+                          "pct_checked": round(checked_dois/all_dois*100, 2)
+                                         if all_dois else 0,
                           "citations_by_source": cite_data,
                           "total_citations": cite_total,
                           "unique_citations": unique_total,
