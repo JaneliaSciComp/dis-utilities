@@ -181,7 +181,7 @@
         (falling back to the native citationCount).
 '''
 
-__version__ = '1.12.2'
+__version__ = '1.13.1'
 
 import argparse
 import collections
@@ -1292,29 +1292,39 @@ def finalize_doi(res, monitor=None):
             usage_fields['jrc_elife_counts'] = res['elife']
             record_usage_changes('elife', res['elife'], row.get('jrc_elife_counts'))
             usage_fields['jrc_elife_updated'] = datetime.now()
-    # Citation jrc_ fields exist only when there is usable data, so uncited DOIs
-    # get no citation fields (but a figshare DOI may still get figshare fields).
+    # A zero is a finding, not an absence - but only when the sources actually
+    # answered. These fields used to be written only when a DOI had citations, which
+    # made "checked, uncited" indistinguishable from "never checked": --notcited
+    # re-queried every uncited DOI on every deep pass, and the share of cited DOIs
+    # could not be computed from the collection at all.
+    # The zero is therefore recorded only when nothing errored. A DOI whose sources
+    # all timed out would otherwise be written as a confirmed zero and then skipped
+    # by every future --notcited run - the same "never checked" confusion, made
+    # permanent and invisible. Leaving the fields off keeps it in the queue.
+    # No regression risk when we do write: combined is a high-water mark that already
+    # takes max(..., previous), so it can never be lower than what is stored.
+    # jrc_citing_dois stays conditional - an empty list is noise, not a finding.
     fields = {}
-    if combined:
-        fields['jrc_citation_count'] = combined
-        if ARG.CITING_DOIS:    # the citing-DOI list itself is optional
-            fields['jrc_citing_dois'] = cc['citing']
-        fields['jrc_citation_sources'] = cc['sources']
-        fields['jrc_citation_updated'] = datetime.now()
-        if combined > previous:
-            COUNT['increased'] += 1
-            HITS.append((doi, previous, native, combined, oa_n, sx_n, dc_n, wos_n))
-            label = SOURCES[ARG.SOURCE]['label']
-            graphql_disp = ('' if ARG.SOURCE == 'crossref' else
-                            f", DataCite-GraphQL={dc_n if ARG.GRAPHQL else 'off'}")
-            hit = (f"{doi}\t{previous} -> {combined} "
-                   + f"({label}={native}, OpenAlex={oa_n}, ScholeXplorer={sx_n}"
-                   + f"{graphql_disp})")
-            if monitor:
-                monitor.write(hit + "\n")
-                monitor.flush()
-            if ARG.DEBUG:
-                tqdm.write(hit)
+    if combined or not cc['errored']:
+        fields = {'jrc_citation_count': combined,
+                  'jrc_citation_sources': cc['sources'],
+                  'jrc_citation_updated': datetime.now()}
+    if fields and ARG.CITING_DOIS and cc['citing']:   # the citing-DOI list is optional
+        fields['jrc_citing_dois'] = cc['citing']
+    if combined > previous:
+        COUNT['increased'] += 1
+        HITS.append((doi, previous, native, combined, oa_n, sx_n, dc_n, wos_n))
+        label = SOURCES[ARG.SOURCE]['label']
+        graphql_disp = ('' if ARG.SOURCE == 'crossref' else
+                        f", DataCite-GraphQL={dc_n if ARG.GRAPHQL else 'off'}")
+        hit = (f"{doi}\t{previous} -> {combined} "
+               + f"({label}={native}, OpenAlex={oa_n}, ScholeXplorer={sx_n}"
+               + f"{graphql_disp})")
+        if monitor:
+            monitor.write(hit + "\n")
+            monitor.flush()
+        if ARG.DEBUG:
+            tqdm.write(hit)
     # Persist citation and usage (figshare/Zenodo/protocols.io/eLife) fields
     # together; nothing to do if all are empty
     fields.update(usage_fields)
