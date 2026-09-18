@@ -68,7 +68,7 @@
     reason when one is available, in place of a title.
 """
 
-__version__ = '2.2.0'
+__version__ = '2.3.0'
 
 import argparse
 import collections
@@ -112,6 +112,13 @@ DATACITE_VERSION_RELATIONS = ('IsVersionOf', 'HasVersion', 'IsIdenticalTo')
 # still be accepted, if the preprint/primary publishing dates are known and consistent
 # and author confirmation otherwise succeeds. See title_score()/dates_consistent().
 TITLE_DATE_GRACE = 5
+# A preprint posted long after its journal article is not that article's preprint.
+# 180 days, not the 30 of dates_consistent: a genuine arXiv posting lagged its journal
+# version by 41 days (10.48550/arxiv.1210.1530, identical title), while the pairs this
+# rejects are a year or more apart - both of them an "Improved ..." follow-up paper
+# matched to the earlier work it improves on, which the token_set_ratio boost scores
+# highly because the earlier title's words are a subset of the later one's.
+PREPRINT_MAX_LAG = 180
 
 EMAIL_SUBJECT = "New preprint/primary matches"
 BADGE_PREPRINT = "background-color:#2e86de; color:#fff; padding:2px 8px; " \
@@ -246,10 +253,15 @@ def initialize_program():
         # DataCite (types.resourceTypeGeneral=Preprint). The subtype filter excludes
         # other posted-content subtypes (letter/retraction/correction/editorial/other),
         # matching doi_common.is_preprint()'s convention.
+        # protocols.io is excluded alongside Janelia figshare: Crossref types all 57 of
+        # its records as posted-content/preprint, but a protocol is not a preprint of
+        # the paper that uses it. Left in, the EASI-FISH protocol matched a JoVE methods
+        # article describing the same technique - same words, different work.
         rows = DB['dis'].dois.find({"$or": [{"type": "posted-content",
                                              "subtype": "preprint"},
                                             {"types.resourceTypeGeneral": "Preprint"}],
-                                    "doi": {"$not": {"$regex": r"^10\.25378/janelia\."}}},
+                                    "doi": {"$not": {"$regex":
+                                            r"^10\.(?:25378/janelia\.|17504/protocols\.io)"}}},
                                    projection)
     except Exception as err:
         terminate_program(err)
@@ -547,7 +559,14 @@ def title_score(pretitle, primtitle):
     # floor=2 (not 4): a flat 4-word floor let short titles (e.g. 3 words) pass with
     # up to 4 extra words - empirically, "Cancer risk factors" vs "Cancer risk
     # factors in aging populations review" scored a false 100.0 under that floor.
-    if shorter_len and word_diff <= max(2, shorter_len * 0.3):
+    # factor=0.5 (not 0.3): peer review trims more than three words in ten from a
+    # title of ordinary length. At 0.3 a 9-word primary allowed only 2.7 words of
+    # difference, so "Imaging cellular activity simultaneously across all organs of
+    # a vertebrate reveals body-wide circuits" scored 81.9 against its own published
+    # version, four words shorter, and was rejected despite a 100-scoring last author
+    # and five shared ORCIDs. The floor still guards the short-title case the comment
+    # above describes, since max(2, ...) governs there.
+    if shorter_len and word_diff <= max(2, shorter_len * 0.5):
         set_score = fuzz.token_set_ratio(pretitle, primtitle, processor=utils.default_process)
         return max(sort_score, set_score)
     return sort_score
@@ -573,6 +592,25 @@ def dates_consistent(predate, primdate):
     except (ValueError, TypeError):
         return False
     return (pre - prim).days <= 30
+
+
+def preprint_postdates(predate, primdate):
+    ''' Was the preprint posted so long after the primary that it cannot be its
+        preprint? Distinct from dates_consistent, which fails closed on an unknown
+        date because it is looking for corroboration; this is looking for a
+        contradiction, so an unknown date is no contradiction and returns False.
+        Keyword arguments:
+          predate: preprint publishing date (YYYY-MM-DD or "unknown")
+          primdate: primary publishing date (YYYY-MM-DD or "unknown")
+        Returns:
+          True only when both dates are known and the gap exceeds PREPRINT_MAX_LAG
+    '''
+    try:
+        pre = datetime.strptime(predate, "%Y-%m-%d")
+        prim = datetime.strptime(primdate, "%Y-%m-%d")
+    except (ValueError, TypeError):
+        return False
+    return (pre - prim).days > PREPRINT_MAX_LAG
 
 
 def process_pair(prerec, primrec):
@@ -616,6 +654,13 @@ def process_pair(prerec, primrec):
         return
     score = title_score(pretitle, primtitle)
     if score < ARG.TITLE_THRESHOLD - TITLE_DATE_GRACE:
+        return
+    # Before MATCH is touched: every column below is appended to in lockstep, so a
+    # later return would leave the parallel lists ragged.
+    # Fuzzy matches only - an explicit is-preprint-of/has-preprint declaration is
+    # ground truth and never reaches process_pair.
+    if preprint_postdates(DL.get_publishing_date(prerec), DL.get_publishing_date(primrec)):
+        COUNT['skipped_preprint_after_primary'] += 1
         return
     TITLE_CANDIDATE_SEEN.add(predoi)
     pre_author = get_first_last_author(prerec, predoi)
