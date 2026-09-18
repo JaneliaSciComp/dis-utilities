@@ -52,7 +52,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.47.0"
+__version__ = "120.50.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -9472,7 +9472,7 @@ def citation_metrics(source='datacite'):
                                       {"doi": 1, "relation": 1,
                                        "jrc_citation_count": 1, "jrc_citation_sources": 1,
                                        "jrc_citation_updated": 1, "jrc_publishing_date": 1,
-                                       "types": 1}))
+                                       "types": 1, "type": 1, "subtype": 1}))
         all_dois = coll.count_documents({"jrc_obtained_from": obtained})
         year_all = {rec['_id']: rec['dois'] for rec in coll.aggregate(
             [{"$match": {"jrc_obtained_from": obtained,
@@ -9659,30 +9659,40 @@ def citation_metrics(source='datacite'):
                  + f"(<b>{union_exceed/close_analyzed*100:.1f}%</b>), a " \
                  + f"<b>{union_lift_pct:+.1f}%</b> gain over trusting the strongest " \
                  + "source alone.</div><br>"
-    # Citations by resource type (DataCite only; Crossref records carry no
-    # types.resourceTypeGeneral). Citations and cited DOIs per resource type.
+    # Citations and cited DOIs per type of work. The two registrars name the type
+    # in different fields and different vocabularies - DataCite in
+    # types.resourceTypeGeneral ("Dataset", "Software"), Crossref in type, refined
+    # by subtype ("journal-article", "posted-content / preprint") - so the label is
+    # built per registrar and the heading follows the registrar's own wording.
+    type_label = 'Resource type' if source == 'datacite' else 'Type'
     rhtml = ''
     rtype_data = {}
-    if source == 'datacite':
-        rtype = {}
-        for row in cited_rows:
-            cnt = row.get('jrc_citation_count', 0) or 0
-            if cnt <= 0:
-                continue
+    rtype = {}
+    for row in cited_rows:
+        cnt = row.get('jrc_citation_count', 0) or 0
+        if cnt <= 0:
+            continue
+        if source == 'datacite':
             name = (row.get('types') or {}).get('resourceTypeGeneral') or 'Unknown'
-            rec = rtype.setdefault(name, {'dois': 0, 'citations': 0})
-            rec['dois'] += 1
-            rec['citations'] += cnt
-        if rtype:
-            rtrows = []
-            for name, rec in sorted(rtype.items(), key=lambda kv: -kv[1]['citations']):
-                rtype_data[name] = rec['citations']
-                rtrows.append([name, cell(f"{rec['dois']:,}", sort=rec['dois']),
-                               cell(f"{rec['citations']:,}", sort=rec['citations'])])
-            rhtml = "<h4>Citations by resource type</h4>"
-            rhtml += render_table(['Resource type', 'Cited DOIs', 'Citations'], rtrows,
-                                  table_id='restype', css='tablesorter numbers-scroll',
-                                  data_attrs={"sortlist": "[[2,1]]"})
+        else:
+            # subtype only qualifies posted-content, where "preprint" is the whole
+            # point; on everything else it is absent and type stands alone.
+            name = row.get('type') or 'Unknown'
+            if row.get('subtype'):
+                name += f" / {row['subtype']}"
+        rec = rtype.setdefault(name, {'dois': 0, 'citations': 0})
+        rec['dois'] += 1
+        rec['citations'] += cnt
+    if rtype:
+        rtrows = []
+        for name, rec in sorted(rtype.items(), key=lambda kv: -kv[1]['citations']):
+            rtype_data[name] = rec['citations']
+            rtrows.append([name, cell(f"{rec['dois']:,}", sort=rec['dois']),
+                           cell(f"{rec['citations']:,}", sort=rec['citations'])])
+        rhtml = f"<h4>Citations by {type_label.lower()}</h4>"
+        rhtml += render_table([type_label, 'Cited DOIs', 'Citations'], rtrows,
+                              table_id='restype', css='tablesorter numbers-scroll',
+                              data_attrs={"sortlist": "[[2,1]]"})
     # Citations by publishing year
     year_cited = {}
     for row in cited_rows:
@@ -9778,9 +9788,14 @@ def citation_metrics(source='datacite'):
                                           color=DP.colors_for_sources(close_data))
         chartscript += script
     if rtype_data:
-        script, rtype_div = DP.hbar_chart(rtype_data, "Citations by resource type",
+        # Scaled up from the 500x300 the sibling charts use: this one carries the
+        # longest category labels on the page ("posted-content / preprint",
+        # "JournalArticle"), and Bokeh does not scale text with the figure, so the
+        # fonts are raised with it rather than left at the 7pt/8pt defaults.
+        script, rtype_div = DP.hbar_chart(rtype_data, f"Citations by {type_label.lower()}",
                                           value_label="Citations", value_format="0,0",
-                                          width=500, height=300, show_values=True)
+                                          width=600, height=360, show_values=True,
+                                          label_font_size="9pt", value_font_size="10pt")
         chartscript += script
     if ydata['Year']:
         # Tap a year bar -> the DOIs published that year for this registrar
@@ -9792,24 +9807,42 @@ def citation_metrics(source='datacite'):
                                               bar_format="0,0", line_format="0%",
                                               width=650, height=400, nav=ynav)
         chartscript += script
-    # Cards (with freshness/version notes) on their own full-width rows, then
-    # each table paired with its chart in a flex row so the chart lines up
-    # with the table, not the cards
-    html = switch + cards + notes \
-           + "<div class='flexrow' style='margin-bottom: 40px'><div class='flexcol'>" + chtml \
-           + "</div>" \
-           + "<div class='flexcol' style='margin: 10px 0 0 20px'>" + cite_div + "</div></div>"
-    if xhtml:
-        html += "<div class='flexrow' style='margin-bottom: 40px'><div class='flexcol'>" + xhtml \
-                + "</div>" \
-                + "<div class='flexcol' style='margin: 10px 0 0 20px'>" + close_div + "</div></div>"
+    def flexrow(section_html, chart_div):
+        ''' Pair a section and its chart side by side. '''
+        return "<div class='flexrow' style='margin-bottom: 40px'><div class='flexcol'>" \
+               + f"{section_html}</div>" \
+               + "<div class='flexcol' style='margin: 10px 0 0 20px'>" \
+               + f"{chart_div}</div></div>"
+    # Two tabs, split by what the numbers are about rather than by chart type.
+    # "Cited works" describes the corpus - which years and which kinds of output
+    # attract citations - and is what most readers come for. "Citation sources"
+    # describes the harvesting itself: which services found those citations and how
+    # well any one of them stands in for the deduplicated union. That second group
+    # is pipeline diagnostics, so it sits behind a tab instead of between the
+    # reader and the findings, as it did when all four sections ran down one page.
+    # Cards and notes stay above the tabs: they summarise both halves, and the
+    # freshness/version caveats qualify every number below them.
+    # Charts here are fixed-width, so they lay out correctly inside an initially
+    # hidden pane - the sizing_mode="stretch_width" case that collapses to zero
+    # width in a hidden div does not arise (see /source_metrics for the same
+    # pattern).
+    active_tab = request.args.get('tab')
+    if active_tab not in ('works', 'sources'):
+        active_tab = 'works'
+    works_body = flexrow(yhtml, year_div)
     if rhtml:
-        html += "<div class='flexrow' style='margin-bottom: 40px'><div class='flexcol'>" + rhtml \
-                + "</div>" \
-                + "<div class='flexcol' style='margin: 10px 0 0 20px'>" + rtype_div + "</div></div>"
-    html += "<div class='flexrow' style='margin-bottom: 40px'><div class='flexcol'>" + yhtml \
-            + "</div>" \
-            + "<div class='flexcol' style='margin: 10px 0 0 20px'>" + year_div + "</div></div>"
+        works_body += flexrow(rhtml, rtype_div)
+    sources_body = flexrow(chtml, cite_div)
+    if xhtml:
+        sources_body += flexrow(xhtml, close_div)
+    html = switch + cards + notes \
+           + '<ul class="nav nav-tabs" role="tablist">' \
+           + tab_button('works', 'Cited works', active_tab == 'works') \
+           + tab_button('sources', 'Citation sources', active_tab == 'sources') \
+           + '</ul><div class="tab-content">' \
+           + tab_pane('works', works_body, active_tab == 'works') \
+           + tab_pane('sources', sources_body, active_tab == 'sources') \
+           + '</div>'
     title = f"{obtained} citation metrics"
     endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,

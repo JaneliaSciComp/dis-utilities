@@ -809,7 +809,8 @@ def heat_map(data, title, x_field, y_field, value_field, width=950, height=500,
 
 
 def hbar_chart(data, title, value_label="Value", width=650, height=450,  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
-               color=None, value_format="0,0", show_pct=True, show_values=False, nav=None):
+               color=None, value_format="0,0", show_pct=True, show_values=False, nav=None,
+               label_font_size="7pt", value_font_size="8pt"):
     ''' Create a horizontal bar chart sorted by value (largest at top).
         Accommodates many categories in a fixed footprint and makes relative
         magnitudes easy to compare by bar length.
@@ -824,6 +825,11 @@ def hbar_chart(data, title, value_label="Value", width=650, height=450,  # pylin
                         "$0,0" for currency, "0%" for a fraction shown as a percent)
           show_pct: include percent-of-total in the hover tooltip (default True)
           show_values: print each value at the end of its bar (default False)
+          label_font_size: y-axis category label size (default "7pt"). Bokeh does
+                           not scale text with the figure, so a caller that widens
+                           the chart has to raise this too or the labels stay put
+                           and only the whitespace grows.
+          value_font_size: end-of-bar value label size (default "8pt"), same reason
         Returns:
           Figure components (chartscript, chartdiv)
     '''
@@ -860,11 +866,12 @@ def hbar_chart(data, title, value_label="Value", width=650, height=450,  # pylin
                   fill_color="color", line_color=None, alpha=0.9)
     if show_values:
         p.add_layout(LabelSet(x="value", y="label", text="value_text", source=source,
-                              x_offset=4, text_baseline="middle", text_font_size="8pt",
+                              x_offset=4, text_baseline="middle",
+                              text_font_size=value_font_size,
                               text_color="dimgray"))
     p.xaxis.formatter = NumeralTickFormatter(format=value_format)
     p.ygrid.grid_line_color = None
-    p.yaxis.major_label_text_font_size = "7pt"
+    p.yaxis.major_label_text_font_size = label_font_size
     tooltips = [("", "@label"), (value_label, f"@value{{{value_format}}}")]
     if show_pct:
         tooltips.append(("% of total", "@pct{0.0}%"))
