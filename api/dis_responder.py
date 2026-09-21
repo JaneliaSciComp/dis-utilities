@@ -52,7 +52,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.50.0"
+__version__ = "120.51.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -16325,6 +16325,252 @@ def ror(rorid=None):
     return make_response(render_template('ror.html', urlroot=request.url_root,
                                          title="Search ROR", content=html,
                                          navbar=generate_navbar('System')))
+
+# RRIDs that have their own SciCrunch authority prefix. Anything matching this
+# is treated as an identifier; anything else the user types is a name search.
+RRID_PATTERN = re.compile(r'^(?:RRID:)?([A-Za-z][A-Za-z0-9]*_[A-Za-z0-9:.\-]*\d[A-Za-z0-9:.\-]*)$')
+# The registry marks a closed resource only by this string in item.availability -
+# there is no boolean and no "replaced by" pointer, so it has to be sniffed.
+RRID_RETIRED = 'NO LONGER IN SERVICE'
+RRID_RESOLVER = 'https://scicrunch.org/resolver/'
+RRID_INDICES = ("RIN_Tool_pr", "RIN_Antibody_pr", "RIN_Organism_pr", "RIN_Plasmid_pr",
+                "RIN_CellLine_pr", "RIN_Protocols_pr", "RIN_BioSample_pr")
+
+
+def _rrid_names(block, key='name'):
+    """ Pull a list of names out of one of the registry's list-of-dicts fields.
+        Keyword arguments:
+          block: list of dicts (or None)
+          key: dict key holding the string
+        Returns:
+          List of non-empty strings
+    """
+    out = []
+    for ent in block or []:
+        val = ent.get(key) if isinstance(ent, dict) else ent
+        if val and str(val).strip():
+            out.append(str(val).strip())
+    return out
+
+
+def _rrid_fetch(rid):
+    """ Resolve one RRID.
+        The public resolver is used rather than the keyed Elasticsearch API
+        because it answers for every authority in one call - SCR_, AB_, BDSC_,
+        Addgene_, CVCL_, IMSR_JAX: - whereas the Elastic indices are split by
+        resource kind and would need a multi-index fan-out. No key is required.
+        Keyword arguments:
+          rid: bare RRID (no "RRID:" prefix)
+        Returns:
+          (source dict or None, error string or None)
+    """
+    try:
+        resp = requests.get(f"{RRID_RESOLVER}RRID:{rid}.json", timeout=10)
+    except Exception as err:
+        return None, str(err)
+    # A 404 is the resolver's way of saying the identifier is not registered -
+    # that is an answer, not a failure, so report it as "no record" rather than
+    # showing the user an error banner.
+    if resp.status_code == 404:
+        return None, None
+    if resp.status_code != 200:
+        return None, f"SciCrunch returned HTTP {resp.status_code}"
+    try:
+        hits = resp.json().get('hits', {}).get('hits', [])
+    except ValueError:
+        return None, "SciCrunch returned a non-JSON response"
+    return (hits[0].get('_source') if hits else None), None
+
+
+def _rrid_search(term):
+    """ Name search across the resource indices.
+        This is the one path that needs SCICRUNCH_API_KEY; the resolver above
+        does not. Without a key the page still resolves identifiers and only
+        name search is unavailable, which is what the caller reports.
+        Keyword arguments:
+          term: free-text name
+        Returns:
+          (list of hits, error string or None)
+    """
+    key = os.environ.get('SCICRUNCH_API_KEY')
+    if not key:
+        return [], "Name search needs SCICRUNCH_API_KEY; identifier lookup still works."
+    body = {"size": 25,
+            "_source": ["rrid.curie", "item.name", "item.types", "item.description"],
+            "query": {"query_string": {"query": f'"{term}"'}}}
+    try:
+        resp = requests.post(f"https://api.scicrunch.io/elastic/{','.join(RRID_INDICES)}/_search",
+                             json=body, headers={'apikey': key}, timeout=20)
+    except Exception as err:
+        return [], str(err)
+    if resp.status_code != 200:
+        return [], f"SciCrunch search returned HTTP {resp.status_code}"
+    return resp.json().get('hits', {}).get('hits', []), None
+
+
+def _rrid_suporg(src):
+    """ Does this resource correspond to one of our supervisory organizations?
+        Matched on the registry's synonyms and on its name with the institutional
+        boilerplate stripped, because suporg stores the short local name
+        ("Advanced Imaging Center") and the registry stores the full official one.
+        Exact string only - a fuzzy guess has no place on a reference page.
+        Keyword arguments:
+          src: resolver _source dict
+        Returns:
+          suporg document, or None
+    """
+    item = src.get('item') or {}
+    cands = set(_rrid_names(item.get('synonyms')))
+    name = str(item.get('name') or '')
+    short = re.sub(r'^Howard Hughes Medical Institute\s*(at)?\s*', '', name, flags=re.I)
+    short = re.sub(r'^Janelia Research Campus\s*', '', short, flags=re.I)
+    short = re.sub(r'\s*(Shared Resource\s*)?Core Facility\s*$', '', short, flags=re.I)
+    cands.add(short.strip())
+    cands.discard('')
+    if not cands:
+        return None
+    try:
+        return DB['dis'].suporg.find_one({"name": {"$in": sorted(cands)}})
+    except Exception:
+        return None
+
+
+def _rrid_render(rid, src):
+    """ Build the detail panel for a resolved RRID.
+        Keyword arguments:
+          rid: bare RRID
+          src: resolver _source dict
+        Returns:
+          HTML
+    """
+    item = src.get('item') or {}
+    name = str(item.get('name') or '').strip()
+    curie = (src.get('rrid') or {}).get('curie') or f"RRID:{rid}"
+    avail = _rrid_names(item.get('availability'), 'keyword') \
+            + _rrid_names(item.get('availability'), 'description')
+    retired = any(RRID_RETIRED in a.upper() for a in avail)
+    html = ""
+    if retired:
+        html += render_warning("This resource is marked NO LONGER IN SERVICE in the "
+                               "registry. The RRID stays valid and citable.", 'warning')
+    html += f"<br><h3>{escape(name)}</h3>"
+    link = f"{RRID_RESOLVER}{escape(curie)}"
+    html += f"<h4><a href='{link}' target='_blank'>{escape(curie)}</a></h4>"
+    # The registry supplies the exact citation string; offering it for copy is
+    # the single most useful thing this page can do for an author.
+    cite = (src.get('rrid') or {}).get('properCitation') or f"{name} ({curie})"
+    html += "<div style='margin:10px 0 16px 0'>" \
+            + "<span style='font-size:0.85em;color:#a8c4e0'>Proper citation</span><br>" \
+            + f"<tt style='font-size:0.95em'>{escape(cite)}</tt> " \
+            + "<button class='btn btn-outline-success btn-sm' type='button' " \
+            + f'onclick="copy_citation({escape(json.dumps(cite))}); return false;">Copy</button>' \
+            + "<span id='copied' style='display:none;color:#89c242'>&nbsp;copied</span></div>"
+    rows = []
+    types = _rrid_names(item.get('types'))
+    if types:
+        rows.append(("Type", ", ".join(escape(t) for t in types)))
+    if avail:
+        rows.append(("Availability", escape("; ".join(dict.fromkeys(avail)))))
+    for alt in _rrid_names(item.get('alternateIdentifiers'), 'identifier'):
+        # An ABRF id is the CoreMarketplace FacilityID, so it links somewhere useful.
+        if alt.startswith('ABRF_'):
+            cmk = f"https://coremarketplace.org/?FacilityID={escape(alt.split('_', 1)[1])}"
+            rows.append(("ABRF CoreMarketplace",
+                         f"<a href='{cmk}' target='_blank'>{escape(alt)}</a>"))
+        else:
+            rows.append(("Alternate ID", escape(alt)))
+    dist = src.get('distributions') or {}
+    for uri in _rrid_names((dist.get('current') if isinstance(dist, dict) else dist), 'uri'):
+        rows.append(("Landing page", f"<a href='{escape(uri)}' target='_blank'>{escape(uri)}</a>"))
+    syns = [x for x in _rrid_names(item.get('synonyms')) if x != name]
+    if syns:
+        rows.append(("Synonyms", "<br>".join(escape(x) for x in syns)))
+    auth = src.get('authority') or {}
+    if auth.get('name'):
+        rows.append(("Authority", escape(str(auth['name']))))
+    awards = [str((a.get('agency') or {}).get('name') or '')
+              for a in src.get('supportingAwards') or []
+              if isinstance(a, dict) and (a.get('agency') or {}).get('name')]
+    if awards:
+        rows.append(("Supporting awards", "<br>".join(escape(a) for a in awards)))
+    rels = []
+    for rel in ((src.get('graph') or {}).get('relationships') or []):
+        res = (rel.get('resource') or {})
+        rl = (rel.get('relationship') or {})
+        if res.get('name'):
+            tgt = res.get('identifier')
+            shown = escape(str(res['name']))
+            if tgt:
+                shown = f"<a href='/rrid/{escape(str(tgt))}'>{shown}</a>"
+            rels.append(f"{escape(str(rl.get('name') or 'related'))}: {shown}")
+    if rels:
+        rows.append(("Relationships", "<br>".join(rels)))
+    # The tie back to our own data - the reason this page is more than a mirror
+    # of the SciCrunch site.
+    sup = _rrid_suporg(src)
+    if sup:
+        cnt = 0
+        try:
+            cnt = DB['dis'].dois.count_documents({"jrc_acknowledge.name": sup['name']})
+        except Exception:
+            pass
+        val = f"<a href='/tag/{quote(sup['name'], safe='')}'>{escape(sup['name'])}</a>"
+        if cnt:
+            val += f" &mdash; {cnt:,} acknowledging DOIs"
+        rows.append(("Janelia supervisory org", val))
+    desc = str(item.get('description') or '').strip()
+    trows = [[cell(safe(f"<b>{k}</b>")), cell(safe(v))] for k, v in rows]
+    html += render_table(['Field', 'Value'], trows, table_id='rriddet', css='standard')
+    if desc:
+        html += f"<div style='max-width:760px;margin-top:14px'>{escape(desc)}</div>"
+    return html
+
+
+@app.route('/rrid/<path:term>')
+@app.route('/rrid')
+def rrid(term=None):
+    """ Look up a Research Resource Identifier (rrids.org) in SciCrunch
+    """
+    if not term:
+        return make_response(render_template('rrid.html', urlroot=request.url_root,
+                                             title="Search RRID", content="", term="",
+                                             navbar=generate_navbar('System')))
+    term = term.strip()
+    mat = RRID_PATTERN.match(term)
+    if mat:
+        src, err = _rrid_fetch(mat.group(1))
+        if err:
+            content = f"<br>{render_warning(escape(err))}"
+        elif not src:
+            content = f"<br><h3>No registry record for {escape(term)}</h3>"
+        else:
+            content = _rrid_render(mat.group(1), src)
+    else:
+        hits, err = _rrid_search(term)
+        if err:
+            content = f"<br>{render_warning(escape(err), 'warning')}"
+        elif not hits:
+            content = f"<br><h3>Nothing found for {escape(term)}</h3>"
+        else:
+            trows = []
+            for hit in hits:
+                hsrc = hit.get('_source') or {}
+                hitem = hsrc.get('item') or {}
+                cur = (hsrc.get('rrid') or {}).get('curie') or ''
+                bare = cur.replace('RRID:', '')
+                trows.append([cell(safe(f"<a href='/rrid/{escape(bare)}'>{escape(cur)}</a>")),
+                              cell(str(hitem.get('name') or '')[:110]),
+                              cell(", ".join(_rrid_names(hitem.get('types')))[:60])])
+            content = f"<br><h4>{len(hits)} match" + ("es" if len(hits) != 1 else "") \
+                      + f" for &quot;{escape(term)}&quot;</h4>" \
+                      + render_table(['RRID', 'Name', 'Type'], trows, table_id='rridhits',
+                                     css='tablesorter standard')
+    endpoint_access()
+    return make_response(render_template('rrid.html', urlroot=request.url_root,
+                                         title="Search RRID", content=content,
+                                         term=escape(term),
+                                         navbar=generate_navbar('System')))
+
 
 # ******************************************************************************
 # * UI endpoints (Tag/affiliation)                                             *

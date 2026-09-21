@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block script %}
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jquery-cookie/1.4.1/jquery.cookie.min.js"></script>
+<script>
+  // One box for both jobs: anything shaped like an identifier goes straight to
+  // the resolver, anything else is treated as a name search. The server decides
+  // which, so the rule lives in one place rather than being duplicated here.
+  function find_rrid() {
+    if (!$('#rrid').val()) {
+      alert("You must enter an RRID or a resource name");
+      return;
+    }
+    window.location = "/rrid/" + encodeURIComponent($("#rrid").val().trim());
+  }
+  function copy_citation(txt) {
+    navigator.clipboard.writeText(txt);
+    $("#copied").fadeIn(120).delay(900).fadeOut(400);
+  }
+</script>
+{% endblock %}
+{% block onload %}
+onload="tableInitialize();"
+{% endblock %}
+
+{% block content %}
+<h2>{{ title }}</h2>
+<form>
+<div class="flexcontainer">
+  <div class="flexitem">
+  <span class="form-control-lg">RRID or resource name:</span>
+  </div>
+  <div class="flexitem">
+    <input type="text" class="form-control form-control-lg" id="rrid"
+           value="{{ term | default('SCR_017823', true) }}" size=34>
+  </div>
+  <div class="flexitem">
+    <button type="submit" id="doib" class="btn btn-primary"
+            onclick="find_rrid(); return false;" href="#">Look up</button>
+  </div>
+</div>
+<div style="font-size:0.85em; color:#a8c4e0; margin:14px 0 6px 0;">
+  Accepts <tt>SCR_017823</tt>, <tt>RRID:AB_2617197</tt>, <tt>IMSR_JAX:000664</tt>,
+  or a name such as <tt>Advanced Imaging Center</tt>.
+</div>
+{{ content | safe }}
+</form>
+{% endblock %}
