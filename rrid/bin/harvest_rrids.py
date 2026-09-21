@@ -22,7 +22,7 @@
     sits behind Cloudflare.
 '''
 
-__version__ = '1.0.0'
+__version__ = '1.1.0'
 
 import argparse
 import collections
@@ -132,29 +132,71 @@ def rrids_from_xml(xml):
     return found
 
 
-def seed_pmids():
-    ''' Every PMID we hold for a Janelia DOI.
-        Keyword arguments:
-          None
+def seed_dois():
+    """ Targets from the dois collection, via PMID.
+        Janelia papers are held with a PMID but no PMC id, so each one has to be
+        resolved through Europe PMC before its full text can be fetched. That is
+        the slow half of the run, and the reason for the cache.
         Returns:
-          Sorted list of PMID strings
-    '''
+          dict of key -> target dict
+    """
     try:
-        rows = DB['dis'].dois.find({"jrc_pmid": {"$exists": True}}, {"jrc_pmid": 1})
+        rows = DB['dis'].dois.find({"jrc_pmid": {"$exists": True}},
+                                   {"jrc_pmid": 1, "doi": 1})
     except Exception as err:
         terminate_program(err)
-    pmids = sorted({str(row['jrc_pmid']) for row in rows})
-    LOGGER.info(f"Seed PMIDs from the dois collection: {len(pmids):,}")
-    return pmids
+    want = {}
+    for row in rows:
+        want[str(row['jrc_pmid'])] = row.get('doi')
+    pmids = sorted(want)
+    LOGGER.info(f"Seed PMIDs from dois: {len(pmids):,}")
+    meta = resolve_pmcids(pmids)
+    out = {}
+    for pmid, rec in meta.items():
+        if not rec.get('pmcid') or not rec.get('oa'):
+            continue
+        out[f"dois:{pmid}"] = {'pmcid': rec['pmcid'], 'title': rec.get('title'),
+                               'doi': rec.get('doi') or want.get(pmid),
+                               'source': 'dois'}
+    LOGGER.info(f"  matched in Europe PMC: {len(meta):,}; with open-access full text: {len(out):,}")
+    return out
+
+
+def seed_external():
+    """ Targets from the external_dois collection, via the PMC id it already holds.
+        These records carry jrc_pmc directly and no PMID at all, so the whole
+        resolution step is skipped. Open-access status is unknown here, so every
+        one is attempted and the failures are counted - cheaper than a second
+        round of lookups to find out in advance.
+        Returns:
+          dict of key -> target dict
+    """
+    try:
+        rows = DB['dis'].external_dois.find({"jrc_pmc": {"$exists": True}},
+                                            {"jrc_pmc": 1, "doi": 1, "title": 1})
+    except Exception as err:
+        terminate_program(err)
+    out = {}
+    for row in rows:
+        pmc = str(row['jrc_pmc']).strip()
+        if not pmc:
+            continue
+        if not pmc.upper().startswith('PMC'):
+            pmc = 'PMC' + pmc
+        out[f"external:{pmc}"] = {'pmcid': pmc, 'doi': row.get('doi'),
+                                  'title': str(row.get('title') or '')[:140],
+                                  'source': 'external_dois'}
+    LOGGER.info(f"Seed PMC ids from external_dois: {len(out):,} (no resolution needed)")
+    return out
 
 
 def resolve_pmcids(pmids):
-    ''' Map PMIDs to PMCIDs, reusing the cache when one is present.
+    """ Map PMIDs to PMCIDs, reusing the cache when one is present.
         Keyword arguments:
           pmids: list of PMID strings
         Returns:
           dict of PMID -> {pmcid, oa, title, doi}
-    '''
+    """
     if os.path.exists(ARG.CACHE):
         with open(ARG.CACHE, encoding='utf-8') as handle:
             meta = json.load(handle)
@@ -185,62 +227,74 @@ def resolve_pmcids(pmids):
 
 
 def processing():  # pylint: disable=too-many-locals
-    ''' Main routine
+    """ Main routine
         Keyword arguments:
           None
         Returns:
           None
-    '''
-    pmids = seed_pmids()
-    meta = resolve_pmcids(pmids)
-    oal = {pmid: rec for pmid, rec in meta.items() if rec.get('pmcid') and rec.get('oa')}
-    LOGGER.info(f"Matched in Europe PMC: {len(meta):,}; with open-access full text: {len(oal):,}")
+    """
+    targets = {}
+    if ARG.SOURCE in ('dois', 'both'):
+        targets.update(seed_dois())
+    if ARG.SOURCE in ('external_dois', 'both'):
+        targets.update(seed_external())
+    LOGGER.info(f"Papers to scan: {len(targets):,}")
     if ARG.LIMIT:
-        oal = dict(list(oal.items())[:ARG.LIMIT])
-        LOGGER.info(f"--limit in force: scanning {len(oal):,}")
+        targets = dict(list(targets.items())[:ARG.LIMIT])
+        LOGGER.info(f"--limit in force: scanning {len(targets):,}")
     results = {}
     done = [0]
 
     def work(item):
-        pmid, rec = item
+        key, rec = item
         resp = get(f"{EPMC}/{rec['pmcid']}/fullTextXML")
         done[0] += 1
         if ARG.VERBOSE and not done[0] % 200:
-            LOGGER.info(f"  fetched {done[0]:,}/{len(oal):,}")
+            LOGGER.info(f"  fetched {done[0]:,}/{len(targets):,}")
         if not resp:
-            COUNT['fulltext_errors'] += 1
-            return pmid, None
-        return pmid, sorted(rrids_from_xml(resp.text))
+            COUNT[f"fulltext_errors_{rec['source']}"] += 1
+            return key, None
+        return key, sorted(rrids_from_xml(resp.text))
 
     with ThreadPoolExecutor(max_workers=ARG.WORKERS) as pool:
-        for pmid, found in pool.map(work, oal.items()):
+        for key, found in pool.map(work, targets.items()):
             if found:
-                results[pmid] = found
+                results[key] = found
+    # Keyed on DOI rather than PMID/PMC so the output joins straight to our own
+    # collections, and so both sources land in one namespace.
     counts = collections.Counter()
     papers = collections.defaultdict(set)
-    for pmid, lst in results.items():
+    for key, lst in results.items():
+        doi = targets[key].get('doi') or key
         for rrid in lst:
             counts[rrid] += 1
-            papers[rrid].add(pmid)
-    with open('rrid_by_paper.json', 'w', encoding='utf-8') as handle:
-        json.dump({pmid: {'rrids': lst, 'doi': meta[pmid].get('doi'),
-                          'title': meta[pmid].get('title')}
-                   for pmid, lst in results.items()}, handle, indent=1)
-    with open('rrids_janelia.tsv', 'w', encoding='utf-8') as handle:
-        handle.write("rrid\tpapers\tpmids\n")
+            papers[rrid].add(doi)
+    with open(f"{ARG.OUTPUT}_by_paper.json", 'w', encoding='utf-8') as handle:
+        json.dump({(targets[k].get('doi') or k): {'rrids': v,
+                                                  'source': targets[k]['source'],
+                                                  'pmcid': targets[k]['pmcid'],
+                                                  'title': targets[k].get('title')}
+                   for k, v in results.items()}, handle, indent=1)
+    with open(f"{ARG.OUTPUT}.tsv", 'w', encoding='utf-8') as handle:
+        handle.write("rrid\tpapers\tdois\n")
         for rrid, cnt in counts.most_common():
             handle.write(f"{rrid}\t{cnt}\t{','.join(sorted(papers[rrid]))}\n")
-    COUNT['papers_scanned'] = len(oal)
-    COUNT['papers_citing_rrids'] = sum(1 for v in results.values() if v)
+    for src in ('dois', 'external_dois'):
+        scanned = sum(1 for t in targets.values() if t['source'] == src)
+        if scanned:
+            cited = sum(1 for k, v in results.items()
+                        if v and targets[k]['source'] == src)
+            COUNT[f"scanned_{src}"] = scanned
+            COUNT[f"citing_rrids_{src}"] = cited
     COUNT['distinct_rrids'] = len(counts)
     print()
     for key in sorted(COUNT):
-        print(f"{key + ':':<26} {COUNT[key]:,}")
+        print(f"{key + ':':<28} {COUNT[key]:,}")
     authority = collections.Counter(rrid.split('_')[0] for rrid in counts)
     print("\nDistinct RRIDs by authority:")
     for auth, cnt in authority.most_common():
         print(f"  {auth + ':':<14} {cnt:,}")
-    print("\nWrote rrids_janelia.tsv and rrid_by_paper.json")
+    print(f"\nWrote {ARG.OUTPUT}.tsv and {ARG.OUTPUT}_by_paper.json")
 
 
 # -----------------------------------------------------------------------------
@@ -251,6 +305,12 @@ if __name__ == '__main__':
     PARSER.add_argument('--manifold', dest='MANIFOLD', action='store',
                         default='prod', choices=['dev', 'prod'],
                         help='MongoDB manifold (dev, prod)')
+    PARSER.add_argument('--source', dest='SOURCE', action='store', default='dois',
+                        choices=['dois', 'external_dois', 'both'],
+                        help='Collection(s) to scan (default: dois)')
+    PARSER.add_argument('--output', dest='OUTPUT', action='store',
+                        default='rrids_janelia',
+                        help='Output filename prefix (default: rrids_janelia)')
     PARSER.add_argument('--cache', dest='CACHE', action='store',
                         default='rrid_pmc_cache.json',
                         help='PMID->PMCID cache file (reused if present)')
