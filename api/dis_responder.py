@@ -52,7 +52,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.51.0"
+__version__ = "120.53.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -2575,6 +2575,78 @@ def get_suporgs():
 # * Tag utility functions                                                      *
 # ******************************************************************************
 
+def tag_rrid_row(tag):
+    ''' The RRID row for a tag's property table, when the matching supervisory
+        organization carries one.
+        Read straight from the suporg document rather than through
+        DL.get_supervisory_orgs(), which whitelists only code and active. That
+        whitelist is deliberate - the acknowledgement taggers store the whole
+        returned dict into jrc_acknowledge[].code, so widening it would stamp the
+        rrid sub-document across the dois collection.
+        Keyword arguments:
+          tag: tag name (matches suporg.name)
+        Returns:
+          One <tr> of HTML, or '' when there is no RRID
+    '''
+    try:
+        rec = DB['dis'].suporg.find_one({"name": tag, "rrid": {"$exists": True}},
+                                        {"rrid": 1})
+    except Exception:
+        return ''
+    if not rec:
+        return ''
+    # Named 'info' rather than 'rrid': the /rrid view function is a module-level
+    # name and a local of the same name shadows it.
+    info = rec['rrid']
+    rid = str(info.get('id') or '')
+    if not rid:
+        return ''
+    # Link to our own /rrid page rather than straight out to SciCrunch: it shows
+    # the proper-citation string and resolves the record live, so a renamed or
+    # retired resource reads correctly without anything cached here being right.
+    cell_html = f"<a href='/rrid/{escape(rid)}'>RRID:{escape(rid)}</a>"
+    if info.get('retired'):
+        cell_html += " <span style='color: yellow;'>(retired)</span>"
+    if info.get('abrf'):
+        fid = escape(str(info['abrf']).split('_', 1)[-1])
+        cell_html += (" &middot; <a href='https://coremarketplace.org/?FacilityID="
+                      + f"{fid}' target='_blank'>CoreMarketplace</a>")
+    return f"<tr><td>RRID</td><td>{cell_html}</td></tr>"
+
+
+def tag_ack_search_row(tag):
+    ''' Whether the acknowledgement tagger is looking for this tag.
+        Worth stating because the absence of acknowledgements is ambiguous
+        otherwise: 26 of the 78 search_regex patterns have never matched
+        anything, and "searched, nothing found" is a different fact from "never
+        searched". The row is only emitted when there is something to say - a
+        pattern exists, or the tag has been applied without one, which is an
+        inconsistency a curator should see.
+        Keyword arguments:
+          tag: tag name (matches search_regex.key and jrc_acknowledge[].name)
+        Returns:
+          One <tr> of HTML, or '' when there is nothing to report
+    '''
+    try:
+        regex = DB['dis'].search_regex.find_one({"key": tag}, {"regex": 1})
+        tagged = DB['dis'].dois.count_documents({"jrc_acknowledge.name": tag})
+    except Exception:
+        return ''
+    if not regex and not tagged:
+        return ''
+    link = f"/acksregexui/{quote(tag, safe='')}"
+    if not regex:
+        # Tagged by hand or by a pattern since removed; nothing will re-find it.
+        return ("<tr><td>Acknowledgement search</td><td>"
+                "<span style='color: yellow;'>No pattern</span> &mdash; "
+                f"<a href='{link}'>{tagged:,} tagged DOI"
+                + ("s" if tagged != 1 else "") + "</a></td></tr>")
+    body = "<span style='color: lime;'>Searched</span> &mdash; "
+    body += (f"<a href='{link}'>{tagged:,} tagged DOI" + ("s" if tagged != 1 else "") + "</a>"
+             if tagged else "no matches yet")
+    return f"<tr><td>Acknowledgement search</td><td>{body}</td></tr>"
+
+
 def get_tag_details(tag):
     ''' Generate details on a tag from the orcid and suporg collections
         Keyword arguments:
@@ -2603,7 +2675,12 @@ def get_tag_details(tag):
     pdict = {}
     for row in rows:
         pdict[row['_id']] = row['count']
-    if not pdict and not acnt:
+    # Acknowledgement-only tags (Fly Core, Cryo-EM Facility) carry no jrc_tag
+    # entries and no ORCID affiliation, so testing only those two suppressed the
+    # whole property table for exactly the tags whose acknowledgement row is most
+    # worth showing.
+    ackcnt = DB['dis'].dois.count_documents({"jrc_acknowledge.name": tag})
+    if not pdict and not acnt and not ackcnt:
         return ''
     parr = []
     pcnt = 0
@@ -2621,6 +2698,8 @@ def get_tag_details(tag):
             html += "<span style='color: yellow;'>Inactive</span></td></tr>"
     else:
         html += f"<tr><td>Tag type</td><td>{tagtype}</td></tr>"
+    html += tag_rrid_row(tag)
+    html += tag_ack_search_row(tag)
     if acnt:
         html += f"<tr><td>Authors with affiliation</td><td>{acnt}</td></tr>"
     if pdict:
