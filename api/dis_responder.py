@@ -5,6 +5,7 @@
 import collections
 import copy
 from datetime import date, datetime, timedelta
+import hashlib
 from html import escape
 import inspect
 import itertools
@@ -52,7 +53,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.53.0"
+__version__ = "120.54.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -16412,8 +16413,33 @@ RRID_PATTERN = re.compile(r'^(?:RRID:)?([A-Za-z][A-Za-z0-9]*_[A-Za-z0-9:.\-]*\d[
 # there is no boolean and no "replaced by" pointer, so it has to be sniffed.
 RRID_RETIRED = 'NO LONGER IN SERVICE'
 RRID_RESOLVER = 'https://scicrunch.org/resolver/'
-RRID_INDICES = ("RIN_Tool_pr", "RIN_Antibody_pr", "RIN_Organism_pr", "RIN_Plasmid_pr",
-                "RIN_CellLine_pr", "RIN_Protocols_pr", "RIN_BioSample_pr")
+# Resource kinds, each a SciCrunch index, with the record counts that make the
+# filter necessary: the antibody index alone holds 3.2M of roughly 6.3M records,
+# so an unfiltered search for a technique name ("Flow Cytometry") returns ~395,000
+# vendor antibody products and buries the handful of facilities and tools someone
+# is actually looking for. Ordered as presented in the pulldown.
+RRID_KINDS = (("tools", "Tools, software &amp; facilities", ("RIN_Tool_pr",)),
+              ("protocols", "Protocols", ("RIN_Protocols_pr",)),
+              ("organisms", "Organisms &amp; stocks", ("RIN_Organism_pr",)),
+              ("plasmids", "Plasmids", ("RIN_Plasmid_pr", "RIN_Addgene_pr",
+                                        "RIN_DGRC_Clones_pr", "RIN_DGRC_Vectors_pr")),
+              ("celllines", "Cell lines", ("RIN_CellLine_pr",)),
+              ("antibodies", "Antibodies", ("RIN_Antibody_pr",)),
+              ("biosamples", "Biosamples", ("RIN_BioSample_pr",)),
+              ("all", "Everything", ()))
+RRID_KIND_MAP = {k: idx for k, _, idx in RRID_KINDS}
+# Default to tools rather than everything: it is the kind DIS users mean, and it
+# is 27,000 records rather than millions.
+RRID_KIND_DEFAULT = "tools"
+RRID_INDICES = tuple(dict.fromkeys(i for _, _, idx in RRID_KINDS for i in idx))
+# Rows per page of a name search. Some terms match enormous numbers of records
+# ("Flow Cytometry" hits ~395,000 across the antibody index), so results are
+# paged rather than fetched whole.
+RRID_SEARCH_PAGE = 50
+# Elasticsearch refuses from+size beyond index.max_result_window, 10,000 by
+# default. Deeper paging needs search_after, which a browsable table cannot
+# drive; past this point the honest answer is to narrow the search.
+RRID_SEARCH_WINDOW = 10000
 
 
 def _rrid_names(block, key='name'):
@@ -16461,30 +16487,56 @@ def _rrid_fetch(rid):
     return (hits[0].get('_source') if hits else None), None
 
 
-def _rrid_search(term):
+def _rrid_search(term, offset=0, kind=RRID_KIND_DEFAULT):
     """ Name search across the resource indices.
         This is the one path that needs SCICRUNCH_API_KEY; the resolver above
         does not. Without a key the page still resolves identifiers and only
         name search is unavailable, which is what the caller reports.
         Keyword arguments:
           term: free-text name
+          offset: rows to skip (paging)
+          kind: resource-kind key from RRID_KINDS ("all" searches every index)
         Returns:
-          (list of hits, error string or None)
+          (list of hits, true match count, error string or None)
     """
     key = os.environ.get('SCICRUNCH_API_KEY')
     if not key:
         return [], "Name search needs SCICRUNCH_API_KEY; identifier lookup still works."
-    body = {"size": 25,
-            "_source": ["rrid.curie", "item.name", "item.types", "item.description"],
+    body = {"size": RRID_SEARCH_PAGE, "from": offset,
+            # item.identifier is the fallback when rrid.curie is absent, which it
+            # is on a meaningful minority of records - it has to be projected or
+            # the fallback silently cannot fire and those rows vanish.
+            "_source": ["rrid.curie", "item.identifier", "item.name", "item.types",
+                        "item.description"],
             "query": {"query_string": {"query": f'"{term}"'}}}
+    # Results are relevance-ordered, but 43 of 50 rows on a typical page share a
+    # score, and the default distributed search answers successive pages from
+    # whichever shard copies respond - so repeating one request returned a
+    # different order, and paging could show a record twice or skip it entirely.
+    # An explicit _id tiebreak is not enough on its own (it made coverage worse
+    # in testing, 92 of 93); pinning shard selection with `preference` is what
+    # actually fixes it. Keyed on the search term so one search stays consistent
+    # while different searches still spread across replicas.
+    body['sort'] = [{"_score": "desc"}, {"_id": "asc"}]
+    pref = hashlib.md5(term.encode('utf-8')).hexdigest()[:12]
     try:
-        resp = requests.post(f"https://api.scicrunch.io/elastic/{','.join(RRID_INDICES)}/_search",
+        indices = RRID_KIND_MAP.get(kind) or RRID_INDICES
+        resp = requests.post(f"https://api.scicrunch.io/elastic/{','.join(indices)}"
+                             f"/_search?preference={pref}",
                              json=body, headers={'apikey': key}, timeout=20)
     except Exception as err:
-        return [], str(err)
+        return [], 0, str(err)
     if resp.status_code != 200:
-        return [], f"SciCrunch search returned HTTP {resp.status_code}"
-    return resp.json().get('hits', {}).get('hits', []), None
+        return [], 0, f"SciCrunch search returned HTTP {resp.status_code}"
+    hits = resp.json().get('hits', {})
+    # Elasticsearch reports the true match count separately from the page of
+    # documents returned. Reporting len(hits) instead called every large result
+    # set "25 matches", which is wrong rather than merely truncated. Newer
+    # clusters cap the count and flag it with relation "gte".
+    total = hits.get('total')
+    if isinstance(total, dict):
+        total = total.get('value', 0)
+    return hits.get('hits', []), (total or 0), None
 
 
 def _rrid_suporg(src):
@@ -16605,6 +16657,55 @@ def _rrid_render(rid, src):
     return html
 
 
+def _rrid_kind_bar(term, current):
+    ''' Resource-kind selector, rendered as links so the choice lives in the URL
+        and a filtered search can be bookmarked or shared.
+        Keyword arguments:
+          term: search term
+          current: active kind key
+        Returns:
+          HTML
+    '''
+    enc = quote(term, safe='')
+    bits = []
+    for key, label, _ in RRID_KINDS:
+        if key == current:
+            bits.append(f"<span style='font-weight:700;color:#89c242'>{label}</span>")
+        else:
+            bits.append(f"<a href='/rrid/{enc}?kind={key}'>{label}</a>")
+    return ("<div style='font-size:0.9em;margin:4px 0 10px 0'>"
+            "<span style='color:#a8c4e0'>Show:</span> "
+            + " &nbsp;|&nbsp; ".join(bits) + "</div>")
+
+
+def _rrid_pager(term, page, total, kind=RRID_KIND_DEFAULT):
+    ''' Previous/next links for a paged name search.
+        Keyword arguments:
+          term: search term
+          page: current 1-based page
+          total: true match count
+          kind: current resource kind, carried through the links
+        Returns:
+          HTML, or '' when everything fits on one page
+    '''
+    pages = (min(total, RRID_SEARCH_WINDOW) + RRID_SEARCH_PAGE - 1) // RRID_SEARCH_PAGE
+    if pages <= 1:
+        return ''
+    enc = quote(term, safe='') + f"?kind={quote(kind, safe='')}"
+    bits = []
+    if page > 1:
+        bits.append(f"<a href='/rrid/{enc}&page={page - 1}'>&laquo; Previous</a>")
+    bits.append(f"<span style='color:#a8c4e0'>Page {page:,} of {pages:,}</span>")
+    if page < pages:
+        bits.append(f"<a href='/rrid/{enc}&page={page + 1}'>Next &raquo;</a>")
+    note = ''
+    if total > RRID_SEARCH_WINDOW:
+        note = ("<div style='font-size:0.85em;color:#a8c4e0'>Only the first "
+                f"{RRID_SEARCH_WINDOW:,} of {total:,} are reachable; narrow the "
+                "search to see the rest.</div>")
+    return f"<div style='margin:8px 0'>{' &nbsp;|&nbsp; '.join(bits)}</div>{note}"
+
+
 @app.route('/rrid/<path:term>')
 @app.route('/rrid')
 def rrid(term=None):
@@ -16625,25 +16726,55 @@ def rrid(term=None):
         else:
             content = _rrid_render(mat.group(1), src)
     else:
-        hits, err = _rrid_search(term)
+        kind = request.args.get('kind', RRID_KIND_DEFAULT)
+        if kind not in RRID_KIND_MAP:
+            kind = RRID_KIND_DEFAULT
+        page = max(1, request.args.get('page', 1, type=int))
+        offset = (page - 1) * RRID_SEARCH_PAGE
+        if offset >= RRID_SEARCH_WINDOW:
+            hits, total, err = [], 0, ("Cannot page beyond "
+                                       f"{RRID_SEARCH_WINDOW:,} results; narrow the search.")
+        else:
+            hits, total, err = _rrid_search(term, offset, kind)
         if err:
             content = f"<br>{render_warning(escape(err), 'warning')}"
+        elif not hits and page > 1:
+            # Out of range rather than empty - saying "nothing found" here would
+            # contradict the result count the reader just paged through.
+            content = f"<br><h3>No results on page {page:,} for " \
+                      + f"{escape(term)}</h3>" + _rrid_kind_bar(term, kind) \
+                      + "<div style='margin:8px 0'><a href='/rrid/" \
+                      + f"{quote(term, safe='')}?kind={quote(kind, safe='')}'>" \
+                      + "&laquo; Back to the first page</a></div>"
         elif not hits:
-            content = f"<br><h3>Nothing found for {escape(term)}</h3>"
+            content = f"<br><h3>Nothing found for {escape(term)}</h3>" \
+                      + _rrid_kind_bar(term, kind)
         else:
             trows = []
             for hit in hits:
                 hsrc = hit.get('_source') or {}
                 hitem = hsrc.get('item') or {}
-                cur = (hsrc.get('rrid') or {}).get('curie') or ''
-                bare = cur.replace('RRID:', '')
+                bare = ((hsrc.get('rrid') or {}).get('curie')
+                        or str(hitem.get('identifier') or '')).replace('RRID:', '')
+                if not bare:
+                    # No usable identifier - nothing to link to, so drop the row
+                    # rather than render a dead link.
+                    continue
+                cur = f"RRID:{bare}"
                 trows.append([cell(safe(f"<a href='/rrid/{escape(bare)}'>{escape(cur)}</a>")),
                               cell(str(hitem.get('name') or '')[:110]),
                               cell(", ".join(_rrid_names(hitem.get('types')))[:60])])
-            content = f"<br><h4>{len(hits)} match" + ("es" if len(hits) != 1 else "") \
-                      + f" for &quot;{escape(term)}&quot;</h4>" \
-                      + render_table(['RRID', 'Name', 'Type'], trows, table_id='rridhits',
-                                     css='tablesorter standard')
+            first = offset + 1
+            last = offset + len(hits)
+            head = f"{total:,} match" + ("es" if total != 1 else "") \
+                   + f" for &quot;{escape(term)}&quot;"
+            if total > len(hits):
+                head += f" &mdash; showing {first:,}&ndash;{last:,}"
+            content = f"<br><h4>{head}</h4>{_rrid_kind_bar(term, kind)}" \
+                      + _rrid_pager(term, page, total, kind)
+            content += render_table(['RRID', 'Name', 'Type'], trows, table_id='rridhits',
+                                    css='tablesorter standard')
+            content += _rrid_pager(term, page, total, kind)
     endpoint_access()
     return make_response(render_template('rrid.html', urlroot=request.url_root,
                                          title="Search RRID", content=content,
