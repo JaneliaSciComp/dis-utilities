@@ -148,7 +148,7 @@ import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
 import jrc_email.jrc_email as JE
 
-__version__ = '1.8.0'
+__version__ = '1.9.1'
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation,line-too-long
 
@@ -250,6 +250,20 @@ COMPILED = []
 # JFRC is word-boundary anchored so it does not fire on the common Drosophila plasmid
 # names ("pJFRC7", "pJFRC26", ...), which are not campus references.
 JANELIA_GATE = re.compile(r'Janelia|\bJFRC\b', re.IGNORECASE)
+# Evidence snippets are clipped to the sentence containing the match, not to a
+# fixed character count, which left ragged fragments of the neighbouring
+# sentences. A sentence ends at .!? followed by whitespace - but acknowledgements
+# are full of initials ("L. D. Lavis"), titles and degrees, so those are excluded
+# or every name would split a sentence.
+EVIDENCE_ABBR = (r'(?<!\b[A-Z])(?<!\bDr)(?<!\bProf)(?<!\bMr)(?<!\bMs)'
+                 r'(?<!\bSt)(?<!\bPh\.D)(?<!\bM\.D)(?<!\bvs)')
+EVIDENCE_END = re.compile(EVIDENCE_ABBR + r'[.!?](?=\s)')
+# How far either side of the match the sentence is allowed to run before it is
+# cut short, and an absolute ceiling for the patterns that match a long span
+# themselves (e.g. \bAIC\b.*?\(HHMI). Without these a run-on sentence produced
+# snippets over 1,300 characters.
+EVIDENCE_SPAN = 140
+EVIDENCE_MAX = 300
 
 
 def ack_to_text(ack):
@@ -302,6 +316,45 @@ def find_acknowledged(text, require_gate=True):
         if regex.search(text):
             found.add(key)
     return sorted(found)
+
+
+def match_evidence(text, names):  # pylint: disable=too-many-locals
+    """ The acknowledgement text that caused each entity to match.
+        A dry run reports which DOIs would gain which tags, but not why, so
+        reviewing a pattern change meant re-deriving the match by hand. The
+        snippet is clipped to the sentence containing the match, and is written
+        to the JSON snapshot only - it is deliberately NOT
+        stored on jrc_acknowledge, which would change the tag shape every
+        consumer reads and bloat the dois collection with duplicated text.
+        Keyword arguments:
+          text: acknowledgement text
+          names: entity keys detected in it
+        Returns:
+          dict of entity key -> surrounding snippet
+    """
+    out = {}
+    wanted = set(names)
+    for key, regex in COMPILED:
+        if key not in wanted:
+            continue
+        mat = regex.search(text)
+        if not mat:
+            continue
+        low = 0
+        for end in EVIDENCE_END.finditer(text, 0, mat.start()):
+            low = end.end()
+        nxt = EVIDENCE_END.search(text, mat.end())
+        high = nxt.end() if nxt else len(text)
+        cut_lo = max(low, mat.start() - EVIDENCE_SPAN)
+        cut_hi = min(high, mat.end() + EVIDENCE_SPAN)
+        snippet = re.sub(r'\s+', ' ', text[cut_lo:cut_hi]).strip()
+        prefix = '...' if cut_lo > low else ''
+        suffix = '...' if cut_hi < high else ''
+        if len(snippet) > EVIDENCE_MAX:
+            snippet = snippet[:EVIDENCE_MAX].rsplit(' ', 1)[0]
+            suffix = '...'
+        out[key] = prefix + snippet + suffix
+    return out
 
 
 def get_suporg_code(name):
@@ -706,7 +759,10 @@ def processing():  # pylint: disable=too-many-locals,too-many-branches,too-many-
         # a new tag this run.
         if not added:
             continue
-        result = {"doi": doi, "acknowledged": names, "jrc_acknowledge": merged}
+        result = {"doi": doi, "acknowledged": names, "jrc_acknowledge": merged,
+                  # Only the tags gained this run - the point is reviewing what
+                  # changed, not re-justifying tags already accepted.
+                  "evidence": match_evidence(rec['text'], added)}
         # Split output by source collection.
         if collection == 'dois':
             internal.append(result)
