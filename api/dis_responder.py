@@ -53,7 +53,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.54.0"
+__version__ = "120.56.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -1558,13 +1558,39 @@ def get_legal_information(row):
     return ltext
 
 
-def get_relations_from_row(row):
+# Relation types that dataset_supplement_html() already renders. Both registrars
+# and both directions, since a pane can show either end of the pair.
+SUPPLEMENT_RELATIONS = frozenset(('IsSupplementTo', 'IsSupplementedBy',
+                                  'is-supplement-to', 'is-supplemented-by'))
+DOI_VERSION = re.compile(r'\.v\d+$', re.I)
+
+
+def doi_stem(doi):
+    """ A DOI without its trailing version suffix.
+        jrc_dataset_supplement stores base DOIs while the raw registrar payload
+        still names every version, so matching the two needs the suffix gone or
+        janelia.12106749.v2 would survive suppression.
+        Keyword arguments:
+          doi: DOI string or None
+        Returns:
+          Lower-cased DOI with any trailing .vN removed
+    """
+    return DOI_VERSION.sub('', str(doi or '').lower().strip())
+
+
+def get_relations_from_row(row, skip=None):
     ''' Get relations from a row
         Keyword arguments:
           row: DOI record
+          skip: set of version-stripped DOIs already shown by
+                dataset_supplement_html(), suppressed here so the same fact is
+                not stated twice in one pane. Only supplement relations are
+                suppressed - a versioning or collection relation to the same DOI
+                is a different fact and still belongs in the raw list.
         Returns:
           relations
     '''
+    skip = skip or set()
     relations = {}
     if "relation" in row and row['relation']:
         # Crossref relations
@@ -1572,6 +1598,8 @@ def get_relations_from_row(row):
             used = []
             for itm in row['relation'][rel]:
                 if itm['id'] in used:
+                    continue
+                if rel in SUPPLEMENT_RELATIONS and doi_stem(itm['id']) in skip:
                     continue
                 if rel not in relations:
                     relations[rel] = []
@@ -1585,6 +1613,9 @@ def get_relations_from_row(row):
     elif 'relatedIdentifiers' in row and row['relatedIdentifiers']:
         # DataCite relations
         for rel in row['relatedIdentifiers']:
+            if rel.get('relationType') in SUPPLEMENT_RELATIONS \
+               and doi_stem(rel.get('relatedIdentifier')) in skip:
+                continue
             if 'relatedIdentifierType' in rel and rel['relatedIdentifierType'] == 'DOI':
                 if rel['relationType'] not in relations:
                     relations[rel['relationType']] = []
@@ -1596,14 +1627,93 @@ def get_relations_from_row(row):
     return relations
 
 
-def add_relations(row):
+def dataset_supplement_html(entries):
+    """ Render jrc_dataset_supplement for the Related DOIs pane.
+        A figshare deposit is usually a collection plus its member items, all
+        declaring the same supplement link, so an article can carry a dozen
+        entries where the reader wants one answer. The collection is promoted to
+        the top and its items are tucked into a collapsed list beneath it - the
+        stored field keeps every DOI, the display just leads with the useful one.
+        Keyword arguments:
+          entries: jrc_dataset_supplement list
+        Returns:
+          HTML
+    """
+    lead = [e for e in entries if '.c.' in str(e.get('doi') or '')]
+    rest = [e for e in entries if e not in lead]
+    verb = {'supplements': 'This DOI supplements',
+            'supplemented_by': 'Data for this DOI'}
+
+    def line(ent):
+        doi = str(ent.get('doi') or '')
+        src = escape(str(ent.get('source') or ''))
+        return (f"<a href='/doiui/{quote(doi, safe='/')}'>{escape(doi)}</a>"
+                f" <span style='font-size:0.8em;color:#a8c4e0'>({src})</span>")
+    groups = {}
+    for ent in (lead or entries):
+        groups.setdefault(ent.get('relation'), []).append(ent)
+    html = ""
+    for rel, ents in groups.items():
+        html += (f"<div style='margin-bottom:6px'><b>{escape(verb.get(rel, rel))}</b>: "
+                 + ", ".join(line(e) for e in ents) + "</div>")
+    # Only worth collapsing when a collection actually stood in for the items.
+    if lead and rest:
+        html += ("<details style='margin-bottom:8px'>"
+                 f"<summary style='cursor:pointer;color:#a8c4e0'>{len(rest)} individual "
+                 "deposit" + ("s" if len(rest) != 1 else "") + "</summary>"
+                 + supplement_table(rest) + "</details>")
+    return html
+
+
+def supplement_table(entries):
+    ''' DOI/type/title table for the collapsed deposit list.
+        A bare DOI says nothing about what was deposited, and the distinction
+        matters - one entry is usually analysis code while the rest are raw data.
+        Type and title are read from our own records in a single query; a DOI we
+        do not hold still gets a row, with the columns left empty rather than
+        omitted, so the count in the summary always matches the rows shown.
+        Keyword arguments:
+          entries: jrc_dataset_supplement entries to tabulate
+        Returns:
+          HTML table
+    '''
+    dois = [str(e.get('doi') or '') for e in entries]
+    known = {}
+    try:
+        # DL.get_title() decides Crossref vs DataCite by testing for the
+        # upper-case "DOI" key, so omitting it sends every Crossref record down
+        # the DataCite branch and returns the literal "No title".
+        for rec in DB['dis'].dois.find({"doi": {"$in": dois}},
+                                       {"doi": 1, "DOI": 1, "titles": 1, "title": 1,
+                                        "type": 1, "subtype": 1, "types": 1}):
+            known[rec['doi']] = rec
+    except Exception:
+        pass
+    rows = []
+    for doi in dois:
+        rec = known.get(doi)
+        kind = title = ''
+        if rec:
+            kind = (rec.get('types') or {}).get('resourceTypeGeneral') \
+                   or rec.get('subtype') or rec.get('type') or ''
+            title = render_title_html(DL.get_title(rec))
+        rows.append([cell(safe(f"<a href='/doiui/{quote(doi, safe='/')}'>{escape(doi)}</a>")),
+                     cell(str(kind)),
+                     cell(safe(title))])
+    return render_table(['DOI', 'Type', 'Title'], rows, table_id='dssupp',
+                        css='tablesorter standard')
+
+
+def add_relations(row, skip=None):
     ''' Create a list of relations
         Keyword arguments:
           row: DOI record
+          skip: DOIs already rendered from jrc_dataset_supplement (see
+                get_relations_from_row)
         Returns:
           HTML
     '''
-    relations = get_relations_from_row(row)
+    relations = get_relations_from_row(row, skip)
     html = ""
     for rel, val in relations.items():
         if '-' not in rel:
@@ -6317,7 +6427,10 @@ def doi_tabs(doi, row, rowext, data, authors):
         if ahtml != "&nbsp;":
             content['subjects'] = ahtml
     # Relations
-    rels = add_relations(data)
+    supp = row.get('jrc_dataset_supplement') if row else None
+    rels = add_relations(data, {doi_stem(e.get('doi')) for e in supp} if supp else None)
+    if supp:
+        rels = dataset_supplement_html(supp) + rels
     if rels:
         content['related'] = rels
     # Legal information
