@@ -41,7 +41,7 @@ import doi_common.doi_common as DL
 import dis_plots as DP
 from dis_html import (DOWNLOAD_ICON, add_jrc_fields, add_subjects, cell,
                       create_downloadable, dloop, doi_link, fcell,
-                      generate_navbar, get_license, make_link,
+                      generate_navbar, get_license,
                       oa_status_rank, registrar_switch, render_table, render_warning,
                       safe, see_also, stat_cards, tab_button, tab_pane, tiny_badge,
                       two_col, year_pulldown as _year_pulldown)
@@ -53,7 +53,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.56.0"
+__version__ = "120.57.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -1560,6 +1560,9 @@ def get_legal_information(row):
 
 # Relation types that dataset_supplement_html() already renders. Both registrars
 # and both directions, since a pane can show either end of the pair.
+# Only http(s) URLs are turned into links; anything else (javascript:, data:)
+# is rendered as text. Registrar metadata is not trusted input.
+SAFE_URL = re.compile(r'^https?://', re.I)
 SUPPLEMENT_RELATIONS = frozenset(('IsSupplementTo', 'IsSupplementedBy',
                                   'is-supplement-to', 'is-supplemented-by'))
 DOI_VERSION = re.compile(r'\.v\d+$', re.I)
@@ -1576,6 +1579,131 @@ def doi_stem(doi):
           Lower-cased DOI with any trailing .vN removed
     """
     return DOI_VERSION.sub('', str(doi or '').lower().strip())
+
+
+# Relations that only restate a DOI's own versioning or collection membership.
+# Nearly half of all relation entries are these (IsIdenticalTo 2,632, IsPartOf
+# 2,408, IsVersionOf 957, IsPreviousVersionOf 249), and as equal citizens they
+# buried the handful that say something, so they are collapsed.
+RELATION_VERSIONS = frozenset((
+    'IsIdenticalTo', 'IsVersionOf', 'HasVersion', 'IsPreviousVersionOf',
+    'IsNewVersionOf', 'IsPartOf', 'HasPart', 'IsOriginalFormOf', 'IsVariantFormOf',
+    'is-version-of', 'has-version', 'is-same-as', 'is-identical-to',
+    'is-component-of', 'is-part-of', 'has-part', 'replaces', 'is-replaced-by'))
+# Peer-review artifacts - eLife deposits a DOI per review round (…sa0/sa1/sa2).
+RELATION_REVIEWS = frozenset(('has-review', 'is-review-of', 'IsReviewedBy', 'Reviews'))
+# Outbound bibliography. DataCite depositors put their works-cited list in
+# relatedIdentifiers as "References" - 84 entries on one figshare deposit, 4,183
+# across the corpus, the largest relation type there is. It is the works this DOI
+# cites rather than a relationship to it, so it gets its own disclosure rather
+# than being mixed in with versions. Inbound citation (IsCitedBy, is-referenced-by)
+# stays visible: it is rare and says something about this DOI.
+RELATION_BIBLIOGRAPHY = frozenset(('References', 'references', 'Cites', 'cites'))
+# Mechanically de-kebabbing a relation type produces odd English ("This DOI is
+# supplement to"), so the common ones get a plain noun phrase instead.
+RELATION_LABEL = {
+    'has-preprint': 'Preprint', 'is-preprint-of': 'Published version',
+    'IsPreprintOf': 'Published version', 'HasPreprint': 'Preprint',
+    'is-supplement-to': 'Supplement to', 'IsSupplementTo': 'Supplement to',
+    'is-supplemented-by': 'Supplementary data', 'IsSupplementedBy': 'Supplementary data',
+    'references': 'References', 'References': 'References',
+    'is-referenced-by': 'Referenced by', 'IsReferencedBy': 'Referenced by',
+    'Cites': 'Cites', 'IsCitedBy': 'Cited by',
+    'IsDerivedFrom': 'Derived from', 'IsSourceOf': 'Source of',
+    'Describes': 'Describes', 'IsDescribedBy': 'Described by',
+    'IsPublishedIn': 'Published in', 'documents': 'Documents',
+    'is-financed-by': 'Funded by', 'finances': 'Funds',
+    'is-reply-to': 'Reply to', 'is-basis-for': 'Basis for', 'Requires': 'Requires'}
+# Accession numbers were rendered as bare codes with no label and no link; these
+# four shapes cover most of what appears (GEO 34, EMDB 20, PDB 18, SRA 5).
+ACCESSION_RESOLVERS = (
+    (re.compile(r'^EMD-\d+$', re.I), 'https://www.ebi.ac.uk/emdb/{}', 'EMDB'),
+    (re.compile(r'^GSE\d+$', re.I), 'https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc={}', 'GEO'),
+    (re.compile(r'^[SED]R[APRSX]\d+$', re.I), 'https://www.ncbi.nlm.nih.gov/sra/{}', 'SRA'),
+    (re.compile(r'^[0-9][A-Za-z0-9]{3}$'), 'https://www.rcsb.org/structure/{}', 'PDB'))
+
+
+def accession_link(ident):
+    ''' Render an accession number, linked to its resolver when the shape is
+        recognised. Unrecognised values (project names like "hemibrain:v1.1")
+        are shown as plain text rather than guessed at.
+        Keyword arguments:
+          ident: accession string
+        Returns:
+          HTML
+    '''
+    for pattern, url, label in ACCESSION_RESOLVERS:
+        if pattern.match(ident):
+            return (f"<a href='{url.format(quote(ident, safe=''))}' target='_blank'>"
+                    f"{escape(ident)}</a> <span style='font-size:0.8em;color:#a8c4e0'>"
+                    f"({label})</span>")
+    return escape(ident)
+
+
+def relation_titles(idents):
+    ''' Titles and types for related DOIs we hold, in one query.
+        Two thirds of related DOIs are in our own collection, so most of this
+        pane can name the thing it points at instead of showing a bare
+        identifier. DL.get_title() decides Crossref vs DataCite by testing for
+        the upper-case "DOI" key, so that field has to be projected or every
+        Crossref record returns the literal "No title".
+        Keyword arguments:
+          idents: iterable of DOI strings
+        Returns:
+          dict of lower-cased DOI -> (title, type)
+    '''
+    want = sorted({str(i or '').lower() for i in idents if i})
+    if not want:
+        return {}
+    out = {}
+    try:
+        for rec in DB['dis'].dois.find({"doi": {"$in": want}},
+                                       {"doi": 1, "DOI": 1, "titles": 1, "title": 1,
+                                        "type": 1, "subtype": 1, "types": 1}):
+            kind = (rec.get('types') or {}).get('resourceTypeGeneral') \
+                   or rec.get('subtype') or rec.get('type') or ''
+            out[str(rec['doi']).lower()] = (DL.get_title(rec), str(kind))
+    except Exception:
+        return {}
+    return out
+
+
+def relation_entry(ident, idtype, known):
+    ''' One related identifier, with its title when we hold it.
+        Keyword arguments:
+          ident: identifier
+          idtype: Crossref/DataCite identifier type
+          known: map from relation_titles()
+        Returns:
+          HTML
+    '''
+    low = str(ident or '').lower()
+    if str(idtype).lower() == 'accession':
+        return accession_link(str(ident))
+    if str(idtype).lower() in ('uri', 'url'):
+        # These values come from registrar metadata, so they are not trusted.
+        # make_link() interpolates a URL into href without escaping, and a
+        # "javascript:" value would become a live link, so only http(s) is
+        # linked and everything else is shown as text.
+        url = str(ident)
+        if not SAFE_URL.match(url):
+            return escape(url)
+        return f"<a href='{escape(url, quote=True)}' target='_blank'>{escape(url)}</a>"
+    if low in known:
+        title, kind = known[low]
+        extra = f" <span style='font-size:0.8em;color:#a8c4e0'>({escape(kind)})</span>" \
+                if kind else ""
+        # DL.get_title() returns the literal "No title" when a record has none -
+        # true of 15 held DOIs, mostly grant records - and printing that as if it
+        # were the title is worse than printing nothing.
+        shown = f" &mdash; {render_title_html(title)}" \
+                if title and str(title).strip().lower() != 'no title' else ""
+        return (f"<a href='/doiui/{quote(str(ident), safe='/')}'>{escape(str(ident))}</a>"
+                f"{extra}{shown}")
+    # Not ours: no title to show, so link out to the registrar instead. Built
+    # here rather than via doi_link(), which does not escape its argument.
+    return (f"<a href='https://doi.org/{quote(str(ident), safe='/')}' target='_blank'>"
+            f"{escape(str(ident))}</a>")
 
 
 def get_relations_from_row(row, skip=None):
@@ -1601,14 +1729,7 @@ def get_relations_from_row(row, skip=None):
                     continue
                 if rel in SUPPLEMENT_RELATIONS and doi_stem(itm['id']) in skip:
                     continue
-                if rel not in relations:
-                    relations[rel] = []
-                if itm['id-type'] == 'uri':
-                    relations[rel].append(f"<a href='{itm['id']}'>(Other resource)</a>")
-                elif itm['id-type'] == 'doi':
-                    relations[rel].append(doi_link(itm['id']))
-                else:
-                    relations[rel].append(itm['id'])
+                relations.setdefault(rel, []).append((itm['id'], itm.get('id-type')))
                 used.append(itm['id'])
     elif 'relatedIdentifiers' in row and row['relatedIdentifiers']:
         # DataCite relations
@@ -1616,14 +1737,9 @@ def get_relations_from_row(row, skip=None):
             if rel.get('relationType') in SUPPLEMENT_RELATIONS \
                and doi_stem(rel.get('relatedIdentifier')) in skip:
                 continue
-            if 'relatedIdentifierType' in rel and rel['relatedIdentifierType'] == 'DOI':
-                if rel['relationType'] not in relations:
-                    relations[rel['relationType']] = []
-                relations[rel['relationType']].append(doi_link(rel['relatedIdentifier']))
-            elif 'relatedIdentifierType' in rel and rel['relatedIdentifierType'] == 'URL':
-                if rel['relationType'] not in relations:
-                    relations[rel['relationType']] = []
-                relations[rel['relationType']].append(make_link(rel['relatedIdentifier']))
+            if rel.get('relatedIdentifierType') in ('DOI', 'URL'):
+                relations.setdefault(rel['relationType'], []).append(
+                    (rel['relatedIdentifier'], rel['relatedIdentifierType']))
     return relations
 
 
@@ -1641,21 +1757,31 @@ def dataset_supplement_html(entries):
     """
     lead = [e for e in entries if '.c.' in str(e.get('doi') or '')]
     rest = [e for e in entries if e not in lead]
-    verb = {'supplements': 'This DOI supplements',
-            'supplemented_by': 'Data for this DOI'}
+    # Same wording as RELATION_LABEL so this block and the raw relation list below
+    # it read as one pane rather than two styles stacked.
+    verb = {'supplements': 'Supplement to',
+            'supplemented_by': 'Supplementary data'}
+    known = relation_titles(e.get('doi') for e in entries)
 
     def line(ent):
         doi = str(ent.get('doi') or '')
         src = escape(str(ent.get('source') or ''))
-        return (f"<a href='/doiui/{quote(doi, safe='/')}'>{escape(doi)}</a>"
-                f" <span style='font-size:0.8em;color:#a8c4e0'>({src})</span>")
+        out = (f"<a href='/doiui/{quote(doi, safe='/')}'>{escape(doi)}</a>"
+               f" <span style='font-size:0.8em;color:#a8c4e0'>({src})</span>")
+        hit = known.get(doi.lower())
+        if hit and hit[0]:
+            out += f" &mdash; {render_title_html(hit[0])}"
+        return out
     groups = {}
     for ent in (lead or entries):
         groups.setdefault(ent.get('relation'), []).append(ent)
     html = ""
     for rel, ents in groups.items():
-        html += (f"<div style='margin-bottom:6px'><b>{escape(verb.get(rel, rel))}</b>: "
-                 + ", ".join(line(e) for e in ents) + "</div>")
+        # One per line, with the same indent add_relations() uses below, so the
+        # two halves of the pane do not read as different components.
+        indent = "<br>&nbsp;&nbsp;&nbsp;&nbsp;" if len(ents) > 1 else " "
+        html += (f"<div style='margin-bottom:6px'><b>{escape(verb.get(rel, rel))}</b>:"
+                 + "".join(f"{indent}{line(e)}" for e in ents) + "</div>")
     # Only worth collapsing when a collection actually stood in for the items.
     if lead and rest:
         html += ("<details style='margin-bottom:8px'>"
@@ -1714,12 +1840,95 @@ def add_relations(row, skip=None):
           HTML
     '''
     relations = get_relations_from_row(row, skip)
-    html = ""
-    for rel, val in relations.items():
+    if not relations:
+        return ""
+    known = relation_titles(i for vals in relations.values() for i, t in vals
+                            if str(t).lower() == 'doi')
+
+    def label(rel):
+        # When jrc_dataset_supplement has already rendered a "Supplementary data"
+        # block (skip is non-empty), whatever survives here is the material that
+        # field cannot hold - non-DOI targets like a Software Heritage snapshot.
+        # Calling both blocks the same thing produced two identical headings on
+        # 18 records; naming the remainder for what it is avoids that.
+        if skip and rel in ('is-supplemented-by', 'IsSupplementedBy'):
+            return 'Other supplementary material'
+        if rel in RELATION_LABEL:
+            return RELATION_LABEL[rel]
+        if rel in RELATION_LABEL.values():
+            return rel
         if '-' not in rel:
-            words = re.split('(?<=.)(?=[A-Z])', rel)
-            rel = ' '.join(wrd.lower() for wrd in words)
-        html += f"This DOI {rel.replace('-', ' ')} " + ", ".join(val) + "<br>"
+            rel = ' '.join(w.lower() for w in re.split('(?<=.)(?=[A-Z])', rel))
+        return rel.replace('-', ' ').capitalize()
+
+    def block(items, headings=True):
+        out = ""
+        for rel, vals in items:
+            rendered = [relation_entry(i, t, known) for i, t in vals]
+            pad = "&nbsp;&nbsp;&nbsp;&nbsp;"
+            multi = len(rendered) > 1
+            # Every entry carries its own indent rather than relying on the
+            # heading to supply the separator before the first one. The first
+            # entry takes the indent WITHOUT a line break: with no heading above
+            # it, a leading <br> renders as a blank line where the heading would
+            # have been.
+            body = ""
+            for idx, ent in enumerate(rendered):
+                if not multi:
+                    body += f" {ent}"
+                elif idx == 0 and not headings:
+                    body += f"{pad}{ent}"
+                else:
+                    body += f"<br>{pad}{ent}"
+            head = f"<b>{escape(rel)}</b>:" if headings else ""
+            out += f"<div style='margin-bottom:4px'>{head}{body}</div>"
+        return out
+    def merge(items):
+        ''' Combine relation types that render under the same label, so a record
+            carrying both is-supplemented-by and IsSupplementedBy - or a raw
+            supplement alongside jrc_dataset_supplement - shows one block rather
+            than two identical headings. Returns labels, already rendered, which
+            is why block() takes them as-is: passing one back through label()
+            would re-derive it, and any label with a mid-string capital ("PDB
+            structures") came back mangled ("P d b structures").
+        '''
+        out = {}
+        for rel, vals in items:
+            out.setdefault(label(rel), []).extend(vals)
+        return list(out.items())
+    primary = [(r, v) for r, v in relations.items()
+               if r not in RELATION_VERSIONS and r not in RELATION_REVIEWS
+               and r not in RELATION_BIBLIOGRAPHY]
+    versions = [(r, v) for r, v in relations.items() if r in RELATION_VERSIONS]
+    reviews = [(r, v) for r, v in relations.items() if r in RELATION_REVIEWS]
+    biblio = [(r, v) for r, v in relations.items() if r in RELATION_BIBLIOGRAPHY]
+    html = block(merge(primary))
+    if biblio:
+        count = sum(len(v) for _, v in biblio)
+        html += ("<details style='margin-bottom:6px'><summary style='cursor:pointer;"
+                 f"color:#a8c4e0'>{count:,} reference" + ("s" if count != 1 else "")
+                 + " cited by this DOI</summary>"
+                 # The summary already names them, so a "References:" heading
+                 # underneath just says it twice. Headings return only when both
+                 # References and Cites are present (3 records), where dropping
+                 # them would merge two different relations into one list.
+                 f"<div style='margin:6px 0'>{block(merge(biblio), len(biblio) > 1)}"
+                 "</div></details>")
+    # Versions, collection membership and review rounds are real but rarely what
+    # the reader came for, so they go behind disclosures rather than competing
+    # with the relations that say something. Versions and reviews get separate
+    # counts: one Zenodo software record carries 250 version links, and a combined
+    # total told the reader nothing about what they were about to expand.
+    for group, singular, plural in ((versions, "version and collection link",
+                                     "version and collection links"),
+                                    (reviews, "review link", "review links")):
+        if not group:
+            continue
+        count = sum(len(v) for _, v in group)
+        html += ("<details style='margin-bottom:6px'><summary style='cursor:pointer;"
+                 f"color:#a8c4e0'>{count:,} {singular if count == 1 else plural}"
+                 "</summary>"
+                 f"<div style='margin:6px 0'>{block(merge(group))}</div></details>")
     return html
 
 
