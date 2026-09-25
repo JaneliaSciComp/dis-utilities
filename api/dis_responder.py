@@ -53,7 +53,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.57.0"
+__version__ = "120.59.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -1650,7 +1650,7 @@ def relation_titles(idents):
         Keyword arguments:
           idents: iterable of DOI strings
         Returns:
-          dict of lower-cased DOI -> (title, type)
+          dict of lower-cased DOI -> (title, type, journal)
     '''
     want = sorted({str(i or '').lower() for i in idents if i})
     if not want:
@@ -1659,10 +1659,12 @@ def relation_titles(idents):
     try:
         for rec in DB['dis'].dois.find({"doi": {"$in": want}},
                                        {"doi": 1, "DOI": 1, "titles": 1, "title": 1,
-                                        "type": 1, "subtype": 1, "types": 1}):
+                                        "type": 1, "subtype": 1, "types": 1,
+                                        "jrc_journal": 1}):
             kind = (rec.get('types') or {}).get('resourceTypeGeneral') \
                    or rec.get('subtype') or rec.get('type') or ''
-            out[str(rec['doi']).lower()] = (DL.get_title(rec), str(kind))
+            out[str(rec['doi']).lower()] = (DL.get_title(rec), str(kind),
+                                            str(rec.get('jrc_journal') or ''))
     except Exception:
         return {}
     return out
@@ -1690,7 +1692,7 @@ def relation_entry(ident, idtype, known):
             return escape(url)
         return f"<a href='{escape(url, quote=True)}' target='_blank'>{escape(url)}</a>"
     if low in known:
-        title, kind = known[low]
+        title, kind = known[low][0], known[low][1]
         extra = f" <span style='font-size:0.8em;color:#a8c4e0'>({escape(kind)})</span>" \
                 if kind else ""
         # DL.get_title() returns the literal "No title" when a record has none -
@@ -1741,6 +1743,70 @@ def get_relations_from_row(row, skip=None):
                 relations.setdefault(rel['relationType'], []).append(
                     (rel['relatedIdentifier'], rel['relatedIdentifierType']))
     return relations
+
+
+def companion_html(entries):
+    ''' Render jrc_companion for the Related DOIs pane.
+        A companion is the same work published twice by one group - a method and
+        its protocol being the archetype - inferred from shared authors and a
+        near-identical title, because no registrar records the relationship.
+        Called "Companion resource" rather than "Companion DOI" because every
+        entry in this pane is a DOI, and rather than "Companion paper" so the
+        wording still fits if this ever covers a dataset or software.
+        Keyword arguments:
+          entries: jrc_companion list
+        Returns:
+          HTML
+    '''
+    known = relation_titles(e.get('doi') for e in entries)
+    # The stored "kind" describes the pair, not the other record: on the journal
+    # article the partner is a conference abstract, but on the abstract the
+    # partner is not. So the headings are direction-neutral, and the journal name
+    # beside each entry says which is which.
+    heading = {'companion': 'Companion resource',
+               'correction': 'Correction or original',
+               'abstract': 'Also published as',
+               'translation': 'Also published as',
+               'cover': 'Also published as'}
+    groups = {}
+    for ent in entries:
+        groups.setdefault(heading.get(ent.get('kind'), 'Companion resource'), []).append(ent)
+    out = ""
+    for label, group in groups.items():
+        out += companion_block(label, group, known)
+    return out
+
+
+def companion_block(label, entries, known):
+    ''' One labelled block of companion entries.
+        Keyword arguments:
+          label: heading
+          entries: entries under it
+          known: map from relation_titles()
+        Returns:
+          HTML
+    '''
+    lines = []
+    for ent in entries:
+        doi = str(ent.get('doi') or '')
+        if not doi:
+            continue
+        out = f"<a href='/doiui/{quote(doi, safe='/')}'>{escape(doi)}</a>"
+        hit = known.get(doi.lower())
+        # Journal is read from the target record rather than stored on the entry:
+        # a cached copy would go stale if the journal were ever renamed, and we
+        # are already fetching the record for its title.
+        jrnl = hit[2] if hit else ''
+        if jrnl:
+            out += f" <span style='font-size:0.8em;color:#a8c4e0'>({escape(jrnl)})</span>"
+        if hit and hit[0] and str(hit[0]).strip().lower() != 'no title':
+            out += f" &mdash; {render_title_html(hit[0])}"
+        lines.append(out)
+    if not lines:
+        return ""
+    indent = "<br>&nbsp;&nbsp;&nbsp;&nbsp;" if len(lines) > 1 else " "
+    return (f"<div style='margin-bottom:6px'><b>{escape(label)}</b>:"
+            + "".join(f"{indent}{ln}" for ln in lines) + "</div>")
 
 
 def dataset_supplement_html(entries):
@@ -6636,10 +6702,13 @@ def doi_tabs(doi, row, rowext, data, authors):
         if ahtml != "&nbsp;":
             content['subjects'] = ahtml
     # Relations
+    comp = row.get('jrc_companion') if row else None
     supp = row.get('jrc_dataset_supplement') if row else None
     rels = add_relations(data, {doi_stem(e.get('doi')) for e in supp} if supp else None)
     if supp:
         rels = dataset_supplement_html(supp) + rels
+    if comp:
+        rels = companion_html(comp) + rels
     if rels:
         content['related'] = rels
     # Legal information
