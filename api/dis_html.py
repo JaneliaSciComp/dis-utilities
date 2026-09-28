@@ -64,6 +64,7 @@ NAV = {"Home": "",
                         "Preprints":
                             {"DOIs by preprint status": "dois_preprint",
                              "DOIs by preprint status by year": "dois_preprint_year",
+                             "Preprint to publication": "preprint_lag",
                              "Preprints with journal publications": "preprint_with_pub",
                              "Preprints without journal publications":
                                  "preprint_relation/preprint_no_pub",
@@ -74,8 +75,7 @@ NAV = {"Home": "",
                                  "supplement_relation/dataset_supplements",
                              "Articles with supplementary datasets":
                                  "supplement_relation/article_supplements"},
-                        "Companion resources": "dois_companion",
-                        "Preprint to publication": "preprint_lag"},
+                        "Companion resources": "dois_companion"},
        "Journals": {"Open access": {"Report": "dois_oa", "Details": "dois_oa_details"},
                     "Top": {"Crossref": {"Publishers": "top_entities/publisher",
                                          "Journals": "top_entities/journal"},
