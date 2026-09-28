@@ -53,7 +53,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.63.0"
+__version__ = "120.64.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -13847,6 +13847,15 @@ DATA_DOI_PREFIXES = ('10.25378', '10.6084', '10.5281', '10.5061', '10.17632',
                      '10.7910', '10.48324')
 # Version suffixes, by depositor convention: Research Square "/v2", figshare
 # ".v2", eLife ".3" appended to an article number.
+# How long after its article a preprint may be dated before it is reported. A
+# preprint published after the article it precedes is a contradiction, but small
+# gaps are registrar bookkeeping rather than a bad link: Development and JEB date
+# an article from its early-online appearance, and SSRN's Cell Press Sneak Peek
+# registers a posting's DOI after the paper is out. Every such pair we hold is
+# within 181 days and is genuinely the same work. The mislink this check exists
+# for - a 2019 article carrying two 2020 preprints of other papers - was 15 to 22
+# months out, so a year separates the two populations cleanly.
+PREPRINT_LAG_TOLERANCE = 365
 RS_VERSION = re.compile(r'/v\d+$', re.I)
 # Anchored on "/elife." rather than a general "trailing .N": bioRxiv DOIs are
 # date-style (10.1101/2020.01.21.911859), so a general rule strips the article
@@ -14054,6 +14063,34 @@ def _integrity_scan():
         shown = sorted(t for t in targets if relation_base(t) in flagged)
         out['multi'].append([doi, len(shown), ", ".join(shown), title_of(doi)])
     out['multi'].sort(key=lambda r: -r[1])
+    # 5. A preprint cannot postdate the article it is a preprint of. Only pairs
+    #    where exactly one end is a preprint are decidable; where both ends or
+    #    neither read as one, there is no direction to test.
+    tested = set()
+    for doi, targets in pre.items():
+        for tgt in targets:
+            pair = tuple(sorted((doi, tgt)))
+            if tgt not in held or pair in tested:
+                continue
+            tested.add(pair)
+            one, two = recs[doi], recs[tgt]
+            if DL.is_preprint(one) == DL.is_preprint(two):
+                continue
+            preprint, article = (one, two) if DL.is_preprint(one) else (two, one)
+            pdate = (preprint.get('jrc_publishing_date') or '')[:10]
+            adate = (article.get('jrc_publishing_date') or '')[:10]
+            if not pdate or not adate:
+                continue
+            try:
+                lag = (datetime.strptime(adate, "%Y-%m-%d")
+                       - datetime.strptime(pdate, "%Y-%m-%d")).days
+            except ValueError:
+                continue
+            if lag >= -PREPRINT_LAG_TOLERANCE:
+                continue
+            out['backwards'].append([preprint['doi'], pdate, article['doi'], adate,
+                                     -lag, title_of(article['doi'].lower())])
+    out['backwards'].sort(key=lambda r: -r[4])
     return out
 
 
@@ -14089,6 +14126,12 @@ def relation_integrity():
          "A preprint server issues one DOI per posting, so two postings of one "
          "article on one server is usually a mismatch. Version siblings, and "
          "papers posted to two different servers, are excluded as normal.", (0, 2)),
+        ('backwards', "Preprint dated after its article",
+         ['Preprint', 'Posted', 'Article', 'Published', 'Days later', 'Article title'],
+         "A preprint cannot be published after the article it precedes, so a gap of "
+         f"more than {PREPRINT_LAG_TOLERANCE} days is usually a relation between "
+         "two different works. Smaller gaps are registrar bookkeeping - an article "
+         "dated from its early-online appearance - and are not reported.", (0, 2)),
         ('ignored', "Explained: no action needed",
          ['Relation', 'Target DOI', 'Referenced by', 'Reason'],
          "The relation names a DOI we do not hold, for a reason we already know: "
