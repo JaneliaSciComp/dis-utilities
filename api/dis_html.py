@@ -59,11 +59,22 @@ NAV = {"Home": "",
                       "DOIs without Janelia authors": "dois_no_janelia",
                       "DOIs with invalid authors": "dois_invalid_auth",
                       },
-       "Preprints": {"DOIs by preprint status": "dois_preprint",
-                     "DOIs by preprint status by year": "dois_preprint_year",
-                     "Preprints with journal publications": "preprint_with_pub",
-                     "Preprints without journal publications": "preprint_relation/preprint_no_pub",
-                     "Journal publications without preprints": "preprint_relation/pub_no_preprint"},
+       "Related DOIs": {"Summary": "relations",
+                        "Integrity checks": "relation_integrity",
+                        "Preprints":
+                            {"DOIs by preprint status": "dois_preprint",
+                             "DOIs by preprint status by year": "dois_preprint_year",
+                             "Preprints with journal publications": "preprint_with_pub",
+                             "Preprints without journal publications":
+                                 "preprint_relation/preprint_no_pub",
+                             "Journal publications without preprints":
+                                 "preprint_relation/pub_no_preprint"},
+                        "Dataset supplements":
+                            {"Datasets supplementing an article":
+                                 "supplement_relation/dataset_supplements",
+                             "Articles with supplementary datasets":
+                                 "supplement_relation/article_supplements"},
+                        "Companion resources": "dois_companion"},
        "Journals": {"Open access": {"Report": "dois_oa", "Details": "dois_oa_details"},
                     "Top": {"Crossref": {"Publishers": "top_entities/publisher",
                                          "Journals": "top_entities/journal"},
