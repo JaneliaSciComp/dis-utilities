@@ -30,9 +30,15 @@
     and its base DOI both carry the link they each assert - the run summary
     reports distinct relationships separately from records written, because most
     figshare links are restated on every version.
+
+    Entries this program did not derive are preserved. The field is rebuilt with
+    a whole-value $set, so an entry recorded by a curator or migrated from another
+    field would otherwise be deleted on the next run. Any entry whose "source" is
+    not one of DERIVED_SOURCES is folded back in - unless the registrar has since
+    declared the same relation, in which case the derived entry replaces it.
 '''
 
-__version__ = '1.3.0'
+__version__ = '1.4.0'
 
 import argparse
 import collections
@@ -66,6 +72,11 @@ DATA_PREFIXES = ('10.25378',      # Janelia figshare
                  '10.48324')      # BossDB
 DATA_RE = re.compile(r'^(?:' + '|'.join(re.escape(p) for p in DATA_PREFIXES) + r')/', re.I)
 VERSION_RE = re.compile(r'\.v\d+$', re.I)
+# Sources this program derives itself, and therefore owns. An entry recorded by
+# anything else - a curator, or a migration from another field - is preserved
+# through a rebuild: this program rebuilds the field with a whole-value $set, so
+# without this an entry it cannot derive would be deleted on the next run.
+DERIVED_SOURCES = ('DataCite', 'Crossref')
 
 
 def terminate_program(msg=None):
@@ -207,6 +218,37 @@ def stem(doi):
     return VERSION_RE.sub('', doi or '')
 
 
+def merge_curated(doi, computed):
+    ''' Fold any curated entries already stored into this run's computed list.
+        A curated entry is one whose source this program does not produce. Where a
+        curated entry names a DOI that is now derivable from registrar metadata,
+        the derived entry wins and the curated one is dropped: the registrar has
+        caught up, and keeping both would show the relation twice.
+        Keyword arguments:
+          doi: DOI
+          computed: entry list built from registrar metadata this run
+        Returns:
+          merged entry list, sorted by target DOI
+    '''
+    try:
+        rec = DB['dis'].dois.find_one({"doi": doi}, {"jrc_dataset_supplement": 1})
+    except Exception as err:
+        terminate_program(err)
+    stored = (rec or {}).get('jrc_dataset_supplement') or []
+    derived_targets = {e.get('doi') for e in computed}
+    kept = [e for e in stored
+            if e.get('source') not in DERIVED_SOURCES and e.get('doi') not in derived_targets]
+    if kept:
+        COUNT['curated_preserved'] += len(kept)
+    superseded = [e for e in stored
+                  if e.get('source') not in DERIVED_SOURCES and e.get('doi') in derived_targets]
+    if superseded:
+        COUNT['curated_superseded'] += len(superseded)
+        LOGGER.info(f"{doi}: {len(superseded)} curated entr(y/ies) now derivable from "
+                    "registrar metadata; the derived entry replaces them")
+    return sorted(computed + kept, key=lambda e: e.get('doi') or '')
+
+
 def unchanged(doi, entries):
     ''' Does the record already hold exactly these links?
         These relations derive from metadata that rarely changes, so on a
@@ -242,24 +284,29 @@ def persist(graph, held):
     for doi in sorted(graph):
         if doi not in held:
             continue
-        if unchanged(doi, graph[doi]):
+        # Merged before the comparison as well as before the write: comparing the
+        # computed list against a stored list that also holds curated entries
+        # would differ every run, and rewrite every record every night.
+        merged = merge_curated(doi, graph[doi])
+        if unchanged(doi, merged):
             COUNT['unchanged'] += 1
             continue
         COUNT['changed'] += 1
         if not ARG.WRITE:
-            for ent in graph[doi]:
+            for ent in merged:
                 mark = '' if ent['doi'] in held else '   (target not held)'
-                print(f"  {doi:42} {ent['relation']:16} {ent['doi']}{mark}")
+                curated = '' if ent.get('source') in DERIVED_SOURCES else '   (curated)'
+                print(f"  {doi:42} {ent['relation']:16} {ent['doi']}{mark}{curated}")
             continue
         try:
             DB['dis'].dois.update_one({"doi": doi},
-                                      {"$set": {"jrc_dataset_supplement": graph[doi],
+                                      {"$set": {"jrc_dataset_supplement": merged,
                                                 "jrc_dataset_supplement_updated":
                                                     datetime.now()}})
             COUNT['written'] += 1
         except Exception as err:
             terminate_program(err)
-        log_process(doi, graph[doi])
+        log_process(doi, merged)
     if not ARG.WRITE:
         print(f"\nDry run: nothing written. Re-run with --write to store "
               f"{COUNT['changed']:,} changed record(s) "
