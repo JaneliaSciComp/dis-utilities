@@ -132,6 +132,18 @@ CITATION_SOURCE_SPARE = ["#0072B2", "#999999", "#B07AA1"]
 SOURCE_PALETTE = ["mediumblue", "darkorange"]
 SOURCE3_PALETTE = ["mediumblue", "darkorange", "wheat"]
 TYPE_PALETTE = ["mediumblue", "darkorange", "wheat", "darkgray"]
+# Relation types on /relations. Its own palette rather than SOURCE3_PALETTE: that
+# family means the Crossref/DataCite registrar split, and these are relation types,
+# so borrowing it would attach a learned meaning to the wrong thing.
+#
+# Measured against ghostwhite, which is what stacked_bar_chart fills the plot area
+# with - NOT the #222 page background. Which background applies depends on the
+# chart type: bar, treemap, lorenz and venn fill with ghostwhite, while pie, donut,
+# heat map, wedge and dual-axis leave it transparent and sit on the page.
+# mediumblue 10.56:1, green 3.24:1, darkorange 2.21:1; closest pair 104 in CIE76,
+# well past the 25 floor. Green replaced "wheat", which measured 1.24:1 here and
+# read as white.
+RELATION_PALETTE = ["mediumblue", "darkorange", "#009E73"]
 
 def make_stretched_palette(palette, low_frac=0.16, low_share=0.50, count=256):
     ''' Build an n-color palette with increased color separation in the lower range.

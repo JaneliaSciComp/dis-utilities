@@ -53,7 +53,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.59.0"
+__version__ = "120.63.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -13345,7 +13345,7 @@ def dois_preprint(year='All'):
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title=title, html=html,
                                          chartscript=chartscript, chartdiv=chartdiv,
-                                         navbar=generate_navbar('Preprints')))
+                                         navbar=generate_navbar('Related DOIs')))
 
 
 @app.route('/dois_preprint_year')
@@ -13404,7 +13404,7 @@ def dois_preprint_year():
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title="DOIs preprint status by year", html=html,
                                          chartscript=chartscript, chartdiv=chartdiv,
-                                         navbar=generate_navbar('Preprints')))
+                                         navbar=generate_navbar('Related DOIs')))
 
 
 @app.route('/preprint_with_pub')
@@ -13489,7 +13489,7 @@ def preprint_with_pub(year=None):
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="Preprints with journal publications", html=html,
-                                         navbar=generate_navbar('Preprints')))
+                                         navbar=generate_navbar('Related DOIs')))
 
 
 @app.route('/preprint_relation/<string:relation_type>')
@@ -13549,7 +13549,579 @@ def show_preprint_relation(relation_type, year=None):
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=cfg['title'], html=html,
-                                         navbar=generate_navbar('Preprints')))
+                                         navbar=generate_navbar('Related DOIs')))
+
+
+@app.route('/supplement_relation/<string:relation_type>')
+@app.route('/supplement_relation/<string:relation_type>/<string:year>')
+def show_supplement_relation(relation_type, year=None):
+    ''' Show dataset/article supplement relations from jrc_dataset_supplement
+        The field records both ends of every pair, so the two report types are
+        the two directions of the same relation rather than two populations:
+        "supplements" is stored on the dataset and points at the article,
+        "supplemented_by" is stored on the article and points at the dataset.
+        Keyword arguments:
+          relation_type: "dataset_supplements" or "article_supplements"
+          year: publishing year to filter by; defaults to the current year, or
+                "All" for no year filter
+    '''
+    relation_config = {
+        'dataset_supplements': {'relation': 'supplements',
+                                'title': "Datasets supplementing an article",
+                                'other': 'Article'},
+        'article_supplements': {'relation': 'supplemented_by',
+                                'title': "Articles with supplementary datasets",
+                                'other': 'Dataset'}}
+    if relation_type not in relation_config:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Invalid relation type"),
+                               message="relation_type must be one of: " \
+                                       + f"{', '.join(relation_config)}")
+    cfg = relation_config[relation_type]
+    payload = {"jrc_dataset_supplement.relation": cfg['relation']}
+    if year is None:
+        year = str(datetime.now().year)
+    if year != 'All':
+        payload['jrc_publishing_date'] = {"$regex": "^" + year}
+    try:
+        rows = list(DB['dis'].dois.find(payload).sort([("jrc_publishing_date", -1)]))
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get supplement data from dois"),
+                               message=error_message(err))
+    # Titles for the far end of each relation, resolved in one query. The
+    # projection carries the upper-case DOI key because DL.get_title() decides
+    # Crossref vs DataCite on its presence - omitting it returns "No title" for
+    # every Crossref record.
+    want = {ent['doi'] for row in rows for ent in row.get('jrc_dataset_supplement', [])
+            if ent.get('relation') == cfg['relation'] and ent.get('doi')}
+    titles = {}
+    if want:
+        try:
+            for rec in DB['dis'].dois.find({"doi": {"$in": sorted(want)}},
+                                           {"doi": 1, "DOI": 1, "titles": 1, "title": 1}):
+                titles[rec['doi']] = DL.get_title(rec)
+        except Exception as err:
+            return render_template('error.html', urlroot=request.url_root,
+                                   title=render_warning("Could not get related titles"),
+                                   message=error_message(err))
+    fileoutput = ""
+    header = ['Published', 'DOI', 'Title', cfg['other'], f"{cfg['other']} title", 'Source']
+    trows = []
+    for row in rows:
+        ptitle = render_title_html(DL.get_title(row))
+        for ent in row.get('jrc_dataset_supplement', []):
+            if ent.get('relation') != cfg['relation']:
+                continue
+            other = ent.get('doi', '')
+            otitle = titles.get(other, '')
+            fileoutput += "\t".join([row['jrc_publishing_date'], row['doi'], DL.get_title(row),
+                                     other, otitle, ent.get('source', '')]) + "\n"
+            trows.append([row['jrc_publishing_date'], safe(doi_link(row['doi'])), ptitle,
+                          safe(doi_link(other)) if other else '',
+                          render_title_html(otitle) if otitle else '',
+                          ent.get('source', '')])
+    html = render_table(header, trows, table_id=relation_type, css='tablesorter numbers-scroll')
+    label = "all years" if year == 'All' else year
+    selected = "(all years)" if year == 'All' else year
+    top = year_pulldown(f"supplement_relation/{relation_type}", selected=selected) + "<br><br>"
+    # Rows counts relations, not records: one DOI may supplement more than one
+    # article, so the two numbers differ and reporting only one is misleading.
+    count_line = f"{cfg['title']} ({label}): {len(trows):,} " \
+                 + f"relation{'' if len(trows) == 1 else 's'} on {len(rows):,} DOIs"
+    html = f"{top}{count_line}<br><br>" \
+           + create_downloadable(relation_type, header, fileoutput) + html
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=cfg['title'], html=html,
+                                         navbar=generate_navbar('Related DOIs')))
+
+
+@app.route('/dois_companion')
+@app.route('/dois_companion/<string:year>')
+def dois_companion(year='All'):
+    ''' Show companion resources recorded in jrc_companion
+        Every pair is written to both DOIs, so each relation appears twice in
+        the collection. Both rows are shown: either DOI is a legitimate way in,
+        and hiding one would make a DOI's own page disagree with this report.
+        Keyword arguments:
+          year: publishing year to filter by, or "All" for no year filter
+    '''
+    payload = {"jrc_companion": {"$exists": True}}
+    if year != 'All':
+        payload['jrc_publishing_date'] = {"$regex": "^" + year}
+    try:
+        rows = list(DB['dis'].dois.find(payload).sort([("jrc_publishing_date", -1)]))
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get companion data from dois"),
+                               message=error_message(err))
+    want = {ent['doi'] for row in rows for ent in row.get('jrc_companion', []) if ent.get('doi')}
+    titles = {}
+    if want:
+        try:
+            for rec in DB['dis'].dois.find({"doi": {"$in": sorted(want)}},
+                                           {"doi": 1, "DOI": 1, "titles": 1, "title": 1}):
+                titles[rec['doi']] = DL.get_title(rec)
+        except Exception as err:
+            return render_template('error.html', urlroot=request.url_root,
+                                   title=render_warning("Could not get companion titles"),
+                                   message=error_message(err))
+    fileoutput = ""
+    header = ['Published', 'DOI', 'Title', 'Journal', 'Companion', 'Companion title',
+              'Kind', 'Title score', 'Author overlap']
+    trows = []
+    for row in rows:
+        ptitle = render_title_html(DL.get_title(row))
+        journal = row.get('jrc_journal', '')
+        for ent in row.get('jrc_companion', []):
+            other = ent.get('doi', '')
+            otitle = titles.get(other, '')
+            score = ent.get('title_score', '')
+            overlap = ent.get('author_overlap', '')
+            fileoutput += "\t".join([row['jrc_publishing_date'], row['doi'], DL.get_title(row),
+                                     journal, other, otitle, str(ent.get('kind', '')),
+                                     str(score), str(overlap)]) + "\n"
+            trows.append([row['jrc_publishing_date'], safe(doi_link(row['doi'])), ptitle,
+                          journal, safe(doi_link(other)) if other else '',
+                          render_title_html(otitle) if otitle else '',
+                          ent.get('kind', ''), score, overlap])
+    html = render_table(header, trows, table_id='companion', css='tablesorter numbers-scroll')
+    label = "all years" if year == 'All' else year
+    top = year_pulldown("dois_companion") + "<br><br>"
+    count_line = f"Companion resources ({label}): {len(trows):,} " \
+                 + f"relation{'' if len(trows) == 1 else 's'} on {len(rows):,} DOIs"
+    html = f"{top}{count_line}<br><br>" \
+           + create_downloadable('companion', header, fileoutput) + html
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="Companion resources", html=html,
+                                         navbar=generate_navbar('Related DOIs')))
+
+
+# Relation types shown on /relations, in the order they appear. Each carries the
+# field that records it, the report it links to, and the program that writes it -
+# the three are determined very differently, and a reader comparing 1,826 preprint
+# links against 26 companions needs to see that they are not the same kind of
+# number.
+RELATION_KINDS = (
+    {'label': "Preprint links", 'field': 'jrc_preprint', 'link': 'dois_preprint',
+     'writer': "update_preprints.py, add_preprint.py"},
+    {'label': "Dataset supplements", 'field': 'jrc_dataset_supplement',
+     'link': 'supplement_relation/dataset_supplements/All',
+     'writer': "link_dataset_supplements.py"},
+    {'label': "Companion resources", 'field': 'jrc_companion', 'link': 'dois_companion',
+     'writer': "find_companion_papers.py"})
+# A jrc_preprint relation the registrar declared itself, as opposed to one this
+# system matched. Version propagation is not separable after the fact - it is not
+# recorded on the record - so the derived bucket covers both fuzzy matching and
+# version propagation rather than claiming to split them.
+PREPRINT_EXPLICIT = {"$or": [{"relation.is-preprint-of": {"$exists": True}},
+                             {"relation.has-preprint": {"$exists": True}},
+                             {"relatedIdentifiers.relationType": "IsPreprintOf"}]}
+
+
+@app.route('/relations')
+@app.route('/relations/<string:year>')
+def relations(year='All'):
+    ''' Summary of every DOI-to-DOI relation this system records
+        Keyword arguments:
+          year: publishing year to filter by, or "All" for no year filter
+    '''
+    coll = DB['dis'].dois
+    base = {}
+    if year != 'All':
+        base['jrc_publishing_date'] = {"$regex": "^" + year}
+
+    def count(extra):
+        return coll.count_documents({**base, **extra})
+
+    try:
+        total = count({})
+        counts = {k['field']: count({k['field']: {"$exists": True}}) for k in RELATION_KINDS}
+        anyrel = count({"$or": [{k['field']: {"$exists": True}} for k in RELATION_KINDS]})
+        # Provenance. Only the preprint field needs a query to split it; the other
+        # two record their own source on each stored entry.
+        expl = count({"$and": [{"jrc_preprint": {"$exists": True}}, PREPRINT_EXPLICIT]})
+        supp_src = collections.Counter()
+        for row in coll.find({**base, "jrc_dataset_supplement": {"$exists": True}},
+                             {"jrc_dataset_supplement": 1}):
+            for ent in row['jrc_dataset_supplement']:
+                supp_src[ent.get('source') or 'Unknown'] += 1
+        pairs = []
+        for one, two in itertools.combinations(RELATION_KINDS, 2):
+            pairs.append((f"{one['label']} + {two['label']}",
+                          count({one['field']: {"$exists": True},
+                                 two['field']: {"$exists": True}})))
+        pairs.append(("All three", count({k['field']: {"$exists": True}
+                                          for k in RELATION_KINDS})))
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get relation counts from dois"),
+                               message=error_message(err))
+
+    def pct(num):
+        return f"{100 * num / total:.1f}%" if total else "0.0%"
+
+    cards = [("DOIs with any relation", f"{anyrel:,} ({pct(anyrel)})")]
+    for kind in RELATION_KINDS:
+        num = counts[kind['field']]
+        cards.append((kind['label'],
+                      safe(f"<a href='/{kind['link']}'>{num:,}</a> ({pct(num)})")))
+    html = stat_cards(cards, div_id='relation-cards') + "<br>"
+
+    # Provenance table. Percentages are of that relation type's own total, not of
+    # the collection, so each row reads on its own terms.
+    header = ['Relation', 'DOIs', 'Determined by', 'Program']
+    trows = []
+    pre = counts['jrc_preprint']
+    trows.append(["Preprint links", f"{pre:,}",
+                  safe(f"Registrar declared: {expl:,}<br>Matched by this system: {pre - expl:,}"),
+                  RELATION_KINDS[0]['writer']])
+    trows.append(["Dataset supplements", f"{counts['jrc_dataset_supplement']:,}",
+                  safe("<br>".join(f"{src} declared: {n:,} relations"
+                                   for src, n in supp_src.most_common())) or "&nbsp;",
+                  RELATION_KINDS[1]['writer']])
+    trows.append(["Companion resources", f"{counts['jrc_companion']:,}",
+                  "Inferred from title, authors and publisher",
+                  RELATION_KINDS[2]['writer']])
+    prov = render_table(header, trows, table_id='provenance', css='standard')
+
+    orows = [[lbl, f"{num:,}"] for lbl, num in pairs]
+    overlap = render_table(['Carrying both', 'DOIs'], orows, table_id='overlap', css='standard')
+    # Each column is wrapped in a single div. two_col() is a flex row and puts its
+    # two arguments in as direct children, so a bare "<h3>...</h3><table>" would
+    # make the heading and the table two separate flex items laid out side by side
+    # - and a <br> between them, being a flex item too, would do nothing at all.
+    html += two_col(f"<div><h3>How each relation was determined</h3><br>{prov}</div>",
+                    f"<div><h3>Records with more than one</h3><br>{overlap}"
+                    + f"<br>DOIs with no relation: {total - anyrel:,} "
+                    + f"({pct(total - anyrel)})</div>")
+
+    # Relations by year, one series per type. Counted on records rather than on
+    # stored entries so the series are comparable with the cards above.
+    try:
+        years, series = [], {k['label']: [] for k in RELATION_KINDS}
+        yq = {"jrc_publishing_date": {"$exists": True, "$ne": None}}
+        allyears = sorted({d[:4] for d in coll.distinct("jrc_publishing_date", yq) if d})
+        allyears = [y for y in allyears if y.isdigit()]
+        for yr in allyears:
+            per = {k['label']: coll.count_documents(
+                {"jrc_publishing_date": {"$regex": "^" + yr},
+                 k['field']: {"$exists": True}}) for k in RELATION_KINDS}
+            if not any(per.values()):
+                continue
+            years.append(yr)
+            for k in RELATION_KINDS:
+                series[k['label']].append(per[k['label']])
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not build the yearly breakdown"),
+                               message=error_message(err))
+    chartscript = chartdiv = ""
+    if years:
+        data = {"years": years}
+        data.update(series)
+        chartscript, chartdiv = DP.stacked_bar_chart(
+            data, "Relations by type and year", xaxis="years",
+            yaxis=[k['label'] for k in RELATION_KINDS],
+            colors=DP.RELATION_PALETTE, orient=pi / 4, width=1000, height=350)
+    html = year_pulldown("relations") \
+           + "<br><br>" + html + "<br>" + chartdiv
+    endpoint_access()
+    # bokeh.html rather than general.html: general.html has no chartscript slot,
+    # so the chart's JS would be dropped and the div would render empty. The chart
+    # div is embedded in `html` above and chartdiv is passed empty, which puts a
+    # full-width chart below the content instead of in the narrow column beside it.
+    return make_response(render_template('bokeh.html', urlroot=request.url_root,
+                                         title="Related DOIs", html=html,
+                                         chartscript=chartscript, chartdiv='',
+                                         chartscript2='', chartdiv2='',
+                                         navbar=generate_navbar('Related DOIs')))
+
+
+
+# Data-repository DOI prefixes, for spotting a dataset recorded as a preprint.
+# Kept in step with link_dataset_supplements.py's DATA_PREFIXES.
+DATA_DOI_PREFIXES = ('10.25378', '10.6084', '10.5281', '10.5061', '10.17632',
+                     '10.7910', '10.48324')
+# Version suffixes, by depositor convention: Research Square "/v2", figshare
+# ".v2", eLife ".3" appended to an article number.
+RS_VERSION = re.compile(r'/v\d+$', re.I)
+# Anchored on "/elife." rather than a general "trailing .N": bioRxiv DOIs are
+# date-style (10.1101/2020.01.21.911859), so a general rule strips the article
+# number and makes two unrelated preprints posted on one day look like two
+# versions of one work.
+ELIFE_VERSION = re.compile(r'^(10\.7554/elife\.\d+)\.\d+$', re.I)
+
+
+def _registrar_preprint(rec):
+    ''' Does the registrar itself call this record a preprint?
+        The DOI prefix says where a deposit lives, not what it is - Zenodo hosts
+        preprints alongside data - so the registrar's own typing decides, and it
+        beats the prefix wherever the two disagree.
+        Keyword arguments:
+          rec: DOI record, or None
+        Returns:
+          True when the record is typed as a preprint
+    '''
+    if not rec:
+        return False
+    return (rec.get('subtype') == 'preprint'
+            or (rec.get('types') or {}).get('resourceTypeGeneral') == 'Preprint')
+
+
+def relation_base(doi):
+    ''' A DOI with any version suffix removed, so siblings compare equal
+        Three conventions are in play and a record may use any of them, so all
+        three are stripped rather than guessing from the prefix.
+        Keyword arguments:
+          doi: DOI string
+        Returns:
+          the versionless form
+    '''
+    doi = RS_VERSION.sub('', str(doi or '').lower())
+    doi = DOI_VERSION.sub('', doi)
+    match = ELIFE_VERSION.match(doi)
+    return match.group(1) if match else doi
+
+
+def _version_groups(dois, coll):
+    ''' Collapse DOIs that declare each other as versions into one group
+        Used where a lexical rule cannot: Zenodo mints a separate DOI per version
+        with no shared stem, so two DOIs of one deposit look like two works until
+        their own relatedIdentifiers are read.
+        Keyword arguments:
+          dois: DOIs to group
+          coll: the dois collection
+        Returns:
+          list of groups, each a set of DOIs that are versions of one another
+    '''
+    linked = collections.defaultdict(set)
+    try:
+        rows = coll.find({"doi": {"$in": sorted(dois)}},
+                         {"doi": 1, "relatedIdentifiers": 1, "relation": 1})
+    except Exception:
+        return [{d} for d in dois]          # ungrouped rather than wrong
+    for row in rows:
+        doi = row['doi'].lower()
+        for item in (row.get('relatedIdentifiers') or []):
+            if item.get('relationType') in RELATION_VERSIONS:
+                linked[doi].add(str(item.get('relatedIdentifier') or '').lower())
+        for rel, vals in (row.get('relation') or {}).items():
+            if rel in RELATION_VERSIONS:
+                for val in vals:
+                    linked[doi].add(str(val.get('id') or '').lower())
+    groups, seen = [], set()
+    for doi in sorted(dois):
+        if doi in seen:
+            continue
+        group, stack = set(), [doi]
+        while stack:
+            this = stack.pop()
+            if this in group:
+                continue
+            group.add(this)
+            stack.extend(x for x in linked.get(this, ()) if x in dois)
+            stack.extend(x for x in dois if this in linked.get(x, ()))
+        seen |= group
+        groups.append(group)
+    return groups
+
+
+def _integrity_scan():
+    ''' One pass over the collection, returning every relation anomaly
+        Loads the three relation fields for the whole collection rather than
+        querying per DOI: the checks are pairwise (does the far end agree?) so
+        every one of them needs the other record anyway.
+        Returns:
+          dict of finding name -> list of rows, plus the raw counts
+    '''
+    coll = DB['dis'].dois
+    # "subtype" and "types" carry the registrar's own typing, which decides whether
+    # a data-repository DOI is really a preprint. Omitting them does not error - it
+    # silently makes every record look like a non-preprint, and empties the Type
+    # column as well.
+    proj = {"doi": 1, "DOI": 1, "titles": 1, "title": 1, "type": 1, "subtype": 1,
+            "types": 1, "jrc_journal": 1, "jrc_publishing_date": 1, "jrc_preprint": 1,
+            "jrc_dataset_supplement": 1, "jrc_companion": 1}
+    held, recs, pre, supp, comp = set(), {}, {}, {}, {}
+    for row in coll.find({}, proj):
+        doi = row['doi'].lower()
+        held.add(doi)
+        recs[doi] = row
+        if row.get('jrc_preprint'):
+            pre[doi] = [str(t).lower() for t in row['jrc_preprint']]
+        if row.get('jrc_dataset_supplement'):
+            supp[doi] = [str(e.get('doi') or '').lower() for e in row['jrc_dataset_supplement']]
+        if row.get('jrc_companion'):
+            comp[doi] = [str(e.get('doi') or '').lower() for e in row['jrc_companion']]
+    ignored = {}
+    for row in DB['dis'].to_ignore.find({"type": "doi"}, {"key": 1, "reason": 1}):
+        if row.get('key'):
+            ignored[row['key'].lower()] = row.get('reason') or "(no reason recorded)"
+
+    def title_of(doi):
+        rec = recs.get(doi)
+        return DL.get_title(rec) if rec else ''
+
+    out = collections.defaultdict(list)
+    stores = (("Preprint", pre), ("Dataset supplement", supp), ("Companion", comp))
+    # 1. A relation names a DOI we do not hold. Targets on the ignore list are
+    #    reported separately: they are a curator's decision, not a gap.
+    for label, store in stores:
+        for doi, targets in store.items():
+            for tgt in targets:
+                if not tgt or tgt in held:
+                    continue
+                if tgt in ignored:
+                    out['ignored'].append([label, tgt, doi, ignored[tgt]])
+                elif relation_base(tgt) == relation_base(doi):
+                    # An earlier version of the referring DOI - eLife .1 and .2
+                    # named by .3. We hold the version that matters; the siblings
+                    # are not separate works and loading them adds nothing.
+                    out['ignored'].append([label, tgt, doi,
+                                           "Earlier version of the referring DOI"])
+                else:
+                    out['missing'].append([label, tgt, doi, title_of(doi)])
+    # 2. Both ends held, but only one records the relation. A versioned figshare
+    #    DOI is expected to be one-sided: link_dataset_supplements.py collapses a
+    #    versioned target to its base, so the article points at the base while the
+    #    version points at the article. Accepting the base DOI as the back-link
+    #    takes this check from 286 findings to 5.
+    for label, store in stores:
+        for doi, targets in store.items():
+            if (label == "Preprint" and doi.startswith(DATA_DOI_PREFIXES)
+                    and not _registrar_preprint(recs.get(doi))):
+                # Reported below as a dataset recorded as a preprint. The far end
+                # does not record it because the far end is right: these are not
+                # preprint relations at all, so listing them here as well would
+                # report one defect twice and bury the five that are only this.
+                continue
+            for tgt in targets:
+                if not tgt or tgt not in held:
+                    continue
+                back = set(store.get(tgt, []))
+                if doi in back or relation_base(doi) in back:
+                    continue
+                out['asymmetric'].append([label, doi, tgt, title_of(tgt)])
+    # 3. A dataset is not a preprint. These are dataset/article relations stored
+    #    in jrc_preprint, which belong in jrc_dataset_supplement.
+    for doi, targets in pre.items():
+        if not doi.startswith(DATA_DOI_PREFIXES):
+            continue
+        # A data-repository prefix does not mean the deposit is data: Zenodo hosts
+        # preprints too. Where the registrar types one as a preprint its
+        # jrc_preprint relation is correct, and reporting it invites someone to
+        # "fix" a record that is already right.
+        if _registrar_preprint(recs[doi]):
+            continue
+        out['dataset_as_preprint'].append(
+            [doi, recs[doi].get('type') or (recs[doi].get('types') or {}).get(
+                'resourceTypeGeneral', ''),
+             ", ".join(targets), title_of(doi)])
+    # 4. More than one preprint on one article is usually legitimate (SSRN plus
+    #    bioRxiv), so this is a look-at list rather than an error.
+    for doi, targets in pre.items():
+        rec = recs[doi]
+        if rec.get('type') != 'journal-article' or len(targets) < 2:
+            continue
+        if any(t.startswith(DATA_DOI_PREFIXES) and not _registrar_preprint(recs.get(t))
+               for t in targets):
+            continue          # already reported as a dataset recorded as a preprint
+        works = {relation_base(t) for t in targets} - {relation_base(doi)}
+        if len(works) < 2:
+            continue          # one preprint plus its own version siblings
+        # Two works on two different servers is the normal shape - a paper posted
+        # to bioRxiv and to SSRN. Two works on the SAME server is the shape worth
+        # looking at, because a server issues one DOI per posting.
+        byserver = collections.defaultdict(list)
+        for work in works:
+            byserver[work.split('/', 1)[0]].append(work)
+        dup = {srv: wks for srv, wks in byserver.items() if len(wks) > 1}
+        if dup:
+            # Unless the server versions by minting a fresh DOI rather than by
+            # suffixing one. Zenodo does: a concept DOI and its version DOI are
+            # consecutive integers, so no lexical rule groups them and only the
+            # records' own version relations can.
+            dup = {srv: wks for srv, wks in dup.items()
+                   if len(_version_groups(wks, coll)) > 1}
+        if not dup:
+            continue
+        # Report the DOIs as deposited, not the versionless forms used to group
+        # them - a truncated DOI in an audit report is not actionable.
+        flagged = {w for wks in dup.values() for w in wks}
+        shown = sorted(t for t in targets if relation_base(t) in flagged)
+        out['multi'].append([doi, len(shown), ", ".join(shown), title_of(doi)])
+    out['multi'].sort(key=lambda r: -r[1])
+    return out
+
+
+@app.route('/relation_integrity')
+def relation_integrity():
+    ''' Relation anomalies that need a human
+        Every finding here is either a relation pointing at something we do not
+        hold, a relation only one end records, or a relation in the wrong field.
+    '''
+    try:
+        find = _integrity_scan()
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not audit DOI relations"),
+                               message=error_message(err))
+    sections = [
+        ('missing', "Referenced but not held",
+         ['Relation', 'Missing DOI', 'Referenced by', 'Referring title'],
+         "A relation names a DOI that is not in the collection. Either it should be "
+         "loaded, or it belongs on the ignore list.", (1, 2)),
+        ('dataset_as_preprint', "Data repository DOIs recorded as preprints",
+         ['DOI', 'Type', 'Related DOIs', 'Title'],
+         "A dataset is not a preprint of the article it accompanies. These relations "
+         "are held in jrc_preprint and look like they belong in "
+         "jrc_dataset_supplement.", (0,)),
+        ('asymmetric', "Recorded at one end only",
+         ['Relation', 'DOI', 'Target', 'Target title'],
+         "Both DOIs are held, but only one of them records the relation. Versioned "
+         "figshare deposits are excluded: their base DOI legitimately carries the "
+         "return link.", (1, 2)),
+        ('multi', "Two preprints of one article on the same server",
+         ['DOI', 'Postings', 'Preprint DOIs', 'Title'],
+         "A preprint server issues one DOI per posting, so two postings of one "
+         "article on one server is usually a mismatch. Version siblings, and "
+         "papers posted to two different servers, are excluded as normal.", (0, 2)),
+        ('ignored', "Explained: no action needed",
+         ['Relation', 'Target DOI', 'Referenced by', 'Reason'],
+         "The relation names a DOI we do not hold, for a reason we already know: "
+         "a curator put it on the ignore list, or it is an earlier version of the "
+         "DOI that names it.", (1, 2))]
+    cards = [(label, safe(f"<a href='#{key}'>{len(find[key]):,}</a>"))
+             for key, label, _, _, _ in sections]
+    html = stat_cards(cards, div_id='integrity-cards') + "<br>"
+    for key, label, header, blurb, linkcols in sections:
+        rows = find[key]
+        html += f"<a id='{key}'></a><h3>{label} ({len(rows):,})</h3>" \
+                + f"<div style='margin-bottom:8px; color:#a8c4e0'>{escape(blurb)}</div>"
+        if not rows:
+            html += "<div style='margin-bottom:18px'>Nothing found.</div>"
+            continue
+        trows = []
+        for row in rows:
+            cells = []
+            for idx, val in enumerate(row):
+                if idx in linkcols and isinstance(val, str) and val:
+                    # "Related DOIs" holds a comma-separated list; link each one.
+                    cells.append(safe(", ".join(doi_link(d.strip())
+                                                for d in val.split(",") if d.strip())))
+                else:
+                    cells.append(val)
+            trows.append(cells)
+        html += render_table(header, trows, table_id=key,
+                             css='tablesorter numbers-scroll') + "<br>"
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="Relation integrity", html=html,
+                                         navbar=generate_navbar('Related DOIs')))
+
 
 # ******************************************************************************
 # * UI endpoints (Journals)                                                    *
