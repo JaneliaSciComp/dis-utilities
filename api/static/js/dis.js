@@ -268,13 +268,41 @@ async function copyCitation(el) {
   const style = el.dataset.citeStyle;
   const group = el.closest('[data-cite-doi]');
   const doi = group ? group.dataset.citeDoi : '';
+  // Three outcomes, because they mean different things to whoever clicked.
+  // "No citation available" is final - the formatter has nothing for this DOI,
+  // and clicking again will not help. "Server unavailable" is worth retrying.
+  // "Copy failed" is the default: the citation arrived and something local went
+  // wrong, most often navigator.clipboard being undefined outside a secure
+  // context. The console keeps the underlying error in every case.
+  let failure = 'Copy failed';
   try {
     if (!doi || !style) { throw new Error('missing doi or style'); }
-    const resp = await fetch('/citation/style/' + encodeURIComponent(style) +
-                             '/' + encodeURI(doi));
-    if (!resp.ok) { throw new Error('HTTP ' + resp.status); }
+    let resp;
+    try {
+      resp = await fetch('/citation/style/' + encodeURIComponent(style) +
+                         '/' + encodeURI(doi));
+    } catch (netErr) {
+      // fetch only rejects when the request never completed - DNS, refused
+      // connection, offline. An HTTP error status resolves normally.
+      failure = 'Server unavailable';
+      throw netErr;
+    }
+    if (resp.status === 404) {
+      // The endpoint answers 404 with an empty body when the formatter has no
+      // citation for this DOI, and for a style it does not know. The styles come
+      // from our own pulldown, so in practice this is the DOI.
+      failure = 'No citation available';
+      throw new Error('HTTP 404');
+    }
+    if (!resp.ok) {
+      failure = 'Server unavailable';
+      throw new Error('HTTP ' + resp.status);
+    }
     const text = (await resp.text()).trim();
-    if (!text) { throw new Error('empty response'); }
+    if (!text) {
+      failure = 'No citation available';
+      throw new Error('empty response');
+    }
     await navigator.clipboard.writeText(text);
     // Confirm on the toggle button, not on the item that was clicked: Bootstrap
     // closes the menu on click, so anything shown on the item is hidden before
@@ -288,8 +316,8 @@ async function copyCitation(el) {
     // jarring answer to a click whose success is a quiet inline flash, and it
     // has to be dismissed before anything else can be tried. The detail stays
     // in the console.
-    console.error('Citation copy failed:', err);
-    flashToggle(group, '<i class="fas fa-times"></i> Copy failed', true);
+    console.error('Citation copy failed (' + failure + '):', err);
+    flashToggle(group, '<i class="fas fa-times"></i> ' + failure, true);
   }
 }
 
