@@ -38,7 +38,7 @@
     declared the same relation, in which case the derived entry replaces it.
 '''
 
-__version__ = '1.4.0'
+__version__ = '1.5.0'
 
 import argparse
 import collections
@@ -72,6 +72,28 @@ DATA_PREFIXES = ('10.25378',      # Janelia figshare
                  '10.48324')      # BossDB
 DATA_RE = re.compile(r'^(?:' + '|'.join(re.escape(p) for p in DATA_PREFIXES) + r')/', re.I)
 VERSION_RE = re.compile(r'\.v\d+$', re.I)
+# bioRxiv and medRxiv put a posting's version in the URL, not in the DOI:
+# biorxiv.org/content/10.1101/2024.02.10.579780v2 is version 2 of the work whose
+# DOI is 10.1101/2024.02.10.579780. A depositor pasting that address into a DOI
+# field leaves a "v2" that resolves nowhere, and the link is dead at both
+# registrars. Anchored on the date-style suffix those servers use, and safe:
+# none of the 653 such DOIs we hold ends in a version.
+PREPRINT_URL_VERSION = re.compile(r'^(10\.1101/\d{4}\.\d{2}\.\d{2}\.\d+)v\d+$', re.I)
+
+
+def normalize_target(doi):
+    ''' A related DOI as deposited, corrected where the depositor gave a URL
+        Keyword arguments:
+          doi: DOI string from relatedIdentifiers or relation
+        Returns:
+          the DOI, with a bioRxiv/medRxiv URL version suffix removed
+    '''
+    match = PREPRINT_URL_VERSION.match(doi or '')
+    if not match:
+        return doi
+    COUNT['normalized_version_suffix'] += 1
+    LOGGER.info(f"{doi}: dropping the URL version suffix, which is not part of the DOI")
+    return match.group(1)
 # Sources this program derives itself, and therefore owns. An entry recorded by
 # anything else - a curator, or a migration from another field - is preserved
 # through a rebuild: this program rebuilds the field with a whole-value $set, so
@@ -152,7 +174,7 @@ def collect():
             if rel.get('relationType') != 'IsSupplementTo' \
                or rel.get('relatedIdentifierType') != 'DOI':
                 continue
-            tgt = str(rel.get('relatedIdentifier') or '').lower().strip()
+            tgt = normalize_target(str(rel.get('relatedIdentifier') or '').lower().strip())
             if not tgt or tgt == doi:
                 continue
             if is_dataset(tgt):
@@ -168,7 +190,7 @@ def collect():
                 # accession numbers (PDB, EMDB) and bare URIs are not joinable
                 COUNT['skipped_non_doi'] += 1
                 continue
-            tgt = str(val.get('id') or '').lower().strip()
+            tgt = normalize_target(str(val.get('id') or '').lower().strip())
             if not tgt or tgt == doi:
                 continue
             if not is_dataset(tgt):
