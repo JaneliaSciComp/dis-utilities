@@ -60,6 +60,7 @@ NAV = {"Home": "",
                       "DOIs with invalid authors": "dois_invalid_auth",
                       },
        "Related DOIs": {"Summary": "relations",
+                        "All relations": "dois_related",
                         "Integrity checks": "relation_integrity",
                         "Preprints":
                             {"DOIs by preprint status": "dois_preprint",

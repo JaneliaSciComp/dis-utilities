@@ -53,7 +53,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.65.0"
+__version__ = "120.66.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -14366,6 +14366,277 @@ def preprint_lag():
                                          chartscript=chartscript, chartdiv='',
                                          chartscript2='', chartdiv2='',
                                          navbar=generate_navbar('Related DOIs')))
+
+
+
+# The three relation types, in the order their columns appear. "declared" names
+# the provenance test: a supplement or preprint the registrar deposited itself,
+# as against one this system worked out. Companions are always inferred - no
+# registrar declares one - so the filter never excludes them on that ground.
+RELATION_COLUMNS = (
+    {'key': 'preprint', 'field': 'jrc_preprint', 'label': 'Preprints'},
+    {'key': 'supplement', 'field': 'jrc_dataset_supplement', 'label': 'Dataset supplements'},
+    {'key': 'companion', 'field': 'jrc_companion', 'label': 'Companion resources'})
+RELATION_KEYS = tuple(c['key'] for c in RELATION_COLUMNS)
+# Relations shown in a cell before the rest go behind a disclosure. One DOI
+# carries 29, which would make a single row taller than the screen.
+RELATION_CELL_MAX = 3
+
+
+def _relation_entries(row, column):
+    ''' The related DOIs a record holds for one relation type
+        jrc_preprint stores bare strings; the other two store dicts. Returns a
+        uniform shape so the caller does not branch per column.
+        Keyword arguments:
+          row: DOI record
+          column: one entry from RELATION_COLUMNS
+        Returns:
+          list of (related DOI, source or None)
+    '''
+    out = []
+    for item in (row.get(column['field']) or []):
+        if isinstance(item, str):
+            out.append((item.lower(), None))
+        else:
+            doi = str(item.get('doi') or '').lower()
+            if doi:
+                out.append((doi, item.get('source')))
+    return out
+
+
+def _relation_declared(row, column, entries):
+    ''' Did a registrar declare this record's relations, or did we derive them?
+        A supplement entry records its own source. A preprint relation does not,
+        so the record's raw metadata is consulted. A companion is always inferred.
+        Keyword arguments:
+          row: DOI record
+          column: one entry from RELATION_COLUMNS
+          entries: that column's entries, from _relation_entries
+        Returns:
+          True when at least one relation was declared by a registrar
+    '''
+    if column['key'] == 'companion':
+        return False
+    if column['key'] == 'supplement':
+        return any(src in ('DataCite', 'Crossref') for _, src in entries)
+    relation = row.get('relation') or {}
+    if 'is-preprint-of' in relation or 'has-preprint' in relation:
+        return True
+    return any(item.get('relationType') in ('IsPreprintOf', 'HasPreprint')
+               for item in (row.get('relatedIdentifiers') or []))
+
+
+def _relation_cell(entries, titles):
+    ''' Render one relation cell: links, capped, with the rest behind a summary
+        Keyword arguments:
+          entries: list of (doi, source) for this cell
+          titles: doi -> title for anything we hold
+        Returns:
+          HTML string
+    '''
+    if not entries:
+        return ""
+    def one(doi, src):
+        title = titles.get(doi)
+        tip = f" title=\"{escape(title)}\"" if title else ""
+        tag = f" <span style='color:#888;font-size:0.85em'>({escape(src)})</span>" \
+              if src and src not in ('DataCite', 'Crossref') else ""
+        return f"<span{tip}>{doi_link(doi)}{tag}</span>"
+    shown = [one(d, s) for d, s in entries[:RELATION_CELL_MAX]]
+    html = "<br>".join(shown)
+    rest = entries[RELATION_CELL_MAX:]
+    if rest:
+        html += (f"<details style='margin-top:3px'><summary style='cursor:pointer;"
+                 f"color:#a8c4e0'>{len(rest):,} more</summary>"
+                 + "<br>".join(one(d, s) for d, s in rest) + "</details>")
+    return html
+
+
+@app.route('/dois_related')
+@app.route('/dois_related/<string:year>')
+def dois_related(year=None):
+    ''' Every DOI's relations, all three types side by side
+        The year is a path segment so that "All" is explicit in the URL: the
+        page defaults to the current year rather than to every year, and a
+        missing segment therefore cannot mean "no filter". The other filters are
+        query parameters, so a filtered view can be bookmarked and sent to
+        someone.
+        Keyword arguments:
+          year: publishing year, or "All"; defaults to the current year because
+                every year is 2,400 DOIs and nobody starts there
+    '''
+    args = request.args
+    if year is None:
+        year = str(datetime.now().year)
+    chosen = [k for k in (args.get('types') or ','.join(RELATION_KEYS)).split(',')
+              if k in RELATION_KEYS]
+    if not chosen:
+        chosen = list(RELATION_KEYS)
+    registrar = args.get('registrar', 'All')
+    provenance = args.get('provenance', 'All')
+    multi = args.get('multi') == '1'
+    columns = [c for c in RELATION_COLUMNS if c['key'] in chosen]
+
+    payload = {"$or": [{c['field']: {"$exists": True}} for c in columns]}
+    if year != 'All':
+        payload['jrc_publishing_date'] = {"$regex": "^" + year}
+    if registrar in ('Crossref', 'DataCite'):
+        payload['jrc_obtained_from'] = registrar
+    try:
+        rows = list(DB['dis'].dois.find(
+            payload, {"doi": 1, "DOI": 1, "titles": 1, "title": 1, "jrc_journal": 1,
+                      "jrc_publishing_date": 1, "jrc_obtained_from": 1, "relation": 1,
+                      "relatedIdentifiers": 1,
+                      **{c['field']: 1 for c in RELATION_COLUMNS}}
+        ).sort([("jrc_publishing_date", -1)]))
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get relations from dois"),
+                               message=error_message(err))
+    # Titles for the far end of every relation, in one query, so a reader can
+    # hover a DOI instead of opening it. The upper-case DOI key has to be
+    # projected or DL.get_title() sends Crossref records down the DataCite branch.
+    wanted = set()
+    for row in rows:
+        for col in columns:
+            wanted.update(d for d, _ in _relation_entries(row, col))
+    titles = {}
+    if wanted:
+        try:
+            for rec in DB['dis'].dois.find({"doi": {"$in": sorted(wanted)}},
+                                           {"doi": 1, "DOI": 1, "titles": 1, "title": 1}):
+                titles[rec['doi'].lower()] = DL.get_title(rec)
+        except Exception as err:
+            return render_template('error.html', urlroot=request.url_root,
+                                   title=render_warning("Could not get related titles"),
+                                   message=error_message(err))
+    header = ['Published', 'DOI', 'Title', 'Journal', 'Source'] + [c['label'] for c in columns]
+    trows, fileoutput, shown_relations = [], "", 0
+    for row in rows:
+        cells, present, declared, count = [], 0, False, 0
+        for col in columns:
+            entries = _relation_entries(row, col)
+            if entries:
+                present += 1
+                count += len(entries)
+                declared = declared or _relation_declared(row, col, entries)
+            cells.append(_relation_cell(entries, titles))
+        if not present:
+            continue                      # matched another type's field only
+        if multi and present < 2:
+            continue
+        if provenance == 'declared' and not declared:
+            continue
+        if provenance == 'derived' and declared:
+            continue
+        shown_relations += count
+        title = DL.get_title(row)
+        trows.append([row.get('jrc_publishing_date', '')[:10],
+                      safe(doi_link(row['doi'])), render_title_html(title),
+                      row.get('jrc_journal', ''), row.get('jrc_obtained_from', '')]
+                     + [safe(c) for c in cells])
+        flat = []
+        for col in columns:
+            flat.append("; ".join(d for d, _ in _relation_entries(row, col)))
+        fileoutput += "\t".join([row.get('jrc_publishing_date', '')[:10], row['doi'],
+                                 title, row.get('jrc_journal', ''),
+                                 row.get('jrc_obtained_from', '')] + flat) + "\n"
+    html = _relation_filters(year, chosen, registrar, provenance, multi)
+    html += (f"<br>{len(trows):,} DOI{'' if len(trows) == 1 else 's'} carrying "
+             f"{shown_relations:,} relation{'' if shown_relations == 1 else 's'}"
+             f" ({'all years' if year == 'All' else year})<br><br>")
+    html += create_downloadable('related_dois', header, fileoutput)
+    html += render_table(header, trows, table_id='related',
+                         css='tablesorter numbers-scroll')
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="Related DOIs", html=html,
+                                         navbar=generate_navbar('Related DOIs')))
+
+
+def _relation_filters(year, chosen, registrar, provenance, multi):
+    ''' The filter bar for /dois_related
+        Every control writes the whole filter set back into the query string, so
+        one control never silently drops another's value - the failure people hit
+        when each filter only knows about itself.
+        Keyword arguments:
+          year, chosen, registrar, provenance, multi: the active filter values
+        Returns:
+          HTML string
+    '''
+    extra = []
+    if set(chosen) != set(RELATION_KEYS):
+        extra.append("types=" + ",".join(k for k in RELATION_KEYS if k in chosen))
+    if registrar != 'All':
+        extra.append(f"registrar={registrar}")
+    if provenance != 'All':
+        extra.append(f"provenance={provenance}")
+    if multi:
+        extra.append("multi=1")
+    # Path mode, with the other filters hung off the suffix: the year has to be
+    # explicit in the URL because a missing one means the current year here, not
+    # every year.
+    query = "?" + "&".join(extra) if extra else ""
+    pulldown = year_pulldown("dois_related", suffix=query,
+                             selected="(all years)" if year == 'All' else year)
+    boxes = ""
+    for col in RELATION_COLUMNS:
+        checked = " checked" if col['key'] in chosen else ""
+        boxes += (f"<div class='form-check form-check-inline'>"
+                  f"<input class='form-check-input relfilter' type='checkbox' "
+                  f"id='t_{col['key']}' value='{col['key']}'{checked}>"
+                  f"<label class='form-check-label' for='t_{col['key']}'>"
+                  f"{col['label']}</label></div>")
+    def picker(name, label, options, current):
+        opts = "".join(f"<option value='{v}'{' selected' if v == current else ''}>"
+                       f"{escape(t)}</option>" for v, t in options)
+        return (f"<span style='margin-right:6px'>{label}</span>"
+                f"<select id='{name}' class='relfilter form-control' "
+                f"style='width:auto; display:inline-block; margin-right:18px'>"
+                f"{opts}</select>")
+    controls = picker('registrar', 'Registrar',
+                      (('All', 'All'), ('Crossref', 'Crossref'), ('DataCite', 'DataCite')),
+                      registrar)
+    controls += picker('provenance', 'Determined by',
+                       (('All', 'All'), ('declared', 'Registrar'), ('derived', 'This system')),
+                       provenance)
+    controls += (f"<div class='form-check form-check-inline'>"
+                 f"<input class='form-check-input relfilter' type='checkbox' id='multi'"
+                 f"{' checked' if multi else ''}>"
+                 f"<label class='form-check-label' for='multi'>More than one "
+                 f"relation type</label></div>")
+    script = """
+<script>
+// Every control rebuilds the whole query string, so changing one never drops
+// another's value. The year lives in the pulldown above and is carried through
+// the URL rather than re-read from a control.
+function relations_filter() {
+  var types = [];
+  $(".relfilter[type=checkbox]").each(function () {
+    if (this.id.indexOf("t_") === 0 && this.checked) { types.push(this.value); }
+  });
+  if (!types.length) {
+    alert("Choose at least one relation type.");
+    return;
+  }
+  var args = [];
+  // The year is the path segment, not a query parameter, so it is read from the
+  // path and put back there. A page with no segment is the current year.
+  var seg = window.location.pathname.split("/")[2];
+  var year = seg ? decodeURIComponent(seg) : "";
+  if (types.length < %COUNT%) { args.push("types=" + types.join(",")); }
+  var reg = $("#registrar").val();
+  if (reg !== "All") { args.push("registrar=" + encodeURIComponent(reg)); }
+  var prov = $("#provenance").val();
+  if (prov !== "All") { args.push("provenance=" + encodeURIComponent(prov)); }
+  if ($("#multi").is(":checked")) { args.push("multi=1"); }
+  window.location = "/dois_related" + (year ? "/" + encodeURIComponent(year) : "")
+                    + (args.length ? "?" + args.join("&") : "");
+}
+$(function () { $(".relfilter").on("change", relations_filter); });
+</script>""".replace('%COUNT%', str(len(RELATION_COLUMNS)))
+    return (f"{pulldown}<br><br><div style='margin-bottom:8px'>{boxes}</div>"
+            f"<div>{controls}</div>{script}")
 
 
 # ******************************************************************************
