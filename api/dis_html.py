@@ -64,6 +64,7 @@ NAV = {"Home": "",
                         "Preprints":
                             {"DOIs by preprint status": "dois_preprint",
                              "DOIs by preprint status by year": "dois_preprint_year",
+                             "Preprint to publication": "preprint_lag",
                              "Preprints with journal publications": "preprint_with_pub",
                              "Preprints without journal publications":
                                  "preprint_relation/preprint_no_pub",

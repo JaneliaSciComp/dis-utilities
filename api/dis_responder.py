@@ -53,7 +53,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.64.0"
+__version__ = "120.65.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -14163,6 +14163,208 @@ def relation_integrity():
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="Relation integrity", html=html,
+                                         navbar=generate_navbar('Related DOIs')))
+
+
+
+# Buckets for the lag distribution, in days. Coarse at the top because the tail is
+# long and thin - the longest gap we hold is 1,692 days - and a bucket per month
+# would be forty near-empty bars.
+LAG_BUCKETS = ((0, 90, "Under 3 months"), (90, 180, "3 to 6 months"),
+               (180, 365, "6 to 12 months"), (365, 730, "1 to 2 years"),
+               (730, 1095, "2 to 3 years"), (1095, None, "Over 3 years"))
+# A journal needs this many pairs before its median is reported. Below it the
+# median is one or two papers and reads as a fact about the journal.
+LAG_MIN_JOURNAL = 10
+# Beyond this a forward gap is worth a look rather than a statistic. The
+# integrity report only catches a preprint dated AFTER its article; a gap this
+# far in the right direction can be a mislink too.
+LAG_OUTLIER = 730
+
+
+def _lag_pairs():
+    ''' Every preprint/article pair we hold, with the gap between them in days
+        A pair is only measurable where exactly one end reads as a preprint:
+        where both or neither do, there is no direction to measure. Each pair is
+        measured once, not once per end.
+        Returns:
+          list of dicts, one per pair
+    '''
+    coll = DB['dis'].dois
+    proj = {"doi": 1, "DOI": 1, "titles": 1, "title": 1, "type": 1, "subtype": 1,
+            "types": 1, "jrc_publishing_date": 1, "jrc_preprint": 1, "jrc_journal": 1}
+    recs = {}
+    for row in coll.find({}, proj):
+        recs[row['doi'].lower()] = row
+    pairs, tested = [], set()
+    for doi, row in recs.items():
+        for tgt in [str(t).lower() for t in (row.get('jrc_preprint') or [])]:
+            other = recs.get(tgt)
+            key = tuple(sorted((doi, tgt)))
+            if not other or key in tested:
+                continue
+            tested.add(key)
+            if DL.is_preprint(row) == DL.is_preprint(other):
+                continue
+            preprint, article = (row, other) if DL.is_preprint(row) else (other, row)
+            pdate = (preprint.get('jrc_publishing_date') or '')[:10]
+            adate = (article.get('jrc_publishing_date') or '')[:10]
+            if not pdate or not adate:
+                continue
+            try:
+                days = (datetime.strptime(adate, "%Y-%m-%d")
+                        - datetime.strptime(pdate, "%Y-%m-%d")).days
+            except ValueError:
+                continue
+            if days < 0:
+                # Reported by /relation_integrity instead; a negative gap is a
+                # data problem, not a publishing delay, and averaging it in
+                # would understate every figure on this page.
+                continue
+            pairs.append({"days": days, "preprint": preprint['doi'],
+                          "article": article['doi'], "year": adate[:4],
+                          "journal": article.get('jrc_journal') or 'Unknown',
+                          "title": DL.get_title(article)})
+    return pairs
+
+
+def _lag_stats(values):
+    ''' Median and quartiles for a list of day counts
+        Returns:
+          dict, or an empty dict when there is nothing to describe
+    '''
+    if not values:
+        return {}
+    ordered = sorted(values)
+    out = {"n": len(ordered), "median": statistics.median(ordered),
+           "mean": statistics.mean(ordered), "max": ordered[-1], "min": ordered[0]}
+    if len(ordered) >= 4:
+        quart = statistics.quantiles(ordered, n=4)
+        out['q1'], out['q3'] = quart[0], quart[2]
+    return out
+
+
+@app.route('/preprint_lag')
+def preprint_lag():
+    ''' How long Janelia work sits as a preprint before it is published
+    '''
+    try:
+        pairs = _lag_pairs()
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not measure preprint lag"),
+                               message=error_message(err))
+    if not pairs:
+        return make_response(render_template('general.html', urlroot=request.url_root,
+                                             title="Preprint to publication",
+                                             html="No measurable preprint/article pairs.",
+                                             navbar=generate_navbar('Related DOIs')))
+    days = [p['days'] for p in pairs]
+    overall = _lag_stats(days)
+    # eLife is reported separately as well as within the total. It is over a
+    # quarter of every pair we hold, and its reviewed-preprint model makes its
+    # gap mean something different from a journal that publishes on acceptance,
+    # so it both dominates the median and is not quite comparable to the rest.
+    elife = _lag_stats([p['days'] for p in pairs if 'elife' in p['journal'].lower()])
+    rest = _lag_stats([p['days'] for p in pairs if 'elife' not in p['journal'].lower()])
+
+    def humanize(num):
+        ''' Days, with a readable second unit. Months stop being readable somewhere
+            around two years - "55.6 months" is a number nobody converts in their
+            head - so past that it reads in years. '''
+        if num >= 730:
+            return f"{num:,.0f} days ({num / 365.25:.1f} years)"
+        return f"{num:,.0f} days ({num / 30.44:.1f} months)"
+
+    cards = [("Pairs measured", f"{overall['n']:,}"),
+             ("Median gap", humanize(overall['median'])),
+             ("Middle half", f"{overall.get('q1', 0):,.0f} to {overall.get('q3', 0):,.0f} days"),
+             ("Longest gap", humanize(overall['max']))]
+    html = stat_cards(cards, div_id='lag-cards') + "<br>"
+
+    # Distribution
+    buckets = collections.OrderedDict((lbl, 0) for _, _, lbl in LAG_BUCKETS)
+    for day in days:
+        for low, high, label in LAG_BUCKETS:
+            if day >= low and (high is None or day < high):
+                buckets[label] += 1
+                break
+    dist_script, dist_div = DP.hbar_chart(dict(buckets), "How long until publication",
+                                          value_label="Pairs", width=600, height=320,
+                                          show_values=True)
+    # Trend: pairs per year as bars, median gap as a line
+    byyear = collections.defaultdict(list)
+    for pair in pairs:
+        if pair['year'].isdigit():
+            byyear[pair['year']].append(pair['days'])
+    years = sorted(byyear)
+    ydata = {"Year": years, "Pairs": [len(byyear[y]) for y in years],
+             "Median": [round(statistics.median(byyear[y])) for y in years]}
+    trend_script, trend_div = DP.dual_axis_chart(
+        ydata, title="Pairs and median gap by publishing year", x_field='Year',
+        bar_field='Pairs', line_field='Median', bar_label='Pairs published',
+        line_label='Median days', bar_color='mediumblue', bar_format="0,0",
+        line_format="0,0", width=680, height=380)
+    chartscript = dist_script + trend_script
+
+    # By journal
+    byjournal = collections.defaultdict(list)
+    for pair in pairs:
+        byjournal[pair['journal']].append(pair['days'])
+    jrows = []
+    for journal, vals in byjournal.items():
+        if len(vals) < LAG_MIN_JOURNAL:
+            continue
+        stat = _lag_stats(vals)
+        jrows.append([journal, stat['n'], f"{stat['median']:,.0f}",
+                      f"{stat['median'] / 30.44:.1f}", f"{stat['max']:,}"])
+    jrows.sort(key=lambda r: -float(r[2].replace(',', '')))
+    jtable = render_table(['Journal', 'Pairs', 'Median days', 'Median months',
+                           'Longest'], jrows, table_id='byjournal',
+                          css='tablesorter numbers-scroll')
+
+    # Outliers, which double as a mislink check in the direction the integrity
+    # report does not cover
+    outliers = sorted((p for p in pairs if p['days'] > LAG_OUTLIER),
+                      key=lambda p: -p['days'])
+    orows = [[f"{p['days']:,}", safe(doi_link(p['preprint'])), safe(doi_link(p['article'])),
+              p['journal'], render_title_html(p['title'])] for p in outliers]
+    otable = render_table(['Days', 'Preprint', 'Article', 'Journal', 'Title'], orows,
+                          table_id='lagoutliers', css='tablesorter numbers-scroll')
+
+    caveat = (
+        "<div style='margin:6px 0 14px 0; color:#a8c4e0'>"
+        "Three things this page cannot correct for. Publishers do not date an "
+        "article the same way: some date it from its first online appearance and "
+        "some from its issue, so comparing one journal against another carries a "
+        "systematic bias. eLife is "
+        f"{100 * elife.get('n', 0) / overall['n']:.0f}% of every pair measured, and "
+        "its reviewed-preprint model makes its gap mean something different, so it "
+        "is reported separately below as well as within the totals. And only pairs "
+        "we have linked can be measured, which favours recent work.</div>")
+    split = render_table(['Population', 'Pairs', 'Median days', 'Median months'],
+                         [["All", f"{overall['n']:,}", f"{overall['median']:,.0f}",
+                           f"{overall['median'] / 30.44:.1f}"],
+                          ["eLife", f"{elife.get('n', 0):,}",
+                           f"{elife.get('median', 0):,.0f}",
+                           f"{elife.get('median', 0) / 30.44:.1f}"],
+                          ["Everything else", f"{rest.get('n', 0):,}",
+                           f"{rest.get('median', 0):,.0f}",
+                           f"{rest.get('median', 0) / 30.44:.1f}"]],
+                         table_id='lagsplit', css='standard')
+    html += caveat + two_col(f"<div>{dist_div}</div>", f"<div>{trend_div}</div>")
+    html += f"<br><div><h3>eLife and everything else</h3><br>{split}</div>"
+    html += f"<br><div><h3>By journal ({LAG_MIN_JOURNAL} pairs or more)</h3><br>{jtable}</div>"
+    html += (f"<br><div><h3>Gaps over {LAG_OUTLIER // 365} years ({len(outliers)})</h3><br>"
+             "<div style='margin-bottom:8px; color:#a8c4e0'>Long gaps happen, but "
+             "/relation_integrity only reports a preprint dated <i>after</i> its "
+             "article. A gap this far in the other direction can be a mislink "
+             f"too.</div>{otable}</div>")
+    endpoint_access()
+    return make_response(render_template('bokeh.html', urlroot=request.url_root,
+                                         title="Preprint to publication", html=html,
+                                         chartscript=chartscript, chartdiv='',
+                                         chartscript2='', chartdiv2='',
                                          navbar=generate_navbar('Related DOIs')))
 
 
