@@ -287,7 +287,7 @@ def error_message(err):
 
 
 def year_pulldown(prefix, all_years=True, suffix='', start_year=2006, query=False,
-                  selected=None, extra=''):
+                  selected=None):
     ''' Request-aware wrapper around dis_html.year_pulldown. When the caller
         doesn't pass an explicit `selected`, derive the currently-active year
         from the request URL (the path segment after the prefix, or ?year= in
@@ -297,8 +297,7 @@ def year_pulldown(prefix, all_years=True, suffix='', start_year=2006, query=Fals
         coupling. Endpoints whose default isn't "All"/current-year (e.g. the
         preprint pages) pass `selected` explicitly.
         Keyword arguments:
-          prefix, all_years, suffix, start_year, query, extra: as
-                 dis_html.year_pulldown
+          prefix, all_years, suffix, start_year, query: as dis_html.year_pulldown
           selected: explicit value to show (skips the request-based derivation)
         Returns:
           Pulldown HTML
@@ -320,8 +319,7 @@ def year_pulldown(prefix, all_years=True, suffix='', start_year=2006, query=Fals
             yr = 'All' if all_years else str(datetime.now().year)
         selected = "(all years)" if yr == 'All' else yr
     return _year_pulldown(prefix, all_years=all_years, suffix=suffix,
-                          start_year=start_year, query=query, selected=selected,
-                          extra=extra)
+                          start_year=start_year, query=query, selected=selected)
 
 
 def tag_pulldown(prefix, year='All', selected=None):
@@ -14455,14 +14453,21 @@ def _relation_cell(entries, titles):
 
 
 @app.route('/dois_related')
-def dois_related():
+@app.route('/dois_related/<string:year>')
+def dois_related(year=None):
     ''' Every DOI's relations, all three types side by side
-        Filters arrive as query parameters so a filtered view can be bookmarked
-        and sent to someone: year, types (comma-separated), registrar,
-        provenance, and multi.
+        The year is a path segment so that "All" is explicit in the URL: the
+        page defaults to the current year rather than to every year, and a
+        missing segment therefore cannot mean "no filter". The other filters are
+        query parameters, so a filtered view can be bookmarked and sent to
+        someone.
+        Keyword arguments:
+          year: publishing year, or "All"; defaults to the current year because
+                every year is 2,400 DOIs and nobody starts there
     '''
     args = request.args
-    year = args.get('year', 'All')
+    if year is None:
+        year = str(datetime.now().year)
     chosen = [k for k in (args.get('types') or ','.join(RELATION_KEYS)).split(',')
               if k in RELATION_KEYS]
     if not chosen:
@@ -14568,9 +14573,12 @@ def _relation_filters(year, chosen, registrar, provenance, multi):
         extra.append(f"provenance={provenance}")
     if multi:
         extra.append("multi=1")
-    pulldown = year_pulldown("dois_related", query=True,
-                             selected="(all years)" if year == 'All' else year,
-                             extra="&".join(extra))
+    # Path mode, with the other filters hung off the suffix: the year has to be
+    # explicit in the URL because a missing one means the current year here, not
+    # every year.
+    query = "?" + "&".join(extra) if extra else ""
+    pulldown = year_pulldown("dois_related", suffix=query,
+                             selected="(all years)" if year == 'All' else year)
     boxes = ""
     for col in RELATION_COLUMNS:
         checked = " checked" if col['key'] in chosen else ""
@@ -14612,15 +14620,18 @@ function relations_filter() {
     return;
   }
   var args = [];
-  var year = new URLSearchParams(window.location.search).get("year");
-  if (year) { args.push("year=" + encodeURIComponent(year)); }
+  // The year is the path segment, not a query parameter, so it is read from the
+  // path and put back there. A page with no segment is the current year.
+  var seg = window.location.pathname.split("/")[2];
+  var year = seg ? decodeURIComponent(seg) : "";
   if (types.length < %COUNT%) { args.push("types=" + types.join(",")); }
   var reg = $("#registrar").val();
   if (reg !== "All") { args.push("registrar=" + encodeURIComponent(reg)); }
   var prov = $("#provenance").val();
   if (prov !== "All") { args.push("provenance=" + encodeURIComponent(prov)); }
   if ($("#multi").is(":checked")) { args.push("multi=1"); }
-  window.location = "/dois_related" + (args.length ? "?" + args.join("&") : "");
+  window.location = "/dois_related" + (year ? "/" + encodeURIComponent(year) : "")
+                    + (args.length ? "?" + args.join("&") : "");
 }
 $(function () { $(".relfilter").on("change", relations_filter); });
 </script>""".replace('%COUNT%', str(len(RELATION_COLUMNS)))

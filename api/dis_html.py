@@ -548,7 +548,7 @@ def dloop(row, keys, sep="\t"):
 
 
 def year_pulldown(prefix, all_years=True, suffix = '', start_year=2006, query=False,
-                  selected=None, extra=''):
+                  selected=None):
     ''' Generate a year pulldown
         Keyword arguments:
           prefix: navigation prefix
@@ -558,9 +558,6 @@ def year_pulldown(prefix, all_years=True, suffix = '', start_year=2006, query=Fa
           query: if True, link as /<prefix>?year=<year> (and /<prefix> for All)
                  instead of the path form /<prefix>/<year><suffix>; use when the
                  path's positional segments are reserved for something else
-          extra: query string (without a leading separator) carried on every link
-                 in query mode, so a page with filters besides the year keeps them
-                 when the year changes
           selected: if given, the currently-selected value is shown on a widened
                     button (the value in bright white), instead of the generic
                     "Select publishing year" label
@@ -596,10 +593,7 @@ def year_pulldown(prefix, all_years=True, suffix = '', start_year=2006, query=Fa
            + f"{btn_label}</button><div class='dropdown-menu'>"
     for year in years:
         if query:
-            args = [] if year == 'All' else [f"year={year}"]
-            if extra:
-                args.append(extra)
-            url = f"/{prefix}" + ("?" + "&".join(args) if args else "")
+            url = f"/{prefix}" if year == 'All' else f"/{prefix}?year={year}"
         else:
             url = f"/{prefix}/{year}{suffix}"
         html += f"<a class='dropdown-item' href='{url}'>{year}</a>"
