@@ -149,7 +149,7 @@ NOTES
   parameter, i.e. filtered by when the article was added to PubMed Central.
 '''
 
-__version__ = '1.11.1'
+__version__ = '1.11.2'
 
 import argparse
 import collections
@@ -1116,8 +1116,12 @@ def _ignore_ack_doi(doi, source):
     try:
         DB['dis']['to_ignore'].update_one(
             {"type": "ack_doi", "key": doi, "term": ARG.TERM.lower()},
+            # "inserted" on insert only, like every other writer to this
+            # collection: it records when the entry was first made, so a later
+            # run must not move it.
             {"$setOnInsert": {"type": "ack_doi", "key": doi, "term": ARG.TERM.lower(),
-                              "reason": f"'{ARG.TERM}' not in ack text"}},
+                              "reason": f"'{ARG.TERM}' not in ack text",
+                              "inserted": datetime.today().replace(microsecond=0)}},
             upsert=True)
         COUNT[f'{source}_ack_doi_ignored'] += 1
     except pymongo.errors.DuplicateKeyError:
