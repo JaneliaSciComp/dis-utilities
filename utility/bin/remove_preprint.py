@@ -7,15 +7,23 @@
     the side you noticed leaves the other half of the relation behind, and the
     integrity report will keep reporting it.
 
+    Removing a relation does not necessarily keep it removed. update_preprints.py
+    rebuilds jrc_preprint on every run, and one of its three rules is the
+    registrar's own metadata, which it treats as ground truth: a publisher that
+    declares has-preprint will have the relation restored by the next nightly
+    run. --suppress records the pair in to_ignore so the rebuild skips it, and a
+    removal without --suppress warns when the relation is one that will come back.
+
     Dry run by default; --write applies the change and logs a processing event
     against each DOI. Removing a relation that is not there is reported and does
     nothing, so a repeated run is harmless.
 """
 
-__version__ = '1.0.0'
+__version__ = '1.1.0'
 
 import argparse
 import collections
+from datetime import datetime
 import json
 from operator import attrgetter
 import sys
@@ -122,6 +130,63 @@ def apply_change(rec, other):
             COUNT['log_failed'] += 1
 
 
+def registrar_declares(rec, other):
+    ''' Does this record's own metadata declare the relation we are removing?
+        Such a relation is ground truth to update_preprints.py, which re-applies
+        it on every run, so removing it without a suppression lasts one night.
+        Keyword arguments:
+          rec: DOI record
+          other: the DOI at the far end
+        Returns:
+          True when the registrar declares it
+    '''
+    other = other.lower()
+    for rel in ('has-preprint', 'is-preprint-of'):
+        for item in ((rec.get('relation') or {}).get(rel) or []):
+            if str(item.get('id') or '').lower() == other:
+                return True
+    for item in (rec.get('relatedIdentifiers') or []):
+        if item.get('relationType') in ('IsPreprintOf', 'HasPreprint') \
+           and str(item.get('relatedIdentifier') or '').lower() == other:
+            return True
+    return False
+
+
+def suppress_pair():
+    ''' Record the pair in to_ignore so the rebuild will not restore it
+        Stored on insert-only terms: a pair already suppressed keeps the reason
+        and date it was first given, so a second run never rewrites a curator's
+        earlier note.
+        Keyword arguments:
+          None
+        Returns:
+          None
+    '''
+    entry = {"type": "preprint_link", "key": ARG.DOI, "related": ARG.RELATED,
+             "reason": ARG.REASON or "Removed by remove_preprint.py",
+             "inserted": datetime.today().replace(microsecond=0)}
+    print(f"suppress: {ARG.DOI} x {ARG.RELATED}")
+    if not ARG.WRITE:
+        COUNT['would_suppress'] += 1
+        return
+    try:
+        # Matched in both directions: the pair is unordered, and suppressing it
+        # once should not depend on which DOI was named first.
+        existing = DB['dis'].to_ignore.find_one(
+            {"type": "preprint_link",
+             "$or": [{"key": ARG.DOI, "related": ARG.RELATED},
+                     {"key": ARG.RELATED, "related": ARG.DOI}]})
+        if existing:
+            LOGGER.warning(f"Pair is already suppressed (since "
+                           f"{str(existing.get('inserted'))[:10]})")
+            COUNT['already_suppressed'] += 1
+            return
+        DB['dis'].to_ignore.insert_one(entry)
+        COUNT['suppressed'] += 1
+    except Exception as err:
+        terminate_program(err)
+
+
 def remove_relation():
     ''' Remove the relation from both DOIs
         Keyword arguments:
@@ -143,8 +208,17 @@ def remove_relation():
                for a, b in ((ARG.DOI, ARG.RELATED), (ARG.RELATED, ARG.DOI))):
         terminate_program(f"Neither {ARG.DOI} nor {ARG.RELATED} records the other; "
                           "there is no relation to remove")
+    declared = [doi for doi, other in ((ARG.DOI, ARG.RELATED), (ARG.RELATED, ARG.DOI))
+                if registrar_declares(recs[doi], other)]
     apply_change(recs[ARG.DOI], ARG.RELATED)
     apply_change(recs[ARG.RELATED], ARG.DOI)
+    if ARG.SUPPRESS:
+        suppress_pair()
+    elif declared:
+        LOGGER.warning(f"{declared[0]} declares this relation in its own metadata, so "
+                       "update_preprints.py will restore it on its next run. Re-run "
+                       "with --suppress to record the pair in to_ignore.")
+        COUNT['will_be_restored'] += 1
     for key in sorted(COUNT):
         print(f"{key + ':':<20} {COUNT[key]:,}")
     if not ARG.WRITE:
@@ -160,6 +234,9 @@ if __name__ == '__main__':
                         required=True, help='One DOI of the pair')
     PARSER.add_argument('--related', dest='RELATED', action='store', type=str.lower,
                         required=True, help='The DOI to unlink from it')
+    PARSER.add_argument('--suppress', dest='SUPPRESS', action='store_true', default=False,
+                        help='Also record the pair in to_ignore, so '
+                             'update_preprints.py will not recreate it')
     PARSER.add_argument('--reason', dest='REASON', action='store', default='',
                         help='Why the relation is being removed (recorded in the '
                              'processing event)')

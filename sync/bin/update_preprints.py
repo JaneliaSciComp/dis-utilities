@@ -68,7 +68,7 @@
     reason when one is available, in place of a title.
 """
 
-__version__ = '2.4.0'
+__version__ = '2.5.0'
 
 import argparse
 import collections
@@ -154,6 +154,12 @@ IGNORE = set()
 # email section, when an associated DOI has no local title because it was never
 # loaded - only ever referenced via to_ignore - see missing_group_card)
 IGNORE_REASON = {}
+# Pairs a curator has said must not be related, as unordered {a, b} frozensets so
+# a suppression holds whichever way round the pair is found. Needed because the
+# three relation-building rules include explicit registrar metadata, which is
+# ground truth and is re-applied on every run: removing such a relation by hand
+# lasts exactly until the next one. See to_ignore type "preprint_link".
+SUPPRESSED = set()
 # Internal Janelia roster (the "orcid" collection, maintained by update_orcid.py/
 # apply_orcids.py/add_people_to_orcid.py from HHMI's People system and the public
 # ORCID API - NOT derived from DOI metadata). Preloaded once in initialize_program,
@@ -279,6 +285,14 @@ def initialize_program():
     except Exception as err:
         terminate_program(err)
     LOGGER.info(f"Ignored DOIs: {len(IGNORE):,}")
+    try:
+        for rec in DB['dis'].to_ignore.find({"type": "preprint_link"},
+                                            {"key": 1, "related": 1}):
+            if rec.get('key') and rec.get('related'):
+                SUPPRESSED.add(frozenset((rec['key'].lower(), rec['related'].lower())))
+    except Exception as err:
+        terminate_program(err)
+    LOGGER.info(f"Suppressed preprint pairs: {len(SUPPRESSED):,}")
     try:
         # Internal Janelia roster, for get_employee_identities()'s name-fallback
         # ORCID resolution. Every (given, family) name variant is indexed - a
@@ -945,6 +959,16 @@ def write_to_database():
         del combined[doi]
     for related in combined.values():
         related -= IGNORE
+    # Applied here rather than inside any one rule: a pair can arrive from
+    # explicit metadata, fuzzy matching or version propagation, and a curator
+    # suppressing it means all three.
+    for doi, related in combined.items():
+        blocked = {other for other in related if frozenset((doi, other)) in SUPPRESSED}
+        if blocked:
+            related -= blocked
+            COUNT['relations_suppressed'] += len(blocked)
+            for other in sorted(blocked):
+                LOGGER.info(f"{doi}: suppressed relation to {other}")
     COUNT['dois_ignored_for_update'] = len(ignored)
     COUNT['dois_flagged_for_update'] = len(combined)
     for doi, related in tqdm(combined.items(), desc="Write relations"):
@@ -1397,6 +1421,7 @@ def print_summary():
                  ("Total relations created", COUNT['relations_created']),
                  ("Missing DOIs referenced", len(MISSING)),
                  ("DOIs ignored (in to_ignore, skipped)", COUNT['dois_ignored_for_update']),
+                 ("Relations suppressed (curator)", COUNT['relations_suppressed']),
                  ("DOIs flagged for jrc_preprint update", COUNT['dois_flagged_for_update']),
                  ("DOIs predicted to change (dry-run diff)", COUNT['dois_would_change']),
                  ("DOIs predicted already correct (dry-run diff)",
