@@ -68,7 +68,7 @@
     reason when one is available, in place of a title.
 """
 
-__version__ = '2.3.0'
+__version__ = '2.4.0'
 
 import argparse
 import collections
@@ -964,9 +964,18 @@ def write_to_database():
         AUDIT.append(f"{doi} -> {merged}")
         if not ARG.WRITE:
             continue
+        # An empty merged list is stored as no field rather than as []. It can
+        # happen: every match for a DOI may land on the ignore list, and
+        # "related -= IGNORE" above then empties the set. The two states are not
+        # distinguishable to a reader - every caller tests {"$exists": True} - so
+        # an empty list makes a DOI count as related on /relations, appear in the
+        # relation reports, and render a row with nothing in it.
+        update = {"$set": {"jrc_preprint": merged}} if merged \
+                 else {"$unset": {"jrc_preprint": ""}}
+        if not merged:
+            COUNT['relations_emptied'] += 1
         try:
-            result = DB['dis'].dois.update_one({"doi": doi},
-                                               {"$set": {"jrc_preprint": merged}},
+            result = DB['dis'].dois.update_one({"doi": doi}, update,
                                                collation=INSENSITIVE)
         except Exception as err:
             COUNT['write_errors'] += 1
@@ -1395,6 +1404,7 @@ def print_summary():
                  ("DOIs with unknown current value", COUNT['dois_unknown_current_value'])])
     if ARG.WRITE:
         rows.extend([("DOIs actually written (value changed)", COUNT['dois_written']),
+                     ("  ...of which had the field removed", COUNT['relations_emptied']),
                      ("DOIs actually already up to date", COUNT['dois_unchanged']),
                      ("DOIs not found in collection", COUNT['dois_not_found']),
                      ("Write failures", COUNT['write_errors']),
