@@ -177,7 +177,7 @@ def before_request():
     '''
     if not DB:
         print("Initializing global variables")
-        if "DIS_MONGO_URI" not in os.environ:
+        if not os.environ.get("DIS_MONGO_URI", "").strip():
             return render_template('warning.html', urlroot=request.url_root,
                                    title=render_warning("Config error"),
                                    message="Missing environment variable DIS_MONGO_URI")

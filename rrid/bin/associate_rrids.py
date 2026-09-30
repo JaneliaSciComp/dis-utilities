@@ -101,7 +101,7 @@ def initialize_program():
         Returns:
           None
     '''
-    if "SCICRUNCH_API_KEY" not in os.environ:
+    if not os.environ.get("SCICRUNCH_API_KEY", "").strip():
         terminate_program("Missing key - set in SCICRUNCH_API_KEY environment variable")
     SESSION.headers['apikey'] = os.environ['SCICRUNCH_API_KEY']
     try:

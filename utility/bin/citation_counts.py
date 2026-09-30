@@ -39,7 +39,7 @@ def initialize_program():
           None
     '''
     # API key
-    if "S2_API_KEY" not in os.environ:
+    if not os.environ.get("S2_API_KEY", "").strip():
         terminate_program("Missing token - set in S2_API_KEY environment variable")
     # Database
     try:

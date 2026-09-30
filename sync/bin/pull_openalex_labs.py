@@ -84,7 +84,7 @@ def initialize_program():
         Returns:
           None
     '''
-    if "OPENALEX_API_KEY" not in os.environ:
+    if not os.environ.get("OPENALEX_API_KEY", "").strip():
         terminate_program("Missing API key - set in OPENALEX_API_KEY environment variable")
     try:
         dbconfig = JRC.get_config("databases")

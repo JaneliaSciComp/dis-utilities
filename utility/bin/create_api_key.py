@@ -59,6 +59,6 @@ if __name__ == '__main__':
                         default=False, help='Flag, Very chatty')
     ARG = PARSER.parse_args()
     LOGGER = JRC.setup_logging(ARG)
-    if "DIS_KEY" not in os.environ:
+    if not os.environ.get("DIS_KEY", "").strip():
         terminate_program("Missing secret key - set in DIS_KEY environment variable")
     print(f"Generated JWT Token:\n{create_jwt_token()}")

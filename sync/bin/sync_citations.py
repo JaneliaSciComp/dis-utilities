@@ -431,7 +431,7 @@ def initialize_program():
         Returns:
           None
     '''
-    if "OPENALEX_EMAIL" not in os.environ:
+    if not os.environ.get("OPENALEX_EMAIL", "").strip():
         terminate_program("Missing contact email - set in OPENALEX_EMAIL environment variable")
     try:
         dbconfig = JRC.get_config("databases")

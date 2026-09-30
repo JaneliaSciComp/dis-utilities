@@ -53,7 +53,7 @@ def initialize_program():
         Returns:
           None
     '''
-    if "ZENODO_API_KEY" not in os.environ:
+    if not os.environ.get("ZENODO_API_KEY", "").strip():
         terminate_program("Missing API key - set in ZENODO_API_KEY environment variable")
     try:
         dbconfig = JRC.get_config("databases")
