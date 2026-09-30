@@ -131,6 +131,7 @@ if __name__ == '__main__':
                         default=False, help='Flag, Very chatty')
     ARG = PARSER.parse_args()
     LOGGER = JRC.setup_logging(ARG)
+    LOGGER.info(f"Started run (version {__version__})")
     initialize_program()
     processing()
     terminate_program()

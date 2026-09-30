@@ -1896,6 +1896,7 @@ if __name__ == '__main__':
                         default=False, help='Flag, Very chatty')
     ARG = PARSER.parse_args()
     LOGGER = JRC.setup_logging(ARG)
+    LOGGER.info(f"Started run (version {__version__})")
     if ARG.CITED and ARG.NOTCITED:
         terminate_program("--cited and --notcited are mutually exclusive")
     # A single choices-constrained --publisher value structurally rules out

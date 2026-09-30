@@ -459,6 +459,7 @@ if __name__ == '__main__':
                              'entry as JSON')
     ARG = PARSER.parse_args()
     LOGGER = JRC.setup_logging(ARG)
+    LOGGER.info(f"Started run (version {__version__})")
     initialize_program()
     processing()
     terminate_program()

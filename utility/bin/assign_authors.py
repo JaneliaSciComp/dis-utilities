@@ -433,6 +433,7 @@ if __name__ == '__main__':
                         default=False, help='Flag, Very chatty')
     ARG = PARSER.parse_args()
     LOGGER = JRC.setup_logging(ARG)
+    LOGGER.info(f"Started run (version {__version__})")
     if "DIS_JWT" not in os.environ:
         terminate_program("Missing token - set in DIS_JWT environment variable")
     REST = JRC.simplenamespace_to_dict(JRC.get_config("rest_services"))
