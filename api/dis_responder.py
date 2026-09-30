@@ -53,7 +53,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.69.0"
+__version__ = "120.67.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -14010,6 +14010,11 @@ def _integrity_scan():
         rec = recs.get(doi)
         return DL.get_title(rec) if rec else ''
 
+    # Every held DOI grouped by its versionless form, so a check can read a whole
+    # version family rather than the one DOI that happens to be named.
+    family = collections.defaultdict(list)
+    for doi in held:
+        family[relation_base(doi)].append(doi)
     out = collections.defaultdict(list)
     unresolved = []
     stores = (("Preprint", pre), ("Dataset supplement", supp), ("Companion", comp))
@@ -14060,7 +14065,17 @@ def _integrity_scan():
             for tgt in targets:
                 if not tgt or tgt not in held:
                     continue
-                back = set(store.get(tgt, []))
+                # The back-link may sit on a version of either end rather than on
+                # the DOI itself, because collapse() in link_dataset_supplements.py
+                # rewrites a versioned target to its base while leaving the other
+                # side as deposited. An article declaring janelia.21266625.v1 is
+                # stored against janelia.21266625, and it is .v1 that records the
+                # article back. Reading the whole version family of the target
+                # keeps that from looking one-sided: the relation is recorded at
+                # both ends, just not on the two DOIs that happen to name it.
+                back = set()
+                for member in family.get(relation_base(tgt), (tgt,)):
+                    back.update(store.get(member, []))
                 if doi in back or relation_base(doi) in back:
                     continue
                 out['asymmetric'].append([label, doi, tgt, title_of(tgt)])
