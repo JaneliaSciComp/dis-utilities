@@ -53,7 +53,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.66.0"
+__version__ = "120.67.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -13864,6 +13864,42 @@ RS_VERSION = re.compile(r'/v\d+$', re.I)
 ELIFE_VERSION = re.compile(r'^(10\.7554/elife\.\d+)\.\d+$', re.I)
 
 
+# A DOI that does not resolve is a different finding from one we have not
+# loaded: the first is the publisher citing something that was never minted (or
+# was withdrawn), and no amount of curation fixes it. doi.org answers a HEAD with
+# a redirect when the DOI is registered and 404 when it is not.
+DOI_RESOLVER = "https://doi.org/"
+DOI_RESOLVE_TTL = 43200          # seconds; a dead DOI rarely comes back to life
+DOI_RESOLVE_TIMEOUT = 5
+_DOI_RESOLVED = {}               # doi -> (resolves or None, checked at)
+
+
+def doi_resolves(doi):
+    """ Does this DOI resolve at doi.org?
+        Cached for DOI_RESOLVE_TTL, because the answer changes about as often as
+        a DOI is minted and the report is viewed far more often than that.
+        Keyword arguments:
+          doi: DOI string
+        Returns:
+          True (registered), False (404), or None when the check itself failed -
+          a timeout is our problem, not the publisher's, and must not be reported
+          as a dead DOI
+    """
+    # time() is the function here, not the module - see the imports
+    now = time()
+    hit = _DOI_RESOLVED.get(doi)
+    if hit and now - hit[1] < DOI_RESOLVE_TTL:
+        return hit[0]
+    try:
+        resp = requests.head(DOI_RESOLVER + quote(doi, safe='/'),
+                             allow_redirects=False, timeout=DOI_RESOLVE_TIMEOUT)
+        answer = resp.status_code != 404
+    except Exception:
+        answer = None
+    _DOI_RESOLVED[doi] = (answer, now)
+    return answer
+
+
 def _registrar_preprint(rec):
     ''' Does the registrar itself call this record a preprint?
         The DOI prefix says where a deposit lives, not what it is - Zenodo hosts
@@ -13975,6 +14011,7 @@ def _integrity_scan():
         return DL.get_title(rec) if rec else ''
 
     out = collections.defaultdict(list)
+    unresolved = []
     stores = (("Preprint", pre), ("Dataset supplement", supp), ("Companion", comp))
     # 1. A relation names a DOI we do not hold. Targets on the ignore list are
     #    reported separately: they are a curator's decision, not a gap.
@@ -13992,7 +14029,20 @@ def _integrity_scan():
                     out['ignored'].append([label, tgt, doi,
                                            "Earlier version of the referring DOI"])
                 else:
-                    out['missing'].append([label, tgt, doi, title_of(doi)])
+                    unresolved.append((label, tgt, doi))
+    # Checked in one parallel pass rather than one at a time: a dozen sequential
+    # HEADs to doi.org is a visible pause on a page load, and these are
+    # independent of each other.
+    if unresolved:
+        wanted = sorted({tgt for _, tgt, _ in unresolved})
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            resolved = dict(zip(wanted, executor.map(doi_resolves, wanted)))
+        for label, tgt, doi in unresolved:
+            if resolved.get(tgt) is False:
+                out['unresolvable'].append([label, tgt, doi, title_of(doi)])
+            else:
+                # True, or None where the check itself failed
+                out['missing'].append([label, tgt, doi, title_of(doi)])
     # 2. Both ends held, but only one records the relation. A versioned figshare
     #    DOI is expected to be one-sided: link_dataset_supplements.py collapses a
     #    versioned target to its base, so the article points at the base while the
@@ -14111,6 +14161,12 @@ def relation_integrity():
          ['Relation', 'Missing DOI', 'Referenced by', 'Referring title'],
          "A relation names a DOI that is not in the collection. Either it should be "
          "loaded, or it belongs on the ignore list.", (1, 2)),
+        ('unresolvable', "Referenced but the DOI does not resolve",
+         ['Relation', 'Dead DOI', 'Referenced by', 'Referring title'],
+         "The DOI is not registered at doi.org, so it cannot be loaded and there "
+         "is nothing to ignore - the publisher deposited a relation to something "
+         "that was never minted, or that has since been withdrawn. Worth reporting "
+         "to them.", (1, 2)),
         ('dataset_as_preprint', "Data repository DOIs recorded as preprints",
          ['DOI', 'Type', 'Related DOIs', 'Title'],
          "A dataset is not a preprint of the article it accompanies. These relations "
