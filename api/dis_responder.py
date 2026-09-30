@@ -53,7 +53,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.67.0"
+__version__ = "120.68.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -14156,6 +14156,24 @@ def relation_integrity():
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not audit DOI relations"),
                                message=error_message(err))
+    # Findings grouped by the response they need, most severe first. Severity is
+    # "how wrong is the database", not "how many rows": a relation we record
+    # incorrectly misleads a reader, while one we have not loaded merely omits.
+    # White text on every header but yellow, which carries dark text - the same
+    # pairing .badge-urgent already uses for black on darkorange.
+    groups = (
+        {'title': "Wrong, and fixable here", 'bg': '#8b1a1a', 'fg': '#ffffff',
+         'note': "The relation we store is demonstrably incorrect.",
+         'keys': ('dataset_as_preprint', 'asymmetric')},
+        {'title': "Decide what belongs", 'bg': '#a8530f', 'fg': '#ffffff',
+         'note': "Only a curator can settle these: load the DOI, or ignore-list it.",
+         'keys': ('missing',)},
+        {'title': "Worth a look", 'bg': '#c9a227', 'fg': '#1a1a1a',
+         'note': "The shape is unusual. Most turn out to be correct on inspection.",
+         'keys': ('multi', 'backwards')},
+        {'title': "Nothing to fix here", 'bg': '#1c6b3a', 'fg': '#ffffff',
+         'note': "Recorded so the numbers reconcile; no action follows from them.",
+         'keys': ('unresolvable', 'ignored')})
     sections = [
         ('missing', "Referenced but not held",
          ['Relation', 'Missing DOI', 'Referenced by', 'Referring title'],
@@ -14193,33 +14211,61 @@ def relation_integrity():
          "The relation names a DOI we do not hold, for a reason we already know: "
          "a curator put it on the ignore list, or it is an earlier version of the "
          "DOI that names it.", (1, 2))]
+    by_key = {key: (label, header, blurb, linkcols)
+              for key, label, header, blurb, linkcols in sections}
     cards = [(label, safe(f"<a href='#{key}'>{len(find[key]):,}</a>"))
              for key, label, _, _, _ in sections]
     html = stat_cards(cards, div_id='integrity-cards') + "<br>"
-    for key, label, header, blurb, linkcols in sections:
-        rows = find[key]
-        html += f"<a id='{key}'></a><h3>{label} ({len(rows):,})</h3>" \
-                + f"<div style='margin-bottom:8px; color:#a8c4e0'>{escape(blurb)}</div>"
-        if not rows:
-            html += "<div style='margin-bottom:18px'>Nothing found.</div>"
-            continue
-        trows = []
-        for row in rows:
-            cells = []
-            for idx, val in enumerate(row):
-                if idx in linkcols and isinstance(val, str) and val:
-                    # "Related DOIs" holds a comma-separated list; link each one.
-                    cells.append(safe(", ".join(doi_link(d.strip())
-                                                for d in val.split(",") if d.strip())))
-                else:
-                    cells.append(val)
-            trows.append(cells)
-        html += render_table(header, trows, table_id=key,
-                             css='tablesorter numbers-scroll') + "<br>"
+    for group in groups:
+        total = sum(len(find[key]) for key in group['keys'])
+        # overflow:hidden so the square-cornered header clips to the box's radius
+        html += ("<div style='border:1px solid " + group['bg'] + "; border-radius:8px; "
+                 "overflow:hidden; margin-bottom:22px;'>"
+                 + f"<div style='background:{group['bg']}; color:{group['fg']}; "
+                 "padding:9px 14px; font-weight:bold;'>"
+                 + escape(group['title'])
+                 + "<span style='font-weight:normal; opacity:0.85;'> &mdash; "
+                 + f"{total:,} finding{'' if total == 1 else 's'}</span></div>"
+                 + "<div style='padding:6px 14px 2px 14px;'>"
+                 + "<div style='color:#a8c4e0; margin:8px 0 14px 0;'>"
+                 + escape(group['note']) + "</div>")
+        for key in group['keys']:
+            label, header, blurb, linkcols = by_key[key]
+            rows = find[key]
+            html += _integrity_section(key, label, header, blurb, linkcols, rows)
+        html += "</div></div>"
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="Relation integrity", html=html,
                                          navbar=generate_navbar('Related DOIs')))
+
+
+def _integrity_section(key, label, header, blurb, linkcols, rows):
+    ''' One finding section, for rendering inside its severity group
+        Keyword arguments:
+          key: section key, used as the anchor and table id
+          label, header, blurb, linkcols: as defined in the sections list
+          rows: the findings themselves
+        Returns:
+          HTML string
+    '''
+    html = (f"<a id='{key}'></a><h3>{label} ({len(rows):,})</h3>"
+            + f"<div style='margin-bottom:8px; color:#a8c4e0'>{escape(blurb)}</div>")
+    if not rows:
+        return html + "<div style='margin-bottom:18px'>Nothing found.</div>"
+    trows = []
+    for row in rows:
+        cells = []
+        for idx, val in enumerate(row):
+            if idx in linkcols and isinstance(val, str) and val:
+                # "Related DOIs" holds a comma-separated list; link each one.
+                cells.append(safe(", ".join(doi_link(d.strip())
+                                            for d in val.split(",") if d.strip())))
+            else:
+                cells.append(val)
+        trows.append(cells)
+    return html + render_table(header, trows, table_id=key,
+                               css='tablesorter numbers-scroll') + "<br>"
 
 
 
