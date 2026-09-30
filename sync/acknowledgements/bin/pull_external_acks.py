@@ -149,7 +149,7 @@ NOTES
   parameter, i.e. filtered by when the article was added to PubMed Central.
 '''
 
-__version__ = '1.11.3'
+__version__ = '1.12.0'
 
 import argparse
 import collections
@@ -237,6 +237,11 @@ EMAIL_GRAY = '#5b6b7c'
 EMAIL_STRIPE_BG = '#f7f9fb'
 EMAIL_BORDER = '#eef1f4'
 EMAIL_BLUE = '#2f7fd1'
+# Red pair for a source that could not be searched. Paired with a warning
+# glyph rather than carried by colour alone, like the rest of this palette.
+# 5.72:1 against its background, ahead of the green pair's 4.89:1.
+EMAIL_RED = '#b3261e'
+EMAIL_RED_BG = '#fdecea'
 
 def terminate_program(msg=None):
     ''' Terminate the program gracefully
@@ -427,8 +432,19 @@ def html_funnel_card(key):
     if COUNT[f'{key}_author_check_skipped']:
         rows.append(("Author check skipped (ignore-listed)",
                     f"{COUNT[f'{key}_author_check_skipped']:,}"))
+    errors = COUNT[f'{key}_search_errors']
+    if errors:
+        rows.append(("Search errors", f"{errors:,}"))
     written = COUNT[f'{key}_dois_written']
-    pill = html_pill(EMAIL_GREEN_BG, EMAIL_GREEN, f'&#10003; {written:,} written')
+    # A source that could not be searched is not a source that found nothing.
+    # Elsevier's ScienceDirect entitlement is IP-scoped, so it fails from the
+    # scheduled host and succeeds from a developer machine. Reported identically
+    # as zeros, the nightly email would show full coverage while a quarter of it
+    # was silently missing.
+    if errors:
+        pill = html_pill(EMAIL_RED_BG, EMAIL_RED, '&#9888; search failed')
+    else:
+        pill = html_pill(EMAIL_GREEN_BG, EMAIL_GREEN, f'&#10003; {written:,} written')
     return html_card_shell(SOURCES[key]['label'], pill, html_metric_rows(rows))
 
 
@@ -491,11 +507,14 @@ def generate_email():
     mode_label = 'WRITE' if ARG.WRITE else 'DRY RUN'
     mode_tone = 'good' if ARG.WRITE else 'warn'
     write_failed = sum(COUNT[f'{key}_write_failed'] for key in SOURCE_ORDER)
+    failed_sources = sum(1 for key in SOURCE_ORDER if COUNT[f'{key}_search_errors'])
     ack_ignored = sum(COUNT[f'{key}_ack_doi_ignored'] for key in SOURCE_ORDER)
     kpis = ''.join([
         JE.kpi_card(f"{len(RECORDS):,}", "DOIs added", 'good' if RECORDS else 'neutral'),
         JE.kpi_card(f"{len(INTERNAL_RECORDS):,}", "Janelia-authored (diverted)", 'neutral'),
         JE.kpi_card(f"{write_failed:,}", "Write failures", 'bad' if write_failed else 'neutral'),
+        JE.kpi_card(f"{failed_sources:,}", "Sources that failed",
+                    'bad' if failed_sources else 'neutral'),
         JE.kpi_card(f"{ack_ignored:,}", "Ack ignore-listed", 'neutral'),
     ])
     funnel_section = (JE.section_header("&#128200; Source Funnel")
@@ -638,6 +657,7 @@ def search_elife():
             data = resp.json()
         except Exception as err:
             LOGGER.warning(f"eLife search error on page {page}: {err}")
+            COUNT['elife_search_errors'] += 1
             break
         if total is None:
             total = data.get('total', 0)
@@ -687,6 +707,7 @@ def search_sciencedirect():
             data = _request_with_retry('PUT', SD_SEARCH_URL, headers=headers, body=body).json()
         except Exception as err:
             LOGGER.warning(f"Elsevier search error at offset {offset}: {err}")
+            COUNT['elsevier_search_errors'] += 1
             break
         if total is None:
             total = data.get("resultsFound", 0)
@@ -834,6 +855,7 @@ def search_pmc(term, max_results=5000, api_key=None, days=None):
         search_data = search_response.json()
     except Exception as err:
         LOGGER.warning(f"PMC search error: {err}")
+        COUNT['pmc_search_errors'] += 1
         return []
     pmids = search_data.get("esearchresult", {}).get("idlist", [])
     total_count = int(search_data.get("esearchresult", {}).get("count", 0))
@@ -889,6 +911,7 @@ def search_openalex():
             page = resp.json()
         except Exception as err:
             LOGGER.warning(f"OpenAlex search error: {err}")
+            COUNT['openalex_search_errors'] += 1
             break
         if total is None:
             total = page.get('meta', {}).get('count', 0)
@@ -1546,6 +1569,8 @@ def processing():
     summary = "\n"
     if ARG.SOURCE in (None, 'elife'):
         summary += f"eLife records read:                {COUNT['elife_read']:,}\n"
+        if COUNT['elife_search_errors']:
+            summary += f"eLife SEARCH ERRORS:              {COUNT['elife_search_errors']:,}\n"
         summary += f"eLife records in database:         {COUNT['elife_in_database']:,}\n"
         summary += f"eLife records no ack:              {COUNT['elife_no_ack']:,}\n"
         summary += f"eLife records term absent:         {COUNT['elife_term_absent']:,}\n"
@@ -1558,6 +1583,8 @@ def processing():
         summary += f"eLife records updated:             {COUNT['elife_dois_written']:,}\n"
     if ARG.SOURCE in (None, 'elsevier'):
         summary += f"Elsevier records read:             {COUNT['elsevier_read']:,}\n"
+        if COUNT['elsevier_search_errors']:
+            summary += f"Elsevier SEARCH ERRORS:           {COUNT['elsevier_search_errors']:,}\n"
         summary += f"Elsevier records in database:      {COUNT['elsevier_in_database']:,}\n"
         if COUNT['elsevier_date_filtered']:
             summary += f"Elsevier records date filtered: {COUNT['elsevier_date_filtered']:,}\n"
@@ -1572,6 +1599,8 @@ def processing():
         summary += f"Elsevier records updated:          {COUNT['elsevier_dois_written']:,}\n"
     if ARG.SOURCE in (None, 'pmc'):
         summary += f"PMC records read:                  {COUNT['pmc_read']:,}\n"
+        if COUNT['pmc_search_errors']:
+            summary += f"PMC SEARCH ERRORS:                {COUNT['pmc_search_errors']:,}\n"
         summary += f"PMC records in database:           {COUNT['pmc_in_database']:,}\n"
         summary += f"PMC records no DOI:                {COUNT['pmc_no_doi']:,}\n"
         summary += f"PMC records no ack:                {COUNT['pmc_no_ack']:,}\n"
@@ -1585,6 +1614,8 @@ def processing():
         summary += f"PMC records updated:               {COUNT['pmc_dois_written']:,}\n"
     if ARG.SOURCE in (None, 'arxiv'):
         summary += f"arXiv records read:                {COUNT['openalex_read']:,}\n"
+        if COUNT['openalex_search_errors']:
+            summary += f"arXiv SEARCH ERRORS:              {COUNT['openalex_search_errors']:,}\n"
         summary += f"arXiv records in database:         {COUNT['openalex_in_database']:,}\n"
         summary += f"arXiv records no ack:              {COUNT['openalex_no_ack']:,}\n"
         summary += f"arXiv records term absent:         {COUNT['openalex_term_absent']:,}\n"
