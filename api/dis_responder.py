@@ -53,7 +53,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.68.0"
+__version__ = "120.69.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -14240,6 +14240,12 @@ def relation_integrity():
                                          navbar=generate_navbar('Related DOIs')))
 
 
+# Findings above this many rows get a scroll box. "Explained" is reference
+# material and only grows - 26 rows today - and a section long enough to push the
+# groups below it off the screen stops the page being a summary.
+RELATION_SCROLL_ROWS = 15
+
+
 def _integrity_section(key, label, header, blurb, linkcols, rows):
     ''' One finding section, for rendering inside its severity group
         Keyword arguments:
@@ -14264,8 +14270,15 @@ def _integrity_section(key, label, header, blurb, linkcols, rows):
             else:
                 cells.append(val)
         trows.append(cells)
-    return html + render_table(header, trows, table_id=key,
-                               css='tablesorter numbers-scroll') + "<br>"
+    table = render_table(header, trows, table_id=key, css='tablesorter numbers-scroll')
+    if len(rows) > RELATION_SCROLL_ROWS:
+        # div.tag-scrollbox is the app's scroll pane: bordered, rounded, with an
+        # always-visible teal scrollbar so it reads as scrollable even where the
+        # OS hides scrollbars at rest. It also gives the table's thead the
+        # overflow ancestor its position:sticky needs - unwrapped, the sticky
+        # header has nothing to stick inside and the columns scroll out of sight.
+        table = f"<div class='tag-scrollbox'>{table}</div>"
+    return html + table + "<br>"
 
 
 
