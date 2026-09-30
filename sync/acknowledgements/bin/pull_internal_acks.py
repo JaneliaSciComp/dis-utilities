@@ -209,7 +209,7 @@ def initialize_program():
         Returns:
           None
     '''
-    if "NCBI_API_KEY" not in os.environ:
+    if not os.environ.get("NCBI_API_KEY", "").strip():
         terminate_program("Missing NCBI API key - set in NCBI_API_KEY environment variable")
     try:
         dbconfig = JRC.get_config("databases")

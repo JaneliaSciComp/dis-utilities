@@ -149,7 +149,7 @@ NOTES
   parameter, i.e. filtered by when the article was added to PubMed Central.
 '''
 
-__version__ = '1.11.2'
+__version__ = '1.11.3'
 
 import argparse
 import collections
@@ -260,8 +260,11 @@ def initialize_program():
           None
     '''
     for key in ("ELSEVIER_API_KEY", "NCBI_API_KEY", "OPENALEX_EMAIL"):
-        if key not in os.environ:
-            terminate_program(f"Missing required environment variable: {key}")
+        # Content, not just presence: a variable defined as an empty string passes
+        # a "key in os.environ" test and is then sent as no credential at all,
+        # which surfaces much later as an opaque 401 from the service.
+        if not os.environ.get(key, '').strip():
+            terminate_program(f"Environment variable {key} is missing or empty")
     try:
         dbconfig = JRC.get_config("databases")
     except Exception as err:
@@ -589,7 +592,16 @@ def _request_with_retry(method, url, params=None, headers=None, body=None, retri
             if attempt < retries - 1:
                 time.sleep(2 ** attempt)
             continue
-        resp.raise_for_status()
+        if not resp.ok:
+            # raise_for_status() reports only "401 Client Error: Unauthorized for
+            # url: ...", and the caller logs that. The body says which 401 it is -
+            # Elsevier answers "No APIKey provided for request" for a blank key and
+            # "Invalid API Key" for a wrong one, and those need different fixes.
+            # Truncated, because an error body is not always short.
+            detail = ' '.join((resp.text or '').split())[:300]
+            raise requests.HTTPError(
+                f"{resp.status_code} {resp.reason} for {url}"
+                + (f" - {detail}" if detail else ""), response=resp)
         return resp
     raise RuntimeError(f"Request to {url} failed after {retries} retries")
 

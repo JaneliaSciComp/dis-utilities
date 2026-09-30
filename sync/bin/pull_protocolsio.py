@@ -76,7 +76,7 @@ def initialize_program():
           None
     '''
     # API key
-    if "PROTOCOLS_API_TOKEN" not in os.environ:
+    if not os.environ.get("PROTOCOLS_API_TOKEN", "").strip():
         terminate_program("Missing token - set in PROTOCOLS_API_TOKEN "
                           "environment variable")
     # Database

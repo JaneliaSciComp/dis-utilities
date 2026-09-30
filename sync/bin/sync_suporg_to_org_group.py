@@ -46,7 +46,7 @@ def initialize_program():
         Returns:
           None
     '''
-    if "PEOPLE_API_KEY" not in os.environ:
+    if not os.environ.get("PEOPLE_API_KEY", "").strip():
         terminate_program("Missing token - set in PEOPLE_API_KEY environment variable")
     try:
         dbconfig = JRC.get_config("databases")
