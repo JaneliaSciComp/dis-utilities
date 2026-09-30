@@ -457,6 +457,7 @@ if __name__ == '__main__':
                         help='Flag, Very chatty')
     ARG = PARSER.parse_args()
     LOGGER = JRC.setup_logging(ARG)
+    LOGGER.info(f"Started run (version {__version__})")
     DISCONFIG = JRC.simplenamespace_to_dict(JRC.get_config("dis"))
     initialize_program(ARG.MANIFOLD)
     processing()

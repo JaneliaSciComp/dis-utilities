@@ -578,6 +578,7 @@ if __name__ == "__main__":
                         default=False, help='Flag, Very chatty')
     ARG = PARSER.parse_args()
     LOGGER = JRC.setup_logging(ARG)
+    LOGGER.info(f"Started run (version {__version__})")
     if not ARG.api_key:
         terminate_program("Springer API key required: "
                           "set $SPRINGER_META_API_KEY or use --api-key.")
