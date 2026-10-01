@@ -53,7 +53,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.67.0"
+__version__ = "120.68.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -1071,6 +1071,110 @@ def match_evidence(row, orc):
     return best
 
 
+def credit_eids(orc):
+    ''' Every employee ID that counts as Janelia credit for one person.
+        merge_roster_records builds the list as "employeeIds" and a record that has not
+        been through it carries a single "employeeId"; both shapes reach here. No
+        person in the collection currently holds more than one ID - the five ORCIDs
+        that look like it are ORCIDs shared by two or three different people, which
+        /mypapers detects and refuses to guess about - so today this returns one ID
+        either way. It takes the list because merge_roster_records produces one, not
+        because the data needs it yet.
+        Keyword arguments:
+          orc: orcid record, merged or not
+        Returns:
+          list of employee IDs, possibly empty
+    '''
+    if not orc:
+        return []
+    if orc.get('employeeIds'):
+        return list(orc['employeeIds'])
+    return [orc['employeeId']] if orc.get('employeeId') else []
+
+
+def is_credited(row, eids):
+    ''' Did this person author this work while a Janelia employee?
+        One test for every page that marks credit. /mypapers and the person pages had
+        separate implementations - one intersected an employee-ID list, the other
+        compared a single ID - which agreed on today's data only because no person
+        currently holds more than one ID. Sharing the test removes a divergence that
+        was waiting on a data change nobody would connect to it.
+        Keyword arguments:
+          row: row from dois collection
+          eids: employee IDs from credit_eids
+        Returns:
+          True when any of the IDs is credited on the work
+    '''
+    return bool(set(eids) & set(row.get('jrc_author') or []))
+
+
+def credit_mark(row, eids):
+    ''' The green checkmark, or the spacing that keeps DOIs aligned without one
+        Keyword arguments:
+          row: row from dois collection
+          eids: employee IDs from credit_eids
+        Returns:
+          HTML string
+    '''
+    if is_credited(row, eids):
+        return "<i class='fa-solid fa-circle-check' style='color: lime'></i> "
+    return "&nbsp;&nbsp;&nbsp;&nbsp;"
+
+
+def evidence_legend():
+    """ The "In the deposit" values, as coloured swatches, built from EVIDENCE itself.
+        Every page that shows the column also explains it, and each explanation names
+        the colours. Hard-coded, they are three copies of a palette that lives in one
+        dict - change a colour there and the prose quietly starts lying. Generated,
+        they cannot disagree with the column they describe.
+        Returns:
+            HTML string
+    """
+    parts = []
+    for key in sorted(EVIDENCE, key=lambda k: -EVIDENCE[k][2]):
+        label, colour, _ = EVIDENCE[key]
+        parts.append(f"<span style='color:{colour};'>{label}</span>")
+    parts.append("<span class='evidence-none'>Nothing deposited</span>")
+    return ", ".join(parts[:-1]) + " and " + parts[-1]
+
+
+def evidence_help(you=False, check_all=False):
+    ''' The "In the deposit" explanation, shared by every page that shows the column.
+        Written once because it was written twice and was on its way to three times:
+        /mypapers explains it to an author about their own work, the person pages
+        explain it to a curator about somebody else, and the two drift apart as soon as
+        the column changes.
+        Keyword arguments:
+          you: second person ("you", for /mypapers) rather than third ("this author")
+          check_all: the page offers a bulk check button
+        Returns:
+          HTML string
+    '''
+    who = "you" if you else "this author"
+    was = "were" if you else "was"
+    bulk = (" or <b>Check all</b> to work through every row at once" if check_all
+            else ". Rows are checked one at a time here, by design - there is no bulk "
+                 "control on this page, because each check is a live lookup and this "
+                 "page is read person after person")
+    return f"""
+    <p>"In the deposit" says what the publisher sent to Crossref or DataCite about {who}
+    on that paper, and nothing more. The values, strongest first, are
+    {evidence_legend()}. The first means {who} {was} listed with a Janelia affiliation,
+    which is the strongest thing a deposit can say; the last means the deposited author
+    list holds no evidence at all, and the work matched on employee ID instead.</p>
+    <p>Name is amber because it is the one value that can pick up a namesake, so it is
+    worth a second look before crediting. It flags a thin deposit rather than a doubtful
+    paper: about two thirds of name-only rows turn out to be affiliation matches that the
+    publisher never deposited.</p>
+    <p>Closing that gap is what the <b>check</b> button on a row is for. This column reads
+    only the stored Crossref/DataCite record, while check also asks OpenAlex and PubMed,
+    which often hold an affiliation the publisher left out{bulk}. It takes about a second a
+    row, so it runs only when asked, and nothing it finds is written to the database:
+    OpenAlex revises its author lists, so a stored answer would age into a confident
+    overstatement, while one fetched on demand is current by construction.</p>
+    """
+
+
 def evidence_cell(kind, pid=None, doi=None):
     ''' Render the "In the deposit" cell for one work.
         Anything short of a deposited Janelia affiliation gets a "check" button, because
@@ -1152,15 +1256,17 @@ def generate_works_table(rows, name=None, show="full", eid=None, orc=None):
     if not works:
         return "", []
     works.sort(key=DL.get_publishing_date, reverse=True)
+    # credit_eids reads the whole employee-ID list where one exists. The person pages
+    # do not merge roster records, so it returns the single ID they already had and
+    # nothing changes today; the test is shared with /mypapers so the two cannot drift.
+    eids = credit_eids(orc) or ([eid] if eid else [])
     def mark_fn(row):
         ''' Green checkmark for works the person authored while a Janelia employee, else
             four non-breaking spaces to keep the DOIs left-aligned. Only meaningful when an
             eid is known; a name search (eid=None) has no single employee, so no marker. '''
         if not eid:
             return ''
-        if 'jrc_author' in row and eid in row['jrc_author']:
-            return "<i class='fa-solid fa-circle-check' style='color: lime'></i> "
-        return "&nbsp;&nbsp;&nbsp;&nbsp;"
+        return credit_mark(row, eids)
     extra_headers = ['In the deposit'] if orc else None
     # No "Check all" button here, deliberately - /mypapers has one and this page does
     # not. Each check is a live OpenAlex and PubMed lookup costing about 0.6s, and the
@@ -1193,28 +1299,7 @@ def generate_works_table(rows, name=None, show="full", eid=None, orc=None):
         # The deposit column and its check buttons render only when orc is set, so
         # describe them only then - a name search has neither.
         if orc:
-            preamble += '''
-    <p>"In the deposit" says what the publisher sent to Crossref or DataCite about this
-    author on that paper, and nothing more.
-    <span style='color:#89c242;'>Janelia affiliation</span> is the strongest thing a deposit
-    can say: the author was listed with a Janelia affiliation.
-    <span style='color:#a8c4e0;'>ORCID</span> means an ORCID was sent but no Janelia
-    affiliation, <span style='color:#d8a657;'>Name</span> means a name and nothing else, and
-    <span class='evidence-none'>Nothing deposited</span> means the deposited author list holds
-    no evidence at all - the work matched on employee ID instead.</p>
-    <p>Name is amber because it is the one value that can pick up a namesake, so it is worth a
-    second look before crediting. It flags a thin deposit rather than a doubtful paper: about
-    two thirds of name-only rows turn out to be affiliation matches that the publisher never
-    deposited.</p>
-    <p>Closing that gap is what the <b>check</b> button on a row is for. This column reads only
-    the stored Crossref/DataCite record, while check also asks OpenAlex and PubMed, which often
-    hold an affiliation the publisher left out. It takes about a second, so it runs only when
-    pressed, and nothing it finds is written to the database: OpenAlex revises its author
-    lists, so a stored answer would age into a confident overstatement, while one fetched on
-    demand is current by construction. Rows are checked one at a time here, by design - there
-    is no "check everything" button on this page, because each check is a live lookup and this
-    page is read person after person.</p>
-    '''
+            preamble += evidence_help()
         html = f"<hr>{preamble}{table}"
     else:
         html = table
@@ -16657,15 +16742,11 @@ def my_papers_body(orc, show):
     rows = [row for row in seen.values()
             if show != 'journal' or journal_or_preprint(row)]
     rows.sort(key=DL.get_publishing_date, reverse=True)
-    def is_credited(row):
-        return bool(set(eids) & set(row.get('jrc_author') or []))
-    credited = sum(1 for row in rows if is_credited(row))
+    credited = sum(1 for row in rows if is_credited(row, eids))
     def mark_fn(row):
-        if is_credited(row):
-            return "<i class='fa-solid fa-circle-check' style='color: lime'></i> "
-        return "&nbsp;&nbsp;&nbsp;&nbsp;"
+        return credit_mark(row, eids)
     def class_fn(row):
-        return 'credited' if is_credited(row) else 'nocredit'
+        return 'credited' if is_credited(row, eids) else 'nocredit'
     # Identity block: what we matched on, and when you were here. No employee ID -
     # it is sensitive and this page is no harder to reach than any other.
     ident = "<table class='borderless'>" \
@@ -16696,14 +16777,12 @@ def my_papers_body(orc, show):
     because affiliation or ORCID information was never sent to Crossref or DataCite. Missing
     checkmarks are common for work published before or after your time here.</p>
     <p>"In the deposit" says what the publisher sent to Crossref or DataCite about you
-    on that paper - nothing more. <span style='color:#89c242;'>Janelia affiliation</span>
-    means they listed you with a Janelia affiliation, which is the strongest thing a
-    deposit can say. <span style='color:#a8c4e0;'>ORCID</span> means they sent your ORCID,
-    <span style='color:#d8a657;'>Name</span> means they sent a name and nothing else, and
-    <span class='evidence-none'>Nothing deposited</span> means the record itself names no
-    evidence at all. That is not a doubt about the paper - on a preprint it usually just
-    means you were added to the author list before it was published, and the credit comes
-    from the published version.</p>
+    on that paper - nothing more. The values, strongest first, are {evidence_legend()}.
+    The first means they listed you with a Janelia affiliation, which is the strongest
+    thing a deposit can say; the last means the record itself names no evidence at all.
+    That is not a doubt about the paper - on a preprint it usually just means you were
+    added to the author list before it was published, and the credit comes from the
+    published version.</p>
     <p>A thin deposit is not a doubt about your paper - it usually just means the publisher
     collected less. Where that happened, OpenAlex or PubMed often holds the affiliation the
     publisher left out: press <b>check</b> on any row to ask them, or <b>Check all</b> to
