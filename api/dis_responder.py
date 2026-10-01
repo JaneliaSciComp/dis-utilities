@@ -53,7 +53,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.70.0"
+__version__ = "120.71.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -1437,9 +1437,22 @@ def get_orcid_from_db(oid, use_eid=False, bare=False, show="full"):
     tenure = janelia_tenure(orc)
     if tenure:
         html += f"<tr><td>At Janelia:</td><td>{tenure}</td></tr>"
-    if 'affiliations' in orc:
-        alinks = ', '.join(f"<a href='/tag/{requests.utils.quote(a)}'>{a}</a>"
-                           for a in orc['affiliations'])
+    if orc.get('affiliations'):
+        # Sorted, current first, the rest marked - the same treatment /dois/mytags
+        # gives them. Unsorted and unmarked, the row said what someone is affiliated
+        # with but not whether they still are, which is the question a reader of a
+        # person page usually has. Shown unmarked where the split cannot be
+        # determined, rather than calling everything past.
+        current, past, _, known = split_affiliations(orc)
+        def alink(aff, mark=''):
+            return f"<a href='/tag/{quote(aff, safe='')}'>{escape(aff)}</a>{mark}"
+        if known:
+            alinks = ', '.join(
+                [alink(a) for a in sorted(current)]
+                + [alink(a, " <span style='color:#a8c4e0;font-size:0.85em'>(past)</span>")
+                   for a in sorted(past)])
+        else:
+            alinks = ', '.join(alink(a) for a in sorted(orc['affiliations']))
         html += f"<tr><td>Affiliations:</td><td>{alinks}</td></tr>"
     html += "</table><br>"
     html = add_orcid_controls(orc, html)
