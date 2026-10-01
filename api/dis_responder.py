@@ -1184,6 +1184,29 @@ def generate_works_table(rows, name=None, show="full", eid=None, orc=None):
     information was not provided to Crossref/DataCite. If one of your publications doesn't have a
     check (or is missing), please email the DOI to the Library at {LIBRARY}.
     '''
+        # The deposit column and its check buttons render only when orc is set, so
+        # describe them only then - a name search has neither.
+        if orc:
+            preamble += '''
+    <p>"In the deposit" says what the publisher sent to Crossref or DataCite about this
+    author on that paper, and nothing more.
+    <span style='color:#89c242;'>Janelia affiliation</span> is the strongest thing a deposit
+    can say: the author was listed with a Janelia affiliation.
+    <span style='color:#a8c4e0;'>ORCID</span> means an ORCID was sent but no Janelia
+    affiliation, <span style='color:#d8a657;'>Name</span> means a name and nothing else, and
+    <span class='evidence-none'>Nothing deposited</span> means the deposited author list holds
+    no evidence at all - the work matched on employee ID instead.</p>
+    <p>Name is amber because it is the one value that can pick up a namesake, so it is worth a
+    second look before crediting. It flags a thin deposit rather than a doubtful paper: about
+    two thirds of name-only rows turn out to be affiliation matches that the publisher never
+    deposited.</p>
+    <p>Closing that gap is what the <b>check</b> button on a row is for. This column reads only
+    the stored Crossref/DataCite record, while check also asks OpenAlex and PubMed, which often
+    hold an affiliation the publisher left out. It takes about a second, so it runs only when
+    pressed, and nothing it finds is written to the database: OpenAlex revises its author
+    lists, so a stored answer would age into a confident overstatement, while one fetched on
+    demand is current by construction.</p>
+    '''
         html = f"<hr>{preamble}{table}"
     else:
         html = table
