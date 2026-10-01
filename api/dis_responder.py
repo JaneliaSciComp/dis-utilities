@@ -53,7 +53,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.73.0"
+__version__ = "120.74.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -3399,11 +3399,14 @@ def source_limit_pulldown(prefix, source, limit):
     return html
 
 
-def journal_buttons(show, prefix):
+def journal_buttons(show, prefix, suffix=''):
     ''' Generate journal display buttons
         Keyword arguments:
           show: display type
           prefix: navigation prefix
+          suffix: appended after /full or /journal, for a page whose other filters
+                  live in a query string - without it, toggling resource type drops
+                  them
         Returns:
           Button HTML
     '''
@@ -3412,11 +3415,11 @@ def journal_buttons(show, prefix):
     # green outline and green text keep it distinguishable without the size change.
     # (The class attribute also ran straight into onclick with no space between them.)
     if show == 'journal':
-        full = f"window.location.href='{prefix}/full'"
+        full = f"window.location.href='{prefix}/full{suffix}'"
         html = '<div><button id="toggle-to-all" type="button" class="btn btn-outline-success" ' \
                + f'onclick="{full}">Show all resource types</button></div>'
     else:
-        jour = f"window.location.href='{prefix}/journal'"
+        jour = f"window.location.href='{prefix}/journal{suffix}'"
         html = '<div><button id="toggle-to-journal" type="button" ' \
                + 'class="btn btn-outline-success" ' \
                + f'onclick="{jour}">Show journals/preprints only</button></div>'
@@ -6489,10 +6492,11 @@ def andy():
 # * UI endpoints (personalized)                                                *
 # ******************************************************************************
 
+@app.route('/dois/mytags/<string:orcid>/<string:year>/<string:show>')
 @app.route('/dois/mytags/<string:orcid>/<string:year>')
 @app.route('/dois/mytags/<string:orcid>')
 @app.route('/dois/mytags')
-def dois_mytags(orcid="0000-0001-8374-6008", year='All'):
+def dois_mytags(orcid="0000-0001-8374-6008", year='All', show='full'):
     ''' Show DOIs an author's affiliations
     '''
     try:
@@ -6541,8 +6545,14 @@ def dois_mytags(orcid="0000-0001-8374-6008", year='All'):
     tenure = janelia_tenure(row)
     if tenure:
         ident += f"<tr><td>At Janelia:</td><td>{tenure}</td></tr>"
+    # The same person from the other angle: this page is what their affiliations
+    # published, /mypapers is what they are credited with. A reader on one had no
+    # way to reach the other.
+    ident += f"<tr><td>Also see:</td><td><a href='/mypapers/{escape(orcid)}'>" \
+             + "Publications credited to this person</a></td></tr>"
     ident += "</table><br>"
-    htmlp = year_pulldown(f"dois/mytags/{orcid}") + "<br>"
+    htmlp = year_pulldown(f"dois/mytags/{orcid}", suffix=f"/{show}" if show != 'full' else '') \
+            + journal_buttons(show, f"/dois/mytags/{orcid}/{year}") + "<br>"
     title = "DOIs for my affiliations"
     if year != 'All':
         title += f" ({year})"
@@ -6568,7 +6578,9 @@ def dois_mytags(orcid="0000-0001-8374-6008", year='All'):
     # nothing at all - several do - and the union alone never shows that. Class per
     # affiliation is index-based, like standard_ack_table's, so a tag name with
     # punctuation or spaces needs no escaping.
-    works = list(rows)
+    # An affiliation's output carries datasets, software and posters alongside the
+    # papers, so the same journals/preprints toggle /mypapers offers applies here.
+    works = [work for work in rows if show != 'journal' or journal_or_preprint(work)]
     tag_class = {name: f'tagidx-{idx}' for idx, name in enumerate(tags)}
     tag_counts = collections.Counter()
     row_tags = {}
@@ -6581,7 +6593,7 @@ def dois_mytags(orcid="0000-0001-8374-6008", year='All'):
     # A DOI can match several of someone's affiliations, so a row carries a class
     # for each - filterByTag asks only that the row holds the one chip's class.
     html, cnt, _ = standard_doi_table(
-        works, count_card=True,
+        works, count_card=True, download_name='my_affiliations',
         class_fn=lambda work: ' '.join(tag_class[name] for name in row_tags[work['doi']]))
     chipbar = ""
     if cnt and len(tags) > 1:
@@ -16867,7 +16879,7 @@ def merge_roster_records(recs):
     return merged
 
 
-def my_papers_body(orc, show):
+def my_papers_body(orc, show, year='All'):
     ''' Build the body of the self-service publication list for one person.
         This is the author-facing counterpart to /userui: same works, same green
         checkmarks, none of the curation apparatus (name variants, employee ID,
@@ -16887,7 +16899,8 @@ def my_papers_body(orc, show):
         for row in get_dois_for_orcid(oid, {**orc, 'employeeId': eid} if eid else orc):
             seen.setdefault(row['doi'], row)
     rows = [row for row in seen.values()
-            if show != 'journal' or journal_or_preprint(row)]
+            if (show != 'journal' or journal_or_preprint(row))
+            and (year == 'All' or str(row.get('jrc_publishing_date') or '').startswith(year))]
     rows.sort(key=DL.get_publishing_date, reverse=True)
     credited = sum(1 for row in rows if is_credited(row, eids))
     def mark_fn(row):
@@ -16902,11 +16915,18 @@ def my_papers_body(orc, show):
     tenure = janelia_tenure(orc)
     if tenure:
         ident += f"<tr><td>At Janelia:</td><td>{tenure}</td></tr>"
+    # The affiliation view of the same person: this page is what they are credited
+    # with, /dois/mytags is what their affiliations published.
+    ident += f"<tr><td>Also see:</td><td><a href='/dois/mytags/{escape(oid)}'>" \
+             + "DOIs from this person's affiliations</a></td></tr>"
     ident += "</table>"
     if not rows:
-        return ident + render_warning("We have no publications on file for you yet. If that "
-                                      + f"looks wrong, email the Library at {LIBRARY}.",
-                                      'warning')
+        empty = ("We have no publications on file for you in that year."
+                 if year != 'All'
+                 else "We have no publications on file for you yet. If that looks wrong, "
+                      f"email the Library at {LIBRARY}.")
+        return ident + year_pulldown(f"mypapers/{oid}/{show}", query=True) \
+               + "<br><br>" + render_warning(empty, 'warning')
     cards = [("Publications", f"<span id='totalrows'>{len(rows):,}</span>"),
              ("Credited to you at Janelia",
               f"<span data-filter-count='credited'>{credited:,}</span>"),
@@ -16951,7 +16971,9 @@ def my_papers_body(orc, show):
                                      extra_fn=lambda row: [evidence_cell(match_evidence(row, orc),
                                                                          oid, row['doi'])])
     return ident + stat_cards(cards, div_id='mypapers-stats') + note \
-           + journal_buttons(show, f"/mypapers/{oid}") + cbutton + table
+           + year_pulldown(f"mypapers/{oid}/{show}", query=True) + "<br><br>" \
+           + journal_buttons(show, f"/mypapers/{oid}",
+                             '' if year == 'All' else f"?year={year}") + cbutton + table
 
 
 @app.route('/author_evidence/<string:pid>/<path:doi>')
@@ -17045,7 +17067,8 @@ def show_my_papers(oid, show='full'):
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=f"Publications for {full_name}",
-                                         html=my_papers_body(orc, show),
+                                         html=my_papers_body(orc, show,
+                                                             request.args.get('year', 'All')),
                                          navbar=generate_navbar('Authorship')))
 
 
