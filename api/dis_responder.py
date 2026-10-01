@@ -1162,6 +1162,12 @@ def generate_works_table(rows, name=None, show="full", eid=None, orc=None):
             return "<i class='fa-solid fa-circle-check' style='color: lime'></i> "
         return "&nbsp;&nbsp;&nbsp;&nbsp;"
     extra_headers = ['In the deposit'] if orc else None
+    # No "Check all" button here, deliberately - /mypapers has one and this page does
+    # not. Each check is a live OpenAlex and PubMed lookup costing about 0.6s, and the
+    # JS runs five at a time, so one press is ~125 outbound calls on a long list. An
+    # author presses that once for their own publications; a curator moves from person
+    # to person all day, and NCBI rate-limits. Per-row checks stay, so nothing is
+    # unreachable - it just has to be asked for one row at a time.
     pid = (orc or {}).get('orcid') or (orc or {}).get('userIdO365')
     extra_fn = (lambda row: [evidence_cell(match_evidence(row, orc), pid,
                                            row['doi'])]) if orc else None
@@ -1205,7 +1211,9 @@ def generate_works_table(rows, name=None, show="full", eid=None, orc=None):
     hold an affiliation the publisher left out. It takes about a second, so it runs only when
     pressed, and nothing it finds is written to the database: OpenAlex revises its author
     lists, so a stored answer would age into a confident overstatement, while one fetched on
-    demand is current by construction.</p>
+    demand is current by construction. Rows are checked one at a time here, by design - there
+    is no "check everything" button on this page, because each check is a live lookup and this
+    page is read person after person.</p>
     '''
         html = f"<hr>{preamble}{table}"
     else:
