@@ -53,7 +53,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.69.0"
+__version__ = "120.70.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -1332,6 +1332,46 @@ def add_orcid_controls(orc, html):
         olink = f"/peoplerec/{orc['userIdO365']}"
         html += f" {tiny_badge('info', 'Show People data', olink)}"
     return html
+
+
+def split_affiliations(orc, tags=None):
+    """ Sort a person's affiliations into current and past.
+        The orcid collection records what someone is affiliated with but not when,
+        so currency comes from the HHMI People system: the supOrgNames it returns
+        are the ones they hold now. One outbound call per person.
+        An alumnus is decided without asking - they have left, so nothing is
+        current. Where there is no employee ID, or People cannot be reached, the
+        answer is unknown rather than past: a caller that renders "past" on a
+        failed lookup is stating something it does not know.
+        Keyword arguments:
+          orc: record from the orcid collection
+          tags: names to sort; defaults to the record's own affiliations
+        Returns:
+          (current, past, department, known) - known is False when the split could
+          not be determined, in which case current and past are empty
+    """
+    names = list(tags if tags is not None else (orc.get('affiliations') or []))
+    if orc.get('alumni'):
+        return [], names, None, True
+    eid = orc.get('employeeId')
+    if not eid:
+        return [], [], None, False
+    try:
+        people = JRC.call_people_by_id(eid)
+    except Exception:
+        people = None
+    if not people:
+        return [], [], None, False
+    current_set = {a['supOrgName'] for a in people.get('affiliations', [])
+                   if 'supOrgName' in a}
+    department = people.get('ccDescr') or ''
+    current, past = [], []
+    for name in names:
+        if name in current_set or (department and name == department):
+            current.append(name)
+        else:
+            past.append(name)
+    return current, past, (department or None), True
 
 
 def janelia_tenure(orc):
@@ -6485,13 +6525,24 @@ def dois_mytags(orcid="0000-0001-8374-6008", year='All'):
                 "person, so there is nothing to search for. This is about the "
                 "affiliation record, not about their publications.", 'warning'),
             navbar=generate_navbar('Tag/affiliation')))
-    taglinks = ', '.join(f"<a href='/tag/{quote(tag, safe='')}'>{escape(tag)}</a>"
-                         for tag in tags)
+    # Sorted, and marked current or past where we can tell. An unknown split shows
+    # the affiliations unmarked rather than calling them all past, which is what a
+    # failed People lookup would otherwise assert.
+    current, past, _, known = split_affiliations(row, tags)
+    def taglink(tag, mark=''):
+        return (f"<a href='/tag/{quote(tag, safe='')}'>{escape(tag)}</a>" + mark)
+    if known:
+        taglinks = ', '.join(
+            [taglink(tag) for tag in sorted(current)]
+            + [taglink(tag, " <span style='color:#a8c4e0;font-size:0.85em'>(past)</span>")
+               for tag in sorted(past)])
+    else:
+        taglinks = ', '.join(taglink(tag) for tag in sorted(tags))
     html, cnt, _ = standard_doi_table(rows, count_card=True)
     if cnt:
-        html = f"{ident}{htmlp}Tags: {taglinks}<br><br>{html}"
+        html = f"{ident}{htmlp}Affiliations: {taglinks}<br><br>{html}"
     else:
-        html = ident + htmlp + f"Tags: {taglinks}<br><br>" \
+        html = ident + htmlp + f"Affiliations: {taglinks}<br><br>" \
                + render_warning("No DOIs were found for these affiliations.", 'warning')
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
