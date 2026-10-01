@@ -367,19 +367,43 @@ div.tag-scrollbox {max-height: 520px;
 /* Shared always-visible teal scrollbar for the app's scroll boxes - Firefox via
    scrollbar-color, Chrome/Safari via ::-webkit-scrollbar - so scroll panes are
    obvious even where the OS hides scrollbars at rest (e.g. the DOI-detail author
-   lists in div.scroll, and the tag-metrics table in div.tag-scrollbox). */
-div.tag-scrollbox, div.scroll {scrollbar-color: var(--table-accent) var(--page-bg);}
+   lists in div.scroll, and the tag-metrics table in div.tag-scrollbox).
+   The track is painted cell-bg with a muted edge rather than page-bg: painted
+   the page color it was a 1.00:1 invisible gutter, so a pane at rest read as
+   having no scrollbar at all. The thumb's surrounding border is 2px rather than
+   3px, which takes the visible thumb from 6px to 10px of a 14px bar - the
+   border is there to inset the thumb, and at 3px of a 12px bar it was eating
+   half of it. */
+/* scrollbar-color MUST stay scoped to Firefox. Chrome honours the standard
+   property too, and honouring it switches Chrome to the standard scrollbar path,
+   where it ignores every ::-webkit-scrollbar rule below and falls back to a
+   macOS overlay scrollbar - zero layout width, faded out at rest, which is the
+   exact problem this block exists to solve.
+   Measured in Chrome on a pane whose content overflows, via
+   offsetWidth - clientWidth: 2px with the property unscoped, which is the pane's
+   own borders and no scrollbar at all; 16px scoped, being 2px of border plus the
+   14px bar below. Unscoping it silently reverts every scroll pane in the app.
+   @supports (-moz-appearance: none) is true in Firefox, false in Chrome and
+   Safari. */
+@supports (-moz-appearance: none) {
+  div.tag-scrollbox, div.scroll {scrollbar-color: var(--table-accent) var(--cell-bg);
+                                 scrollbar-width: auto;
+  }
+}
 div.tag-scrollbox::-webkit-scrollbar,
-div.scroll::-webkit-scrollbar {width: 12px;}
+div.scroll::-webkit-scrollbar {width: 14px;}
 div.tag-scrollbox::-webkit-scrollbar-track,
-div.scroll::-webkit-scrollbar-track {background: var(--page-bg);
-                                     border-radius: 5px;
+div.scroll::-webkit-scrollbar-track {background: var(--cell-bg);
+                                     border-radius: 7px;
+                                     border: 1px solid var(--muted-border);
 }
 div.tag-scrollbox::-webkit-scrollbar-thumb,
 div.scroll::-webkit-scrollbar-thumb {background: var(--table-accent);
-                                     border-radius: 6px;
-                                     border: 3px solid var(--page-bg);
+                                     border-radius: 7px;
+                                     border: 2px solid var(--cell-bg);
 }
+div.tag-scrollbox::-webkit-scrollbar-thumb:hover,
+div.scroll::-webkit-scrollbar-thumb:hover {background: var(--hhmi-green1);}
 
 div.codescroll-full {height: calc(100vh - 200px);
                      width: 90%;
