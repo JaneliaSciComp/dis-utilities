@@ -53,7 +53,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.68.0"
+__version__ = "120.72.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -1334,6 +1334,76 @@ def add_orcid_controls(orc, html):
     return html
 
 
+# Amber for an affiliation somebody no longer holds. The same amber the deposit
+# column gives its weakest evidence and .tag-stale gives a stale row: across the
+# app it reads as "this is the older or weaker case", which is what a past
+# affiliation is. 7.21:1 on the page background.
+PAST_AFFILIATION = '#d8a657'
+
+
+def affiliation_links(orc, tags=None):
+    """ A person's affiliations as links, sorted, current first, past marked.
+        Shared by the person pages and /dois/mytags so the same person reads the
+        same way wherever they appear.
+        Keyword arguments:
+          orc: record from the orcid collection
+          tags: names to render; defaults to the record's own affiliations
+        Returns:
+          HTML string, comma separated
+    """
+    names = list(tags if tags is not None else (orc.get('affiliations') or []))
+    current, past, _, known = split_affiliations(orc, names)
+    def one(aff, mark=''):
+        return f"<a href='/tag/{quote(aff, safe='')}'>{escape(aff)}</a>{mark}"
+    if not known:
+        # Shown unmarked rather than all marked past, which would state something
+        # a failed People lookup does not know.
+        return ', '.join(one(a) for a in sorted(names))
+    stale = (f" <span style='color:{PAST_AFFILIATION};font-size:0.85em'>(past)</span>")
+    return ', '.join([one(a) for a in sorted(current)]
+                     + [one(a, stale) for a in sorted(past)])
+
+
+def split_affiliations(orc, tags=None):
+    """ Sort a person's affiliations into current and past.
+        The orcid collection records what someone is affiliated with but not when,
+        so currency comes from the HHMI People system: the supOrgNames it returns
+        are the ones they hold now. One outbound call per person.
+        An alumnus is decided without asking - they have left, so nothing is
+        current. Where there is no employee ID, or People cannot be reached, the
+        answer is unknown rather than past: a caller that renders "past" on a
+        failed lookup is stating something it does not know.
+        Keyword arguments:
+          orc: record from the orcid collection
+          tags: names to sort; defaults to the record's own affiliations
+        Returns:
+          (current, past, department, known) - known is False when the split could
+          not be determined, in which case current and past are empty
+    """
+    names = list(tags if tags is not None else (orc.get('affiliations') or []))
+    if orc.get('alumni'):
+        return [], names, None, True
+    eid = orc.get('employeeId')
+    if not eid:
+        return [], [], None, False
+    try:
+        people = JRC.call_people_by_id(eid)
+    except Exception:
+        people = None
+    if not people:
+        return [], [], None, False
+    current_set = {a['supOrgName'] for a in people.get('affiliations', [])
+                   if 'supOrgName' in a}
+    department = people.get('ccDescr') or ''
+    current, past = [], []
+    for name in names:
+        if name in current_set or (department and name == department):
+            current.append(name)
+        else:
+            past.append(name)
+    return current, past, (department or None), True
+
+
 def janelia_tenure(orc):
     ''' Describe when someone was at Janelia, for the person page.
         The page tells the reader a checkmark means the author contributed to a
@@ -1397,10 +1467,14 @@ def get_orcid_from_db(oid, use_eid=False, bare=False, show="full"):
     tenure = janelia_tenure(orc)
     if tenure:
         html += f"<tr><td>At Janelia:</td><td>{tenure}</td></tr>"
-    if 'affiliations' in orc:
-        alinks = ', '.join(f"<a href='/tag/{requests.utils.quote(a)}'>{a}</a>"
-                           for a in orc['affiliations'])
-        html += f"<tr><td>Affiliations:</td><td>{alinks}</td></tr>"
+    if orc.get('affiliations'):
+        # Sorted, current first, the rest marked - the same treatment /dois/mytags
+        # gives them. Unsorted and unmarked, the row said what someone is affiliated
+        # with but not whether they still are, which is the question a reader of a
+        # person page usually has. Shown unmarked where the split cannot be
+        # determined, rather than calling everything past.
+        html += "<tr><td>Affiliations:</td><td>" \
+                + affiliation_links(orc) + "</td></tr>"
     html += "</table><br>"
     html = add_orcid_controls(orc, html)
     html += "<br>"
@@ -6418,7 +6492,7 @@ def andy():
 @app.route('/dois/mytags/<string:orcid>/<string:year>')
 @app.route('/dois/mytags/<string:orcid>')
 @app.route('/dois/mytags')
-def dois_mytags(orcid="0000-0003-3118-1636", year='All'):
+def dois_mytags(orcid="0000-0001-8374-6008", year='All'):
     ''' Show DOIs an author's affiliations
     '''
     try:
@@ -6427,14 +6501,23 @@ def dois_mytags(orcid="0000-0003-3118-1636", year='All'):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not find DOIs for my affiliations"),
                                message=error_message(err))
+    if not row:
+        # find_one returns None for an ORCID we do not hold, and every line below
+        # reads the record. Authentication will supply a known ORCID, but the route
+        # also takes one from the URL, where a typo should not be a 500.
+        return render_template('warning.html', urlroot=request.url_root,
+                               title=render_warning(f"Could not find ORCID {orcid}", 'warning'),
+                               message="There is nobody with that ORCID in the orcid collection.")
+    # Tested for truth, not presence: a record can carry group as an empty string,
+    # and "if 'group' in row" is true for that. An empty tag reaches the $in query
+    # harmlessly but renders as an empty link in the tag list.
     tags = []
-    if 'group' in row:
+    if row.get('group'):
         tags.append(row['group'])
     for ttype in ('affiliations', 'managed'):
-        if ttype in row:
-            for tag in row[ttype]:
-                if tag not in tags:
-                    tags.append(tag)
+        for tag in (row.get(ttype) or []):
+            if tag and tag not in tags:
+                tags.append(tag)
     payload = {"jrc_tag.name": {"$in": tags}}
     if year != 'All':
         payload['jrc_publishing_date'] = {"$regex": "^"+ year}
@@ -6445,15 +6528,48 @@ def dois_mytags(orcid="0000-0003-3118-1636", year='All'):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not find DOIs for my affiliations"),
                                message=error_message(err))
+    # Who this is, in the same shape /mypapers uses: name, ORCID, and when they were
+    # here. The page is headed "my affiliations" and otherwise never says whose. No
+    # employee ID - it is sensitive, and this page is no harder to reach than any other.
+    name = " ".join(x for x in ((row.get('given') or [''])[0],
+                                (row.get('family') or [''])[0]) if x)
+    ident = "<table class='borderless'>"
+    if name:
+        ident += f"<tr><td>Name:</td><td>{escape(name)}</td></tr>"
+    ident += f"<tr><td>ORCID:</td><td><a href='{ORCID}{escape(orcid)}'>" \
+             + f"{escape(orcid)}</a></td></tr>"
+    tenure = janelia_tenure(row)
+    if tenure:
+        ident += f"<tr><td>At Janelia:</td><td>{tenure}</td></tr>"
+    ident += "</table><br>"
     htmlp = year_pulldown(f"dois/mytags/{orcid}") + "<br>"
-    html, cnt, _ = standard_doi_table(rows, count_card=True)
     title = "DOIs for my affiliations"
     if year != 'All':
         title += f" ({year})"
+    if not tags:
+        # Distinct from "no DOIs found": 367 of 980 people with an ORCID have no
+        # group, affiliations or managed teams recorded, and for them the query can
+        # only ever match nothing. Saying "no DOIs were found" sends them looking
+        # for missing publications instead of a missing affiliation.
+        endpoint_access()
+        return make_response(render_template(
+            'general.html', urlroot=request.url_root, title=title,
+            html=ident + render_warning(
+                "We have no group, affiliations or managed teams on file for this "
+                "person, so there is nothing to search for. This is about the "
+                "affiliation record, not about their publications.", 'warning'),
+            navbar=generate_navbar('Tag/affiliation')))
+    # Sorted, and marked current or past where we can tell. An unknown split shows
+    # the affiliations unmarked rather than calling them all past, which is what a
+    # failed People lookup would otherwise assert.
+    taglinks = affiliation_links(row, tags)
+    html, cnt, _ = standard_doi_table(rows, count_card=True)
     if cnt:
-        html = f"{htmlp}Tags: {', '.join(tags)}<br><br>{html}"
+        html = f"{ident}{htmlp}Affiliations: {taglinks}<br><br>{html}"
     else:
-        html = htmlp + render_warning("No DOIs were found for your affiliations.", 'warning')
+        html = ident + htmlp + f"Affiliations: {taglinks}<br><br>" \
+               + render_warning("No DOIs were found for these affiliations.", 'warning')
+    endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
                                          navbar=generate_navbar('Tag/affiliation')))
