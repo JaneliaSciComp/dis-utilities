@@ -53,7 +53,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.68.0"
+__version__ = "120.69.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -6418,7 +6418,7 @@ def andy():
 @app.route('/dois/mytags/<string:orcid>/<string:year>')
 @app.route('/dois/mytags/<string:orcid>')
 @app.route('/dois/mytags')
-def dois_mytags(orcid="0000-0003-3118-1636", year='All'):
+def dois_mytags(orcid="0000-0001-8374-6008", year='All'):
     ''' Show DOIs an author's affiliations
     '''
     try:
@@ -6427,14 +6427,23 @@ def dois_mytags(orcid="0000-0003-3118-1636", year='All'):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not find DOIs for my affiliations"),
                                message=error_message(err))
+    if not row:
+        # find_one returns None for an ORCID we do not hold, and every line below
+        # reads the record. Authentication will supply a known ORCID, but the route
+        # also takes one from the URL, where a typo should not be a 500.
+        return render_template('warning.html', urlroot=request.url_root,
+                               title=render_warning(f"Could not find ORCID {orcid}", 'warning'),
+                               message="There is nobody with that ORCID in the orcid collection.")
+    # Tested for truth, not presence: a record can carry group as an empty string,
+    # and "if 'group' in row" is true for that. An empty tag reaches the $in query
+    # harmlessly but renders as an empty link in the tag list.
     tags = []
-    if 'group' in row:
+    if row.get('group'):
         tags.append(row['group'])
     for ttype in ('affiliations', 'managed'):
-        if ttype in row:
-            for tag in row[ttype]:
-                if tag not in tags:
-                    tags.append(tag)
+        for tag in (row.get(ttype) or []):
+            if tag and tag not in tags:
+                tags.append(tag)
     payload = {"jrc_tag.name": {"$in": tags}}
     if year != 'All':
         payload['jrc_publishing_date'] = {"$regex": "^"+ year}
@@ -6445,15 +6454,46 @@ def dois_mytags(orcid="0000-0003-3118-1636", year='All'):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not find DOIs for my affiliations"),
                                message=error_message(err))
+    # Who this is, in the same shape /mypapers uses: name, ORCID, and when they were
+    # here. The page is headed "my affiliations" and otherwise never says whose. No
+    # employee ID - it is sensitive, and this page is no harder to reach than any other.
+    name = " ".join(x for x in ((row.get('given') or [''])[0],
+                                (row.get('family') or [''])[0]) if x)
+    ident = "<table class='borderless'>"
+    if name:
+        ident += f"<tr><td>Name:</td><td>{escape(name)}</td></tr>"
+    ident += f"<tr><td>ORCID:</td><td><a href='{ORCID}{escape(orcid)}'>" \
+             + f"{escape(orcid)}</a></td></tr>"
+    tenure = janelia_tenure(row)
+    if tenure:
+        ident += f"<tr><td>At Janelia:</td><td>{tenure}</td></tr>"
+    ident += "</table><br>"
     htmlp = year_pulldown(f"dois/mytags/{orcid}") + "<br>"
-    html, cnt, _ = standard_doi_table(rows, count_card=True)
     title = "DOIs for my affiliations"
     if year != 'All':
         title += f" ({year})"
+    if not tags:
+        # Distinct from "no DOIs found": 367 of 980 people with an ORCID have no
+        # group, affiliations or managed teams recorded, and for them the query can
+        # only ever match nothing. Saying "no DOIs were found" sends them looking
+        # for missing publications instead of a missing affiliation.
+        endpoint_access()
+        return make_response(render_template(
+            'general.html', urlroot=request.url_root, title=title,
+            html=ident + render_warning(
+                "We have no group, affiliations or managed teams on file for this "
+                "person, so there is nothing to search for. This is about the "
+                "affiliation record, not about their publications.", 'warning'),
+            navbar=generate_navbar('Tag/affiliation')))
+    taglinks = ', '.join(f"<a href='/tag/{quote(tag, safe='')}'>{escape(tag)}</a>"
+                         for tag in tags)
+    html, cnt, _ = standard_doi_table(rows, count_card=True)
     if cnt:
-        html = f"{htmlp}Tags: {', '.join(tags)}<br><br>{html}"
+        html = f"{ident}{htmlp}Tags: {taglinks}<br><br>{html}"
     else:
-        html = htmlp + render_warning("No DOIs were found for your affiliations.", 'warning')
+        html = ident + htmlp + f"Tags: {taglinks}<br><br>" \
+               + render_warning("No DOIs were found for these affiliations.", 'warning')
+    endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
                                          navbar=generate_navbar('Tag/affiliation')))
