@@ -53,7 +53,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.72.0"
+__version__ = "120.73.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -6563,9 +6563,40 @@ def dois_mytags(orcid="0000-0001-8374-6008", year='All'):
     # the affiliations unmarked rather than calling them all past, which is what a
     # failed People lookup would otherwise assert.
     taglinks = affiliation_links(row, tags)
-    html, cnt, _ = standard_doi_table(rows, count_card=True)
+    # A chip per affiliation, carrying how many of this person's DOIs it accounts
+    # for. The counts are the point as much as the filter: an affiliation can bring
+    # nothing at all - several do - and the union alone never shows that. Class per
+    # affiliation is index-based, like standard_ack_table's, so a tag name with
+    # punctuation or spaces needs no escaping.
+    works = list(rows)
+    tag_class = {name: f'tagidx-{idx}' for idx, name in enumerate(tags)}
+    tag_counts = collections.Counter()
+    row_tags = {}
+    for work in works:
+        matched = sorted({tag.get('name') for tag in (work.get('jrc_tag') or [])
+                          if tag.get('name') in tag_class})
+        row_tags[work['doi']] = matched
+        for name in matched:
+            tag_counts[name] += 1
+    # A DOI can match several of someone's affiliations, so a row carries a class
+    # for each - filterByTag asks only that the row holds the one chip's class.
+    html, cnt, _ = standard_doi_table(
+        works, count_card=True,
+        class_fn=lambda work: ' '.join(tag_class[name] for name in row_tags[work['doi']]))
+    chipbar = ""
+    if cnt and len(tags) > 1:
+        chips = "".join(
+            f"<span class='tag-chip' data-tagclass='{tag_class[name]}' "
+            "onclick=\"filterByTag('dois', this, 'totalrows');\">"
+            f"{escape(name)} <span class='tag-chip-count'>{tag_counts[name]:,}</span>"
+            "</span>"
+            for name in sorted(tags, key=lambda n: (-tag_counts[n], n.lower())))
+        chipbar = ("<p><b>Filter by affiliation:</b> " + chips
+                   + "<br><span style='font-size:10pt;color:#a8c4e0'>Click one to show "
+                   "only its DOIs; click it again to show them all. A DOI credited to "
+                   "more than one of these appears under each.</span></p>")
     if cnt:
-        html = f"{ident}{htmlp}Affiliations: {taglinks}<br><br>{html}"
+        html = f"{ident}{htmlp}Affiliations: {taglinks}<br><br>{chipbar}{html}"
     else:
         html = ident + htmlp + f"Affiliations: {taglinks}<br><br>" \
                + render_warning("No DOIs were found for these affiliations.", 'warning')
