@@ -53,7 +53,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.66.0"
+__version__ = "120.67.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -13864,6 +13864,42 @@ RS_VERSION = re.compile(r'/v\d+$', re.I)
 ELIFE_VERSION = re.compile(r'^(10\.7554/elife\.\d+)\.\d+$', re.I)
 
 
+# A DOI that does not resolve is a different finding from one we have not
+# loaded: the first is the publisher citing something that was never minted (or
+# was withdrawn), and no amount of curation fixes it. doi.org answers a HEAD with
+# a redirect when the DOI is registered and 404 when it is not.
+DOI_RESOLVER = "https://doi.org/"
+DOI_RESOLVE_TTL = 43200          # seconds; a dead DOI rarely comes back to life
+DOI_RESOLVE_TIMEOUT = 5
+_DOI_RESOLVED = {}               # doi -> (resolves or None, checked at)
+
+
+def doi_resolves(doi):
+    """ Does this DOI resolve at doi.org?
+        Cached for DOI_RESOLVE_TTL, because the answer changes about as often as
+        a DOI is minted and the report is viewed far more often than that.
+        Keyword arguments:
+          doi: DOI string
+        Returns:
+          True (registered), False (404), or None when the check itself failed -
+          a timeout is our problem, not the publisher's, and must not be reported
+          as a dead DOI
+    """
+    # time() is the function here, not the module - see the imports
+    now = time()
+    hit = _DOI_RESOLVED.get(doi)
+    if hit and now - hit[1] < DOI_RESOLVE_TTL:
+        return hit[0]
+    try:
+        resp = requests.head(DOI_RESOLVER + quote(doi, safe='/'),
+                             allow_redirects=False, timeout=DOI_RESOLVE_TIMEOUT)
+        answer = resp.status_code != 404
+    except Exception:
+        answer = None
+    _DOI_RESOLVED[doi] = (answer, now)
+    return answer
+
+
 def _registrar_preprint(rec):
     ''' Does the registrar itself call this record a preprint?
         The DOI prefix says where a deposit lives, not what it is - Zenodo hosts
@@ -13974,7 +14010,13 @@ def _integrity_scan():
         rec = recs.get(doi)
         return DL.get_title(rec) if rec else ''
 
+    # Every held DOI grouped by its versionless form, so a check can read a whole
+    # version family rather than the one DOI that happens to be named.
+    family = collections.defaultdict(list)
+    for doi in held:
+        family[relation_base(doi)].append(doi)
     out = collections.defaultdict(list)
+    unresolved = []
     stores = (("Preprint", pre), ("Dataset supplement", supp), ("Companion", comp))
     # 1. A relation names a DOI we do not hold. Targets on the ignore list are
     #    reported separately: they are a curator's decision, not a gap.
@@ -13992,7 +14034,20 @@ def _integrity_scan():
                     out['ignored'].append([label, tgt, doi,
                                            "Earlier version of the referring DOI"])
                 else:
-                    out['missing'].append([label, tgt, doi, title_of(doi)])
+                    unresolved.append((label, tgt, doi))
+    # Checked in one parallel pass rather than one at a time: a dozen sequential
+    # HEADs to doi.org is a visible pause on a page load, and these are
+    # independent of each other.
+    if unresolved:
+        wanted = sorted({tgt for _, tgt, _ in unresolved})
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            resolved = dict(zip(wanted, executor.map(doi_resolves, wanted)))
+        for label, tgt, doi in unresolved:
+            if resolved.get(tgt) is False:
+                out['unresolvable'].append([label, tgt, doi, title_of(doi)])
+            else:
+                # True, or None where the check itself failed
+                out['missing'].append([label, tgt, doi, title_of(doi)])
     # 2. Both ends held, but only one records the relation. A versioned figshare
     #    DOI is expected to be one-sided: link_dataset_supplements.py collapses a
     #    versioned target to its base, so the article points at the base while the
@@ -14010,7 +14065,17 @@ def _integrity_scan():
             for tgt in targets:
                 if not tgt or tgt not in held:
                     continue
-                back = set(store.get(tgt, []))
+                # The back-link may sit on a version of either end rather than on
+                # the DOI itself, because collapse() in link_dataset_supplements.py
+                # rewrites a versioned target to its base while leaving the other
+                # side as deposited. An article declaring janelia.21266625.v1 is
+                # stored against janelia.21266625, and it is .v1 that records the
+                # article back. Reading the whole version family of the target
+                # keeps that from looking one-sided: the relation is recorded at
+                # both ends, just not on the two DOIs that happen to name it.
+                back = set()
+                for member in family.get(relation_base(tgt), (tgt,)):
+                    back.update(store.get(member, []))
                 if doi in back or relation_base(doi) in back:
                     continue
                 out['asymmetric'].append([label, doi, tgt, title_of(tgt)])
@@ -14106,11 +14171,35 @@ def relation_integrity():
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not audit DOI relations"),
                                message=error_message(err))
+    # Findings grouped by the response they need, most severe first. Severity is
+    # "how wrong is the database", not "how many rows": a relation we record
+    # incorrectly misleads a reader, while one we have not loaded merely omits.
+    # White text on every header but yellow, which carries dark text - the same
+    # pairing .badge-urgent already uses for black on darkorange.
+    groups = (
+        {'title': "Wrong, and fixable here", 'bg': '#8b1a1a', 'fg': '#ffffff',
+         'note': "The relation we store is demonstrably incorrect.",
+         'keys': ('dataset_as_preprint', 'asymmetric')},
+        {'title': "Decide what belongs", 'bg': '#a8530f', 'fg': '#ffffff',
+         'note': "Only a curator can settle these: load the DOI, or ignore-list it.",
+         'keys': ('missing',)},
+        {'title': "Worth a look", 'bg': '#c9a227', 'fg': '#1a1a1a',
+         'note': "The shape is unusual. Most turn out to be correct on inspection.",
+         'keys': ('multi', 'backwards')},
+        {'title': "Nothing to fix here", 'bg': '#1c6b3a', 'fg': '#ffffff',
+         'note': "Recorded so the numbers reconcile; no action follows from them.",
+         'keys': ('unresolvable', 'ignored')})
     sections = [
         ('missing', "Referenced but not held",
          ['Relation', 'Missing DOI', 'Referenced by', 'Referring title'],
          "A relation names a DOI that is not in the collection. Either it should be "
          "loaded, or it belongs on the ignore list.", (1, 2)),
+        ('unresolvable', "Referenced but the DOI does not resolve",
+         ['Relation', 'Dead DOI', 'Referenced by', 'Referring title'],
+         "The DOI is not registered at doi.org, so it cannot be loaded and there "
+         "is nothing to ignore - the publisher deposited a relation to something "
+         "that was never minted, or that has since been withdrawn. Worth reporting "
+         "to them.", (1, 2)),
         ('dataset_as_preprint', "Data repository DOIs recorded as preprints",
          ['DOI', 'Type', 'Related DOIs', 'Title'],
          "A dataset is not a preprint of the article it accompanies. These relations "
@@ -14137,33 +14226,74 @@ def relation_integrity():
          "The relation names a DOI we do not hold, for a reason we already know: "
          "a curator put it on the ignore list, or it is an earlier version of the "
          "DOI that names it.", (1, 2))]
+    by_key = {key: (label, header, blurb, linkcols)
+              for key, label, header, blurb, linkcols in sections}
     cards = [(label, safe(f"<a href='#{key}'>{len(find[key]):,}</a>"))
              for key, label, _, _, _ in sections]
     html = stat_cards(cards, div_id='integrity-cards') + "<br>"
-    for key, label, header, blurb, linkcols in sections:
-        rows = find[key]
-        html += f"<a id='{key}'></a><h3>{label} ({len(rows):,})</h3>" \
-                + f"<div style='margin-bottom:8px; color:#a8c4e0'>{escape(blurb)}</div>"
-        if not rows:
-            html += "<div style='margin-bottom:18px'>Nothing found.</div>"
-            continue
-        trows = []
-        for row in rows:
-            cells = []
-            for idx, val in enumerate(row):
-                if idx in linkcols and isinstance(val, str) and val:
-                    # "Related DOIs" holds a comma-separated list; link each one.
-                    cells.append(safe(", ".join(doi_link(d.strip())
-                                                for d in val.split(",") if d.strip())))
-                else:
-                    cells.append(val)
-            trows.append(cells)
-        html += render_table(header, trows, table_id=key,
-                             css='tablesorter numbers-scroll') + "<br>"
+    for group in groups:
+        total = sum(len(find[key]) for key in group['keys'])
+        # overflow:hidden so the square-cornered header clips to the box's radius
+        html += ("<div style='border:1px solid " + group['bg'] + "; border-radius:8px; "
+                 "overflow:hidden; margin-bottom:22px;'>"
+                 + f"<div style='background:{group['bg']}; color:{group['fg']}; "
+                 "padding:9px 14px; font-weight:bold;'>"
+                 + escape(group['title'])
+                 + "<span style='font-weight:normal; opacity:0.85;'> &mdash; "
+                 + f"{total:,} finding{'' if total == 1 else 's'}</span></div>"
+                 + "<div style='padding:6px 14px 2px 14px;'>"
+                 + "<div style='color:#a8c4e0; margin:8px 0 14px 0;'>"
+                 + escape(group['note']) + "</div>")
+        for key in group['keys']:
+            label, header, blurb, linkcols = by_key[key]
+            rows = find[key]
+            html += _integrity_section(key, label, header, blurb, linkcols, rows)
+        html += "</div></div>"
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="Relation integrity", html=html,
                                          navbar=generate_navbar('Related DOIs')))
+
+
+# Findings above this many rows get a scroll box. "Explained" is reference
+# material and only grows - 26 rows today - and a section long enough to push the
+# groups below it off the screen stops the page being a summary.
+RELATION_SCROLL_ROWS = 15
+
+
+def _integrity_section(key, label, header, blurb, linkcols, rows):
+    ''' One finding section, for rendering inside its severity group
+        Keyword arguments:
+          key: section key, used as the anchor and table id
+          label, header, blurb, linkcols: as defined in the sections list
+          rows: the findings themselves
+        Returns:
+          HTML string
+    '''
+    html = (f"<a id='{key}'></a><h3>{label} ({len(rows):,})</h3>"
+            + f"<div style='margin-bottom:8px; color:#a8c4e0'>{escape(blurb)}</div>")
+    if not rows:
+        return html + "<div style='margin-bottom:18px'>Nothing found.</div>"
+    trows = []
+    for row in rows:
+        cells = []
+        for idx, val in enumerate(row):
+            if idx in linkcols and isinstance(val, str) and val:
+                # "Related DOIs" holds a comma-separated list; link each one.
+                cells.append(safe(", ".join(doi_link(d.strip())
+                                            for d in val.split(",") if d.strip())))
+            else:
+                cells.append(val)
+        trows.append(cells)
+    table = render_table(header, trows, table_id=key, css='tablesorter numbers-scroll')
+    if len(rows) > RELATION_SCROLL_ROWS:
+        # div.tag-scrollbox is the app's scroll pane: bordered, rounded, with an
+        # always-visible teal scrollbar so it reads as scrollable even where the
+        # OS hides scrollbars at rest. It also gives the table's thead the
+        # overflow ancestor its position:sticky needs - unwrapped, the sticky
+        # header has nothing to stick inside and the columns scroll out of sight.
+        table = f"<div class='tag-scrollbox'>{table}</div>"
+    return html + table + "<br>"
 
 
 
