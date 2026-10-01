@@ -139,7 +139,7 @@ import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
 import jrc_email.jrc_email as JE
 
-__version__ = '1.8.0'
+__version__ = '1.8.1'
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation,no-member
 
@@ -714,7 +714,7 @@ def generate_email(internal, error):
     msg = JE.render(os.path.basename(__file__), __version__, run_data,
                     mode_label, mode_tone, kpis, body)
     email = DIS['developer']
-    JRC.send_email(msg, DIS['sender'], email, "Acknowledgements updated for DOIs", mime='html')
+    JRC.send_email(msg, DIS['sender'], email, "Internal acknowledgement DOI sync", mime='html')
 
 
 def mark_no_acknowledgements(internal):
