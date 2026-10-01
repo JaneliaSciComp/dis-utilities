@@ -53,7 +53,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.71.0"
+__version__ = "120.72.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -1334,6 +1334,36 @@ def add_orcid_controls(orc, html):
     return html
 
 
+# Amber for an affiliation somebody no longer holds. The same amber the deposit
+# column gives its weakest evidence and .tag-stale gives a stale row: across the
+# app it reads as "this is the older or weaker case", which is what a past
+# affiliation is. 7.21:1 on the page background.
+PAST_AFFILIATION = '#d8a657'
+
+
+def affiliation_links(orc, tags=None):
+    """ A person's affiliations as links, sorted, current first, past marked.
+        Shared by the person pages and /dois/mytags so the same person reads the
+        same way wherever they appear.
+        Keyword arguments:
+          orc: record from the orcid collection
+          tags: names to render; defaults to the record's own affiliations
+        Returns:
+          HTML string, comma separated
+    """
+    names = list(tags if tags is not None else (orc.get('affiliations') or []))
+    current, past, _, known = split_affiliations(orc, names)
+    def one(aff, mark=''):
+        return f"<a href='/tag/{quote(aff, safe='')}'>{escape(aff)}</a>{mark}"
+    if not known:
+        # Shown unmarked rather than all marked past, which would state something
+        # a failed People lookup does not know.
+        return ', '.join(one(a) for a in sorted(names))
+    stale = (f" <span style='color:{PAST_AFFILIATION};font-size:0.85em'>(past)</span>")
+    return ', '.join([one(a) for a in sorted(current)]
+                     + [one(a, stale) for a in sorted(past)])
+
+
 def split_affiliations(orc, tags=None):
     """ Sort a person's affiliations into current and past.
         The orcid collection records what someone is affiliated with but not when,
@@ -1443,17 +1473,8 @@ def get_orcid_from_db(oid, use_eid=False, bare=False, show="full"):
         # with but not whether they still are, which is the question a reader of a
         # person page usually has. Shown unmarked where the split cannot be
         # determined, rather than calling everything past.
-        current, past, _, known = split_affiliations(orc)
-        def alink(aff, mark=''):
-            return f"<a href='/tag/{quote(aff, safe='')}'>{escape(aff)}</a>{mark}"
-        if known:
-            alinks = ', '.join(
-                [alink(a) for a in sorted(current)]
-                + [alink(a, " <span style='color:#a8c4e0;font-size:0.85em'>(past)</span>")
-                   for a in sorted(past)])
-        else:
-            alinks = ', '.join(alink(a) for a in sorted(orc['affiliations']))
-        html += f"<tr><td>Affiliations:</td><td>{alinks}</td></tr>"
+        html += "<tr><td>Affiliations:</td><td>" \
+                + affiliation_links(orc) + "</td></tr>"
     html += "</table><br>"
     html = add_orcid_controls(orc, html)
     html += "<br>"
@@ -6541,16 +6562,7 @@ def dois_mytags(orcid="0000-0001-8374-6008", year='All'):
     # Sorted, and marked current or past where we can tell. An unknown split shows
     # the affiliations unmarked rather than calling them all past, which is what a
     # failed People lookup would otherwise assert.
-    current, past, _, known = split_affiliations(row, tags)
-    def taglink(tag, mark=''):
-        return (f"<a href='/tag/{quote(tag, safe='')}'>{escape(tag)}</a>" + mark)
-    if known:
-        taglinks = ', '.join(
-            [taglink(tag) for tag in sorted(current)]
-            + [taglink(tag, " <span style='color:#a8c4e0;font-size:0.85em'>(past)</span>")
-               for tag in sorted(past)])
-    else:
-        taglinks = ', '.join(taglink(tag) for tag in sorted(tags))
+    taglinks = affiliation_links(row, tags)
     html, cnt, _ = standard_doi_table(rows, count_card=True)
     if cnt:
         html = f"{ident}{htmlp}Affiliations: {taglinks}<br><br>{html}"
