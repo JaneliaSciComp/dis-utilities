@@ -10,7 +10,7 @@
     linked to orcid.org).
 '''
 
-__version__ = '2.1.3'
+__version__ = '2.2.0'
 
 import argparse
 import collections
@@ -22,6 +22,7 @@ import os
 import sys
 import time
 import traceback
+import pymongo
 from pymongo.collation import Collation
 import requests
 from tqdm import tqdm
@@ -50,6 +51,10 @@ TIMEOUT = (requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout,
            requests.exceptions.Timeout)
 # Added ORCIDs for the summary email: list of {name, userId, orcid} dicts
 ADDED = []
+# People whose ORCID could not be stored because another record already holds it.
+# Only reachable once the orcid collection carries a unique index on the field;
+# before that a collision is written silently and found months later by hand.
+COLLIDED = []
 OUTPUT = {"name_error": [], "name_multi_records": [], "name_not_found": [], "orcid_exists": [],
           "orcid_mismatch": [], "orcid_added": []}
 # Palette for the bespoke email tables (html_metric_rows, html_added_table) that
@@ -192,6 +197,21 @@ def check_orcid(oid, name, family, given):
     if ARG.WRITE:
         try:
             coll.update_one({'_id': rec['_id']}, {'$set': {'orcid': oid}})
+        except pymongo.errors.DuplicateKeyError:
+            # An ORCID belongs to exactly one person and is never reassigned, so
+            # another record holding this one means either this match is wrong or
+            # that record is. Either way it needs a person, and the rest of the run
+            # is unaffected - terminating here would leave every later person
+            # unprocessed and send no summary at all.
+            other = coll.find_one({"orcid": oid}, {"given": 1, "family": 1})
+            whose = f"{(other.get('given') or ['?'])[0]} {(other.get('family') or ['?'])[0]}" \
+                    if other else 'another record'
+            LOGGER.warning(f"{oid} not stored for {given} {family}: already held by {whose}")
+            COLLIDED.append({"name": f"{given} {family}", "userId": email, "orcid": oid,
+                             "held_by": whose})
+            COUNT['orcid_collision'] += 1
+            ADDED.pop()
+            return
         except Exception as err:
             terminate_program(err)
 
@@ -339,17 +359,21 @@ def html_metric_rows(rows):
             + "".join(trs) + '</table>')
 
 
-def html_added_table(added):
+def html_added_table(added, extra=None, empty="No ORCIDs were added."):
     ''' Build the "ORCIDs Added" table: one row per applied ORCID, author linked
         to their /userui/ record (when a userIdO365 is known) and the ORCID
         linked to orcid.org.
         Keyword arguments:
           added: list of {name, userId, orcid} dicts
+          extra: optional (column heading, dict key) for a third column - the
+                 collision table needs to say who already holds the ORCID, and
+                 without it that is the one fact the row exists to carry
+          empty: message when the list is empty
         Returns:
           HTML table, or a plain message if empty
     '''
     if not added:
-        return f'<div style="color:{EMAIL_GRAY};font-size:13px;">No ORCIDs were added.</div>'
+        return f'<div style="color:{EMAIL_GRAY};font-size:13px;">{html.escape(empty)}</div>'
     rows = []
     for i, entry in enumerate(added):
         bgattr = f' bgcolor="{EMAIL_STRIPE_BG}"' if i % 2 == 0 else ''
@@ -362,17 +386,22 @@ def html_added_table(added):
         oid = html.escape(entry['orcid'])
         oid_link = (f"<a href='https://orcid.org/{oid}' "
                     f"style='color:{EMAIL_NAVY};text-decoration:none;'>{oid}</a>")
-        rows.append(f'<tr{bgattr} style="{bg}">'
-                    f'<td style="padding:8px 10px;white-space:nowrap;">{name}</td>'
-                    f'<td style="padding:8px 10px;">{oid_link}</td></tr>')
-    rows.append('<tr><td colspan="2" style="height:1px;line-height:1px;font-size:1px;">'
+        cells = (f'<td style="padding:8px 10px;white-space:nowrap;">{name}</td>'
+                 f'<td style="padding:8px 10px;">{oid_link}</td>')
+        if extra:
+            cells += ('<td style="padding:8px 10px;">'
+                      + html.escape(str(entry.get(extra[1], ''))) + '</td>')
+        rows.append(f'<tr{bgattr} style="{bg}">{cells}</tr>')
+    span = 3 if extra else 2
+    rows.append(f'<tr><td colspan="{span}" style="height:1px;line-height:1px;font-size:1px;">'
                 '&nbsp;</td></tr>')
     return ('<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
             'style="border-collapse:collapse;font-size:12.5px;">'
             f'<tr style="color:{EMAIL_GRAY};font-size:10.5px;text-transform:uppercase;'
             'letter-spacing:.03em;"><td style="padding:6px 10px;">Author</td>'
-            '<td style="padding:6px 10px;">ORCID</td></tr>'
-            + "".join(rows) + '</table>')
+            '<td style="padding:6px 10px;">ORCID</td>'
+            + (f'<td style="padding:6px 10px;">{html.escape(extra[0])}</td>' if extra else '')
+            + '</tr>' + "".join(rows) + '</table>')
 
 
 def generate_email(dois, fname):
@@ -413,6 +442,11 @@ def generate_email(dois, fname):
                        + html_metric_rows(breakdown_rows))
     body += JE.body_row(JE.section_header(f"&#9989; ORCIDs Added ({len(ADDED):,})")
                         + html_added_table(ADDED))
+    if COLLIDED:
+        body += JE.body_row(
+            JE.section_header(f"&#9888; ORCIDs not stored - already held "
+                              f"({len(COLLIDED):,})")
+            + html_added_table(COLLIDED, extra=("Already held by", "held_by")))
     msg = JE.render(os.path.basename(__file__), __version__, run_data,
                     mode_label, mode_tone, kpis, body)
     subject = "ORCIDs added to orcid collection"
@@ -449,6 +483,10 @@ def postprocessing():
             except Exception as err:
                 terminate_program(err)
             dois.extend(adois)
+    if COLLIDED:
+        print(f"ORCIDs NOT stored (collision): {len(COLLIDED):,}")
+        for item in COLLIDED:
+            print(f"    {item['orcid']}  {item['name']}  already held by {item['held_by']}")
     print(f"ORCIDs read:                  {COUNT['read']:,}")
     print(f"ORCIDs considered:            {COUNT['considered']:,}")
     print(f"ORCIDs ignored:               {COUNT['orcid_ignored']:,}")
