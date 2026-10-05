@@ -7,7 +7,7 @@
 | add_people_to_orcid.py | Sync new entries in the People system to the orcid table | |
 | email_authors.py | Email information on newly-curated DOIs to authors | [Every Monday morning](https://jenkins.int.janelia.org/view/DIS/job/DIS-sync-dis-email_authors/)
 | email_orcids.py | Email Janelians that don't have an ORCID to encourage them to get one | |
-| find_unloaded_relations.py | Find referenced DOIS that are not in the database | [Immediately following a scheduled run of *update_dois.py*](https://jenkins.int.janelia.org/view/DIS/job/DIS-sync-find_unloaded/) |
+| find_unloaded_relations.py | Find referenced DOIs that are not in the database, skipping those on the ignore list or held in *external_dois* | [Immediately following a scheduled run of *update_dois.py*](https://jenkins.int.janelia.org/view/DIS/job/DIS-sync-find_unloaded/) |
 | group_search.py | Find resources authored by group (lab) heads | |
 | pull_arxiv.py  | Produce a list of aRxiv DOIs eligible for insertion | [Every morning](https://jenkins.int.janelia.org/view/DIS/job/DIS-sync-pull_arxiv/) |
 | pull_bioRxiv.py| Produce a list of bioRxiv DOIs eligible for insertion | [Every morning](https://jenkins.int.janelia.org/view/DIS/job/DIS-sync-pull_bioarxiv/) |
@@ -22,6 +22,8 @@
 | update_preprints.py | Update preprint relations | [Immediately following a scheduled run of *update_dois.py*](https://jenkins.int.janelia.org/view/DIS/job/DIS-sync-dis-update_preprints/) |
 
 Of the above programs, only *update_dois.py*, *update_orcid.py*, and *update_preprints.py* update the database directly. The "*pull*" programs and *find_unloaded_relations.py* pass information to *update_dois.py* via text files.
+
+Those programs write their text file on every run, whatever flags are given, because the scheduled job that follows reads it. In them, `--test` and `--write` control only where the run-summary email goes: `--test` sends it to the developer, `--write` to the receivers list, and neither flag sends nothing at all. `find_unloaded_relations.py` writes *unloaded_relations.txt*, emptying it when there is nothing to load so that a previous run's list is never read a second time.
 
 ## Development setup
 
