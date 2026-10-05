@@ -296,12 +296,13 @@ def update_managed_teams(idresp, row):  # pylint: disable=too-many-branches
         '''
     if 'managedTeams' not in idresp:
         return False
-    dirty = False
-    lab = ''
     old_affiliations = row['affiliations'].copy() if 'affiliations' in row else []
     old_managed = row['managed'].copy() if 'managed' in row else []
+    old_group = row.get('group')
+    old_group_code = row.get('group_code')
     # Reset managed so it's rebuilt from scratch; old_managed holds the prior value for comparison
     row.pop('managed', None)
+    labs = []
     for team in idresp['managedTeams']:
         org = team.get('supOrgName')
         subtype = team.get('supOrgSubType')
@@ -309,43 +310,50 @@ def update_managed_teams(idresp, row):  # pylint: disable=too-many-branches
         if not org:
             continue
         if subtype == 'Lab' and org.endswith(' Lab'):
-            # Lab head
+            # Lab head. Collected rather than assigned here: assigning inside
+            # the loop made the surviving group whichever lab People happened
+            # to list last, and flagged the record dirty on the way past the
+            # others even when the final value was unchanged.
             if code in IGNORE:
                 continue
-            if lab:
-                LOGGER.warning(f"Multiple labs found for {idresp['nameFirstPreferred']} " \
-                               + idresp['nameLastPreferred'])
-            lab = org
-            if 'group' not in row or row['group'] != lab:
-                dirty = True
-            row['group'] = lab
-            row['group_code'] = code
+            labs.append((org, code))
         else:
             # Managed team
             set_row(row, 'managed')
             if org not in row['managed'] and subtype:
                 if subtype != 'Lab' or not org.endswith(' Lab'):
                     row['managed'].append(org)
-                    LOGGER.debug(f"{row['given'][0]} {row['family'][0]}: {old_managed} -> " \
-                                 + f"{row['managed']}")
-                    if not dirty:
-                        COUNT['managed'] += 1
-                        dirty = True
         # COUNT['affiliations'] is bumped once per record in record_updates
         set_row(row, 'affiliations')
         if org not in row['affiliations']:
             row['affiliations'].append(org)
-            LOGGER.debug(f"{row['given'][0]} {row['family'][0]}: {old_affiliations} -> " \
-                         + f"{row['affiliations']}")
-            dirty = True
-    if not dirty or 'managed' not in row:
-        return dirty
-    if sorted(old_managed) == sorted(row['managed']):
-        COUNT['managed'] -= 1
-        dirty = False
-    if dirty:
-        LOGGER.debug(f"{row['given'][0]} {row['family'][0]}: {old_managed} -> {row['managed']}")
-    return dirty
+    if labs:
+        if len(labs) > 1:
+            LOGGER.warning(f"Multiple labs found for {idresp['nameFirstPreferred']} "
+                           f"{idresp['nameLastPreferred']}: "
+                           f"{', '.join(org for org, _ in labs)}")
+        # Keep the lab the record already carries when People offers several,
+        # so a reordering of the response cannot silently repoint the group.
+        # Add the unwanted supOrgCode to to_ignore (type suporg) to retire it.
+        row['group'], row['group_code'] = next((pair for pair in labs if pair[0] == old_group),
+                                               labs[0])
+    # Each field is compared once, against the state the record arrived in. The
+    # previous version cancelled a real group change whenever managed happened
+    # to be unchanged, and could decrement COUNT['managed'] it never incremented.
+    group_changed = row.get('group') != old_group or row.get('group_code') != old_group_code
+    managed_changed = sorted(old_managed) != sorted(row.get('managed', []))
+    aff_changed = row.get('affiliations', []) != old_affiliations
+    # Built unconditionally, so it uses the same defensive access update_orcid()
+    # uses - an empty name list here would otherwise abort the whole run.
+    name = f"{(row.get('given') or ['?'])[0]} {(row.get('family') or ['?'])[0]}"
+    if group_changed:
+        LOGGER.warning(f"Group changed for {name}: {old_group} -> {row.get('group')}")
+    if managed_changed:
+        COUNT['managed'] += 1
+        LOGGER.debug(f"{name}: {old_managed} -> {row.get('managed', [])}")
+    if aff_changed:
+        LOGGER.debug(f"{name}: {old_affiliations} -> {row.get('affiliations', [])}")
+    return group_changed or managed_changed or aff_changed
 
 
 def write_record(row):
