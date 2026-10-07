@@ -25,7 +25,7 @@
       extra       list of (label, value) pairs for program-specific context
 '''
 
-__version__ = '1.0.0'
+__version__ = '1.1.0'
 
 import collections
 import sys
@@ -208,7 +208,8 @@ def apply_decisions(coll, accepted, logger):
         Keyword arguments:
           coll: orcid collection
           accepted: list of ((key_field, key_value), field, value) tuples
-          logger: logger for records that did not update
+          logger: warns on a record already holding the value, errors on a
+                  key that matched no record at all
         Returns:
           Number of names written
     '''
@@ -221,6 +222,12 @@ def apply_decisions(coll, accepted, logger):
         result = coll.update_one({key[0]: key[1]}, {'$addToSet': update})
         if result.modified_count:
             written += sum(len(v) for v in fields.values())
+        elif not result.matched_count:
+            # Distinct from the case below, and the only one that loses a
+            # change: the key matched no record at all, so nothing was even
+            # considered. Reported at error level because it means the
+            # candidate was keyed wrongly, not that the work was redundant.
+            logger.error(f"{key[0]}={key[1]}: no record matched, nothing written")
         else:
-            logger.warning(f"{key[1]}: nothing updated (variant may already be present)")
+            logger.warning(f"{key[1]}: already held, nothing written")
     return written

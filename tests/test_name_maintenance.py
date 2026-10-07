@@ -34,6 +34,7 @@ class FakeOrcidCollection:
 
     def update_one(self, query, update, upsert=False):
         self.updates.append({'query': query, 'update': update})
+        matched = 1 if query.get('_id') in self.docs else 0
         # Only $addToSet is modelled; a $set is recorded but not applied, since
         # no test asserts on a read following one.
         modified = 0
@@ -47,15 +48,20 @@ class FakeOrcidCollection:
             doc[field] = have
         if '$set' in update:
             modified = 1
-        return types.SimpleNamespace(matched_count=1, modified_count=modified)
+        return types.SimpleNamespace(matched_count=matched,
+                                     modified_count=modified if matched else 0)
 
 
 class FakeLogger:
     def __init__(self):
         self.warnings = []
+        self.errors = []
 
     def warning(self, msg):
         self.warnings.append(str(msg))
+
+    def error(self, msg):
+        self.errors.append(str(msg))
 
 
 # --- apply_decisions: the --review write ----------------------------------
@@ -95,6 +101,20 @@ def test_a_name_already_present_is_reported_not_counted():
     logger = FakeLogger()
     assert apply_decisions(coll, [((('_id'), 1), 'given', 'Gerald M.')], logger) == 0
     assert logger.warnings, "a no-op update should say so"
+    assert not logger.errors, "already held is not an error"
+
+
+def test_a_key_matching_no_record_is_an_error_not_a_shrug():
+    ''' Both failures used to print the same "may already be present" line, so
+        a candidate keyed wrongly - the one case where the change is actually
+        lost - was indistinguishable from redundant work.
+    '''
+    coll = FakeOrcidCollection([{'_id': 1, 'given': ['Gerald']}])
+    logger = FakeLogger()
+    assert apply_decisions(coll, [((('_id'), 99), 'given', 'Gerald M.')], logger) == 0
+    assert logger.errors, "a key that matched nothing must be an error"
+    assert not logger.warnings
+    assert '99' in logger.errors[0]
 
 
 # --- apply_dedupe: the --dedupe write -------------------------------------
