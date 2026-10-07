@@ -14808,9 +14808,14 @@ def relation_integrity():
          "DOI that names it.", (1, 2))]
     by_key = {key: (label, header, blurb, linkcols)
               for key, label, header, blurb, linkcols in sections}
+    # Only checks that found something get a card. A card reading zero is a
+    # link to "Nothing found.", and with half the checks usually clean the row
+    # was mostly those. The section headings below still carry the zero, so
+    # nothing is hidden - the row just stops competing with itself.
     cards = [(label, safe(f"<a href='#{key}'>{len(find[key]):,}</a>"))
-             for key, label, _, _, _ in sections]
-    html = stat_cards(cards, div_id='integrity-cards') + "<br>"
+             for key, label, _, _, _ in sections if find[key]]
+    html = (stat_cards(cards, div_id='integrity-cards') + "<br>") if cards else \
+        "<div style='margin-bottom:14px'>Every check is clean.</div>"
     for group in groups:
         total = sum(len(find[key]) for key in group['keys'])
         # overflow:hidden so the square-cornered header clips to the box's radius
