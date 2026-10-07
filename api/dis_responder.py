@@ -53,7 +53,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.74.0"
+__version__ = "120.75.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -14513,6 +14513,62 @@ def _integrity_scan():
             out['backwards'].append([preprint['doi'], pdate, article['doi'], adate,
                                      -lag, title_of(article['doi'].lower())])
     out['backwards'].sort(key=lambda r: -r[4])
+    # 6. More Janelia credits than there are authors to carry them.
+    #
+    #    Credits are deliberately shared across a version family and across a
+    #    preprint/published pair - authors join a paper between the preprint
+    #    and the journal version, and that credit is legitimate - so a record
+    #    is only wrong if its credits outnumber the largest author list
+    #    anywhere in its family. Judged against the record's own list alone,
+    #    38 records look broken and all but a handful are correct.
+    #
+    #    Counted by aggregation rather than by projecting the author arrays:
+    #    the arrays run to 74 names and nothing here needs their contents.
+    sizes = {}
+    try:
+        # $isArray, not $ifNull: $ifNull guards a missing field, but $size still
+        # throws on a field of the wrong type, and one record stores jrc_author
+        # as the string '[ "52180" ]'. A single malformed record would otherwise
+        # fail the whole aggregation and take the page down with it.
+        def countable(field):
+            return {"$cond": [{"$isArray": f"${field}"}, {"$size": f"${field}"}, 0]}
+
+        # A Crossref grant record has no author or creators at all: its people
+        # are investigators on the project. Counted against author/creators
+        # alone every funded grant looks over-credited - 10.35802/221300 names
+        # five investigators including Gerald Rubin, carries one credit, and
+        # was reported as 1 credit against 0 authors.
+        investigators = {"$reduce": {
+            "input": {"$cond": [{"$isArray": "$project"}, "$project", []]},
+            "initialValue": 0,
+            "in": {"$add": ["$$value",
+                            {"$cond": [{"$isArray": "$$this.investigator"},
+                                       {"$size": "$$this.investigator"}, 0]},
+                            {"$cond": [{"$isArray": "$$this.lead-investigator"},
+                                       {"$size": "$$this.lead-investigator"}, 0]}]}}}
+        for row in coll.aggregate([
+                {"$project": {"doi": 1, "na": countable('author'),
+                              "nc": countable('creators'), "np": investigators,
+                              "nj": countable('jrc_author')}}]):
+            sizes[row['doi'].lower()] = (max(row['na'], row['nc'], row['np']), row['nj'])
+    except Exception:
+        sizes = {}
+    for doi, (nauth, ncred) in sizes.items():
+        if not ncred or ncred <= nauth:
+            continue
+        # Largest author list across the version family and any linked record.
+        best, why = nauth, "this record"
+        for sib in family.get(relation_base(doi), []):
+            sauth = sizes.get(sib, (0, 0))[0]
+            if sauth > best:
+                best, why = sauth, f"version {sib}"
+        for tgt in pre.get(doi, []):
+            tauth = sizes.get(tgt, (0, 0))[0]
+            if tauth > best:
+                best, why = tauth, f"linked {tgt}"
+        if ncred > best:
+            out['overcredited'].append([doi, ncred, best, why, title_of(doi)])
+    out['overcredited'].sort(key=lambda r: -(r[1] - r[2]))
     return out
 
 
@@ -14542,7 +14598,7 @@ def relation_integrity():
          'keys': ('missing',)},
         {'title': "Worth a look", 'bg': '#c9a227', 'fg': '#1a1a1a',
          'note': "The shape is unusual. Most turn out to be correct on inspection.",
-         'keys': ('multi', 'backwards')},
+         'keys': ('multi', 'backwards', 'overcredited')},
         {'title': "Nothing to fix here", 'bg': '#1c6b3a', 'fg': '#ffffff',
          'note': "Recorded so the numbers reconcile; no action follows from them.",
          'keys': ('unresolvable', 'ignored')})
@@ -14551,6 +14607,14 @@ def relation_integrity():
          ['Relation', 'Missing DOI', 'Referenced by', 'Referring title'],
          "A relation names a DOI that is not in the collection. Either it should be "
          "loaded, or it belongs on the ignore list.", (1, 2)),
+        ('overcredited', "More Janelia credits than authors",
+         ['DOI', 'Credits', 'Authors', 'Largest author list found', 'Title'],
+         "A record credits more Janelians than any version of it, or its linked "
+         "preprint or published version, has authors to carry. Credits are shared "
+         "across a version family on purpose - authors join a paper between the "
+         "preprint and the journal version - so only a record exceeding its whole "
+         "family is counted here. Most turn out to be a person holding two employee "
+         "IDs, or a response/comment DOI that inherited its parent's credits.", (0,)),
         ('unresolvable', "Referenced but the DOI does not resolve",
          ['Relation', 'Dead DOI', 'Referenced by', 'Referring title'],
          "The DOI is not registered at doi.org, so it cannot be loaded and there "
