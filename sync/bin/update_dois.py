@@ -7,7 +7,7 @@
            to DIS MongoDB.
 """
 
-__version__ = '22.7.0'
+__version__ = '22.8.0'
 
 import argparse
 import collections
@@ -904,24 +904,6 @@ def get_suporg_code(name):
     if name in SUPORG:
         return SUPORG[name]
     return None
-
-
-def add_pmid(key, persist):
-    ''' Add the PMID to a DOI record
-        Keyword arguments:
-          key: DOI
-          persist: dict keyed by DOI with value of the Crossref/DataCite record
-        Returns:
-          None
-    '''
-    try:
-        pmid = JRC.get_pmid(key)
-    except JRC.PMIDNotFound:
-        return
-    except Exception as err:
-        terminate_program(err)
-    if pmid:
-        persist[key]['jrc_pmid'] = pmid
 
 
 def get_tags(persist, rec):
