@@ -1,0 +1,15 @@
+# GitHub's language statistics count every tracked file, so a checked-in
+# third-party bundle is reported as if we wrote it. Swagger UI and the jQuery
+# plugins ship here as vendored bundles: 5.3 MB of the 5.33 MB of JavaScript in
+# this repository is theirs, which had GitHub calling a Python project 46%
+# JavaScript. Marking them linguist-vendored leaves them in the tree and in the
+# diff, and only takes them out of the language breakdown.
+#
+# Ours, and deliberately still counted: api/static/js/dis.js,
+# api/static/js/tablesorter.js, api/static/css/main.css,
+# api/static/css/tablesorter-jrc1.css.
+
+api/static/swagger-ui/**                linguist-vendored
+api/static/swagger-ui5/**               linguist-vendored
+api/static/js/jquery/**                 linguist-vendored
+api/static/js/bootstrap-autocomplete/** linguist-vendored
