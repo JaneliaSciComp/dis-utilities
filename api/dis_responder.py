@@ -54,7 +54,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.79.1"
+__version__ = "120.79.2"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -18907,9 +18907,9 @@ def _award_index(funder_id=None):
 
 
 def _is_grant_number(key):
-    ''' Whether an award key identifies a grant rather than naming a programme.
+    ''' Whether an award key identifies a grant rather than naming a program.
 
-        A key with no digit in it is a programme name - "Investigator",
+        A key with no digit in it is a program name - "Investigator",
         "Odyssey Award", "Fellowship". Those are real awards, but many people
         hold one, so the DOIs grouped under one are not the output of a single
         grant and must not be presented as though they were.
@@ -18965,8 +18965,8 @@ def show_awards():
             "funder, so awards are grouped by both. NIH application-type prefixes and "
             "budget-period suffixes fold together &mdash; <code>1U19NS104648</code>, "
             "<code>5U19NS104648</code> and <code>U19 NS104648</code> are one grant.</p>"
-            "<p>Some funders deposit a programme name instead of a grant number. Those "
-            "are listed too, but many people hold one award of a named programme, so "
+            "<p>Some funders deposit a program name instead of a grant number. Those "
+            "are listed too, but many people hold one award of a named program, so "
             "the DOIs under it are not one grant's output and are excluded from the "
             "count below.</p>")
     if fid:
@@ -18981,7 +18981,7 @@ def show_awards():
     cards = [("Awards", f"{len(index):,}"),
              ("Produced more than one DOI", f"{multi:,}"),
              ("DOIs covered", f"{covered:,}"),
-             ("Named programmes, not grants", f"{named:,}")]
+             ("Named programs, not grants", f"{named:,}")]
     if filler:
         cards.append(("Entries with no award number", f"{filler:,}"))
     html += stat_cards(cards)
@@ -19043,8 +19043,8 @@ def show_award(fid, key):
     header = f"<h4>{escape(label)}</h4>" \
              f"<p>{funder_cell} &middot; <a href='{others}'>other awards</a></p>"
     if not _is_grant_number(unquote(key).upper()):
-        header += "<p>This is a programme name rather than a grant number. Several " \
-                  "people hold an award of the same programme, so the DOIs below are " \
+        header += "<p>This is a program name rather than a grant number. Several " \
+                  "people hold an award of the same program, so the DOIs below are " \
                   "not necessarily the output of one grant.</p>"
     # Every spelling is listed: someone reconciling this against a grants
     # database needs to know the deposits were not uniform.
