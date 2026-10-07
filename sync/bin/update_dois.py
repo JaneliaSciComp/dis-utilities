@@ -27,6 +27,7 @@ from tqdm import tqdm
 import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
 import jrc_email.jrc_email as JE
+import dis_funder_lib as DFL
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,logging-fstring-interpolation,logging-not-lazy,too-many-lines
 
@@ -1042,6 +1043,40 @@ def add_openalex(rec):
         rec["jrc_oa_status"] = data['open_access']['oa_status']
 
 
+def add_funders(rec):
+    ''' Add funder identifiers from the registrar metadata already on the
+        record. No API call is needed to parse them - only to resolve a
+        funder's place in the registry hierarchy, and that is cached.
+
+        Two fields are written. jrc_funder is the detail a person reads: who
+        funded it, under which award. jrc_funder_ids is what a query uses -
+        every funder ID plus its ancestors, flattened, so one indexed term
+        finds a funder and everything beneath it. A paper naming only NINDS
+        answers a query for NIH.
+        Keyword arguments:
+          rec: Crossref/DataCite record
+        Returns:
+          None
+    '''
+    try:
+        funders = DFL.parse_funders(rec, DB['dis'].funder)
+    except Exception as err:
+        LOGGER.warning(f"Could not parse funders for {rec.get('doi')}: {err}")
+        return
+    if not funders:
+        return
+    rec['jrc_funder'] = funders
+    try:
+        rollup = DFL.rollup_ids(funders, DB['dis'].funder)
+    except Exception as err:
+        # The detail is still worth storing without the rollup; the backfill
+        # can fill it in later rather than losing the parse.
+        LOGGER.warning(f"Could not roll up funders for {rec.get('doi')}: {err}")
+        return
+    if rollup:
+        rec['jrc_funder_ids'] = rollup
+
+
 def add_datacite(rec):
     ''' Add data from DataCite
         Keyword arguments:
@@ -1142,6 +1177,8 @@ def update_mongodb(persist):
         # Data from OpenAlex
         if 'janelia' not in key: # Janelia DataCite DOIs are [almost] never in OpenAlex
             add_openalex(val)
+        # Funders, from metadata already on the record
+        add_funders(val)
         # Legal/open access data from DataCite
         if val['jrc_obtained_from'] == 'DataCite':
             add_datacite(val)
