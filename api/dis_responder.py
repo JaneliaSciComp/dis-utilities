@@ -54,7 +54,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.78.0"
+__version__ = "120.79.1"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -18815,7 +18815,7 @@ def funder(fid):
              f"<a href='https://doi.org/10.13039/{fid}' target='_blank'>10.13039/{fid}</a>"
     if cached and cached.get('ror'):
         header += f" &middot; <a href='/ror/{cached['ror']}'>ROR {cached['ror']}</a>"
-    header += "</p>"
+    header += f" &middot; <a href='/awards?funder={fid}'>awards</a></p>"
     # The gap between the two counts is the whole point of the rollup, so it is
     # shown rather than left for someone to wonder about.
     inherited = len(rows) - direct
@@ -18836,6 +18836,232 @@ def funder(fid):
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=name, html=html,
+                                         navbar=generate_navbar('DOIs')))
+
+
+# An NIH grant number is [type]ACT IC NNNNNN[-suffix]: "1R01EB024261-01A1". The
+# leading digit is the application type (1 new, 2 renewal, 5 continuation) and
+# the trailing suffix is the budget period, so one grant is deposited under
+# several spellings. Only the core identifies the grant.
+NIH_AWARD = re.compile(r'^[1-9]?([A-Z][A-Z0-9]{2}[A-Z]{2}\d{6})(?:[-\s].*)?$', re.I)
+# Award fields carrying no award number. Publishers use these as filler, and
+# grouping on them would invent a grant that funded two dozen unrelated papers.
+AWARD_NOT_A_NUMBER = re.compile(r'^(n/?a|none|null|-+|unknown|not applicable|'
+                                r'no external funding|janelia(\s+research\s+campus)?)$', re.I)
+
+
+def award_key(value):
+    ''' Canonical key for an award number, or None when it is not one
+        Keyword arguments:
+          value: the award string as deposited
+        Returns:
+          Uppercase key, or None for filler
+    '''
+    text = ' '.join(str(value or '').split())
+    if not text or AWARD_NOT_A_NUMBER.match(text):
+        return None
+    match = NIH_AWARD.match(text.replace(' ', ''))
+    return match.group(1).upper() if match else text.upper()
+
+
+def _award_index(funder_id=None):
+    ''' Group DOIs by the award that funded them.
+
+        Keyed on (funder, award) rather than the award alone: an award number is
+        only unique within its funder - "2014862" is an NSF grant and a
+        plausible identifier anywhere else.
+        Keyword arguments:
+          funder_id: restrict to one funder (optional)
+        Returns:
+          (index, filler) - index maps (fid, key) to award detail, filler counts
+          award entries that carried no award number
+    '''
+    query = {"jrc_funder.awards": {"$exists": True}}
+    if funder_id:
+        query["jrc_funder.id"] = funder_id
+    index, filler = {}, 0
+    # Only the funder block and the DOI: the index counts and groups, it does
+    # not render records. The award page re-reads the full documents, because
+    # standard_doi_table goes through DL.get_title and DL.get_publishing_date,
+    # which read the raw registrar fields rather than the jrc_ ones - a
+    # projection narrow enough for this loop leaves both of them empty.
+    for rec in DB['dis'].dois.find(query, {"doi": 1, "jrc_funder": 1}):
+        for fund in rec.get('jrc_funder') or []:
+            fid = fund.get('id')
+            if funder_id and fid != funder_id:
+                continue
+            for award in fund.get('awards') or []:
+                key = award_key(award)
+                if not key:
+                    filler += 1
+                    continue
+                default_name = f"Funder {fid}" if fid else 'Unidentified funder'
+                entry = index.setdefault((fid, key),
+                                         {'funder': fund.get('name') or default_name,
+                                          'fid': fid,
+                                          'spellings': collections.Counter(),
+                                          'dois': {}})
+                entry['spellings'][' '.join(str(award).split())] += 1
+                entry['dois'][rec['doi']] = rec
+    return index, filler
+
+
+def _is_grant_number(key):
+    ''' Whether an award key identifies a grant rather than naming a programme.
+
+        A key with no digit in it is a programme name - "Investigator",
+        "Odyssey Award", "Fellowship". Those are real awards, but many people
+        hold one, so the DOIs grouped under one are not the output of a single
+        grant and must not be presented as though they were.
+        Keyword arguments:
+          key: an award key from _award_index
+        Returns:
+          True when the key contains a digit
+    '''
+    return any(c.isdigit() for c in key)
+
+
+def _award_label(entry):
+    ''' The spelling to show for an award: whichever was deposited most often, so
+        a heading reads as a real grant number rather than a normalized key.
+        Keyword arguments:
+          entry: an _award_index value
+        Returns:
+          Award string
+    '''
+    return entry['spellings'].most_common(1)[0][0]
+
+
+@app.route('/awards')
+def show_awards():
+    '''
+    Return the awards that funded Janelia DOIs
+    ---
+    tags:
+      - DOI
+    responses:
+      '200':
+        description: HTML report
+      '500':
+        description: MongoDB error
+    '''
+    fid = request.args.get('funder')
+    if fid and not re.match(r'^\d+$', fid):
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Invalid funder ID"),
+                               message=f"{escape(fid)} is not a Crossref Funder Registry ID")
+    try:
+        index, filler = _award_index(fid)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not group DOIs by award"),
+                               message=error_message(err))
+    if not index:
+        return make_response(render_template('general.html', urlroot=request.url_root,
+                                             title="Awards",
+                                             html="<p>No awards found.</p>",
+                                             navbar=generate_navbar('DOIs')))
+    html = ("<p>What each grant produced. An award number is only unique within its "
+            "funder, so awards are grouped by both. NIH application-type prefixes and "
+            "budget-period suffixes fold together &mdash; <code>1U19NS104648</code>, "
+            "<code>5U19NS104648</code> and <code>U19 NS104648</code> are one grant.</p>"
+            "<p>Some funders deposit a programme name instead of a grant number. Those "
+            "are listed too, but many people hold one award of a named programme, so "
+            "the DOIs under it are not one grant's output and are excluded from the "
+            "count below.</p>")
+    if fid:
+        fname = (DB['dis'].funder.find_one({"id": fid}) or {}).get('name') or f"Funder {fid}"
+        html = f"<h4>{escape(fname)}</h4>" + html \
+               + f"<p><a href='/awards'>&larr; all awards</a> &middot; " \
+                 f"<a href='/funder/{fid}'>DOIs for this funder</a></p>"
+    multi = sum(1 for (_, key), e in index.items()
+                if len(e['dois']) > 1 and _is_grant_number(key))
+    covered = len({d for e in index.values() for d in e['dois']})
+    named = sum(1 for (_, key) in index if not _is_grant_number(key))
+    cards = [("Awards", f"{len(index):,}"),
+             ("Produced more than one DOI", f"{multi:,}"),
+             ("DOIs covered", f"{covered:,}"),
+             ("Named programmes, not grants", f"{named:,}")]
+    if filler:
+        cards.append(("Entries with no award number", f"{filler:,}"))
+    html += stat_cards(cards)
+    rows = []
+    fileoutput = ""
+    for (afid, key), entry in sorted(index.items(),
+                                     key=lambda kv: (-len(kv[1]['dois']), kv[1]['funder'])):
+        label = _award_label(entry)
+        link = f"/award/{afid or '-'}/{quote(key, safe='')}"
+        funder_cell = escape(entry['funder'])
+        if afid:
+            funder_cell = f"<a href='/funder/{afid}'>{funder_cell}</a>"
+        ndois = len(entry['dois'])
+        rows.append([safe(f"<a href='{link}'>{escape(label)}</a>"), safe(funder_cell),
+                     cell(f"{ndois:,}", sort=ndois, align='right')])
+        fileoutput += f"{label}\t{entry['funder']}\t{ndois}\n"
+    html += create_downloadable('awards', ['Award', 'Funder', 'DOIs'], fileoutput)
+    html += render_table(['Award', 'Funder', 'DOIs'], rows, css="tablesorter numbers-scroll")
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="Awards", html=html,
+                                         navbar=generate_navbar('DOIs')))
+
+
+@app.route('/award/<string:fid>/<path:key>')
+def show_award(fid, key):
+    '''
+    Return the DOIs produced by one award
+    ---
+    tags:
+      - DOI
+    responses:
+      '200':
+        description: HTML report
+      '500':
+        description: MongoDB error
+    '''
+    fid = None if fid == '-' else fid
+    if fid and not re.match(r'^\d+$', fid):
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Invalid funder ID"),
+                               message=f"{escape(fid)} is not a Crossref Funder Registry ID")
+    try:
+        index, _ = _award_index(fid)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get DOIs for this award"),
+                               message=error_message(err))
+    entry = index.get((fid, unquote(key).upper()))
+    if not entry:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Award not found", 'warning'),
+                               message=f"No DOIs name award {escape(unquote(key))}")
+    label = _award_label(entry)
+    funder_cell = escape(entry['funder'])
+    if entry['fid']:
+        funder_cell = f"<a href='/funder/{entry['fid']}'>{funder_cell}</a>"
+    others = f"/awards?funder={entry['fid']}" if entry['fid'] else '/awards'
+    header = f"<h4>{escape(label)}</h4>" \
+             f"<p>{funder_cell} &middot; <a href='{others}'>other awards</a></p>"
+    if not _is_grant_number(unquote(key).upper()):
+        header += "<p>This is a programme name rather than a grant number. Several " \
+                  "people hold an award of the same programme, so the DOIs below are " \
+                  "not necessarily the output of one grant.</p>"
+    # Every spelling is listed: someone reconciling this against a grants
+    # database needs to know the deposits were not uniform.
+    if len(entry['spellings']) > 1:
+        spellings = ", ".join(f"<code>{escape(sp)}</code>"
+                              for sp, _ in entry['spellings'].most_common())
+        header += f"<p>Deposited as {spellings}.</p>"
+    try:
+        rows = list(DB['dis'].dois.find({"doi": {"$in": sorted(entry['dois'])}}))
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get DOIs for this award"),
+                               message=error_message(err))
+    table, _, _ = standard_doi_table(rows, download_name='award_dois')
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=f"Award {label}", html=header + table,
                                          navbar=generate_navbar('DOIs')))
 
 
