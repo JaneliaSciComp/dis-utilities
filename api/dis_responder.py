@@ -7250,10 +7250,26 @@ def show_doi_ui(doi):
                                 title=render_warning("Could not get DOI", 'error'),
                                 message=str(err))
     if not data:
-        return render_template('warning.html', urlroot=request.url_root,
-                                title=render_warning("Could not find DOI", 'warning'),
-                                message=f"Could not find DOI {doi} in " \
-                                        +f"{'DataCite' if DL.is_datacite(doi) else 'Crossref'}")
+        registrar = 'DataCite' if DL.is_datacite(doi) else 'Crossref'
+        if not row:
+            return render_template('warning.html', urlroot=request.url_root,
+                                    title=render_warning("Could not find DOI", 'warning'),
+                                    message=f"Could not find DOI {doi} in {registrar}")
+        # Held locally but the registrar will not resolve it - versioned figshare
+        # DOIs like 10.25378/janelia.29669162.v2 are in our collection and not in
+        # DataCite's API. What we store IS the registrar's own record, so the page
+        # is rendered from that rather than refused: everything below reads the
+        # same fields either way. The banner says the live lookup failed so the
+        # page is never mistaken for fresh.
+        data = row
+        # Prepended, not appended: recsec already holds the green "saved
+        # locally" banner and the jrc field table, and a reader who has taken
+        # the green line at face value has already stopped reading. The warning
+        # that the data is not live has to come first to be read at all.
+        recsec = "<h4 style='color:red'><i class='fa-solid fa-warning'></i> " \
+                 + f"Could not re-fetch this DOI from {registrar} &mdash; " \
+                 + "everything below is the copy stored locally, not live data</h4><br>" \
+                 + recsec
     try:
         authors = DL.get_author_list(data, orcid=True, project_map=DB['dis'].project_map)
     except Exception as err:
