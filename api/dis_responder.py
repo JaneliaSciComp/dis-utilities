@@ -54,7 +54,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.76.0"
+__version__ = "120.77.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -11675,7 +11675,7 @@ def figshare_groups(year='All'):  # pylint: disable=too-many-locals,too-many-bra
             result['rest']['source'] = 'mongo'
             result['rest']['row_count'] = len(members)
             return generate_response(result)
-        dtitle = f"figshare group: {stem}"
+        dtitle = f"figshare group: {escape(stem)}"
         back = f"<a href='{base}' class='btn btn-outline-primary btn-sm'>" \
                + "&larr; all groups</a>"
         if not members:
@@ -11947,10 +11947,13 @@ def zenodo_groups(year='All'):  # pylint: disable=too-many-locals,too-many-branc
                                     f"\"{escape(concept)}\"", 'warning')
             endpoint_access()
             return make_response(render_template('general.html', urlroot=request.url_root,
-                                                 title=f"Zenodo deposit: {concept}", html=html,
+                                                 title=f"Zenodo deposit: {escape(concept)}",
+                                                 html=html,
                                                  navbar=generate_navbar('DataCite')))
         casings = collections.Counter(r['title'] for r in members if r['title'])
-        dtitle = f"Zenodo deposit: {casings.most_common(1)[0][0] if casings else concept}"
+        label = (render_title_html(casings.most_common(1)[0][0]) if casings
+                 else escape(concept))
+        dtitle = f"Zenodo deposit: {label}"
         mrows = []
         tviews = tdl = tcit = 0
         for rec in members:
@@ -12541,10 +12544,12 @@ def protocolsio_dois(year='All'):  # pylint: disable=too-many-locals,too-many-br
                                     f"\"{escape(concept)}\"", 'warning')
             endpoint_access()
             return make_response(render_template('general.html', urlroot=request.url_root,
-                                                 title=f"protocols.io deposit: {concept}",
+                                                 title=f"protocols.io deposit: {escape(concept)}",
                                                  html=html, navbar=generate_navbar('DataCite')))
         casings = collections.Counter(r['title'] for r in members if r['title'])
-        dtitle = f"protocols.io deposit: {casings.most_common(1)[0][0] if casings else concept}"
+        label = (render_title_html(casings.most_common(1)[0][0]) if casings
+                 else escape(concept))
+        dtitle = f"protocols.io deposit: {label}"
         mrows = []
         tviews = texp = tcit = 0
         for rec in members:
@@ -12987,10 +12992,12 @@ def elife_dois(year='All'):  # pylint: disable=too-many-locals,too-many-branches
                                     f"\"{escape(concept)}\"", 'warning')
             endpoint_access()
             return make_response(render_template('general.html', urlroot=request.url_root,
-                                                 title=f"eLife article: {concept}",
+                                                 title=f"eLife article: {escape(concept)}",
                                                  html=html, navbar=generate_navbar('DOIs')))
         casings = collections.Counter(r['title'] for r in members if r['title'])
-        dtitle = f"eLife article: {casings.most_common(1)[0][0] if casings else concept}"
+        label = (render_title_html(casings.most_common(1)[0][0]) if casings
+                 else escape(concept))
+        dtitle = f"eLife article: {label}"
         mrows = []
         tviews = tdl = tcit = 0
         for rec in members:
