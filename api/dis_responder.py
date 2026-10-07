@@ -21,6 +21,7 @@ import socket
 import statistics
 import string
 import sys
+import unicodedata
 from time import sleep, time
 from types import SimpleNamespace
 from urllib.parse import quote, unquote
@@ -53,7 +54,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.75.0"
+__version__ = "120.76.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -8959,6 +8960,157 @@ NAME_MISMATCH_KINDS = (
      'Genuinely different from the nearest roster name. Some are typos in the '
      'published record, some are a shortened or alternate given name, and some '
      'will be a different person entirely.'))
+
+
+def _orcid_name_tokens(value):
+    ''' Lowercase accent-folded name tokens, for comparing two renderings of a
+        person without caring about order, punctuation or diacritics.
+        Keyword arguments:
+          value: a name
+        Returns:
+          List of tokens
+    '''
+    text = unicodedata.normalize('NFKD', str(value or ''))
+    text = ''.join(c for c in text if not unicodedata.combining(c))
+    return re.sub(r'[^a-z ]', ' ', text.lower()).split()
+
+
+def _deposited_name(auth):
+    ''' The author's name as deposited, in "Given Family" order.
+
+        Crossref splits given and family; DataCite usually gives one name
+        field, sometimes "Family, Given" and sometimes "Given Family".
+        Reading the single field as a surname makes "Frank Loesche" look
+        nothing like the roster's Frank Loesche.
+        Keyword arguments:
+          auth: one author/creator entry
+        Returns:
+          Name string
+    '''
+    given, family = auth.get('given'), auth.get('family')
+    if given or family:
+        return f"{given or ''} {family or ''}".strip()
+    name = (auth.get('name') or '').strip()
+    if name.count(',') == 1:
+        fam, giv = (part.strip() for part in name.split(','))
+        return f"{giv} {fam}".strip()
+    return name
+
+
+def _deposited_orcid(auth):
+    ''' The ORCID on an author entry, from either registrar's shape
+        Keyword arguments:
+          auth: one author/creator entry
+        Returns:
+          Bare ORCID iD, or ''
+    '''
+    oid = auth.get('ORCID') or ''
+    if not oid:
+        for nid in auth.get('nameIdentifiers') or []:
+            if isinstance(nid, dict) \
+               and str(nid.get('nameIdentifierScheme') or '').upper() == 'ORCID':
+                oid = nid.get('nameIdentifier') or ''
+                break
+    return str(oid).rstrip('/').rsplit('/', maxsplit=1)[-1].lower()
+
+
+@app.route('/orcid_mismatch')
+def show_orcid_mismatch():
+    '''
+    Return authors whose deposited ORCID belongs to a different person
+    ---
+    tags:
+      - ORCID
+    responses:
+      '200':
+        description: HTML report
+      '500':
+        description: MongoDB error
+    '''
+    # rapidfuzz only ranks the findings; the ORCID itself is an exact key, so a
+    # missing library should not take the report down with it.
+    try:
+        from rapidfuzz import fuzz          # pylint: disable=import-outside-toplevel
+        score_of = fuzz.token_sort_ratio
+    except ImportError:
+        score_of = lambda a, b: 0           # pylint: disable=unnecessary-lambda-assignment
+    try:
+        roster = {}
+        for row in DB['dis'].orcid.find({"orcid": {"$exists": True}},
+                                        {"orcid": 1, "given": 1, "family": 1,
+                                         "userIdO365": 1}):
+            roster[row['orcid'].lower()] = {
+                'tokens': {tok for val in (row.get('given') or []) + (row.get('family') or [])
+                           for tok in _orcid_name_tokens(val)},
+                'display': f"{(row.get('given') or ['?'])[0]} "
+                           f"{(row.get('family') or ['?'])[0]}",
+                'userId': row.get('userIdO365') or ''}
+        rows = []
+        for rec in DB['dis'].dois.find({}, {"doi": 1, "author": 1, "creators": 1,
+                                            "title": 1, "titles": 1}):
+            for auth in (rec.get('author') or rec.get('creators') or []):
+                if not isinstance(auth, dict):
+                    continue
+                entry = roster.get(_deposited_orcid(auth))
+                if not entry:
+                    continue
+                deposited = _deposited_name(auth)
+                tokens = set(_orcid_name_tokens(deposited))
+                # One shared token is enough to call it the same person: it
+                # covers a swapped name order, a middle initial, a dropped
+                # accent and a misspelt surname, all of which are the publisher
+                # rendering one person differently rather than naming another.
+                if not tokens or (tokens & entry['tokens']):
+                    continue
+                rows.append({'doi': rec['doi'], 'deposited': deposited,
+                             'orcid': _deposited_orcid(auth), 'roster': entry,
+                             'score': score_of(deposited, entry['display']),
+                             'title': DL.get_title(rec) or ''})
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not compare ORCIDs to names"),
+                               message=error_message(err))
+    rows.sort(key=lambda r: (r['score'], r['doi']))
+    html = ("<p>An author entry carries an ORCID that belongs to somebody else on the "
+            "roster, so the credit lands on the wrong Janelian. This is the publisher's "
+            "metadata, not our matching: the ORCID is an exact key, and these are the "
+            "entries where it names a person sharing no part of the deposited name.</p>"
+            "<p>Because the error is in the deposit, removing the credit does not make "
+            "it stay removed &mdash; <code>update_dois.py</code> re-reads the same ORCID "
+            "and credits the same wrong person the next time the record refreshes. The "
+            "fix is a correction from the publisher.</p>")
+    if not rows:
+        html += "<p>No mismatches found.</p>"
+        return make_response(render_template('general.html', urlroot=request.url_root,
+                                             title="ORCID/name mismatches", html=html,
+                                             navbar=generate_navbar('Authorship')))
+    trows = []
+    fileoutput = ""
+    for row in rows:
+        person = escape(row['roster']['display'])
+        if row['roster']['userId']:
+            person = f"<a href='/userui/{escape(row['roster']['userId'])}'>{person}</a>"
+        trows.append([safe(doi_link(row['doi'])), row['deposited'],
+                      safe(f"<a href='{ORCID}{row['orcid']}' target='_blank'>"
+                           f"{escape(row['orcid'])}</a>"),
+                      safe(person),
+                      cell(f"{row['score']:.0f}", sort=f"{row['score']:06.1f}", align='right'),
+                      row['title']])
+        fileoutput += f"{row['doi']}\t{row['deposited']}\t{row['orcid']}\t" \
+                      f"{row['roster']['display']}\t{row['score']:.0f}\n"
+    html += stat_cards([("Mismatches", f"{len(rows):,}"),
+                        ("DOIs affected", f"{len({r['doi'] for r in rows}):,}"),
+                        ("People wrongly credited",
+                         f"{len({r['roster']['display'] for r in rows}):,}")])
+    html += create_downloadable('orcid_mismatch',
+                                ['DOI', 'Deposited name', 'ORCID', 'ORCID belongs to', 'Score'],
+                                fileoutput)
+    html += render_table(['DOI', 'Deposited name', 'ORCID', 'ORCID belongs to',
+                          'Similarity', 'Title'], trows)
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="ORCID/name mismatches", html=html,
+                                         navbar=generate_navbar('Authorship')))
 
 
 @app.route('/dois_name_mismatch')
