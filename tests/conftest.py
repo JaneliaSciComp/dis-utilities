@@ -64,6 +64,11 @@ def _prepare_imports():
         _ensure(name)
     _ensure('unidecode', unidecode=lambda s: s)
     _ensure('tqdm', tqdm=lambda x, **kw: x)
+    # The maintenance programs catch pymongo.errors.PyMongoError. The stub has
+    # to carry a real exception class: an except clause naming something that is
+    # not one raises TypeError when it is reached, which would turn a database
+    # error into a confusing failure three frames away from its cause.
+    _ensure('pymongo', errors=types.SimpleNamespace(PyMongoError=Exception))
     for pkg, sub in (('jrc_common', 'jrc_common'), ('jrc_email', 'jrc_email'),
                      ('doi_common', 'doi_common')):
         dotted = f'{pkg}.{sub}'
