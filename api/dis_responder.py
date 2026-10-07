@@ -54,7 +54,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.77.0"
+__version__ = "120.78.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -18765,9 +18765,10 @@ def funders(year='All'):
             "misattribute it.</p>"
     # bokeh.html, not general.html: general.html has no chartscript slot, so a
     # chart rendered into it is silently dropped.
-    chartscript, chartdiv = DP.stacked_bar_chart(
-        chart, "Funders per record", "Funders", ["Records"],
-        colors=['#5b8ff9'], width=700, height=340, legend=False,
+    chartscript, chartdiv = DP.bar_chart(
+        chart, "Funders per record", "Funders", "Records",
+        x_label="Funders named on a record", y_label="Records",
+        color='#5b8ff9', width=700, height=340,
         tooltip=[("Funders", "@Funders"), ("Records", "@Records{0,0}")])
     endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
