@@ -14850,10 +14850,15 @@ def _integrity_section(key, label, header, blurb, linkcols, rows):
         Returns:
           HTML string
     '''
-    html = (f"<a id='{key}'></a><h3>{label} ({len(rows):,})</h3>"
-            + f"<div style='margin-bottom:8px; color:#a8c4e0'>{escape(blurb)}</div>")
+    html = f"<a id='{key}'></a><h3>{label} ({len(rows):,})</h3>"
     if not rows:
+        # The heading still earns its place at zero - it is what makes the band
+        # counts reconcile, and says the check ran. The blurb does not: it
+        # explains what to do about a finding, which is moot when there are
+        # none, and repeated across every clean section it pushes the sections
+        # that do need attention off the screen.
         return html + "<div style='margin-bottom:18px'>Nothing found.</div>"
+    html += f"<div style='margin-bottom:8px; color:#a8c4e0'>{escape(blurb)}</div>"
     trows = []
     for row in rows:
         cells = []
