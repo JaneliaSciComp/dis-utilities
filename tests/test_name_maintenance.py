@@ -196,3 +196,50 @@ def test_the_longest_family_name_wins():
 
 def test_an_unmatched_family_name_splits_to_nothing():
     assert split_against_family('Gerald Rubin', ['Smith']) == (None, None)
+
+
+# --- add_orcid_name_variants: not re-proposing what we already hold --------
+
+@pytest.fixture(name='variants_env')
+def fixture_variants_env(monkeypatch):
+    ''' process_alternate_name reaches for module globals; supply them and
+        hand back the module so a test can read REVIEW and COUNT.
+    '''
+    import add_orcid_name_variants as AONV
+    monkeypatch.setattr(AONV, 'ARG', types.SimpleNamespace(NONLATIN=False), raising=False)
+    monkeypatch.setattr(AONV, 'APPLY', [])
+    monkeypatch.setattr(AONV, 'REVIEW', [])
+    AONV.COUNT.clear()
+    return AONV
+
+
+def held_sets(given, family):
+    ''' The same four sets process_alternate_name is handed in the real run. '''
+    from dis_name_lib import exact_key as ek, normalize as nz
+    return {'given': {nz(g) for g in given}, 'given_exact': {ek(g) for g in given},
+            'family': {nz(f) for f in family}, 'families': list(family)}
+
+
+def test_initials_we_already_hold_are_not_proposed_again(variants_env):
+    ''' The initials branch returned before the already-held check, so the
+        same initials came back for review on every run no matter how often
+        they had been accepted - three of them on the first real --review run.
+    '''
+    rec = {'_id': 1, 'orcid': '0000-0001-8396-1533',
+           'given': ['Wyatt', 'Wyatt L', 'Wyatt L.', 'W', 'WL'], 'family': ['Korff']}
+    variants_env.process_alternate_name(rec, 'other-name', 'W Korff', {},
+                                        held_sets(rec['given'], rec['family']))
+    assert not variants_env.REVIEW, "already held - nothing to review"
+    assert variants_env.COUNT['already_held'] == 1
+
+
+def test_a_differently_spelled_initial_is_still_proposed(variants_env):
+    ''' Skipping on the normalized key would fold "M A" into "M.A." and drop
+        it. Publishers deposit both, and holding both is the entire point.
+    '''
+    rec = {'_id': 1, 'orcid': '0000-0002-0470-6911',
+           'given': ['Miguel', 'M.A.'], 'family': ['Nunez']}
+    variants_env.process_alternate_name(rec, 'credit-name', 'M A Nunez', {},
+                                        held_sets(rec['given'], rec['family']))
+    assert len(variants_env.REVIEW) == 1
+    assert variants_env.REVIEW[0]['value'] == 'M A'
