@@ -484,6 +484,52 @@ def stacked_bar_chart(data, title, xaxis, yaxis, colors=None, width=None, height
     return components(plt)
 
 
+def bar_chart(data, title, x_field, y_field, x_label=None, y_label=None,  # pylint: disable=too-many-arguments,too-many-positional-arguments
+              color=None, width=None, height=None, orient=None, tooltip=None, nav=None):
+    ''' Create a single-series vertical bar chart - the vertical counterpart to
+        hbar_chart, and what a histogram wants.
+
+        stacked_bar_chart draws this correctly when handed one series, but it
+        identifies its series through a legend, so it never labels its axes. A
+        single-series caller has to suppress that legend, which leaves nothing
+        naming the bars at all. Hence the axis labels here.
+        Keyword arguments:
+          data: dictionary of data
+          title: chart title
+          x_field: x-axis column name
+          y_field: y-axis column name
+          x_label: x-axis label (optional, defaults to x_field)
+          y_label: y-axis label (optional, defaults to y_field)
+          color: bar color (optional)
+          width: width of chart (optional)
+          height: height of chart (optional)
+          orient: orientation of x-axis labels (optional)
+          tooltip: list of tooltip tuples (optional)
+          nav: drill-down map passed to _make_clickable (optional)
+        Returns:
+          Figure components
+    '''
+    plt = figure(x_range=data[x_field], title=title, toolbar_location=None)
+    if width and height:
+        plt.width = width
+        plt.height = height
+    cds = ColumnDataSource(data)
+    bars = plt.vbar(x=x_field, top=y_field, width=0.9, source=cds,
+                    color=color or '#5b8ff9')
+    plt.add_tools(HoverTool(renderers=[bars],
+                            tooltips=tooltip if tooltip
+                            else f"@{x_field}: @{y_field}"))
+    if orient:
+        plt.xaxis.major_label_orientation = orient
+    plt.xaxis.axis_label = x_label if x_label is not None else x_field
+    plt.yaxis.axis_label = y_label if y_label is not None else y_field
+    plt.xgrid.grid_line_color = None
+    plt.y_range.start = 0
+    plt.background_fill_color = "ghostwhite"
+    _make_clickable(plt, cds, list(data[x_field]), nav, renderers=[bars])
+    return components(plt)
+
+
 def dual_axis_chart(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
     data,
     title="Cost and Count by Year",

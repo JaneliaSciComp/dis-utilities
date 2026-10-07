@@ -54,7 +54,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.77.0"
+__version__ = "120.78.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -14808,9 +14808,14 @@ def relation_integrity():
          "DOI that names it.", (1, 2))]
     by_key = {key: (label, header, blurb, linkcols)
               for key, label, header, blurb, linkcols in sections}
+    # Only checks that found something get a card. A card reading zero is a
+    # link to "Nothing found.", and with half the checks usually clean the row
+    # was mostly those. The section headings below still carry the zero, so
+    # nothing is hidden - the row just stops competing with itself.
     cards = [(label, safe(f"<a href='#{key}'>{len(find[key]):,}</a>"))
-             for key, label, _, _, _ in sections]
-    html = stat_cards(cards, div_id='integrity-cards') + "<br>"
+             for key, label, _, _, _ in sections if find[key]]
+    html = (stat_cards(cards, div_id='integrity-cards') + "<br>") if cards else \
+        "<div style='margin-bottom:14px'>Every check is clean.</div>"
     for group in groups:
         total = sum(len(find[key]) for key in group['keys'])
         # overflow:hidden so the square-cornered header clips to the box's radius
@@ -14850,10 +14855,15 @@ def _integrity_section(key, label, header, blurb, linkcols, rows):
         Returns:
           HTML string
     '''
-    html = (f"<a id='{key}'></a><h3>{label} ({len(rows):,})</h3>"
-            + f"<div style='margin-bottom:8px; color:#a8c4e0'>{escape(blurb)}</div>")
+    html = f"<a id='{key}'></a><h3>{label} ({len(rows):,})</h3>"
     if not rows:
+        # The heading still earns its place at zero - it is what makes the band
+        # counts reconcile, and says the check ran. The blurb does not: it
+        # explains what to do about a finding, which is moot when there are
+        # none, and repeated across every clean section it pushes the sections
+        # that do need attention off the screen.
         return html + "<div style='margin-bottom:18px'>Nothing found.</div>"
+    html += f"<div style='margin-bottom:8px; color:#a8c4e0'>{escape(blurb)}</div>"
     trows = []
     for row in rows:
         cells = []
@@ -18765,9 +18775,10 @@ def funders(year='All'):
             "misattribute it.</p>"
     # bokeh.html, not general.html: general.html has no chartscript slot, so a
     # chart rendered into it is silently dropped.
-    chartscript, chartdiv = DP.stacked_bar_chart(
-        chart, "Funders per record", "Funders", ["Records"],
-        colors=['#5b8ff9'], width=700, height=340, legend=False,
+    chartscript, chartdiv = DP.bar_chart(
+        chart, "Funders per record", "Funders", "Records",
+        x_label="Funders named on a record", y_label="Records",
+        color='#5b8ff9', width=700, height=340,
         tooltip=[("Funders", "@Funders"), ("Records", "@Records{0,0}")])
     endpoint_access()
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
