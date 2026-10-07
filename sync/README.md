@@ -5,6 +5,7 @@
 | Name                       | Description                                            | Run frequency          |
 | -------------------------- | ------------------------------------------------------ | ---------------------- |
 | add_people_to_orcid.py | Sync new entries in the People system to the orcid table | |
+| backfill_funders.py | Populate *jrc_funder*/*jrc_funder_ids* on DOI records loaded before funders were parsed | One-off; see [Funders](#funders) |
 | email_authors.py | Email information on newly-curated DOIs to authors | [Every Monday morning](https://jenkins.int.janelia.org/view/DIS/job/DIS-sync-dis-email_authors/)
 | email_orcids.py | Email Janelians that don't have an ORCID to encourage them to get one | |
 | find_unloaded_relations.py | Find referenced DOIs that are not in the database, skipping those on the ignore list or held in *external_dois* | [Immediately following a scheduled run of *update_dois.py*](https://jenkins.int.janelia.org/view/DIS/job/DIS-sync-find_unloaded/) |
@@ -267,3 +268,55 @@ Primary DOIs with relations:  502
 Preprint relations:           542
 Primary relations:            542
 ```
+
+### Funders
+Both registrars record who paid for a paper, and they do not agree on how. Crossref deposits a
+Crossref Funder Registry DOI in `funder[]`; DataCite deposits whatever the submitter chose in
+`fundingReferences[]`, most often a ROR. Crossref has lately begun accepting a ROR too, carried in
+the parallel `funder[].id[]` array alongside (or instead of) the Funder Registry DOI.
+
+*update_dois.py* parses all of these into two fields as it loads a record, using *dis_funder_lib.py*.
+No extra registrar call is made: the funder data is already in the metadata we fetched.
+
+- **jrc_funder** is the detail a person reads — who funded the work, under which award numbers.
+  A funder the registrar named without an identifier is kept with a null `id` rather than dropped:
+  the funding is real, it just cannot be joined, and inventing an ID from the name would
+  misattribute it.
+- **jrc_funder_ids** is what a query uses. It holds every funder ID on the record *plus all of
+  their ancestors*, flattened and deduplicated.
+
+The rollup is the point of the second field. The registry is a tree — NINDS sits under NIH, which
+sits under HHS — so a paper that names only NINDS has to answer a query for NIH. Storing the
+ancestors on the record means one indexed term does that, with no `$graphLookup` at query time.
+It is not a small correction: 529 records name NIH directly, and 803 are NIH-funded once the
+institutes are rolled up.
+
+Identifiers are normalized to the bare Funder Registry ID (`100000011`, not
+`10.13039/100000011`), which is what the Crossref funders API takes. A ROR is crosswalked to one
+through ROR's own `external_ids.fundref`.
+
+#### The funder collection
+Resolving a funder's ancestors, and crosswalking a ROR, both mean calling an API. Those answers
+are cached in a **funder** collection:
+
+```
+{ id:        "100000065",
+  name:      "National Institute of Neurological Disorders and Stroke",
+  ancestors: ["100000016", "100000002"],   // HHS -> NIH
+  ror:       "01s5ya894",                  // present when crosswalked
+  updated:   ISODate(...) }
+```
+
+It holds public registry data and nothing about our DOIs, so it is entirely re-derivable: drop it
+and the next run rebuilds it, at the cost of one API call per distinct funder. For that reason
+*backfill_funders.py* populates it even on a dry run — warming the cache means the `--write` pass
+does no network work at all. No DOI record is touched without `--write`.
+
+Two things to know about it. Nothing refreshes an entry once cached, because the hierarchy
+effectively never changes; if a funder is ever renamed or re-parented we would keep the stale copy,
+and re-running the backfill will not fix that on its own. And a handful of entries hold only an
+`id` and a `ror` — written by the crosswalk, which has no reason to fetch the funder's own record —
+so a `/funder/<id>` page for one of those shows the ID in place of a name until something resolves
+it.
+
+Indexes: `jrc_funder_ids` and `jrc_funder.id` on *dois*, and a unique `id` on *funder*.

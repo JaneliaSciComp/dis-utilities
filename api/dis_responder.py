@@ -1735,6 +1735,64 @@ def add_update_times(row):
     return ""
 
 
+def funder_panel(funders):
+    ''' Funders for the DOI page's Funders tab.
+
+        A table rather than the one-line-per-funder form used elsewhere: a tab
+        has the room, and awards belong in their own column. The median record
+        names two funders, but the tail runs to 19 carrying 25 award numbers,
+        and run together those are unreadable.
+
+        Award numbers are shown as the publisher deposited them. On a record
+        naming many funders they are frequently attributed to the wrong one -
+        Crossref gives every funder entry its own award array, and some
+        publishers fill each with the full list - so they are presented as
+        claims rather than as fact.
+        Keyword arguments:
+          funders: jrc_funder list
+        Returns:
+          HTML
+    '''
+    # Some publishers deposit a funder DOI with no name alongside it, so the
+    # stored entry has none either - 260 entries across 150 records, HHMI among
+    # them. Every one of those IDs is in the funder cache, so the name is a
+    # lookup away rather than a bare number on the page.
+    missing = [str(e['id']) for e in funders
+               if isinstance(e, dict) and e.get('id') and not e.get('name')]
+    resolved = {}
+    if missing:
+        # A failure here degrades to the pre-existing behaviour - the ID shown
+        # in place of the name - rather than breaking the DOI page, so it is
+        # swallowed deliberately.
+        try:
+            resolved = {d['id']: d.get('name') for d
+                        in DB['dis'].funder.find({"id": {"$in": missing}}, {"id": 1, "name": 1})}
+        except Exception:
+            resolved = {}
+    rows = []
+    for entry in funders:
+        if not isinstance(entry, dict):
+            continue
+        label = entry.get('name') or resolved.get(str(entry.get('id'))) \
+                or entry.get('id') or '?'
+        name = escape(str(label))
+        if entry.get('id'):
+            name = f"<a href='/funder/{escape(str(entry['id']))}'>{name}</a>"
+        ident = ""
+        if entry.get('id'):
+            ident = f"<a href='https://doi.org/10.13039/{escape(str(entry['id']))}' " \
+                    f"target='_blank'>10.13039/{escape(str(entry['id']))}</a>"
+        awards = ", ".join(escape(str(a)) for a in (entry.get('awards') or []))
+        rows.append([safe(name), safe(ident), awards])
+    if not rows:
+        return ""
+    html = f"<h4>Funders ({len(rows)})</h4>"
+    # Default css (standard-scroll) is the text-table variant: no numeric-only
+    # column here to right-align.
+    html += render_table(['Funder', 'Funder Registry ID', 'Awards'], rows)
+    return html
+
+
 def get_legal_information(row):
     ''' Get legal information from a row
         Keyword arguments:
@@ -6863,7 +6921,8 @@ def doi_tabs(doi, row, rowext, data, authors):
     display_key = {'author': 'Author tags', 'citations': 'Citations',
                    'figshare': 'Figshare', 'abstract': 'Abstract',
                    'ack': 'Acknowledgements', 'subjects': 'Subjects', 'related': 'Related DOIs',
-                   'legal': 'Legal information', 'processing': 'Processing'}
+                   'legal': 'Legal information', 'funder': 'Funders',
+                   'processing': 'Processing'}
     # Author tags
     if row and 'jrc_tag' in row:
         tags = []
@@ -6991,6 +7050,11 @@ def doi_tabs(doi, row, rowext, data, authors):
         ahtml = get_legal_information(row)
         if ahtml:
             content['legal'] = ahtml
+    # Funders. Their own tab rather than a row in the jrc field table: the
+    # median record names two, but the tail runs to 19 with 25 award numbers,
+    # which buries everything below it.
+    if row and row.get('jrc_funder'):
+        content['funder'] = funder_panel(row['jrc_funder'])
     # Processing events (own variable - ahtml is reused by the Authors pane below)
     phtml = get_processing_events(doi)
     if phtml:
@@ -7675,6 +7739,8 @@ def show_dois_metrics(year='All'):
                   ("Full-text URL (jrc_fulltext_url)",
                    {"jrc_fulltext_url": {"$exists": True}}, 'Crossref'),
                   ("PubMed ID (jrc_pmid)", {"jrc_pmid": {"$exists": True}}, 'Crossref'),
+                  ("Funder (jrc_funder)",
+                   {"jrc_funder": {"$exists": True}}, 'Crossref/DataCite'),
                   ("Acknowledgements (jrc_acknowledgements)",
                    {"jrc_acknowledgements": {"$exists": True}}, 'Crossref'),
                   ("Newsletter (jrc_newsletter)",
@@ -18310,6 +18376,234 @@ def ror(rorid=None):
     return make_response(render_template('ror.html', urlroot=request.url_root,
                                          title="Search ROR", content=html,
                                          navbar=generate_navbar('System')))
+
+# Thresholds for the Janelia-share chip filter, loosest last. Cumulative: a row
+# carries the class of every band it qualifies for, so one chip selects a band
+# and everything above it.
+JANELIA_SHARE_BANDS = (('jshare-all', 1.0, 'All authors'),
+                       ('jshare-75', 0.75, '75% or more'),
+                       ('jshare-50', 0.5, 'Half or more'),
+                       ('jshare-any', 0.0, 'At least one'))
+
+
+def janelia_share_filter(rows):
+    ''' Chip bar and row classifier for filtering a DOI table by how much of
+        its authorship is Janelian.
+
+        The ratio is matched Janelia authors over total authors. Two things it
+        is not: it is not a measure of contribution - a 200-author consortium
+        paper with a dozen Janelians scores 6% and may still be major Janelia
+        work - and the numerator is what author matching found, so a paper
+        whose authors failed to match looks less Janelian than it is. Both
+        argue for offering bands rather than a precise figure.
+        Keyword arguments:
+          rows: rows from the dois collection
+        Returns:
+          (chip bar HTML, class_fn, extra_fn) for standard_doi_table
+    '''
+    share = {}
+    tally = {}
+    for row in rows:
+        total = len(row.get('author') or row.get('creators') or [])
+        janelia = len(row.get('jrc_author') or [])
+        tally[row['doi']] = (janelia, total)
+        if total and janelia:
+            # Clamped because jrc_author can exceed the author list when author
+            # matching over-credits a record - 10.1113/jp283832 carries 22
+            # employee IDs against 2 deposited authors. That is a credit bug
+            # worth fixing at source; here it must not yield a 1100% share.
+            share[row['doi']] = min(1.0, janelia / total)
+
+    def extra_fn(row):
+        ''' The share as a cell. The fraction leads and the percentage follows
+            in parentheses, because the denominator is what tells a reader how
+            much to trust the figure: 3/4 and 150/200 are both 75%, and only
+            one of them survives a single missed author match.
+        '''
+        janelia, total = tally.get(row['doi'], (0, 0))
+        if not total:
+            return [cell(safe('&mdash;'), sort='-1', align='right')]
+        pct = min(1.0, janelia / total) if janelia else 0
+        return [cell(f"{janelia}/{total} ({pct:.0%})", sort=f"{pct:08.4f}", align='right')]
+
+    if not share:
+        return "", None, extra_fn
+    counts = {cls: sum(1 for v in share.values() if v >= cut)
+              for cls, cut, _ in JANELIA_SHARE_BANDS}
+
+    def class_fn(row):
+        val = share.get(row['doi'])
+        if val is None:
+            return ''
+        return ' '.join(cls for cls, cut, _ in JANELIA_SHARE_BANDS if val >= cut)
+
+    chips = "".join(
+        f"<span class='tag-chip' data-tagclass='{cls}' "
+        "onclick=\"filterByTag('dois', this, 'totalrows');\">"
+        f"{label} <span class='tag-chip-count'>{counts[cls]:,}</span></span>"
+        for cls, _, label in JANELIA_SHARE_BANDS if counts[cls])
+    if not chips:
+        return "", class_fn, extra_fn
+    bar = "<p><b>Filter by Janelia authorship:</b> " + chips \
+        + "<br><span style='font-size:10pt;color:#a8c4e0'>Share of matched authors " \
+          "who are Janelian. Bands are cumulative. A large consortium paper scores " \
+          "low without being less ours.</span></p>"
+    return bar, class_fn, extra_fn
+
+
+@app.route('/funders')
+@app.route('/funders/<string:year>')
+def funders(year='All'):
+    ''' Summary of the funding recorded across the collection.
+
+        Leads with coverage rather than with the top-funder table, because the
+        table is the part that misleads. Only a minority of records carry any
+        funder metadata at all, and almost none of the DataCite half does, so
+        every count here is a floor - "885 HHMI-funded papers" means 885 of the
+        records whose publisher happened to deposit funding, not 885 of ours.
+        Keyword arguments:
+          year: publishing year to filter by, or "All" for no year filter
+    '''
+    coll = DB['dis'].dois
+    base = {}
+    if year != 'All':
+        base['jrc_publishing_date'] = {"$regex": "^" + year}
+    try:
+        total = coll.count_documents(base)
+        have = coll.count_documents({**base, "jrc_funder": {"$exists": True}})
+        by_registrar = []
+        for reg in ('Crossref', 'DataCite'):
+            rtot = coll.count_documents({**base, "jrc_obtained_from": reg})
+            rhave = coll.count_documents({**base, "jrc_obtained_from": reg,
+                                          "jrc_funder": {"$exists": True}})
+            by_registrar.append((reg, rhave, rtot))
+        # One pass for the per-funder tallies, the unjoinable count, and the
+        # funders-per-record distribution: three scans of the same cursor would
+        # be three times the work for the same answer.
+        rolled = collections.Counter()
+        direct = collections.Counter()
+        spread = collections.Counter()
+        unjoinable = awarded = 0
+        for row in coll.find({**base, "jrc_funder": {"$exists": True}},
+                             {"jrc_funder": 1, "jrc_funder_ids": 1}):
+            entries = row['jrc_funder']
+            spread[len(entries)] += 1
+            if any(e.get('awards') for e in entries):
+                awarded += 1
+            for ent in entries:
+                if ent.get('id'):
+                    direct[ent['id']] += 1
+                else:
+                    unjoinable += 1
+            for fid in row.get('jrc_funder_ids') or []:
+                rolled[fid] += 1
+        names = {d['id']: d.get('name') for d in DB['dis'].funder.find({}, {"id": 1, "name": 1})}
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not summarize funders"),
+                               message=error_message(err))
+    pct = f"{100.0 * have / total:.1f}%" if total else "0%"
+    html = year_pulldown('funders', all_years=True, selected=year)
+    html += stat_cards([("DOIs with funders", f"{have:,}"),
+                        ("Coverage", pct),
+                        ("Distinct funders", f"{len(rolled):,}"),
+                        ("Carrying awards", f"{awarded:,}")])
+    html += "<h4>Coverage</h4>"
+    html += "<p>Funding is only recorded when the publisher deposits it. Every count " \
+            "on this page is a floor, not a total.</p>"
+    rows = [[reg, f"{rhave:,}", f"{rtot:,}",
+             f"{100.0 * rhave / rtot:.1f}%" if rtot else "0%"]
+            for reg, rhave, rtot in by_registrar]
+    rows.append([safe("<b>All</b>"), safe(f"<b>{have:,}</b>"), safe(f"<b>{total:,}</b>"),
+                 safe(f"<b>{pct}</b>")])
+    html += render_table(['Registrar', 'With funders', 'Records', 'Coverage'], rows)
+    html += "<h4>Top funders</h4>"
+    html += "<p>&quot;Rolled up&quot; counts a funder plus everything beneath it in the " \
+            "Crossref Funder Registry hierarchy; &quot;named directly&quot; counts only " \
+            "the records that name it themselves. The gap is funding attributed to a " \
+            "sub-agency.</p>"
+    rows = []
+    for fid, cnt in rolled.most_common(25):
+        label = escape(str(names.get(fid) or f"Funder {fid}"))
+        rows.append([safe(f"<a href='/funder/{fid}'>{label}</a>"),
+                     cell(f"{cnt:,}", sort=cnt, align='right'),
+                     cell(f"{direct.get(fid, 0):,}", sort=direct.get(fid, 0), align='right')])
+    html += render_table(['Funder', 'Rolled up', 'Named directly'], rows,
+                         css="tablesorter numbers-scroll")
+    html += "<h4>Funders per record</h4>"
+    html += "<p>Most records name one or two funders; the tail is what made a " \
+            "dedicated tab necessary on the DOI page.</p>"
+    buckets = sorted(spread)
+    chart = {"Funders": [str(n) for n in buckets],
+             "Records": [spread[n] for n in buckets]}
+    html += f"<p>{unjoinable:,} funder entries name a funder the registrar did not " \
+            "identify. They are kept on the record but cannot be counted above: the " \
+            "funding is real, and matching it to a registry entry by name would " \
+            "misattribute it.</p>"
+    # bokeh.html, not general.html: general.html has no chartscript slot, so a
+    # chart rendered into it is silently dropped.
+    chartscript, chartdiv = DP.stacked_bar_chart(
+        chart, "Funders per record", "Funders", ["Records"],
+        colors=['#5b8ff9'], width=700, height=340, legend=False,
+        tooltip=[("Funders", "@Funders"), ("Records", "@Records{0,0}")])
+    endpoint_access()
+    return make_response(render_template('bokeh.html', urlroot=request.url_root,
+                                         title="Funders", html=html,
+                                         chartscript=chartscript, chartdiv=chartdiv,
+                                         navbar=generate_navbar('DOIs')))
+
+
+@app.route('/funder/<string:fid>')
+def funder(fid):
+    ''' Show the DOIs attributed to a Crossref Funder Registry funder.
+
+        Matched on jrc_funder_ids rather than jrc_funder.id, so the answer
+        includes everything beneath the funder in the registry hierarchy: NIH
+        returns the papers that name only NINDS, which is what a person asking
+        "what did NIH fund" means.
+    '''
+    fid = str(fid).split('/', maxsplit=1)[-1]
+    if not re.match(r'^\d+$', fid):
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Invalid funder ID"),
+                               message=f"{escape(fid)} is not a Crossref Funder Registry ID")
+    try:
+        cached = DB['dis'].funder.find_one({"id": fid})
+        rows = list(DB['dis'].dois.find({"jrc_funder_ids": fid}))
+        direct = DB['dis'].dois.count_documents({"jrc_funder.id": fid})
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning(f"Could not get DOIs for funder {fid}"),
+                               message=error_message(err))
+    name = (cached or {}).get('name') or f"Funder {fid}"
+    header = f"<h4>{escape(name)}</h4>" \
+             f"<p>Crossref Funder Registry " \
+             f"<a href='https://doi.org/10.13039/{fid}' target='_blank'>10.13039/{fid}</a>"
+    if cached and cached.get('ror'):
+        header += f" &middot; <a href='/ror/{cached['ror']}'>ROR {cached['ror']}</a>"
+    header += "</p>"
+    # The gap between the two counts is the whole point of the rollup, so it is
+    # shown rather than left for someone to wonder about.
+    inherited = len(rows) - direct
+    if inherited > 0:
+        header += f"<p>{direct:,} name this funder directly; {inherited:,} more name " \
+                  "a funder beneath it in the registry hierarchy.</p>"
+    if not rows:
+        header += "<p>No DOIs are attributed to this funder.</p>"
+        return make_response(render_template('general.html', urlroot=request.url_root,
+                                             title=name, html=header,
+                                             navbar=generate_navbar('DOIs')))
+    chipbar, class_fn, extra_fn = janelia_share_filter(rows)
+    table, _, _ = standard_doi_table(rows, download_name='funder_dois',
+                                     class_fn=class_fn,
+                                     extra_headers=['Janelia share'],
+                                     extra_fn=extra_fn)
+    html = header + chipbar + table
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=name, html=html,
+                                         navbar=generate_navbar('DOIs')))
+
 
 # RRIDs that have their own SciCrunch authority prefix. Anything matching this
 # is treated as an identifier; anything else the user types is a name search.
