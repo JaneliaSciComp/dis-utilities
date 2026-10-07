@@ -50,7 +50,7 @@
     whenever --test is supplied; the full candidate list is attached as a TSV.
 '''
 
-__version__ = '1.0.0'
+__version__ = '1.0.1'
 
 import argparse
 import collections
@@ -372,6 +372,14 @@ def process_alternate_name(rec, source, raw, person, held):
         COUNT['family_only'] += 1
         return
     if is_initials_only(given):
+        # Compared against the exact spellings rather than the normalized ones:
+        # "M.A." and "M A" are different spellings, publishers use both, and
+        # holding both is the point - so only a literal duplicate is skipped.
+        # Without this the same initials were proposed on every run, however
+        # many times they had already been accepted.
+        if exact_key(given) in held['given_exact']:
+            COUNT['already_held'] += 1
+            return
         add_candidate(rec, given, source, 'review', 'given: initials only', person=person)
         return
     if normalize(given) in held['given']:
