@@ -54,7 +54,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.83.0"
+__version__ = "120.83.1"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -9141,9 +9141,13 @@ def _name_cell(row):
     others = row.get('duplicate')
     if others:
         tip = escape("Same person also listed as: " + "; ".join(str(o) for o in others))
-        html += (f" <span title='{tip}' style='background:#3a4a5a; color:#cfe2f3; "
-                 "padding:1px 7px; border-radius:9px; font-size:0.72em; "
-                 "vertical-align:middle; cursor:help'>duplicate</span>")
+        # Dark text on orange rather than white: white on this orange is
+        # 3.6:1, which is too thin for text this small, while #1a1a1a is 6.2:1.
+        # It is also the brightest of the oranges tried, which is the point.
+        html += (f" <span title='{tip}' style='background:#f97316; color:#1a1a1a; "
+                 "padding:1px 8px; border-radius:9px; font-size:0.76em; "
+                 "font-weight:bold; vertical-align:middle; cursor:help'>"
+                 "duplicate</span>")
     return safe(html)
 
 
