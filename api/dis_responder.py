@@ -54,7 +54,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.83.1"
+__version__ = "120.83.2"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -9370,8 +9370,10 @@ def show_protocolsio_users():
     order = {key: num for num, (key, _, _, _, _) in enumerate(ROSTER_USER_KINDS)}
     trows = []
     fileoutput = ""
-    for row in sorted(rows, key=lambda r: (order[r['kind']], -len(r['dois']),
-                                           r['name'].lower())):
+    # Status then name, the same landing order as /figshare_users. Protocol
+    # count is a sortable column, so leading with it here would only make the
+    # two pages disagree.
+    for row in sorted(rows, key=lambda r: (order[r['kind']], r['name'].lower())):
         bgc, fgc = colors[row['kind']]
         badge = (f"<span style='background:{bgc}; color:{fgc}; padding:2px 8px; "
                  f"border-radius:10px; font-size:0.85em'>{escape(labels[row['kind']])}</span>")
