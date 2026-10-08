@@ -54,7 +54,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.82.1"
+__version__ = "120.83.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -9104,6 +9104,49 @@ def _roster_index():
     return by_email, by_orcid, by_name, rows
 
 
+def _flag_duplicates(rows, label_of):
+    ''' Mark rows that are the same person appearing more than once.
+
+        Grouped on the roster record rather than the displayed name, so the
+        four spellings of one ORCID - "Virginie M S Ruetten" through "Virginia
+        Ruetten" - are seen as one person. A row that matched nobody falls back
+        to its own name, which still catches two accounts opened under the same
+        spelling.
+        Keyword arguments:
+          rows: report rows, each with 'person' (roster record or None) and 'name'
+          label_of: what to call the other appearances in the tooltip
+        Returns:
+          None; rows gain a 'duplicate' list
+    '''
+    groups = collections.defaultdict(list)
+    for row in rows:
+        person = row.get('person')
+        key = f"id:{person['_id']}" if person else f"name:{row['name'].strip().lower()}"
+        groups[key].append(row)
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        for row in members:
+            row['duplicate'] = [label_of(other) for other in members if other is not row]
+
+
+def _name_cell(row):
+    ''' A report's name cell, carrying a duplicate marker when there is one
+        Keyword arguments:
+          row: a report row
+        Returns:
+          Safe HTML
+    '''
+    html = escape(row['name'])
+    others = row.get('duplicate')
+    if others:
+        tip = escape("Same person also listed as: " + "; ".join(str(o) for o in others))
+        html += (f" <span title='{tip}' style='background:#3a4a5a; color:#cfe2f3; "
+                 "padding:1px 7px; border-radius:9px; font-size:0.72em; "
+                 "vertical-align:middle; cursor:help'>duplicate</span>")
+    return safe(html)
+
+
 def _classify_janelian(row):
     ''' Where a roster entry belongs among the figshare user kinds
         Keyword arguments:
@@ -9171,6 +9214,7 @@ def show_figshare_users():
                      'how': how, 'score': score, 'account': acct.get('id'),
                      'matched': matched,
                      'active': acct.get('active'), 'person': person})
+    _flag_duplicates(rows, lambda r: r['email'] or f"figshare id {r['account']}")
     counts = collections.Counter(r['kind'] for r in rows)
     html = ("<p>Everyone with a janelia.figshare.com account, matched against the "
             "roster by institutional email, then ORCID, then name. The three are "
@@ -9204,7 +9248,7 @@ def show_figshare_users():
         how = escape(row['how'])
         if row['score'] is not None:
             how += f" ({row['score']:.0f})"
-        trows.append([row['name'], row['email'],
+        trows.append([_name_cell(row), row['email'],
                       safe(f"<a href='{ORCID}{escape(row['orcid'])}' target='_blank'>"
                            f"{escape(row['orcid'])}</a>") if row['orcid'] else '',
                       safe(badge), safe(roster_name), safe(how),
@@ -9302,6 +9346,7 @@ def show_protocolsio_users():
         rows.append({'name': name, 'orcid': entry['orcid'], 'dois': sorted(entry['dois']),
                      'kind': _classify_janelian(person) if person else 'unknown',
                      'how': how, 'score': score, 'matched': matched, 'person': person})
+    _flag_duplicates(rows, lambda r: r['name'])
     counts = collections.Counter(r['kind'] for r in rows)
     html = ("<p>Everyone credited on a Janelia protocols.io protocol, matched against "
             "the roster by ORCID and then by name. protocols.io publishes no list of "
@@ -9342,7 +9387,7 @@ def show_protocolsio_users():
         shown = ' '.join(doi_link(d) for d in row['dois'][:PROTOCOLSIO_EXAMPLES])
         if len(row['dois']) > PROTOCOLSIO_EXAMPLES:
             shown += f" &hellip; (+{len(row['dois']) - PROTOCOLSIO_EXAMPLES:,})"
-        trows.append([row['name'],
+        trows.append([_name_cell(row),
                       safe(f"<a href='{ORCID}{escape(row['orcid'])}' target='_blank'>"
                            f"{escape(row['orcid'])}</a>") if row['orcid'] else '',
                       safe(badge), safe(roster_name), safe(how),
