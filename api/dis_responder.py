@@ -54,7 +54,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.80.0"
+__version__ = "120.81.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -244,7 +244,7 @@ def handle_invalid_usage(error):
 SECRET_ENV = ('DIS_JWT', 'ELSEVIER_API_KEY', 'LENS_API_KEY', 'NCBI_API_KEY',
               'OPENALEX_API_KEY', 'PEOPLE_API_KEY', 'PROTOCOLS_API_TOKEN',
               'S2_API_KEY', 'SPRINGER_META_API_KEY', 'WOS_API_KEY',
-              'ZENODO_API_KEY')
+              'ZENODO_API_KEY', 'FIGSHARE_JWT')
 
 
 def redact(text):
@@ -9012,6 +9012,207 @@ def _deposited_orcid(auth):
                 oid = nid.get('nameIdentifier') or ''
                 break
     return str(oid).rstrip('/').rsplit('/', maxsplit=1)[-1].lower()
+
+
+# figshare account holders, matched against the roster three ways. The keys are
+# tried strongest first: an institutional email and an ORCID each identify a
+# person outright, and a name does not - two people share one often enough that
+# a name match is a suggestion rather than an answer.
+FIGSHARE_API = 'https://api.figshare.com/v2'
+# How close a name has to be before it is offered as a match. High, because the
+# roster holds 2,382 people and a loose threshold pairs strangers who share a
+# surname: at 90 "Michelle Hu" and "Michelle Du" are still told apart.
+FIGSHARE_NAME_CUTOFF = 92
+# How a matched person is classified. A contingent worker is carried on the
+# roster as alumni whether or not they are still here, so alumni alone does not
+# mean departed.
+FIGSHARE_USER_KINDS = (
+    ('current', 'Current Janelian', '#1c6b3a', '#ffffff',
+     'An employee on the roster who is not marked alumni.'),
+    ('contingent', 'Contingent worker', '#2e6f9e', '#ffffff',
+     'Carried on the roster as a contingent worker. Shown apart from employees '
+     'because the roster marks many of them alumni whether or not they are '
+     'still here, so the alumni flag does not say whether they have left.'),
+    ('former', 'No longer at Janelia', '#c9a227', '#1a1a1a',
+     'An employee marked alumni. A figshare account that may no longer need '
+     'its quota.'),
+    ('unknown', 'Unknown', '#8b2f2f', '#ffffff',
+     'No roster match on email, ORCID or name. Either someone outside Janelia '
+     'with an account here, or a roster gap.'))
+
+
+def _figshare_accounts():
+    ''' Every account figshare lists for the institution
+        Keyword arguments:
+          None
+        Returns:
+          List of account dicts
+    '''
+    token = os.environ.get('FIGSHARE_JWT')
+    if not token:
+        raise RuntimeError("FIGSHARE_JWT is not set, so figshare cannot be queried")
+    out = []
+    page = 1
+    while True:
+        req = requests.get(f"{FIGSHARE_API}/account/institution/accounts",
+                           headers={'Authorization': f"token {token}"},
+                           params={'page': page, 'page_size': 1000}, timeout=60)
+        req.raise_for_status()
+        batch = req.json()
+        if not batch:
+            break
+        out.extend(batch)
+        # A short page is the last one; figshare returns no total to page against.
+        if len(batch) < 1000:
+            break
+        page += 1
+    return out
+
+
+def _roster_index():
+    ''' The roster, keyed every way a figshare account might be matched
+        Keyword arguments:
+          None
+        Returns:
+          (by_email, by_orcid, by_name, rows) - the first three map a key to an
+          index into rows
+    '''
+    rows = []
+    by_email, by_orcid, by_name = {}, {}, {}
+    for row in DB['dis'].orcid.find({}, {"given": 1, "family": 1, "orcid": 1,
+                                         "userIdO365": 1, "alumni": 1,
+                                         "workerType": 1, "employeeId": 1}):
+        idx = len(rows)
+        rows.append(row)
+        if row.get('userIdO365'):
+            # The roster stores these shouted - SPRUSTONN@hhmi.org - and
+            # figshare stores them lowercase.
+            by_email.setdefault(row['userIdO365'].strip().lower(), idx)
+        if row.get('orcid'):
+            by_orcid.setdefault(str(row['orcid']).strip(), idx)
+        for given in row.get('given') or []:
+            for family in row.get('family') or []:
+                by_name.setdefault(f"{given} {family}".strip().lower(), idx)
+    return by_email, by_orcid, by_name, rows
+
+
+def _classify_janelian(row):
+    ''' Where a roster entry belongs among the figshare user kinds
+        Keyword arguments:
+          row: orcid collection record
+        Returns:
+          'current', 'contingent' or 'former'
+    '''
+    # Contingent workers are taken out first, whatever their alumni flag says.
+    # Of the 14 holding a figshare account, 4 are marked alumni and 10 are not,
+    # and the flag is not reliable enough on them to read as departed - which is
+    # why they are counted apart rather than folded into either side.
+    if row.get('workerType') == 'Contingent Worker':
+        return 'contingent'
+    return 'former' if row.get('alumni') else 'current'
+
+
+@app.route('/figshare_users')
+def show_figshare_users():
+    '''
+    Return figshare account holders matched against the Janelia roster
+    ---
+    tags:
+      - ORCID
+    responses:
+      '200':
+        description: HTML report
+      '500':
+        description: figshare or MongoDB error
+    '''
+    try:
+        from rapidfuzz import fuzz, process  # pylint: disable=import-outside-toplevel
+    except ImportError:
+        fuzz = process = None
+    try:
+        accounts = _figshare_accounts()
+        by_email, by_orcid, by_name, roster = _roster_index()
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not list figshare users"),
+                               message=error_message(err))
+    keys = list(by_name)
+    rows = []
+    for acct in accounts:
+        name = f"{acct.get('first_name') or ''} {acct.get('last_name') or ''}".strip()
+        email = (acct.get('institution_user_id') or acct.get('email') or '').strip().lower()
+        orcid = str(acct.get('orcid_id') or '').strip()
+        idx, how, score, matched = None, '', None, None
+        if email and email in by_email:
+            idx, how = by_email[email], 'email'
+        elif orcid and orcid in by_orcid:
+            idx, how = by_orcid[orcid], 'ORCID'
+        elif name and name.lower() in by_name:
+            idx, how = by_name[name.lower()], 'name'
+        elif name and keys and fuzz is not None:
+            # Only a strong match is offered, and it is labelled as fuzzy so
+            # nobody reads it as the same kind of answer an email gives.
+            hit = process.extractOne(name.lower(), keys, scorer=fuzz.WRatio,
+                                     score_cutoff=FIGSHARE_NAME_CUTOFF)
+            if hit:
+                idx, how, score = by_name[hit[0]], 'fuzzy name', hit[1]
+                matched = hit[0]
+        person = roster[idx] if idx is not None else None
+        kind = _classify_janelian(person) if person else 'unknown'
+        rows.append({'name': name, 'email': email, 'orcid': orcid, 'kind': kind,
+                     'how': how, 'score': score, 'account': acct.get('id'),
+                     'matched': matched,
+                     'active': acct.get('active'), 'person': person})
+    counts = collections.Counter(r['kind'] for r in rows)
+    html = ("<p>Everyone with a janelia.figshare.com account, matched against the "
+            "roster by institutional email, then ORCID, then name. The three are "
+            "not equally strong, so each row says which one answered.</p>")
+    html += stat_cards([("Accounts", f"{len(rows):,}")]
+                       + [(label, f"{counts.get(key, 0):,}")
+                          for key, label, _, _, _ in FIGSHARE_USER_KINDS])
+    html += "<ul style='margin-top:6px'>"
+    for _, label, bgc, _, blurb in FIGSHARE_USER_KINDS:
+        html += f"<li><b style='color:{bgc}'>{escape(label)}</b> &mdash; {escape(blurb)}</li>"
+    html += "</ul>"
+    trows = []
+    fileoutput = ""
+    order = {key: num for num, (key, _, _, _, _) in enumerate(FIGSHARE_USER_KINDS)}
+    for row in sorted(rows, key=lambda r: (order[r['kind']], r['name'].lower())):
+        label = dict((k, lab) for k, lab, _, _, _ in FIGSHARE_USER_KINDS)[row['kind']]
+        colors = dict((k, (bgc, fgc)) for k, _, bgc, fgc, _ in FIGSHARE_USER_KINDS)[row['kind']]
+        badge = (f"<span style='background:{colors[0]}; color:{colors[1]}; "
+                 f"padding:2px 8px; border-radius:10px; font-size:0.85em'>"
+                 f"{escape(label)}</span>")
+        person = row['person']
+        roster_name = ''
+        if person:
+            roster_name = row['matched'].title() if row['matched'] else \
+                f"{(person.get('given') or ['?'])[0]} {(person.get('family') or ['?'])[0]}"
+            if person.get('userIdO365'):
+                roster_name = f"<a href='/userui/{escape(person['userIdO365'])}'>" \
+                              f"{escape(roster_name)}</a>"
+            else:
+                roster_name = escape(roster_name)
+        how = escape(row['how'])
+        if row['score'] is not None:
+            how += f" ({row['score']:.0f})"
+        trows.append([escape(row['name']), escape(row['email']),
+                      safe(f"<a href='{ORCID}{escape(row['orcid'])}' target='_blank'>"
+                           f"{escape(row['orcid'])}</a>") if row['orcid'] else '',
+                      safe(badge), safe(roster_name), safe(how),
+                      safe('' if row['active'] else "<b>inactive</b>")])
+        fileoutput += f"{row['name']}\t{row['email']}\t{row['orcid']}\t{label}\t" \
+                      f"{row['how']}\t{row['score'] or ''}\t{row['account']}\n"
+    html += create_downloadable('figshare_users',
+                                ['Name', 'Email', 'ORCID', 'Status', 'Matched by',
+                                 'Score', 'figshare ID'], fileoutput)
+    html += render_table(['figshare name', 'Institutional email', 'ORCID', 'Status',
+                          'Roster name', 'Matched by', 'Account'], trows,
+                         css="tablesorter numbers-scroll")
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="figshare users", html=html,
+                                         navbar=generate_navbar('DataCite')))
 
 
 @app.route('/orcid_mismatch')
