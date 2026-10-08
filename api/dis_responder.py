@@ -54,7 +54,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.81.0"
+__version__ = "120.82.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -9014,19 +9014,27 @@ def _deposited_orcid(auth):
     return str(oid).rstrip('/').rsplit('/', maxsplit=1)[-1].lower()
 
 
-# figshare account holders, matched against the roster three ways. The keys are
+# Account holders on an external platform, matched against the roster. The keys are
 # tried strongest first: an institutional email and an ORCID each identify a
 # person outright, and a name does not - two people share one often enough that
 # a name match is a suggestion rather than an answer.
 FIGSHARE_API = 'https://api.figshare.com/v2'
-# How close a name has to be before it is offered as a match. High, because the
-# roster holds 2,382 people and a loose threshold pairs strangers who share a
-# surname: at 90 "Michelle Hu" and "Michelle Du" are still told apart.
-FIGSHARE_NAME_CUTOFF = 92
+# How close a name has to be before it is offered as a match, scored on the
+# sorted tokens. WRatio was tried first and rewards containment too heavily:
+# it scored "Liu Liu" against "Zhe J. Liu" at 95 because the surname is
+# present in both, pairing two different people. Sorting the tokens scores
+# that 47 while still reaching a name written surname-first.
+#
+# 85 rather than something higher because the real matches are not close: a
+# dropped middle initial ("Lisa K. Randolph" / "Lisa Randolph") scores 90 and
+# an extra given name ("Salina Long" / "Xi Salina Long") 88. The cost is that
+# two names differing by one letter in the surname still score about 91, so
+# every fuzzy match is labelled with its score and left for a reader to judge.
+ROSTER_NAME_CUTOFF = 85
 # How a matched person is classified. A contingent worker is carried on the
 # roster as alumni whether or not they are still here, so alumni alone does not
 # mean departed.
-FIGSHARE_USER_KINDS = (
+ROSTER_USER_KINDS = (
     ('current', 'Current Janelian', '#1c6b3a', '#ffffff',
      'An employee on the roster who is not marked alumni.'),
     ('contingent', 'Contingent worker', '#2e6f9e', '#ffffff',
@@ -9152,8 +9160,8 @@ def show_figshare_users():
         elif name and keys and fuzz is not None:
             # Only a strong match is offered, and it is labelled as fuzzy so
             # nobody reads it as the same kind of answer an email gives.
-            hit = process.extractOne(name.lower(), keys, scorer=fuzz.WRatio,
-                                     score_cutoff=FIGSHARE_NAME_CUTOFF)
+            hit = process.extractOne(name.lower(), keys, scorer=fuzz.token_sort_ratio,
+                                     score_cutoff=ROSTER_NAME_CUTOFF)
             if hit:
                 idx, how, score = by_name[hit[0]], 'fuzzy name', hit[1]
                 matched = hit[0]
@@ -9169,17 +9177,17 @@ def show_figshare_users():
             "not equally strong, so each row says which one answered.</p>")
     html += stat_cards([("Accounts", f"{len(rows):,}")]
                        + [(label, f"{counts.get(key, 0):,}")
-                          for key, label, _, _, _ in FIGSHARE_USER_KINDS])
+                          for key, label, _, _, _ in ROSTER_USER_KINDS])
     html += "<ul style='margin-top:6px'>"
-    for _, label, bgc, _, blurb in FIGSHARE_USER_KINDS:
+    for _, label, bgc, _, blurb in ROSTER_USER_KINDS:
         html += f"<li><b style='color:{bgc}'>{escape(label)}</b> &mdash; {escape(blurb)}</li>"
     html += "</ul>"
     trows = []
     fileoutput = ""
-    order = {key: num for num, (key, _, _, _, _) in enumerate(FIGSHARE_USER_KINDS)}
+    order = {key: num for num, (key, _, _, _, _) in enumerate(ROSTER_USER_KINDS)}
     for row in sorted(rows, key=lambda r: (order[r['kind']], r['name'].lower())):
-        label = dict((k, lab) for k, lab, _, _, _ in FIGSHARE_USER_KINDS)[row['kind']]
-        colors = dict((k, (bgc, fgc)) for k, _, bgc, fgc, _ in FIGSHARE_USER_KINDS)[row['kind']]
+        label = dict((k, lab) for k, lab, _, _, _ in ROSTER_USER_KINDS)[row['kind']]
+        colors = dict((k, (bgc, fgc)) for k, _, bgc, fgc, _ in ROSTER_USER_KINDS)[row['kind']]
         badge = (f"<span style='background:{colors[0]}; color:{colors[1]}; "
                  f"padding:2px 8px; border-radius:10px; font-size:0.85em'>"
                  f"{escape(label)}</span>")
@@ -9212,6 +9220,146 @@ def show_figshare_users():
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="figshare users", html=html,
+                                         navbar=generate_navbar('DataCite')))
+
+
+# Example DOIs shown per author before the rest become a count. A protocols.io
+# DOI is long enough that more than two crowds the row off the screen.
+PROTOCOLSIO_EXAMPLES = 2
+
+
+def _protocolsio_authors():
+    ''' Everyone credited on a Janelia protocols.io protocol.
+
+        Read from our own copy of the Crossref records rather than from
+        protocols.io. The platform has no endpoint that lists the people at an
+        institution - the only account endpoint is the caller's own profile -
+        so the authors on the protocols we hold are the available population.
+        Fetching each protocol for its affiliation would be 50 calls and half a
+        minute, which is not something to do on a page load.
+        Keyword arguments:
+          None
+        Returns:
+          Dict of name to {orcid, dois}
+    '''
+    out = {}
+    for rec in DB['dis'].dois.find({"doi": {"$regex": "^10.17504/"}},
+                                   {"doi": 1, "author": 1, "creators": 1}):
+        for auth in rec.get('author') or rec.get('creators') or []:
+            # protocols.io arrives from Crossref, so the keys are given/family
+            # rather than the givenName/familyName a DataCite record would use.
+            given = auth.get('given') or auth.get('givenName') or ''
+            family = auth.get('family') or auth.get('familyName') or ''
+            name = ' '.join(f"{given} {family}".split())
+            if not name:
+                continue
+            entry = out.setdefault(name, {'orcid': None, 'dois': set()})
+            entry['dois'].add(rec['doi'])
+            orcid = auth.get('ORCID') or auth.get('orcid')
+            if orcid:
+                entry['orcid'] = str(orcid).rstrip('/').rsplit('/', maxsplit=1)[-1]
+    return out
+
+
+@app.route('/protocolsio_users')
+def show_protocolsio_users():
+    '''
+    Return protocols.io authors matched against the Janelia roster
+    ---
+    tags:
+      - DOI
+    responses:
+      '200':
+        description: HTML report
+      '500':
+        description: MongoDB error
+    '''
+    try:
+        from rapidfuzz import fuzz, process  # pylint: disable=import-outside-toplevel
+    except ImportError:
+        fuzz = process = None
+    try:
+        authors = _protocolsio_authors()
+        _, by_orcid, by_name, roster = _roster_index()
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not list protocols.io users"),
+                               message=error_message(err))
+    keys = list(by_name)
+    rows = []
+    for name, entry in authors.items():
+        idx, how, score, matched = None, '', None, None
+        if entry['orcid'] and entry['orcid'] in by_orcid:
+            idx, how = by_orcid[entry['orcid']], 'ORCID'
+        elif name.lower() in by_name:
+            idx, how = by_name[name.lower()], 'name'
+        elif keys and fuzz is not None:
+            hit = process.extractOne(name.lower(), keys, scorer=fuzz.token_sort_ratio,
+                                     score_cutoff=ROSTER_NAME_CUTOFF)
+            if hit:
+                idx, how, score, matched = by_name[hit[0]], 'fuzzy name', hit[1], hit[0]
+        person = roster[idx] if idx is not None else None
+        rows.append({'name': name, 'orcid': entry['orcid'], 'dois': sorted(entry['dois']),
+                     'kind': _classify_janelian(person) if person else 'unknown',
+                     'how': how, 'score': score, 'matched': matched, 'person': person})
+    counts = collections.Counter(r['kind'] for r in rows)
+    html = ("<p>Everyone credited on a Janelia protocols.io protocol, matched against "
+            "the roster by ORCID and then by name. protocols.io publishes no list of "
+            "the people at an institution, so this is drawn from the authors of the "
+            "protocols we hold rather than from a roll of accounts &mdash; a protocol "
+            "names its collaborators, so some of the unmatched are expected to be "
+            "from elsewhere.</p>")
+    # Counted as DOIs, not protocols: protocols.io mints a DOI per version, so
+    # the 57 we hold are 50 protocols, and calling them protocols would overstate
+    # the corpus.
+    html += stat_cards([("Authors", f"{len(rows):,}"),
+                        ("Protocol DOIs", f"{len({d for r in rows for d in r['dois']}):,}")]
+                       + [(label, f"{counts.get(key, 0):,}")
+                          for key, label, _, _, _ in ROSTER_USER_KINDS])
+    labels = {k: lab for k, lab, _, _, _ in ROSTER_USER_KINDS}
+    colors = {k: (bgc, fgc) for k, _, bgc, fgc, _ in ROSTER_USER_KINDS}
+    order = {key: num for num, (key, _, _, _, _) in enumerate(ROSTER_USER_KINDS)}
+    trows = []
+    fileoutput = ""
+    for row in sorted(rows, key=lambda r: (order[r['kind']], -len(r['dois']),
+                                           r['name'].lower())):
+        bgc, fgc = colors[row['kind']]
+        badge = (f"<span style='background:{bgc}; color:{fgc}; padding:2px 8px; "
+                 f"border-radius:10px; font-size:0.85em'>{escape(labels[row['kind']])}</span>")
+        person = row['person']
+        roster_name = ''
+        if person:
+            roster_name = row['matched'].title() if row['matched'] else \
+                f"{(person.get('given') or ['?'])[0]} {(person.get('family') or ['?'])[0]}"
+            if person.get('userIdO365'):
+                roster_name = f"<a href='/userui/{escape(person['userIdO365'])}'>" \
+                              f"{escape(roster_name)}</a>"
+            else:
+                roster_name = escape(roster_name)
+        how = escape(row['how'])
+        if row['score'] is not None:
+            how += f" ({row['score']:.0f})"
+        shown = ' '.join(doi_link(d) for d in row['dois'][:PROTOCOLSIO_EXAMPLES])
+        if len(row['dois']) > PROTOCOLSIO_EXAMPLES:
+            shown += f" &hellip; (+{len(row['dois']) - PROTOCOLSIO_EXAMPLES:,})"
+        trows.append([escape(row['name']),
+                      safe(f"<a href='{ORCID}{escape(row['orcid'])}' target='_blank'>"
+                           f"{escape(row['orcid'])}</a>") if row['orcid'] else '',
+                      safe(badge), safe(roster_name), safe(how),
+                      cell(f"{len(row['dois']):,}", sort=len(row['dois']), align='right'),
+                      safe(shown)])
+        fileoutput += f"{row['name']}\t{row['orcid'] or ''}\t{labels[row['kind']]}\t" \
+                      f"{row['how']}\t{row['score'] or ''}\t{len(row['dois'])}\t" \
+                      f"{', '.join(row['dois'])}\n"
+    html += create_downloadable('protocolsio_users',
+                                ['Name', 'ORCID', 'Status', 'Matched by', 'Score',
+                                 'Protocols', 'DOIs'], fileoutput)
+    html += render_table(['Author', 'ORCID', 'Status', 'Roster name', 'Matched by',
+                          'Protocols', 'Examples'], trows,
+                         css="tablesorter numbers-scroll")
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="protocols.io users", html=html,
                                          navbar=generate_navbar('DataCite')))
 
 
