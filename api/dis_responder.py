@@ -54,7 +54,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.82.0"
+__version__ = "120.82.1"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -5617,7 +5617,7 @@ def _build_ack_sources():
     trows = []
     for src in order:
         i, e = sources[src]['Internal'], sources[src]['External']
-        trows.append([escape(str(src)), f"{i:,}", f"{e:,}", f"{i + e:,}"])
+        trows.append([str(src), f"{i:,}", f"{e:,}", f"{i + e:,}"])
     if unrec['Internal'] or unrec['External']:
         i, e = unrec['Internal'], unrec['External']
         trows.append([safe("<span style='color:#a8c4e0;'>(source not recorded)</span>"),
@@ -9204,7 +9204,7 @@ def show_figshare_users():
         how = escape(row['how'])
         if row['score'] is not None:
             how += f" ({row['score']:.0f})"
-        trows.append([escape(row['name']), escape(row['email']),
+        trows.append([row['name'], row['email'],
                       safe(f"<a href='{ORCID}{escape(row['orcid'])}' target='_blank'>"
                            f"{escape(row['orcid'])}</a>") if row['orcid'] else '',
                       safe(badge), safe(roster_name), safe(how),
@@ -9342,7 +9342,7 @@ def show_protocolsio_users():
         shown = ' '.join(doi_link(d) for d in row['dois'][:PROTOCOLSIO_EXAMPLES])
         if len(row['dois']) > PROTOCOLSIO_EXAMPLES:
             shown += f" &hellip; (+{len(row['dois']) - PROTOCOLSIO_EXAMPLES:,})"
-        trows.append([escape(row['name']),
+        trows.append([row['name'],
                       safe(f"<a href='{ORCID}{escape(row['orcid'])}' target='_blank'>"
                            f"{escape(row['orcid'])}</a>") if row['orcid'] else '',
                       safe(badge), safe(roster_name), safe(how),
