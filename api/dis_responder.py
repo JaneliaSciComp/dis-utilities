@@ -54,7 +54,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.79.2"
+__version__ = "120.80.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -18985,21 +18985,105 @@ def show_awards():
     if filler:
         cards.append(("Entries with no award number", f"{filler:,}"))
     html += stat_cards(cards)
+    # Grouped mode collapses to one row per funder. Keyed on the funder ID where
+    # there is one, and on the name where there is not: "NIH" and "National
+    # Institutes of Health" are the same body but arrive as different strings,
+    # and merging them on similarity would also merge "Wellcome" (100004440)
+    # into "Wellcome Trust" (100010269), which are genuinely different registry
+    # entries. Rows with no ID therefore stay separate, and say so by sorting
+    # alongside everything else rather than being hidden.
+    grouped = request.args.get('group') == 'funder' and not fid
+    # Only offered on the unfiltered page: narrowed to one funder, grouping by
+    # funder is a table of one row. The view you are on is plain text rather
+    # than a styled button - a primary button linking to the page it is already
+    # on reads as an action and does nothing.
+    if not fid:
+        flat = "Every award" if not grouped \
+            else "<a href='/awards'>Every award</a>"
+        grp = "Grouped by funder" if grouped \
+            else "<a href='/awards?group=funder'>Grouped by funder</a>"
+        html += f"<p><b>View:</b> {flat} &middot; {grp}</p>"
     rows = []
     fileoutput = ""
-    for (afid, key), entry in sorted(index.items(),
-                                     key=lambda kv: (-len(kv[1]['dois']), kv[1]['funder'])):
-        label = _award_label(entry)
-        link = f"/award/{afid or '-'}/{quote(key, safe='')}"
-        funder_cell = escape(entry['funder'])
-        if afid:
-            funder_cell = f"<a href='/funder/{afid}'>{funder_cell}</a>"
-        ndois = len(entry['dois'])
-        rows.append([safe(f"<a href='{link}'>{escape(label)}</a>"), safe(funder_cell),
-                     cell(f"{ndois:,}", sort=ndois, align='right')])
-        fileoutput += f"{label}\t{entry['funder']}\t{ndois}\n"
-    html += create_downloadable('awards', ['Award', 'Funder', 'DOIs'], fileoutput)
-    html += render_table(['Award', 'Funder', 'DOIs'], rows, css="tablesorter numbers-scroll")
+    if grouped:
+        # An entry with no ID whose name is exactly a funder we hold is that
+        # funder - "Medical Research Council" deposited without an identifier is
+        # not a second council. Exact string equality only, never similarity:
+        # that is what keeps "Wellcome" (100004440) out of "Wellcome Trust"
+        # (100010269), which are different registry entries.
+        #
+        # Eight names in the registry belong to more than one ID - "Human
+        # Frontier Science Program" is 100004412 and 501100000854 - and there is
+        # nothing in a deposit to say which was meant. Those stay unresolved
+        # rather than being assigned to whichever came back first.
+        by_name = collections.defaultdict(set)
+        registry = {}
+        for known in DB['dis'].funder.find({}, {"id": 1, "name": 1}):
+            if known.get('name'):
+                by_name[known['name'].strip().lower()].add(known['id'])
+                registry[known['id']] = known['name']
+        resolve = {name: next(iter(ids)) for name, ids in by_name.items() if len(ids) == 1}
+        funders = {}
+        for (afid, _), entry in index.items():
+            name = entry['funder'].strip().lower()
+            gfid = afid or resolve.get(name)
+            gkey = gfid or f"name:{name}"
+            group = funders.setdefault(gkey, {'funder': entry['funder'], 'fid': gfid,
+                                              'awards': 0, 'dois': set()})
+            group['awards'] += 1
+            group['dois'].update(entry['dois'])
+        # Label an identified funder with the registry's own name rather than
+        # whichever spelling a deposit happened to use. Two deposits can type
+        # "Wellcome Trust" while carrying different IDs, which rendered as two
+        # identical rows; the registry calls those Wellcome Trust and Wellcome.
+        for group in funders.values():
+            if group['fid'] and group['fid'] in registry:
+                group['funder'] = registry[group['fid']]
+        # Eight registry names really do belong to two funders apiece. Nothing
+        # distinguishes them on screen, so those carry their ID.
+        shown = collections.Counter(g['funder'] for g in funders.values())
+        for group in funders.values():
+            if group['fid'] and shown[group['funder']] > 1:
+                group['funder'] = f"{group['funder']} [{group['fid']}]"
+        for group in sorted(funders.values(),
+                            key=lambda g: (-len(g['dois']), g['funder'].lower())):
+            funder_cell = escape(group['funder'])
+            if group['fid']:
+                funder_cell = f"<a href='/awards?funder={group['fid']}'>{funder_cell}</a>"
+            else:
+                # No ID, so no per-funder award page to link to - the name is all
+                # we hold, and saying so beats a link that filters on nothing.
+                funder_cell += " <span style='color:#a8c4e0'>(no funder ID)</span>"
+            ndois = len(group['dois'])
+            rows.append([safe(funder_cell),
+                         cell(f"{group['awards']:,}", sort=group['awards'], align='right'),
+                         cell(f"{ndois:,}", sort=ndois, align='right')])
+            fileoutput += f"{group['funder']}\t{group['fid'] or ''}\t" \
+                          f"{group['awards']}\t{ndois}\n"
+        headers = ['Funder', 'Awards', 'DOIs']
+        # The file carries the funder ID, which the table conveys by linking the
+        # name. Without it an unidentified row reads the same as a resolved one -
+        # "NIH 104 45" beside "National Institutes of Health 804 458" - and
+        # anything summing the file would count that funder twice.
+        html += create_downloadable('awards_by_funder',
+                                    ['Funder', 'Funder ID', 'Awards', 'DOIs'], fileoutput)
+    else:
+        for (afid, key), entry in sorted(index.items(),
+                                         key=lambda kv: (-len(kv[1]['dois']),
+                                                         kv[1]['funder'].lower())):
+            label = _award_label(entry)
+            link = f"/award/{afid or '-'}/{quote(key, safe='')}"
+            funder_cell = escape(entry['funder'])
+            if afid:
+                funder_cell = f"<a href='/funder/{afid}'>{funder_cell}</a>"
+            ndois = len(entry['dois'])
+            rows.append([safe(funder_cell), safe(f"<a href='{link}'>{escape(label)}</a>"),
+                         cell(f"{ndois:,}", sort=ndois, align='right')])
+            fileoutput += f"{entry['funder']}\t{afid or ''}\t{label}\t{ndois}\n"
+        headers = ['Funder', 'Award', 'DOIs']
+        html += create_downloadable('awards',
+                                    ['Funder', 'Funder ID', 'Award', 'DOIs'], fileoutput)
+    html += render_table(headers, rows, css="tablesorter numbers-scroll")
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="Awards", html=html,
