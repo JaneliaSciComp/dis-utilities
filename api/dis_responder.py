@@ -318,7 +318,13 @@ def year_pulldown(prefix, all_years=True, suffix='', start_year=2006, query=Fals
                 yr = path[len(pfx) + 1:].split('/')[0] or None
         if not yr:
             yr = 'All' if all_years else str(datetime.now().year)
-        selected = "(all years)" if yr == 'All' else yr
+        selected = yr
+    # Outside the derivation branch on purpose: a caller that knows its own
+    # effective year wants to pass it as-is and still get the house label for
+    # "All". Mapping only the derived value is what made every such caller
+    # hand-roll this conditional, and what left the ones that didn't showing a
+    # button that disagreed with their own heading.
+    selected = "(all years)" if selected == 'All' else selected
     return _year_pulldown(prefix, all_years=all_years, suffix=suffix,
                           start_year=start_year, query=query, selected=selected)
 
@@ -8730,7 +8736,8 @@ def dois_time(period, year=None):
         nav = {y: {"field": "publishing_year", "value": y} for y in data['years']}
         title = "DOIs published by year" + tagsfx
         chart_title = "DOIs published by year/source"
-        pulldown = year_pulldown('dois_time/year', suffix=year_suffix) \
+        pulldown = year_pulldown('dois_time/year', suffix=year_suffix,
+                                  selected=year) \
                    + "&nbsp;&nbsp;&nbsp;" + tag_pulldown('dois_time/year', year, tag)
     else:
         data = {'months': [f"{mon:02}" for mon in range(1, 13)],
@@ -14564,7 +14571,7 @@ def show_organization(org_in, year=None, show="full"):
     html = render_table(['Published', 'DOI', 'Tags', 'Title'], trows,
                         table_id='dois', css='tablesorter standard-scroll')
     if not dcnt:
-        html = year_pulldown(f"org_detail/{org_in}") + subtitle \
+        html = year_pulldown(f"org_detail/{org_in}", selected=year) + subtitle \
                + render_warning(f"No DOIs were found for {org_in}.", 'warning') \
                + journal_buttons(show, f"/org_detail/{org_in}/{year}")
     else:
@@ -14574,7 +14581,7 @@ def show_organization(org_in, year=None, show="full"):
                   + f"</div><div class='flexcol'>{'&nbsp;'*5}</div><div class='flexcol'>" \
                   + create_downloadable(f"{org_in.replace(' ', '_')}_{year}", header, content) \
                   + "</div></div>"
-        html = year_pulldown(f"org_detail/{org_in}") + subtitle \
+        html = year_pulldown(f"org_detail/{org_in}", selected=year) + subtitle \
                + f"{'Journal/preprint ' if show == 'journal' else ''}" \
                + f"DOIs found for {org_in}: {dcnt:,} ({org_journal_cnt:,} " \
                + "journal publications)<br>" \
@@ -16228,8 +16235,7 @@ def _relation_filters(year, chosen, registrar, provenance, multi):
     # explicit in the URL because a missing one means the current year here, not
     # every year.
     query = "?" + "&".join(extra) if extra else ""
-    pulldown = year_pulldown("dois_related", suffix=query,
-                             selected="(all years)" if year == 'All' else year)
+    pulldown = year_pulldown("dois_related", suffix=query, selected=year)
     boxes = ""
     for col in RELATION_COLUMNS:
         checked = " checked" if col['key'] in chosen else ""
