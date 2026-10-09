@@ -12613,13 +12613,13 @@ def figshare_groups(year='All'):  # pylint: disable=too-many-locals,too-many-bra
             result['rest']['source'] = 'mongo'
             result['rest']['row_count'] = len(members)
             return generate_response(result)
-        dtitle = f"figshare group: {escape(stem)}"
+        dtitle = f"figshare group: {stem}"
         back = f"<a href='{base}' class='btn btn-outline-primary btn-sm'>" \
                + "&larr; all groups</a>"
         if not members:
             html = back + "<br><br>" \
                    + render_warning(f"No figshare DOIs match the group "
-                                    f"\"{escape(stem)}\"", 'warning')
+                                    f"\"{stem}\"", 'warning')
             endpoint_access()
             return make_response(render_template('general.html', urlroot=request.url_root,
                                                  title=dtitle, html=html,
@@ -12882,10 +12882,10 @@ def zenodo_groups(year='All'):  # pylint: disable=too-many-locals,too-many-branc
         if not members:
             html = back + "<br><br>" \
                    + render_warning(f"No Zenodo DOIs match the deposit "
-                                    f"\"{escape(concept)}\"", 'warning')
+                                    f"\"{concept}\"", 'warning')
             endpoint_access()
             return make_response(render_template('general.html', urlroot=request.url_root,
-                                                 title=f"Zenodo deposit: {escape(concept)}",
+                                                 title=f"Zenodo deposit: {concept}",
                                                  html=html,
                                                  navbar=generate_navbar('DataCite')))
         casings = collections.Counter(r['title'] for r in members if r['title'])
@@ -13479,10 +13479,10 @@ def protocolsio_dois(year='All'):  # pylint: disable=too-many-locals,too-many-br
         if not members:
             html = back + "<br><br>" \
                    + render_warning(f"No protocols.io DOIs match the deposit "
-                                    f"\"{escape(concept)}\"", 'warning')
+                                    f"\"{concept}\"", 'warning')
             endpoint_access()
             return make_response(render_template('general.html', urlroot=request.url_root,
-                                                 title=f"protocols.io deposit: {escape(concept)}",
+                                                 title=f"protocols.io deposit: {concept}",
                                                  html=html, navbar=generate_navbar('DataCite')))
         casings = collections.Counter(r['title'] for r in members if r['title'])
         label = (render_title_html(casings.most_common(1)[0][0]) if casings
@@ -13927,10 +13927,10 @@ def elife_dois(year='All'):  # pylint: disable=too-many-locals,too-many-branches
         if not members:
             html = back + "<br><br>" \
                    + render_warning(f"No eLife DOIs match the article "
-                                    f"\"{escape(concept)}\"", 'warning')
+                                    f"\"{concept}\"", 'warning')
             endpoint_access()
             return make_response(render_template('general.html', urlroot=request.url_root,
-                                                 title=f"eLife article: {escape(concept)}",
+                                                 title=f"eLife article: {concept}",
                                                  html=html, navbar=generate_navbar('DOIs')))
         casings = collections.Counter(r['title'] for r in members if r['title'])
         label = (render_title_html(casings.most_common(1)[0][0]) if casings
@@ -16690,7 +16690,7 @@ def show_journals_dois(year=None):
         # Empty result for a valid year: keep the year pulldown so another year can be
         # chosen, and show the standard inline warning instead of a full error page.
         escope = ([year] if year != 'All' else []) + ([tag] if tag else [])
-        etitle = "DOIs by journal" + (f" ({', '.join(escape(s) for s in escope)})"
+        etitle = "DOIs by journal" + (f" ({', '.join(escope)})"
                                       if escope else "")
         emsg = "No journals were found" + (f" for {year}" if year != 'All' else "") + "."
         ehtml = year_pulldown('journals_dois', selected=yr_selected, suffix=year_suffix) \
@@ -19737,7 +19737,7 @@ def funder(fid):
     if not re.match(r'^\d+$', fid):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Invalid funder ID"),
-                               message=f"{escape(fid)} is not a Crossref Funder Registry ID")
+                               message=f"{fid} is not a Crossref Funder Registry ID")
     try:
         cached = DB['dis'].funder.find_one({"id": fid})
         rows = list(DB['dis'].dois.find({"jrc_funder_ids": fid}))
@@ -19939,7 +19939,7 @@ def show_awards():
     if fid and not re.match(r'^\d+$', fid):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Invalid funder ID"),
-                               message=f"{escape(fid)} is not a Crossref Funder Registry ID")
+                               message=f"{fid} is not a Crossref Funder Registry ID")
     try:
         index, filler = _award_index(fid)
     except Exception as err:
@@ -20056,7 +20056,7 @@ def show_award(fid, key):
     if fid and not re.match(r'^\d+$', fid):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Invalid funder ID"),
-                               message=f"{escape(fid)} is not a Crossref Funder Registry ID")
+                               message=f"{fid} is not a Crossref Funder Registry ID")
     try:
         index, _ = _award_index(fid)
     except Exception as err:
@@ -20067,7 +20067,7 @@ def show_award(fid, key):
     if not entry:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Award not found", 'warning'),
-                               message=f"No DOIs name award {escape(unquote(key))}")
+                               message=f"No DOIs name award {unquote(key)}")
     label = _award_label(entry)
     funder_cell = escape(entry['funder'])
     if entry['fid']:
@@ -20412,7 +20412,7 @@ def rrid(term=None):
     if mat:
         src, err = _rrid_fetch(mat.group(1))
         if err:
-            content = f"<br>{render_warning(escape(err))}"
+            content = f"<br>{render_warning(err)}"
         elif not src:
             content = f"<br><h3>No registry record for {escape(term)}</h3>"
         else:
@@ -20429,7 +20429,7 @@ def rrid(term=None):
         else:
             hits, total, err = _rrid_search(term, offset, kind)
         if err:
-            content = f"<br>{render_warning(escape(err), 'warning')}"
+            content = f"<br>{render_warning(err, 'warning')}"
         elif not hits and page > 1:
             # Out of range rather than empty - saying "nothing found" here would
             # contradict the result count the reader just paged through.
@@ -21209,7 +21209,7 @@ def show_acks_by_curator(curator=None):
     if not union:
         return render_template('warning.html', urlroot=request.url_root,
                                title=render_warning("No DOIs", 'warning'),
-                               message=f"No DOIs were curated by {escape(curator)}.")
+                               message=f"No DOIs were curated by {curator}.")
     union.sort(key=lambda row: row.get('jrc_publishing_date', ''), reverse=True)
     # ack='' -> no highlight (highlight_subtext no-ops on an empty subtext).
     table, cnt, _ = standard_ack_table(union, '', show_count=False)

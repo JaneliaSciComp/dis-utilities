@@ -76,6 +76,39 @@ def test_every_severity_escapes(severity):
     assert '<img' not in DH.render_warning(HOSTILE, severity)
 
 
+def test_render_warning_does_not_double_escape():
+    ''' render_warning escapes its own message now, so a caller that still
+        escapes on the way in produces &amp;amp; and the user reads a literal
+        "&amp;". Several callers did exactly that, having been written when the
+        escaping had to happen at the call site.
+    '''
+    assert DH.render_warning('Smith & Jones').endswith('Smith &amp; Jones')
+    assert '&amp;amp;' not in DH.render_warning('Smith & Jones')
+
+
+def test_no_caller_pre_escapes_a_render_warning_message():
+    ''' The call-site half of the rule above, checked across the app. '''
+    import re
+    src = (Path(__file__).resolve().parents[1] / 'api' / 'dis_responder.py') \
+        .read_text(encoding='utf-8')
+    offenders = []
+    for m in re.finditer(r'render_warning\(', src):
+        i, depth, arg = m.end(), 1, ''
+        while i < len(src) and depth:
+            char = src[i]
+            if char in '([{':
+                depth += 1
+            elif char in ')]}':
+                depth -= 1
+                if not depth:
+                    break
+            arg += char
+            i += 1
+        if 'escape(' in arg:
+            offenders.append(src[:m.start()].count('\n') + 1)
+    assert not offenders, f"render_warning already escapes; drop escape() at lines {offenders}"
+
+
 # --- the link builders ----------------------------------------------------
 
 def test_year_pulldown_escapes_a_hostile_prefix():
