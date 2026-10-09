@@ -309,10 +309,12 @@ def _restriction_unavailable():
         Returns:
           Message string, or None
     '''
+    fix = (" Run utility/bin/manage_report_users.py to generate the values and the"
+           " commands that install them.")
     if not app.secret_key:
-        return "DIS_SESSION_SECRET is not set, so this page cannot verify a login."
+        return "DIS_SESSION_SECRET is not set, so this page cannot verify a login." + fix
     if not _report_users():
-        return "DIS_REPORT_USERS is not set, so nobody is permitted on this page."
+        return "DIS_REPORT_USERS is not set, so nobody is permitted on this page." + fix
     return None
 
 
