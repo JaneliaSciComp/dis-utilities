@@ -29,8 +29,11 @@ import concurrent.futures
 import dateutil.parser
 import dateutil.tz
 import bson
-from flask import (Flask, make_response, render_template, request, jsonify, redirect, send_file)
+from flask import (Flask, make_response, render_template, request, jsonify, redirect,
+                   send_file, session, url_for)
+from functools import wraps
 from flask_cors import CORS
+from werkzeug.security import check_password_hash, generate_password_hash
 from apispec import APISpec
 from apispec.yaml_utils import load_yaml_from_docstring
 import pandas as pd
@@ -236,6 +239,189 @@ def handle_invalid_usage(error):
     response = jsonify(error.to_dict())
     response.status_code = error.status_code
     return response
+
+
+# ******************************************************************************
+# * Restricted reports                                                         *
+# ******************************************************************************
+
+# The four platform user reports pair named people with the deposits they are
+# credited on. The underlying DOIs are public and the roster is visible
+# elsewhere on the site, so this is not secrecy - it is keeping the convenient
+# aggregation to the people who need it until the application grows a real login
+# and authorization model. When that lands, delete this section and the
+# @restricted decorators; the rest of the app never learned about users.
+#
+# Deliberately NOT done at the edge: production is OpenShift, where the route
+# runs browser -> HAProxy -> Service -> gunicorn with no proxy of our own in
+# between, so there is nowhere outside the application to put a check.
+#
+# Two secrets, both belonging in the dis-utilities-secrets Secret that the
+# deployment already pulls in via envFrom:
+#
+#   DIS_SESSION_SECRET  signs the session cookie. It MUST be the same string in
+#                       every replica - the deployment runs 2 - or a browser
+#                       that authenticates against one pod is logged out the
+#                       moment the service sends it to the other. Generate once:
+#                           python3 -c "import secrets; print(secrets.token_hex(32))"
+#
+#   DIS_REPORT_USERS    who may look, as comma-separated name:hash pairs. The
+#                       hash is a werkzeug password hash, so no password is
+#                       stored anywhere. Add a person with:
+#                           python3 -c "from werkzeug.security import generate_password_hash as g; \
+#                                       print('alice:' + g(input('password: ')))"
+#                       The hash itself contains colons, so only the FIRST colon
+#                       separates the name from it.
+RESTRICTED_SESSION_KEY = 'dis_report_user'
+# Local development is plain HTTP, and a Secure cookie is not stored over plain
+# HTTP - the login would appear to succeed and then bounce straight back to the
+# form. Production is HTTPS at the router, so Secure is the default and the
+# escape hatch has to be set deliberately.
+ALLOW_HTTP_SESSION = os.environ.get('DIS_ALLOW_HTTP_SESSION') == '1'
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['SESSION_COOKIE_SECURE'] = not ALLOW_HTTP_SESSION
+app.secret_key = os.environ.get('DIS_SESSION_SECRET') or ''
+
+
+def _report_users():
+    ''' The people allowed to see the restricted reports
+        Returns:
+          Dict of name to password hash, empty if the variable is unset
+    '''
+    out = {}
+    for entry in os.environ.get('DIS_REPORT_USERS', '').split(','):
+        entry = entry.strip()
+        if ':' not in entry:
+            continue
+        name, _, digest = entry.partition(':')
+        name, digest = name.strip(), digest.strip()
+        if name and digest:
+            out[name] = digest
+    return out
+
+
+def _restriction_unavailable():
+    ''' Why the gate cannot run, or None if it can.
+        Missing configuration denies access rather than granting it: a report
+        that silently stopped being restricted would look exactly like one that
+        was working.
+        Returns:
+          Message string, or None
+    '''
+    if not app.secret_key:
+        return "DIS_SESSION_SECRET is not set, so this page cannot verify a login."
+    if not _report_users():
+        return "DIS_REPORT_USERS is not set, so nobody is permitted on this page."
+    return None
+
+
+def restricted(view):
+    ''' Require a signed-in reader for a view
+        Keyword arguments:
+          view: view function
+        Returns:
+          Wrapped view
+    '''
+    @wraps(view)
+    def wrapper(*args, **kwargs):
+        problem = _restriction_unavailable()
+        if problem:
+            print(f"Restricted page {request.path} refused: {problem}")
+            return make_response(render_template('error.html', urlroot=request.url_root,
+                                                 title=render_warning("Restricted report"),
+                                                 message=problem), 503)
+        if not session.get(RESTRICTED_SESSION_KEY):
+            # full_path appends a bare '?' when there is no query string, which
+            # would otherwise show up in the address bar after signing in.
+            target = request.full_path.rstrip('?')
+            return redirect(url_for('report_login', next=target))
+        return view(*args, **kwargs)
+    return wrapper
+
+
+@app.route('/report_login', methods=['GET', 'POST'])
+def report_login():
+    '''
+    Sign in to the restricted reports
+    ---
+    tags:
+      - Navigation
+    responses:
+      '200':
+        description: Sign-in form
+      '302':
+        description: Signed in, redirected onward
+    '''
+    problem = _restriction_unavailable()
+    if problem:
+        return make_response(render_template('error.html', urlroot=request.url_root,
+                                             title=render_warning("Restricted report"),
+                                             message=problem), 503)
+    # Only ever a path on this site: an open redirect here would hand an
+    # attacker a janelia.org link that lands on their page.
+    nxt = request.values.get('next') or '/'
+    if not nxt.startswith('/') or nxt.startswith('//'):
+        nxt = '/'
+    note = ""
+    if request.method == 'POST':
+        name = request.form.get('username', '').strip()
+        digest = _report_users().get(name)
+        # check_password_hash on a known-bad hash when the user is unknown, so a
+        # wrong name and a wrong password cost the same time to reject.
+        reference = digest or generate_password_hash('_no_such_user_')
+        if digest and check_password_hash(reference, request.form.get('password', '')):
+            session.clear()
+            session[RESTRICTED_SESSION_KEY] = name
+            session.permanent = False
+            print(f"Restricted report sign-in: {name} from {request.remote_addr}")
+            return redirect(nxt)
+        check_password_hash(reference, request.form.get('password', ''))
+        print(f"Restricted report sign-in FAILED for {name!r} from {request.remote_addr}")
+        note = render_warning("That name and password were not recognized.", 'warning')
+    elif not ALLOW_HTTP_SESSION and not request.is_secure \
+         and request.headers.get('X-Forwarded-Proto', 'http') != 'https':
+        # Without this the developer sees a successful POST, no cookie, and an
+        # immediate bounce back to this form with no explanation anywhere.
+        note = render_warning("This page is being served over plain HTTP, so the signed "
+                              "cookie will not be stored. Set DIS_ALLOW_HTTP_SESSION=1 "
+                              "for local testing.", 'warning')
+    html = f"""{note}
+<p>These reports name individual people, so they are limited to a few readers
+until the site has proper accounts.</p>
+<form method="post" action="{escape(url_for('report_login'))}" class="form-inline">
+  <input type="hidden" name="next" value="{escape(nxt)}">
+  <div class="form-group" style="margin-right:8px;">
+    <label for="username" style="margin-right:6px;">Name</label>
+    <input class="form-control" type="text" id="username" name="username"
+           autocomplete="username" autofocus required>
+  </div>
+  <div class="form-group" style="margin-right:8px;">
+    <label for="password" style="margin-right:6px;">Password</label>
+    <input class="form-control" type="password" id="password" name="password"
+           autocomplete="current-password" required>
+  </div>
+  <button type="submit" class="btn btn-outline-success">Sign in</button>
+</form>"""
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="Sign in", html=html,
+                                         navbar=generate_navbar('')))
+
+
+@app.route('/report_logout')
+def report_logout():
+    '''
+    Sign out of the restricted reports
+    ---
+    tags:
+      - Navigation
+    responses:
+      '302':
+        description: Signed out, redirected home
+    '''
+    session.pop(RESTRICTED_SESSION_KEY, None)
+    return redirect('/')
 
 
 # Environment variables holding a credential. Several are put into query
@@ -9465,6 +9651,7 @@ def _classify_janelian(row):
 
 
 @app.route('/figshare_users')
+@restricted
 def show_figshare_users():
     '''
     Return figshare account holders matched against the Janelia roster
@@ -9607,6 +9794,7 @@ def _protocolsio_authors():
 
 
 @app.route('/protocolsio_users')
+@restricted
 def show_protocolsio_users():
     '''
     Return protocols.io authors matched against the Janelia roster
@@ -10014,6 +10202,7 @@ def show_dryad_dois(year='All'):
 
 
 @app.route('/dryad_users')
+@restricted
 def show_dryad_users():
     '''
     Return Dryad depositors matched against the Janelia roster
@@ -10030,6 +10219,7 @@ def show_dryad_users():
 
 
 @app.route('/zenodo_users')
+@restricted
 def show_zenodo_users():
     '''
     Return Zenodo depositors matched against the Janelia roster
