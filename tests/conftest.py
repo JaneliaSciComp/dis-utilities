@@ -80,6 +80,14 @@ def _prepare_imports():
             # doi_common only needs the one function the registrar routing uses.
             attrs = {'is_datacite': _fallback_is_datacite} if pkg == 'doi_common' else {}
             _stub(dotted, **attrs)
+    # dis_html, whose escaping the XSS regression tests cover, imports dis_config,
+    # and dis_config reads api/config.cfg at import time. That file is deployment
+    # configuration and is deliberately not in the repository, so on a bare
+    # checkout - CI included - importing it raises FileNotFoundError and takes the
+    # entire collection down, not just the one module. Stub it only when the real
+    # file is absent, so a developer checkout still exercises the real constants.
+    if not (Path(__file__).resolve().parents[1] / 'api' / 'config.cfg').exists():
+        _stub('dis_config', DO_NOT_DISPLAY=[], NCBI_MESH='', PMCID='')
 
 
 _prepare_imports()

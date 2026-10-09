@@ -175,8 +175,14 @@ def render_warning(msg, severity='error', size='lg'):
         color = 'red'
     elif severity == 'warning':
         icon = 'exclamation-circle'
-    return f"<span class='fas fa-{icon} fa-{size}' style='color:{color}'></span>" \
-           + f"&nbsp;{msg}"
+    # escape(): render_warning's output is always handed to a template that
+    # renders it with |safe (general.html and bokeh.html both do, for html= and
+    # title= alike), so the message is a raw-HTML sink. Callers routinely build
+    # it from a path segment or query parameter - a year, an ORCID, an employee
+    # ID - which made every one of those a reflected XSS. No caller passes HTML
+    # in (all 330 checked), so escaping here is safe and closes the whole class.
+    return safe(f"<span class='fas fa-{icon} fa-{size}' style='color:{color}'></span>"
+                + f"&nbsp;{escape(str(msg))}")
 
 
 # Open Access statuses ordered least → most restrictive, for status-card display
@@ -294,6 +300,16 @@ class Safe(str):
     ''' Marks a string as already-rendered, trusted HTML so that render_table()
         will not escape it. Plain str cells are HTML-escaped. '''
     __slots__ = ()
+
+    def __html__(self):
+        ''' Jinja's escape protocol. Without this, a Safe value handed to a
+            template is indistinguishable from a plain str, which is why the
+            templates reached for |safe on title= and message= and turned every
+            one of those into a raw-HTML sink. With it, Safe is the single trust
+            marker for both render_table() and the templates: trusted HTML
+            passes through, and anything else is escaped.
+        '''
+        return str(self)
 
 
 def safe(value):
@@ -560,7 +576,9 @@ def create_downloadable(name, header, content, label=None):
     # download button in the app was carrying a class that did nothing, and the size
     # argument was a knob no caller ever turned. Bootstrap's default is the size we
     # want anyway.
-    return f'<a class="btn btn-outline-success" href="/download/{fname}" ' \
+    # escape(): fname is built from the caller's download_name, which on many
+    # pages interpolates a path segment (a year, a provider, a journal type).
+    return f'<a class="btn btn-outline-success" href="/download/{escape(fname)}" ' \
                 + f'role="button">{DOWNLOAD_ICON}{label}</a>'
 
 
@@ -610,7 +628,8 @@ def year_pulldown(prefix, all_years=True, suffix = '', start_year=2006, query=Fa
         btn_label = ("<span style='opacity:0.85;'>Publishing year</span> "
                      "<span style='opacity:0.85;'>&#9662;</span> "
                      "<span style='opacity:0.5;'>|</span> "
-                     f"<span style='color:#ffffff;font-weight:700;'>{selected}</span>")
+                     "<span style='color:#ffffff;font-weight:700;'>"
+                     f"{escape(str(selected))}</span>")
         btn_style = " style='min-width:240px;'"
     else:
         wrapper_class = 'btn-group'
@@ -625,7 +644,11 @@ def year_pulldown(prefix, all_years=True, suffix = '', start_year=2006, query=Fa
             url = f"/{prefix}" if year == 'All' else f"/{prefix}?year={year}"
         else:
             url = f"/{prefix}/{year}{suffix}"
-        html += f"<a class='dropdown-item' href='{url}'>{year}</a>"
+        # escape(): prefix/suffix are supplied by the caller and routinely carry
+        # a path segment from the request (an org, a subject, a source), so this
+        # href is attacker-reachable. The attribute is single-quoted and
+        # html.escape() escapes ' as well as & < > ", which is what closes it.
+        html += f"<a class='dropdown-item' href='{escape(url)}'>{escape(str(year))}</a>"
     html += "</div></div>"
     return html
 
