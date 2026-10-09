@@ -318,7 +318,13 @@ def year_pulldown(prefix, all_years=True, suffix='', start_year=2006, query=Fals
                 yr = path[len(pfx) + 1:].split('/')[0] or None
         if not yr:
             yr = 'All' if all_years else str(datetime.now().year)
-        selected = "(all years)" if yr == 'All' else yr
+        selected = yr
+    # Outside the derivation branch on purpose: a caller that knows its own
+    # effective year wants to pass it as-is and still get the house label for
+    # "All". Mapping only the derived value is what made every such caller
+    # hand-roll this conditional, and what left the ones that didn't showing a
+    # button that disagreed with their own heading.
+    selected = "(all years)" if selected == 'All' else selected
     return _year_pulldown(prefix, all_years=all_years, suffix=suffix,
                           start_year=start_year, query=query, selected=selected)
 
@@ -360,12 +366,13 @@ def tag_pulldown(prefix, year='All', selected=None):
             + "tag-pulldown-search-box' placeholder='Filter tags…' " \
             + "autocomplete='off' oninput='filterTagPulldown(this)' " \
             + "onclick='event.stopPropagation()'></div>"
-    html += f"<a class='dropdown-item{'' if selected else ' active'}' href='{base}'>" \
+    # escape(): base is built from the caller's route, path segment included.
+    html += f"<a class='dropdown-item{'' if selected else ' active'}' href='{escape(base)}'>" \
             + "All tags</a><div class='dropdown-divider'></div>"
     for tag in tags:
         cls = 'dropdown-item active' if tag == selected else 'dropdown-item'
         html += f"<a class='{cls} tag-pulldown-item' " \
-                + f"href='{base}?tag={quote(tag, safe='')}'>{escape(tag)}</a>"
+                + f"href='{escape(base)}?tag={quote(tag, safe='')}'>{escape(tag)}</a>"
     html += "<span class='dropdown-item disabled tag-pulldown-empty' " \
             + "style='display:none;'>No matching tags</span>"
     html += "</div></div>"
@@ -3674,7 +3681,7 @@ def source_pulldown(prefix, source, limit):
         cls = 'dropdown-item'
         if src == source:
             cls += ' active'
-        html += f"<a class='{cls}' href='/{prefix}/{src}/{limit}'>{src}</a>"
+        html += f"<a class='{cls}' href='/{escape(prefix)}/{escape(str(src))}/{limit}'>{escape(str(src))}</a>"
     html += "</div></div>"
     return html
 
@@ -3697,7 +3704,7 @@ def source_limit_pulldown(prefix, source, limit):
         cls = 'dropdown-item'
         if lim == limit:
             cls += ' active'
-        html += f"<a class='{cls}' href='/{prefix}/{source}/{lim}'>{lim}</a>"
+        html += f"<a class='{cls}' href='/{escape(prefix)}/{escape(str(source))}/{lim}'>{lim}</a>"
     html += "</div></div>"
     return html
 
@@ -3718,11 +3725,11 @@ def journal_buttons(show, prefix, suffix=''):
     # green outline and green text keep it distinguishable without the size change.
     # (The class attribute also ran straight into onclick with no space between them.)
     if show == 'journal':
-        full = f"window.location.href='{prefix}/full{suffix}'"
+        full = f"window.location.href='{escape(prefix)}/full{escape(suffix)}'"
         html = '<div><button id="toggle-to-all" type="button" class="btn btn-outline-success" ' \
                + f'onclick="{full}">Show all resource types</button></div>'
     else:
-        jour = f"window.location.href='{prefix}/journal{suffix}'"
+        jour = f"window.location.href='{escape(prefix)}/journal{escape(suffix)}'"
         html = '<div><button id="toggle-to-journal" type="button" ' \
                + 'class="btn btn-outline-success" ' \
                + f'onclick="{jour}">Show journals/preprints only</button></div>'
@@ -7628,18 +7635,24 @@ def show_doi_ui(doi):
         return inspect_error(err, 'Could not get author list details')
     html += doi_tabs(doi, row, rowext, data, authors)
     # Title
-    doilink = f"<a href='{DOI}{doi}' target='_blank'>{doi}</a>"
+    # escape(): doi is the path segment, and it lands in an href, in the link
+    # text, and inside a JS string in an onclick. The assembled heading is real
+    # HTML, so it is marked safe() at the end - the escaping has to happen on the
+    # way in, not to the finished string.
+    edoi = escape(doi)
+    doilink = f"<a href='{DOI}{edoi}' target='_blank'>{edoi}</a>"
     badges = get_display_badges(doi, row, data, local)
     doilink += " <button style='background-color:transparent;border:none;' " \
-               + f"onclick=\"copyText('{doi}')\">" \
+               + f"onclick=\"copyText('{edoi}')\">" \
                + "<i class='fas fa-regular fa-copy shadow' " \
                + "style='background-color:transparent'></i></button>"
     if row and row.get('jrc_pmid'):
-        doititle = f"{doilink} (PMID: <a href='{PMID}{row['jrc_pmid']}/' " \
-                   + f"target='_blank'>{row['jrc_pmid']}</a>)"
+        epmid = escape(str(row['jrc_pmid']))
+        doititle = f"{doilink} (PMID: <a href='{PMID}{epmid}/' " \
+                   + f"target='_blank'>{epmid}</a>)"
     else:
         doititle = doilink
-    doititle += badges
+    doititle = safe(doititle + str(badges))
     # Retraction banner: shown above the DOI line when the record is flagged retracted.
     banner = ""
     if row and row.get('jrc_retracted'):
@@ -8485,7 +8498,7 @@ def dois_report(year=None):
            + f"<h2 class='dark'>Tags</h2>{stat['Tags']}" \
            + "<h2 class='dark'>Top journals</h2>" \
            + f"<p style='font-size: 14pt;line-height:90%;'>{stat['Topjournals']}</p>"
-    html = f"<div class='titlestat'>{year} YEAR IN REVIEW</div>{sheet}<br>" \
+    html = f"<div class='titlestat'>{escape(str(year))} YEAR IN REVIEW</div>{sheet}<br>" \
            + f"<div class='yearstatd'>{html}</div>"
     html += '<br>' + year_pulldown('dois_report', all_years=False)
     endpoint_access()
@@ -8640,9 +8653,9 @@ def dois_yearly(year=None):
            + "<h2 class='green1'>Top 5 cited Crossref journal articles/preprints</h2>" \
            + topcited \
            + "<div style='font-size: 14pt; margin-top: 8px;'>" \
-           + f"<a href='/citation_list/crossref?year={year}'>Show all cited works</a></div>"
+           + f"<a href='/citation_list/crossref?year={escape(str(year))}'>Show all cited works</a></div>"
     tagsfx = f" &middot; {escape(tag)}" if tag else ''
-    html = f"<div class='titlestat'>{year} YEAR IN REVIEW{tagsfx}</div><br>" \
+    html = f"<div class='titlestat'>{escape(str(year))} YEAR IN REVIEW{tagsfx}</div><br>" \
            + f"<div class='yearstat'>{html}</div>"
     html += '<br>' + year_pulldown('dois_yearly', all_years=False, suffix=year_suffix) \
             + "&nbsp;&nbsp;&nbsp;" + tag_pulldown('dois_yearly', year, tag)
@@ -8723,7 +8736,8 @@ def dois_time(period, year=None):
         nav = {y: {"field": "publishing_year", "value": y} for y in data['years']}
         title = "DOIs published by year" + tagsfx
         chart_title = "DOIs published by year/source"
-        pulldown = year_pulldown('dois_time/year', suffix=year_suffix) \
+        pulldown = year_pulldown('dois_time/year', suffix=year_suffix,
+                                  selected=year) \
                    + "&nbsp;&nbsp;&nbsp;" + tag_pulldown('dois_time/year', year, tag)
     else:
         data = {'months': [f"{mon:02}" for mon in range(1, 13)],
@@ -12599,13 +12613,13 @@ def figshare_groups(year='All'):  # pylint: disable=too-many-locals,too-many-bra
             result['rest']['source'] = 'mongo'
             result['rest']['row_count'] = len(members)
             return generate_response(result)
-        dtitle = f"figshare group: {escape(stem)}"
+        dtitle = f"figshare group: {stem}"
         back = f"<a href='{base}' class='btn btn-outline-primary btn-sm'>" \
                + "&larr; all groups</a>"
         if not members:
             html = back + "<br><br>" \
                    + render_warning(f"No figshare DOIs match the group "
-                                    f"\"{escape(stem)}\"", 'warning')
+                                    f"\"{stem}\"", 'warning')
             endpoint_access()
             return make_response(render_template('general.html', urlroot=request.url_root,
                                                  title=dtitle, html=html,
@@ -12868,10 +12882,10 @@ def zenodo_groups(year='All'):  # pylint: disable=too-many-locals,too-many-branc
         if not members:
             html = back + "<br><br>" \
                    + render_warning(f"No Zenodo DOIs match the deposit "
-                                    f"\"{escape(concept)}\"", 'warning')
+                                    f"\"{concept}\"", 'warning')
             endpoint_access()
             return make_response(render_template('general.html', urlroot=request.url_root,
-                                                 title=f"Zenodo deposit: {escape(concept)}",
+                                                 title=f"Zenodo deposit: {concept}",
                                                  html=html,
                                                  navbar=generate_navbar('DataCite')))
         casings = collections.Counter(r['title'] for r in members if r['title'])
@@ -13465,10 +13479,10 @@ def protocolsio_dois(year='All'):  # pylint: disable=too-many-locals,too-many-br
         if not members:
             html = back + "<br><br>" \
                    + render_warning(f"No protocols.io DOIs match the deposit "
-                                    f"\"{escape(concept)}\"", 'warning')
+                                    f"\"{concept}\"", 'warning')
             endpoint_access()
             return make_response(render_template('general.html', urlroot=request.url_root,
-                                                 title=f"protocols.io deposit: {escape(concept)}",
+                                                 title=f"protocols.io deposit: {concept}",
                                                  html=html, navbar=generate_navbar('DataCite')))
         casings = collections.Counter(r['title'] for r in members if r['title'])
         label = (render_title_html(casings.most_common(1)[0][0]) if casings
@@ -13913,10 +13927,10 @@ def elife_dois(year='All'):  # pylint: disable=too-many-locals,too-many-branches
         if not members:
             html = back + "<br><br>" \
                    + render_warning(f"No eLife DOIs match the article "
-                                    f"\"{escape(concept)}\"", 'warning')
+                                    f"\"{concept}\"", 'warning')
             endpoint_access()
             return make_response(render_template('general.html', urlroot=request.url_root,
-                                                 title=f"eLife article: {escape(concept)}",
+                                                 title=f"eLife article: {concept}",
                                                  html=html, navbar=generate_navbar('DOIs')))
         casings = collections.Counter(r['title'] for r in members if r['title'])
         label = (render_title_html(casings.most_common(1)[0][0]) if casings
@@ -14206,10 +14220,10 @@ def doiui_firstlast(year='All', which=None):
                                                     + "from dois collection"),
                                message=error_message(err))
     frows = [["Lab head first author",
-              cell(safe(f"<a href='/doiui_firstlast/{year}/first'>{cnt['first']:,}</a>"),
+              cell(safe(f"<a href='/doiui_firstlast/{escape(str(year))}/first'>{cnt['first']:,}</a>"),
                    sort=cnt['first'])],
              ["Lab head last author",
-              cell(safe(f"<a href='/doiui_firstlast/{year}/last'>{cnt['last']:,}</a>"),
+              cell(safe(f"<a href='/doiui_firstlast/{escape(str(year))}/last'>{cnt['last']:,}</a>"),
                    sort=cnt['last'])]]
     html = render_table(['Authorship', 'DOIs'], frows, table_id='group',
                         css='tablesorter numbers-scroll') + "<br>" \
@@ -14557,7 +14571,7 @@ def show_organization(org_in, year=None, show="full"):
     html = render_table(['Published', 'DOI', 'Tags', 'Title'], trows,
                         table_id='dois', css='tablesorter standard-scroll')
     if not dcnt:
-        html = year_pulldown(f"org_detail/{org_in}") + subtitle \
+        html = year_pulldown(f"org_detail/{org_in}", selected=year) + subtitle \
                + render_warning(f"No DOIs were found for {org_in}.", 'warning') \
                + journal_buttons(show, f"/org_detail/{org_in}/{year}")
     else:
@@ -14567,7 +14581,7 @@ def show_organization(org_in, year=None, show="full"):
                   + f"</div><div class='flexcol'>{'&nbsp;'*5}</div><div class='flexcol'>" \
                   + create_downloadable(f"{org_in.replace(' ', '_')}_{year}", header, content) \
                   + "</div></div>"
-        html = year_pulldown(f"org_detail/{org_in}") + subtitle \
+        html = year_pulldown(f"org_detail/{org_in}", selected=year) + subtitle \
                + f"{'Journal/preprint ' if show == 'journal' else ''}" \
                + f"DOIs found for {org_in}: {dcnt:,} ({org_journal_cnt:,} " \
                + "journal publications)<br>" \
@@ -14648,14 +14662,14 @@ def org_summary(org='Shared Resources',year='All', which=None):
     title = f"Journal publications for {org}"
     if year != 'All':
         title += f" ({year})"
-    c1 = f"<a href='/org_summary/all/{year}/first'>{len(finds['first']):,}</a>" \
+    c1 = f"<a href='/org_summary/all/{escape(str(year))}/first'>{len(finds['first']):,}</a>" \
         if finds['first'] else ""
-    c2 = f"<a href='/org_summary/{org}/{year}/first'>{len(finds['firstsr']):,}</a>" \
+    c2 = f"<a href='/org_summary/{escape(str(org))}/{escape(str(year))}/first'>{len(finds['firstsr']):,}</a>" \
          if finds['firstsr'] else ""
     row1 = ['Lab head first author', safe(c1), safe(c2)]
-    c1 = f"<a href='/org_summary/all/{year}/last'>{len(finds['last']):,}</a>" \
+    c1 = f"<a href='/org_summary/all/{escape(str(year))}/last'>{len(finds['last']):,}</a>" \
          if finds['last'] else ""
-    c2 = f"<a href='/org_summary/{org}/{year}/last'>{len(finds['lastsr']):,}</a>" \
+    c2 = f"<a href='/org_summary/{escape(str(org))}/{escape(str(year))}/last'>{len(finds['lastsr']):,}</a>" \
          if finds['lastsr'] else ""
     row2 = ['Lab head last author', safe(c1), safe(c2)]
     html = render_table(['', 'All', org], [row1, row2], table_id='org',
@@ -14698,11 +14712,11 @@ def org_year(org="Shared Resources"):
     for yr in data['years']:
         total['Janelia'] += years['Janelia'][yr]
         total[org] += years[org][yr]
-        c1 = f"<a href='/org_summary/all/{yr}/last'>{years['Janelia'][yr]}</a>"
-        c2 = f"<a href='/org_summary/{org}/{yr}/last'>{years[org][yr]}</a>"
+        c1 = f"<a href='/org_summary/all/{escape(str(yr))}/last'>{years['Janelia'][yr]}</a>"
+        c2 = f"<a href='/org_summary/{escape(str(org))}/{escape(str(yr))}/last'>{years[org][yr]}</a>"
         trows.append([yr, safe(c1), safe(c2)])
     c1 = f"<a href='/org_summary/all/All/last'>{total['Janelia']}</a>"
-    c2 = f"<a href='/org_summary/{org}/All/last'>{total[org]}</a>"
+    c2 = f"<a href='/org_summary/{escape(str(org))}/All/last'>{total[org]}</a>"
     html = render_table(['Year', 'All', org], trows, table_id='years',
                         css='tablesorter numbers-scroll',
                         footer=[fcell('Total', header=False), fcell(safe(c1), header=False),
@@ -15129,7 +15143,7 @@ def dois_companion(year='All'):
     html = render_table(header, trows, table_id='companion', css='tablesorter numbers-scroll')
     label = "all years" if year == 'All' else year
     top = year_pulldown("dois_companion") + "<br><br>"
-    count_line = f"Companion resources ({label}): {len(trows):,} " \
+    count_line = f"Companion resources ({escape(str(label))}): {len(trows):,} " \
                  + f"relation{'' if len(trows) == 1 else 's'} on {len(rows):,} DOIs"
     html = f"{top}{count_line}<br><br>" \
            + create_downloadable('companion', header, fileoutput) + html
@@ -16188,7 +16202,7 @@ def dois_related(year=None):
     html = _relation_filters(year, chosen, registrar, provenance, multi)
     html += (f"<br>{len(trows):,} DOI{'' if len(trows) == 1 else 's'} carrying "
              f"{shown_relations:,} relation{'' if shown_relations == 1 else 's'}"
-             f" ({'all years' if year == 'All' else year})<br><br>")
+             f" ({'all years' if year == 'All' else escape(str(year))})<br><br>")
     html += create_downloadable('related_dois', header, fileoutput)
     html += render_table(header, trows, table_id='related',
                          css='tablesorter numbers-scroll')
@@ -16221,8 +16235,7 @@ def _relation_filters(year, chosen, registrar, provenance, multi):
     # explicit in the URL because a missing one means the current year here, not
     # every year.
     query = "?" + "&".join(extra) if extra else ""
-    pulldown = year_pulldown("dois_related", suffix=query,
-                             selected="(all years)" if year == 'All' else year)
+    pulldown = year_pulldown("dois_related", suffix=query, selected=year)
     boxes = ""
     for col in RELATION_COLUMNS:
         checked = " checked" if col['key'] in chosen else ""
@@ -16677,7 +16690,7 @@ def show_journals_dois(year=None):
         # Empty result for a valid year: keep the year pulldown so another year can be
         # chosen, and show the standard inline warning instead of a full error page.
         escope = ([year] if year != 'All' else []) + ([tag] if tag else [])
-        etitle = "DOIs by journal" + (f" ({', '.join(escape(s) for s in escope)})"
+        etitle = "DOIs by journal" + (f" ({', '.join(escope)})"
                                       if escope else "")
         emsg = "No journals were found" + (f" for {year}" if year != 'All' else "") + "."
         ehtml = year_pulldown('journals_dois', selected=yr_selected, suffix=year_suffix) \
@@ -17194,7 +17207,7 @@ def show_subscription_summary_by_provider(prov):
     if oa_cnt:
         cards.append(("Open access", f"{oa_cnt:,}", "lime"))
     if cost_total is not None:
-        cost_link = f"<a href='/subscription/cost/{prov}'>${cost_total:,.2f}</a>"
+        cost_link = f"<a href='/subscription/cost/{escape(str(prov))}'>${cost_total:,.2f}</a>"
         cards.append((f"Subscription cost ({cost_year})", cost_link))
     if apc_stats:
         apc_body = (f"<span style='font-size:0.75em; font-weight:normal;'>"
@@ -17216,7 +17229,7 @@ def show_subscription_summary_by_provider(prov):
         pub_doi_cnt = 0
     if pub_doi_cnt:
         cards.append(("Janelia publications",
-                      f"<a href='/dois_provider/{prov}'>{pub_doi_cnt:,}</a>"))
+                      f"<a href='/dois_provider/{escape(str(prov))}'>{pub_doi_cnt:,}</a>"))
     html = stat_cards(cards, div_id='prov-stats')
     headers = ['Publisher'] + list(types) + ['TOTAL']
     trows = []
@@ -17239,7 +17252,7 @@ def show_subscription_summary_by_provider(prov):
     html += render_table(headers, trows, table_id='journals',
                          css='tablesorter numbers-scroll', footer=footer)
     html += "<br><a class='btn btn-outline-info' " \
-            + f"href='/subscriptionlist/{prov}/provider'" \
+            + f"href='/subscriptionlist/{escape(str(prov))}/provider'" \
             + " role='button'>Show details</a>"
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
@@ -19302,7 +19315,7 @@ def people(name=None):
         return make_response(render_template('people.html', urlroot=request.url_root,
                                              title="Search People system",
                                              content="<br><h3>No names found containing " \
-                                                     + f"\"{name}\"</h3>",
+                                                     + f"\"{escape(name)}\"</h3>",
                                              navbar=generate_navbar('System')))
     html = "<br><br><h3>Select a name for details:</h3>"
     trows = []
@@ -19724,7 +19737,7 @@ def funder(fid):
     if not re.match(r'^\d+$', fid):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Invalid funder ID"),
-                               message=f"{escape(fid)} is not a Crossref Funder Registry ID")
+                               message=f"{fid} is not a Crossref Funder Registry ID")
     try:
         cached = DB['dis'].funder.find_one({"id": fid})
         rows = list(DB['dis'].dois.find({"jrc_funder_ids": fid}))
@@ -19926,7 +19939,7 @@ def show_awards():
     if fid and not re.match(r'^\d+$', fid):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Invalid funder ID"),
-                               message=f"{escape(fid)} is not a Crossref Funder Registry ID")
+                               message=f"{fid} is not a Crossref Funder Registry ID")
     try:
         index, filler = _award_index(fid)
     except Exception as err:
@@ -20043,7 +20056,7 @@ def show_award(fid, key):
     if fid and not re.match(r'^\d+$', fid):
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Invalid funder ID"),
-                               message=f"{escape(fid)} is not a Crossref Funder Registry ID")
+                               message=f"{fid} is not a Crossref Funder Registry ID")
     try:
         index, _ = _award_index(fid)
     except Exception as err:
@@ -20054,7 +20067,7 @@ def show_award(fid, key):
     if not entry:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Award not found", 'warning'),
-                               message=f"No DOIs name award {escape(unquote(key))}")
+                               message=f"No DOIs name award {unquote(key)}")
     label = _award_label(entry)
     funder_cell = escape(entry['funder'])
     if entry['fid']:
@@ -20399,7 +20412,7 @@ def rrid(term=None):
     if mat:
         src, err = _rrid_fetch(mat.group(1))
         if err:
-            content = f"<br>{render_warning(escape(err))}"
+            content = f"<br>{render_warning(err)}"
         elif not src:
             content = f"<br><h3>No registry record for {escape(term)}</h3>"
         else:
@@ -20416,7 +20429,7 @@ def rrid(term=None):
         else:
             hits, total, err = _rrid_search(term, offset, kind)
         if err:
-            content = f"<br>{render_warning(escape(err), 'warning')}"
+            content = f"<br>{render_warning(err, 'warning')}"
         elif not hits and page > 1:
             # Out of range rather than empty - saying "nothing found" here would
             # contradict the result count the reader just paged through.
@@ -21196,7 +21209,7 @@ def show_acks_by_curator(curator=None):
     if not union:
         return render_template('warning.html', urlroot=request.url_root,
                                title=render_warning("No DOIs", 'warning'),
-                               message=f"No DOIs were curated by {escape(curator)}.")
+                               message=f"No DOIs were curated by {curator}.")
     union.sort(key=lambda row: row.get('jrc_publishing_date', ''), reverse=True)
     # ack='' -> no highlight (highlight_subtext no-ops on an empty subtext).
     table, cnt, _ = standard_ack_table(union, '', show_count=False)
