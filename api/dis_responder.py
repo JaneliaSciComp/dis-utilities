@@ -54,7 +54,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.84.0"
+__version__ = "120.85.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -1431,6 +1431,249 @@ def janelia_tenure(orc):
     return f"since {escape(hired)}"
 
 
+# External platforms shown on a person's page. Each entry is the logo file, the
+# DOI prefix our collection records that platform's deposits under, and what a
+# presence there actually means - which is not the same thing on all three.
+# A logo means the person puts their own work on that platform: they hold an
+# account there, or they deposited something. A preprint server is deliberately
+# not on this list - a bioRxiv DOI means somebody co-authored a preprint that
+# the corresponding author posted, which is the relationship an author has to
+# any journal, and 76% of Janelians with published output have one. It would be
+# a badge that says "publishes", next to a column already counting DOIs.
+#
+# Matching is by DOI prefix, which rots when a platform re-registers: bioRxiv
+# moved to openRxiv's 10.64898 and 95 of our preprints sit there, and figshare
+# already needs two prefixes. A migration makes a logo undercount silently
+# rather than fail, so these are worth re-checking if a platform's numbers look
+# flat.
+#
+# The evidence differs by platform:
+#   ORCID         they hold an iD. No DOI prefix - the roster answers it.
+#   figshare      they hold an account, or are credited on a deposit. The only
+#                 platform publishing an account list, so the only one that can
+#                 show for somebody who has deposited nothing.
+#   protocols.io  credited on a protocol we hold. They publish no account list
+#                 and expose no ORCID, so an account alone is invisible to us.
+#   Zenodo        credited on a deposit. Zenodo has no account concept at all.
+PERSON_PLATFORMS = (
+    ('ORCID', 'orcid.png', None),
+    # Both figshare prefixes: 10.25378 is janelia.figshare.com and 10.6084 is
+    # figshare.com, and 27 Janelians have deposits only under the latter.
+    ('figshare', 'figshare.png', {"doi": {"$regex": "^10.(25378|6084)/"}}),
+    ('protocols.io', 'protocols.png', {"doi": {"$regex": "^10.17504/"}}),
+    ('Dryad', 'dryad.png', {"doi": {"$regex": "^10.5061/"}}),
+    ('Zenodo', 'zenodo.png', {"doi": {"$regex": "^10.5281/"}}))
+# How tall the logos are drawn. They arrive at three different sizes and aspect
+# ratios, so height is fixed and width left to follow.
+PLATFORM_LOGO_PX = 44
+# Separator inside a logo's tooltip. A literal character rather than an entity,
+# because the tooltip is escaped on its way into the title attribute.
+PLATFORM_TIP_SEP = ' \u00b7 '
+# figshare's institutional account list, cached: it is the one platform whose
+# membership cannot be answered from our own collection, and a person page
+# should not make an API call to say so. Refreshed on a timer because 144
+# accounts change rarely.
+FIGSHARE_ACCOUNT_CACHE = {'at': 0, 'by_email': {}, 'by_orcid': {}}
+FIGSHARE_CACHE_SECONDS = 1800
+
+
+def _figshare_account_index():
+    ''' figshare institutional accounts, keyed by email and ORCID
+        Keyword arguments:
+          None
+        Returns:
+          (by_email, by_orcid), either of which may be empty if figshare is
+          unreachable - a person page is not worth failing over this
+    '''
+    if time() - FIGSHARE_ACCOUNT_CACHE['at'] < FIGSHARE_CACHE_SECONDS:
+        return FIGSHARE_ACCOUNT_CACHE['by_email'], FIGSHARE_ACCOUNT_CACHE['by_orcid']
+    try:
+        accounts = _figshare_accounts()
+    except Exception as err:
+        # print, as the rest of this module does - it has no LOGGER, and this
+        # sits in the handler that runs precisely when figshare is unreachable,
+        # so a NameError here would replace a degraded page with a broken one.
+        print(f"figshare accounts unavailable: {redact(str(err))}")
+        return FIGSHARE_ACCOUNT_CACHE['by_email'], FIGSHARE_ACCOUNT_CACHE['by_orcid']
+    by_email, by_orcid = {}, {}
+    for acct in accounts:
+        email = (acct.get('institution_user_id') or '').strip().lower()
+        if email:
+            by_email[email] = acct
+        orcid = str(acct.get('orcid_id') or '').strip()
+        if orcid:
+            by_orcid[orcid] = acct
+    FIGSHARE_ACCOUNT_CACHE.update({'at': time(), 'by_email': by_email, 'by_orcid': by_orcid})
+    return by_email, by_orcid
+
+
+def _platform_logo_img(name, logo, tip, px):
+    ''' One platform logo
+        Keyword arguments:
+          name: platform name, used as the alt text
+          logo: file under static/images
+          tip: title attribute
+          px: height in pixels; width follows, since the four logos are not
+              all the same aspect ratio
+        Returns:
+          HTML string
+    '''
+    # The gap scales with the logo, so the 44px row on a person page keeps its
+    # breathing room while the 25px row in a table stays compact.
+    gap = max(6, px // 4)
+    return (f"<img src='/static/images/{logo}' alt='{escape(name)}' "
+            f"title='{escape(tip, quote=True)}' "
+            f"style='height:{px}px; width:auto; vertical-align:middle; "
+            f"margin-right:{gap}px'>")
+
+
+def platform_deposit_counts(eids):
+    ''' How many deposits each person has on each platform.
+
+        One aggregation per platform rather than three counts per person: at 69
+        lab heads that is 71ms against 3.6 seconds, and the page is not worth
+        three and a half seconds.
+        Keyword arguments:
+          eids: employeeIds to count for
+        Returns:
+          Dict of employeeId to {platform: count}
+    '''
+    out = {}
+    if not eids:
+        return out
+    for name, _, query in PERSON_PLATFORMS:
+        if not query:
+            continue
+        try:
+            # Unwound and re-matched: jrc_author is a list, so grouping on it
+            # without the second match would count a lab head once for every
+            # co-author on the same deposit.
+            rows = DB['dis'].dois.aggregate([
+                {"$match": {**query, "jrc_author": {"$in": eids}}},
+                {"$unwind": "$jrc_author"},
+                {"$match": {"jrc_author": {"$in": eids}}},
+                {"$group": {"_id": "$jrc_author", "n": {"$sum": 1}}}])
+        except Exception:
+            continue
+        for row in rows:
+            out.setdefault(row['_id'], {})[name] = row['n']
+    return out
+
+
+def person_orcid(row):
+    """ The ORCID to show for a row on a platform report.
+
+        The roster's first, the platform's second. A person whose ORCID we hold
+        but figshare does not would otherwise show no ORCID logo at all, which
+        reads as "no ORCID" rather than "the platform has not recorded one".
+        Keyword arguments:
+          row: a report row carrying 'orcid' and possibly 'person'
+        Returns:
+          Bare ORCID, or None
+    """
+    person = row.get('person') or {}
+    return (str(person.get('orcid') or '').strip() or row.get('orcid') or None)
+
+
+def deposit_logos(counts, px=25, orcid=None, exclude=None):
+    ''' Logos for the platforms somebody has deposited on.
+
+        Deposits only - no account lookup, so a logo here means the person has
+        output on that platform rather than merely an account, and the three
+        logos mean the same thing as each other.
+
+        An ORCID is shown first when given, which is how /labs carries an
+        identifier that used to need a 180px column of its own.
+        Keyword arguments:
+          counts: {platform: count} for one person
+          px: logo height
+          orcid: bare ORCID, linked from its logo (optional)
+          exclude: a platform to leave out, for a page that is already about it
+        Returns:
+          HTML string, empty when there are none
+    '''
+    out = ''
+    if orcid:
+        logo = next(lg for nm, lg, _ in PERSON_PLATFORMS if nm == 'ORCID')
+        out += (f"<a href='{ORCID}{escape(orcid)}' target='_blank'>"
+                + _platform_logo_img('ORCID', logo, f"ORCID {orcid}", px) + "</a>")
+    for name, logo, query in PERSON_PLATFORMS:
+        if not query or name == exclude:
+            continue
+        count = (counts or {}).get(name)
+        if not count:
+            continue
+        out += _platform_logo_img(
+            name, logo, f"{name}: {count:,} deposit{'' if count == 1 else 's'}", px)
+    return out
+
+
+def person_platform_logos(orc):
+    ''' Logos for the external platforms a person appears on.
+
+        Deposit counts come from jrc_author, so they are the deposits this
+        person is credited on rather than every deposit bearing their name -
+        the same number the rest of the site would quote.
+
+        figshare is asked a second question the other two cannot answer: does
+        this person hold an account. Somebody can hold one and have deposited
+        nothing, and that still counts as being on figshare. protocols.io and
+        Zenodo publish no account list, so for those two an absent logo means
+        "nothing of theirs is in our collection", not "no account".
+        Keyword arguments:
+          orc: a record from the orcid collection
+        Returns:
+          HTML string, empty when the person appears nowhere
+    '''
+    eid = orc.get('employeeId')
+    email = (orc.get('userIdO365') or '').strip().lower()
+    orcid = str(orc.get('orcid') or '').strip()
+    by_email, by_orcid = _figshare_account_index()
+    account = by_email.get(email) or (by_orcid.get(orcid) if orcid else None)
+    # The same counter /labs uses, asked about one person. Counting deposits
+    # twice, two ways, is how the two pages would come to disagree.
+    counts = platform_deposit_counts([eid] if eid else []).get(eid, {})
+    shown = []
+    for name, logo, query in PERSON_PLATFORMS:
+        count = counts.get(name, 0) if query else 0
+        if name == 'ORCID':
+            has_account = bool(orcid)
+        elif name == 'figshare':
+            has_account = bool(account)
+        else:
+            has_account = False
+        if not count and not has_account:
+            continue
+        # The tooltip says which of the two questions was answered, because an
+        # account and a deposit are different claims.
+        parts = []
+        if has_account:
+            parts.append("iD" if name == 'ORCID' else "account")
+        if count:
+            parts.append(f"{count:,} deposit{'' if count == 1 else 's'}")
+        # A real middle dot, not the entity: the whole tip is escaped on its way
+        # into the title attribute, so an entity would arrive as "&middot;".
+        tip = f"{name}: " + PLATFORM_TIP_SEP.join(parts)
+        img = _platform_logo_img(name, logo, tip, PLATFORM_LOGO_PX)
+        link = PLATFORM_LINK.get(name, lambda **_k: None)(account=account, orcid=orcid) \
+            if has_account else None
+        shown.append(f"<a href='{link}' target='_blank'>{img}</a>" if link else img)
+    if not shown:
+        return ""
+    return ("<tr><td>Also on:</td><td style='padding-top:4px'>"
+            + ''.join(shown) + "</td></tr>")
+
+
+# A profile to link the logo to, where the platform has one. figshare's is
+# keyed on user_id, NOT the account id: they are different integers in the same
+# range and the wrong one silently resolves to somebody else's profile.
+PLATFORM_LINK = {
+    'ORCID': lambda orcid=None, **_k: f"{ORCID}{orcid}" if orcid else None,
+    'figshare': lambda account=None, **_k: (
+        f"https://janelia.figshare.com/authors/_/{account['user_id']}"
+        if account and account.get('user_id') else None)}
+
+
 def get_orcid_from_db(oid, use_eid=False, bare=False, show="full"):
     ''' Generate HTML for an ORCID or employeeId that is in the orcid collection
         Keyword arguments:
@@ -1476,6 +1719,7 @@ def get_orcid_from_db(oid, use_eid=False, bare=False, show="full"):
         # determined, rather than calling everything past.
         html += "<tr><td>Affiliations:</td><td>" \
                 + affiliation_links(orc) + "</td></tr>"
+    html += person_platform_logos(orc)
     html += "</table><br>"
     html = add_orcid_controls(orc, html)
     html += "<br>"
@@ -9258,6 +9502,11 @@ def show_figshare_users():
                      'matched': matched,
                      'active': acct.get('active'), 'person': person})
     _flag_duplicates(rows, lambda r: r['email'] or f"figshare id {r['account']}")
+    # One pass for every person on the page. The platform this page is
+    # about is left out of the row - it is the page.
+    elsewhere = platform_deposit_counts(
+        [r['person']['employeeId'] for r in rows
+         if r.get('person') and r['person'].get('employeeId')])
     counts = collections.Counter(r['kind'] for r in rows)
     html = ("<p>Everyone with a janelia.figshare.com account, matched against the "
             "roster by institutional email, then ORCID, then name. The three are "
@@ -9286,17 +9535,18 @@ def show_figshare_users():
         if row['score'] is not None:
             how += f" ({row['score']:.0f})"
         trows.append([_name_cell(row), row['email'],
-                      safe(f"<a href='{ORCID}{escape(row['orcid'])}' target='_blank'>"
-                           f"{escape(row['orcid'])}</a>") if row['orcid'] else '',
                       safe(badge), safe(roster_name), safe(how),
-                      safe('' if row['active'] else "<b>inactive</b>")])
+                      safe('' if row['active'] else "<b>inactive</b>"),
+                      safe(deposit_logos(
+                          elsewhere.get((row.get('person') or {}).get('employeeId')),
+                          px=25, orcid=person_orcid(row), exclude='figshare'))])
         fileoutput += f"{row['name']}\t{row['email']}\t{row['orcid']}\t{label}\t" \
                       f"{row['how']}\t{row['score'] or ''}\t{row['account']}\n"
     html += create_downloadable('figshare_users',
                                 ['Name', 'Email', 'ORCID', 'Status', 'Matched by',
                                  'Score', 'figshare ID'], fileoutput)
-    html += render_table(['figshare name', 'Institutional email', 'ORCID', 'Status',
-                          'Roster name', 'Matched by', 'Account'], trows,
+    html += render_table(['figshare name', 'Institutional email', 'Status',
+                          'Roster name', 'Matched by', 'Account', 'Also on'], trows,
                          css="tablesorter numbers-scroll")
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
@@ -9384,6 +9634,11 @@ def show_protocolsio_users():
                      'kind': _classify_janelian(person) if person else 'unknown',
                      'how': how, 'score': score, 'matched': matched, 'person': person})
     _flag_duplicates(rows, lambda r: r['name'])
+    # One pass for every person on the page. The platform this page is
+    # about is left out of the row - it is the page.
+    elsewhere = platform_deposit_counts(
+        [r['person']['employeeId'] for r in rows
+         if r.get('person') and r['person'].get('employeeId')])
     counts = collections.Counter(r['kind'] for r in rows)
     html = ("<p>Everyone credited on a Janelia protocols.io protocol, matched against "
             "the roster by ORCID and then by name. protocols.io publishes no list of "
@@ -9425,19 +9680,20 @@ def show_protocolsio_users():
         if len(row['dois']) > PROTOCOLSIO_EXAMPLES:
             shown += f" &hellip; (+{len(row['dois']) - PROTOCOLSIO_EXAMPLES:,})"
         trows.append([_name_cell(row),
-                      safe(f"<a href='{ORCID}{escape(row['orcid'])}' target='_blank'>"
-                           f"{escape(row['orcid'])}</a>") if row['orcid'] else '',
                       safe(badge), safe(roster_name), safe(how),
                       cell(f"{len(row['dois']):,}", sort=len(row['dois']), align='right'),
-                      safe(shown)])
+                      safe(shown),
+                      safe(deposit_logos(
+                          elsewhere.get((row.get('person') or {}).get('employeeId')),
+                          px=25, orcid=person_orcid(row), exclude='protocols.io'))])
         fileoutput += f"{row['name']}\t{row['orcid'] or ''}\t{labels[row['kind']]}\t" \
                       f"{row['how']}\t{row['score'] or ''}\t{len(row['dois'])}\t" \
                       f"{', '.join(row['dois'])}\n"
     html += create_downloadable('protocolsio_users',
                                 ['Name', 'ORCID', 'Status', 'Matched by', 'Score',
                                  'Protocols', 'DOIs'], fileoutput)
-    html += render_table(['Author', 'ORCID', 'Status', 'Roster name', 'Matched by',
-                          'Protocols', 'Examples'], trows,
+    html += render_table(['Author', 'Status', 'Roster name', 'Matched by',
+                          'Protocols', 'Examples', 'Also on'], trows,
                          css="tablesorter numbers-scroll")
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
@@ -9598,6 +9854,11 @@ def show_zenodo_users():
     if not everyone:
         rows = [r for r in rows if r['keep']]
     _flag_duplicates(rows, lambda r: r['name'])
+    # One pass for every person on the page. The platform this page is
+    # about is left out of the row - it is the page.
+    elsewhere = platform_deposit_counts(
+        [r['person']['employeeId'] for r in rows
+         if r.get('person') and r['person'].get('employeeId')])
     counts = collections.Counter(r['kind'] for r in rows)
     html = ("<p>Everyone credited on a Janelia Zenodo deposit, matched against the "
             "roster by ORCID and then by name. Zenodo publishes no list of the people "
@@ -9655,20 +9916,21 @@ def show_zenodo_users():
         # Janelia filter misses somebody, and the column is where that shows.
         aff = '; '.join(row['affiliations'])
         trows.append([_name_cell(row),
-                      safe(f"<a href='{ORCID}{escape(row['orcid'])}' target='_blank'>"
-                           f"{escape(row['orcid'])}</a>") if row['orcid'] else '',
                       safe(badge), safe(roster_name), safe(how),
                       cell(aff[:60] + ('&hellip;' if len(aff) > 60 else ''), sort=aff),
                       cell(f"{len(row['dois']):,}", sort=len(row['dois']), align='right'),
-                      safe(shown_dois)])
+                      safe(shown_dois),
+                      safe(deposit_logos(
+                          elsewhere.get((row.get('person') or {}).get('employeeId')),
+                          px=25, orcid=person_orcid(row), exclude='Zenodo'))])
         fileoutput += f"{row['name']}\t{row['orcid'] or ''}\t{labels[row['kind']]}\t" \
                       f"{row['how']}\t{row['score'] or ''}\t{aff}\t{len(row['dois'])}\t" \
                       f"{', '.join(row['dois'])}\n"
     html += create_downloadable('zenodo_users',
                                 ['Name', 'ORCID', 'Status', 'Matched by', 'Score',
                                  'Affiliation', 'Deposits', 'DOIs'], fileoutput)
-    html += render_table(['Depositor', 'ORCID', 'Status', 'Roster name', 'Matched by',
-                          'Affiliation', 'Deposits', 'Examples'], trows,
+    html += render_table(['Depositor', 'Status', 'Roster name', 'Matched by',
+                          'Affiliation', 'Deposits', 'Examples', 'Also on'], trows,
                          css="tablesorter numbers-scroll")
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
@@ -21784,7 +22046,11 @@ def show_labs():
     result = initialize_result()
     expected = 'html' if 'Accept' in request.headers \
                          and 'html' in request.headers['Accept'] else 'json'
-    payload = {"group": {"$exists": True}}
+    # $exists alone is not enough: a record carrying group as an empty string
+    # satisfies it and arrives as a lab with no name. $exists stays as well as
+    # $nin, because $nin with None would otherwise match every record that has
+    # no group field at all.
+    payload = {"group": {"$exists": True, "$nin": [None, ""]}}
     try:
         rows = DB['dis'].orcid.find(payload, {'_id': 0}).sort("group", 1)
     except Exception as err:
@@ -21814,6 +22080,9 @@ def show_labs():
     row_classes = []
     group_names = []
     orcid_count = former_count = 0
+    # Counted for every lab head in one pass; see platform_deposit_counts.
+    deposits = platform_deposit_counts([r['employeeId'] for r in labs
+                                        if r.get('employeeId')])
     for row in labs:
         group_names.append(row['group'])
         name = ' '.join([row['given'][0], row['family'][0]])
@@ -21831,19 +22100,17 @@ def show_labs():
         badges = []
         worker_badge(row, badges)
         name += f" {' '.join(badges)}"
+        oid = row['orcid'].replace('https://orcid.org/', '') if row.get('orcid') else None
+        logos = deposit_logos(deposits.get(row.get('employeeId')), px=25, orcid=oid)
+        if logos:
+            name += f"<br>{logos}"
         try:
             grow = DB['dis'].suporg.find_one({"name": row['group']})
         except Exception:
             grow = None
         glink = f"<a href='/tag/{row['group']}'>{row['group']}</a>" if grow else row['group']
-        if row.get('orcid'):
-            oid = row['orcid'].replace('https://orcid.org/', '')
-            orcid_cell = cell(safe(f"<a href='https://orcid.org/{escape(oid)}' "
-                                   f"target='_blank'>{escape(oid)}</a>"), style='width: 180px')
-        else:
-            orcid_cell = cell('', style='width: 180px')
         doi = tagcnt.get(row['group'], 0)
-        trows.append([cell(safe(name), sort=surname_key), orcid_cell, safe(glink),
+        trows.append([cell(safe(name), sort=surname_key), safe(glink),
                       safe(_affiliation_pills(row.get('affiliations'))),
                       f"{doi:,}"])
         row_classes.append('former' if is_former else '')
@@ -21869,7 +22136,9 @@ def show_labs():
                      f"Hide former labs ({former_count:,})</button>")
     controls += ("&nbsp;<span style='color: #6c757d;'>Showing "
                  f"<span id='labscount'>{len(labs):,}</span> labs</span></div>")
-    table = render_table(['Name', 'ORCID', 'Group', 'Affiliations', 'DOIs'], trows,
+    # ORCID has no column of its own: it is the logo in the Name cell, which
+    # gives the 180px back to Affiliations.
+    table = render_table(['Name', 'Group', 'Affiliations', 'DOIs'], trows,
                          table_id='labs', css='tablesorter numberlast-scroll',
                          row_classes=row_classes, data_attrs={"sortlist": "[[0,0]]"})
     endpoint_access()
