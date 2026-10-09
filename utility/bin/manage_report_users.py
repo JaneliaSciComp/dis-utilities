@@ -14,26 +14,58 @@
     the commands that install them; it never contacts the cluster itself, so a
     mistake here cannot change production.
 
-    Passwords are hashed with werkzeug, so no password is ever stored or
-    printed back. Adding somebody MERGES with the existing roster rather than
-    replacing it - rewriting DIS_REPORT_USERS with a single entry is how you
-    would silently lock out everybody else.
+    Passwords are hashed before they go anywhere, so no password is stored or
+    printed back. The hash is werkzeug's scrypt format, which is what the
+    application verifies against, but it is produced here with the standard
+    library alone: werkzeug arrives with Flask and so lives in the api venv,
+    and this is a command-line tool that should run under whichever python is
+    to hand. tests/test_report_users.py pins the two formats together.
+
+    Adding somebody MERGES with the existing roster rather than replacing it -
+    rewriting DIS_REPORT_USERS with a single entry is how you would silently
+    lock out everybody else.
 """
 
 __version__ = '1.0.0'
 
 import argparse
 from getpass import getpass
+import hashlib
 import os
 import secrets
+import string
 import sys
-
-from werkzeug.security import generate_password_hash
 
 ARG = None
 # Matches the application's reader: split on the FIRST colon only, because a
 # werkzeug hash ("scrypt:32768:8:1$...") contains colons of its own.
 SEPARATOR = ':'
+# werkzeug's own defaults, reproduced here so this program needs nothing but the
+# standard library. werkzeug ships with Flask and so lives in the api venv; this
+# is a command-line tool that should run under whichever python is to hand, and
+# a web framework is a strange thing to install to hash a password.
+# The output is byte-for-byte what werkzeug's generate_password_hash produces,
+# which test_report_users.py asserts against the real library.
+SCRYPT_N, SCRYPT_R, SCRYPT_P = 32768, 8, 1
+SCRYPT_SALT_LEN = 16
+SCRYPT_DKLEN = 64
+# n=32768, r=8 needs about 128 MiB; the default maxmem of 0 refuses it.
+SCRYPT_MAXMEM = 132 * 1024 * 1024
+
+
+def generate_password_hash(password):
+    ''' Hash a password in werkzeug's scrypt format
+        Keyword arguments:
+          password: plain-text password
+        Returns:
+          "scrypt:N:r:p$salt$hex", as werkzeug would produce
+    '''
+    salt = ''.join(secrets.choice(string.ascii_letters + string.digits)
+                   for _ in range(SCRYPT_SALT_LEN))
+    digest = hashlib.scrypt(password.encode(), salt=salt.encode(), n=SCRYPT_N,
+                            r=SCRYPT_R, p=SCRYPT_P, maxmem=SCRYPT_MAXMEM,
+                            dklen=SCRYPT_DKLEN).hex()
+    return f"scrypt:{SCRYPT_N}:{SCRYPT_R}:{SCRYPT_P}${salt}${digest}"
 
 
 def parse_users(raw):
