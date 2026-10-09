@@ -9982,11 +9982,9 @@ def show_dryad_dois(year='All'):
     # page shows. Passing selected=year put a bare "All" on the button.
     html = year_pulldown('dryad_dois') + "<br><br>"
     if not rows:
-        # escape(): year is a path segment, and render_warning's output reaches
-        # the template through {{ html|safe }}.
         msg = "No Dryad DOIs were found"
         if year != 'All':
-            msg += f" for publishing year {escape(year)}"
+            msg += f" for publishing year {year}"
         html += render_warning(msg, 'warning')
         endpoint_access()
         return make_response(render_template('general.html', urlroot=request.url_root,
