@@ -360,12 +360,13 @@ def tag_pulldown(prefix, year='All', selected=None):
             + "tag-pulldown-search-box' placeholder='Filter tags…' " \
             + "autocomplete='off' oninput='filterTagPulldown(this)' " \
             + "onclick='event.stopPropagation()'></div>"
-    html += f"<a class='dropdown-item{'' if selected else ' active'}' href='{base}'>" \
+    # escape(): base is built from the caller's route, path segment included.
+    html += f"<a class='dropdown-item{'' if selected else ' active'}' href='{escape(base)}'>" \
             + "All tags</a><div class='dropdown-divider'></div>"
     for tag in tags:
         cls = 'dropdown-item active' if tag == selected else 'dropdown-item'
         html += f"<a class='{cls} tag-pulldown-item' " \
-                + f"href='{base}?tag={quote(tag, safe='')}'>{escape(tag)}</a>"
+                + f"href='{escape(base)}?tag={quote(tag, safe='')}'>{escape(tag)}</a>"
     html += "<span class='dropdown-item disabled tag-pulldown-empty' " \
             + "style='display:none;'>No matching tags</span>"
     html += "</div></div>"
@@ -3674,7 +3675,7 @@ def source_pulldown(prefix, source, limit):
         cls = 'dropdown-item'
         if src == source:
             cls += ' active'
-        html += f"<a class='{cls}' href='/{prefix}/{src}/{limit}'>{src}</a>"
+        html += f"<a class='{cls}' href='/{escape(prefix)}/{escape(str(src))}/{limit}'>{escape(str(src))}</a>"
     html += "</div></div>"
     return html
 
@@ -3697,7 +3698,7 @@ def source_limit_pulldown(prefix, source, limit):
         cls = 'dropdown-item'
         if lim == limit:
             cls += ' active'
-        html += f"<a class='{cls}' href='/{prefix}/{source}/{lim}'>{lim}</a>"
+        html += f"<a class='{cls}' href='/{escape(prefix)}/{escape(str(source))}/{lim}'>{lim}</a>"
     html += "</div></div>"
     return html
 
@@ -3718,11 +3719,11 @@ def journal_buttons(show, prefix, suffix=''):
     # green outline and green text keep it distinguishable without the size change.
     # (The class attribute also ran straight into onclick with no space between them.)
     if show == 'journal':
-        full = f"window.location.href='{prefix}/full{suffix}'"
+        full = f"window.location.href='{escape(prefix)}/full{escape(suffix)}'"
         html = '<div><button id="toggle-to-all" type="button" class="btn btn-outline-success" ' \
                + f'onclick="{full}">Show all resource types</button></div>'
     else:
-        jour = f"window.location.href='{prefix}/journal{suffix}'"
+        jour = f"window.location.href='{escape(prefix)}/journal{escape(suffix)}'"
         html = '<div><button id="toggle-to-journal" type="button" ' \
                + 'class="btn btn-outline-success" ' \
                + f'onclick="{jour}">Show journals/preprints only</button></div>'
@@ -7628,18 +7629,24 @@ def show_doi_ui(doi):
         return inspect_error(err, 'Could not get author list details')
     html += doi_tabs(doi, row, rowext, data, authors)
     # Title
-    doilink = f"<a href='{DOI}{doi}' target='_blank'>{doi}</a>"
+    # escape(): doi is the path segment, and it lands in an href, in the link
+    # text, and inside a JS string in an onclick. The assembled heading is real
+    # HTML, so it is marked safe() at the end - the escaping has to happen on the
+    # way in, not to the finished string.
+    edoi = escape(doi)
+    doilink = f"<a href='{DOI}{edoi}' target='_blank'>{edoi}</a>"
     badges = get_display_badges(doi, row, data, local)
     doilink += " <button style='background-color:transparent;border:none;' " \
-               + f"onclick=\"copyText('{doi}')\">" \
+               + f"onclick=\"copyText('{edoi}')\">" \
                + "<i class='fas fa-regular fa-copy shadow' " \
                + "style='background-color:transparent'></i></button>"
     if row and row.get('jrc_pmid'):
-        doititle = f"{doilink} (PMID: <a href='{PMID}{row['jrc_pmid']}/' " \
-                   + f"target='_blank'>{row['jrc_pmid']}</a>)"
+        epmid = escape(str(row['jrc_pmid']))
+        doititle = f"{doilink} (PMID: <a href='{PMID}{epmid}/' " \
+                   + f"target='_blank'>{epmid}</a>)"
     else:
         doititle = doilink
-    doititle += badges
+    doititle = safe(doititle + str(badges))
     # Retraction banner: shown above the DOI line when the record is flagged retracted.
     banner = ""
     if row and row.get('jrc_retracted'):
@@ -8485,7 +8492,7 @@ def dois_report(year=None):
            + f"<h2 class='dark'>Tags</h2>{stat['Tags']}" \
            + "<h2 class='dark'>Top journals</h2>" \
            + f"<p style='font-size: 14pt;line-height:90%;'>{stat['Topjournals']}</p>"
-    html = f"<div class='titlestat'>{year} YEAR IN REVIEW</div>{sheet}<br>" \
+    html = f"<div class='titlestat'>{escape(str(year))} YEAR IN REVIEW</div>{sheet}<br>" \
            + f"<div class='yearstatd'>{html}</div>"
     html += '<br>' + year_pulldown('dois_report', all_years=False)
     endpoint_access()
@@ -8640,9 +8647,9 @@ def dois_yearly(year=None):
            + "<h2 class='green1'>Top 5 cited Crossref journal articles/preprints</h2>" \
            + topcited \
            + "<div style='font-size: 14pt; margin-top: 8px;'>" \
-           + f"<a href='/citation_list/crossref?year={year}'>Show all cited works</a></div>"
+           + f"<a href='/citation_list/crossref?year={escape(str(year))}'>Show all cited works</a></div>"
     tagsfx = f" &middot; {escape(tag)}" if tag else ''
-    html = f"<div class='titlestat'>{year} YEAR IN REVIEW{tagsfx}</div><br>" \
+    html = f"<div class='titlestat'>{escape(str(year))} YEAR IN REVIEW{tagsfx}</div><br>" \
            + f"<div class='yearstat'>{html}</div>"
     html += '<br>' + year_pulldown('dois_yearly', all_years=False, suffix=year_suffix) \
             + "&nbsp;&nbsp;&nbsp;" + tag_pulldown('dois_yearly', year, tag)
@@ -14206,10 +14213,10 @@ def doiui_firstlast(year='All', which=None):
                                                     + "from dois collection"),
                                message=error_message(err))
     frows = [["Lab head first author",
-              cell(safe(f"<a href='/doiui_firstlast/{year}/first'>{cnt['first']:,}</a>"),
+              cell(safe(f"<a href='/doiui_firstlast/{escape(str(year))}/first'>{cnt['first']:,}</a>"),
                    sort=cnt['first'])],
              ["Lab head last author",
-              cell(safe(f"<a href='/doiui_firstlast/{year}/last'>{cnt['last']:,}</a>"),
+              cell(safe(f"<a href='/doiui_firstlast/{escape(str(year))}/last'>{cnt['last']:,}</a>"),
                    sort=cnt['last'])]]
     html = render_table(['Authorship', 'DOIs'], frows, table_id='group',
                         css='tablesorter numbers-scroll') + "<br>" \
@@ -14648,14 +14655,14 @@ def org_summary(org='Shared Resources',year='All', which=None):
     title = f"Journal publications for {org}"
     if year != 'All':
         title += f" ({year})"
-    c1 = f"<a href='/org_summary/all/{year}/first'>{len(finds['first']):,}</a>" \
+    c1 = f"<a href='/org_summary/all/{escape(str(year))}/first'>{len(finds['first']):,}</a>" \
         if finds['first'] else ""
-    c2 = f"<a href='/org_summary/{org}/{year}/first'>{len(finds['firstsr']):,}</a>" \
+    c2 = f"<a href='/org_summary/{escape(str(org))}/{escape(str(year))}/first'>{len(finds['firstsr']):,}</a>" \
          if finds['firstsr'] else ""
     row1 = ['Lab head first author', safe(c1), safe(c2)]
-    c1 = f"<a href='/org_summary/all/{year}/last'>{len(finds['last']):,}</a>" \
+    c1 = f"<a href='/org_summary/all/{escape(str(year))}/last'>{len(finds['last']):,}</a>" \
          if finds['last'] else ""
-    c2 = f"<a href='/org_summary/{org}/{year}/last'>{len(finds['lastsr']):,}</a>" \
+    c2 = f"<a href='/org_summary/{escape(str(org))}/{escape(str(year))}/last'>{len(finds['lastsr']):,}</a>" \
          if finds['lastsr'] else ""
     row2 = ['Lab head last author', safe(c1), safe(c2)]
     html = render_table(['', 'All', org], [row1, row2], table_id='org',
@@ -14698,11 +14705,11 @@ def org_year(org="Shared Resources"):
     for yr in data['years']:
         total['Janelia'] += years['Janelia'][yr]
         total[org] += years[org][yr]
-        c1 = f"<a href='/org_summary/all/{yr}/last'>{years['Janelia'][yr]}</a>"
-        c2 = f"<a href='/org_summary/{org}/{yr}/last'>{years[org][yr]}</a>"
+        c1 = f"<a href='/org_summary/all/{escape(str(yr))}/last'>{years['Janelia'][yr]}</a>"
+        c2 = f"<a href='/org_summary/{escape(str(org))}/{escape(str(yr))}/last'>{years[org][yr]}</a>"
         trows.append([yr, safe(c1), safe(c2)])
     c1 = f"<a href='/org_summary/all/All/last'>{total['Janelia']}</a>"
-    c2 = f"<a href='/org_summary/{org}/All/last'>{total[org]}</a>"
+    c2 = f"<a href='/org_summary/{escape(str(org))}/All/last'>{total[org]}</a>"
     html = render_table(['Year', 'All', org], trows, table_id='years',
                         css='tablesorter numbers-scroll',
                         footer=[fcell('Total', header=False), fcell(safe(c1), header=False),
@@ -15129,7 +15136,7 @@ def dois_companion(year='All'):
     html = render_table(header, trows, table_id='companion', css='tablesorter numbers-scroll')
     label = "all years" if year == 'All' else year
     top = year_pulldown("dois_companion") + "<br><br>"
-    count_line = f"Companion resources ({label}): {len(trows):,} " \
+    count_line = f"Companion resources ({escape(str(label))}): {len(trows):,} " \
                  + f"relation{'' if len(trows) == 1 else 's'} on {len(rows):,} DOIs"
     html = f"{top}{count_line}<br><br>" \
            + create_downloadable('companion', header, fileoutput) + html
@@ -16188,7 +16195,7 @@ def dois_related(year=None):
     html = _relation_filters(year, chosen, registrar, provenance, multi)
     html += (f"<br>{len(trows):,} DOI{'' if len(trows) == 1 else 's'} carrying "
              f"{shown_relations:,} relation{'' if shown_relations == 1 else 's'}"
-             f" ({'all years' if year == 'All' else year})<br><br>")
+             f" ({'all years' if year == 'All' else escape(str(year))})<br><br>")
     html += create_downloadable('related_dois', header, fileoutput)
     html += render_table(header, trows, table_id='related',
                          css='tablesorter numbers-scroll')
@@ -17194,7 +17201,7 @@ def show_subscription_summary_by_provider(prov):
     if oa_cnt:
         cards.append(("Open access", f"{oa_cnt:,}", "lime"))
     if cost_total is not None:
-        cost_link = f"<a href='/subscription/cost/{prov}'>${cost_total:,.2f}</a>"
+        cost_link = f"<a href='/subscription/cost/{escape(str(prov))}'>${cost_total:,.2f}</a>"
         cards.append((f"Subscription cost ({cost_year})", cost_link))
     if apc_stats:
         apc_body = (f"<span style='font-size:0.75em; font-weight:normal;'>"
@@ -17216,7 +17223,7 @@ def show_subscription_summary_by_provider(prov):
         pub_doi_cnt = 0
     if pub_doi_cnt:
         cards.append(("Janelia publications",
-                      f"<a href='/dois_provider/{prov}'>{pub_doi_cnt:,}</a>"))
+                      f"<a href='/dois_provider/{escape(str(prov))}'>{pub_doi_cnt:,}</a>"))
     html = stat_cards(cards, div_id='prov-stats')
     headers = ['Publisher'] + list(types) + ['TOTAL']
     trows = []
@@ -17239,7 +17246,7 @@ def show_subscription_summary_by_provider(prov):
     html += render_table(headers, trows, table_id='journals',
                          css='tablesorter numbers-scroll', footer=footer)
     html += "<br><a class='btn btn-outline-info' " \
-            + f"href='/subscriptionlist/{prov}/provider'" \
+            + f"href='/subscriptionlist/{escape(str(prov))}/provider'" \
             + " role='button'>Show details</a>"
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
@@ -19302,7 +19309,7 @@ def people(name=None):
         return make_response(render_template('people.html', urlroot=request.url_root,
                                              title="Search People system",
                                              content="<br><h3>No names found containing " \
-                                                     + f"\"{name}\"</h3>",
+                                                     + f"\"{escape(name)}\"</h3>",
                                              navbar=generate_navbar('System')))
     html = "<br><br><h3>Select a name for details:</h3>"
     trows = []
