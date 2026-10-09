@@ -9701,19 +9701,19 @@ def show_protocolsio_users():
                                          navbar=generate_navbar('DataCite')))
 
 
-# Affiliation strings that mean Janelia. Free text typed by the depositor, so
-# this is a pattern rather than a lookup: "HHMI Janelia Research Campus",
-# "Howard Hughes Medical Institute", "Janelia Research Campus, HHMI" and a
-# dozen other arrangements all occur.
-ZENODO_JANELIA = re.compile(r'janelia', re.I)
+# Affiliation strings that mean Janelia, on the DataCite platforms that record
+# one (Zenodo and Dryad). Free text typed by the depositor, so this is a pattern
+# rather than a lookup: "HHMI Janelia Research Campus", "Howard Hughes Medical
+# Institute", "Janelia Research Campus, HHMI" and a dozen other arrangements.
+DEPOSIT_JANELIA = re.compile(r'janelia', re.I)
 # HHMI without Janelia is not Janelia. HHMI investigators are hosted at
 # universities all over the country, and they deposit: David Baker writes
 # "Howard Hughes Medical Institute, University of Washington". Such a person is
 # only kept when the roster also knows them, which is evidence this particular
 # HHMI affiliate is one of ours.
-ZENODO_HHMI = re.compile(r'hhmi|howard hughes', re.I)
-# Example DOIs shown per author before the rest become a count.
-ZENODO_EXAMPLES = 2
+DEPOSIT_HHMI = re.compile(r'hhmi|howard hughes', re.I)
+# Example DOIs shown per depositor before the rest become a count.
+DEPOSIT_EXAMPLES = 2
 
 
 def _datacite_person_name(auth):
@@ -9741,19 +9741,20 @@ def _datacite_person_name(auth):
     return name
 
 
-def _zenodo_authors():
-    ''' Everyone credited on a Janelia Zenodo deposit.
+def _datacite_depositors(prefix):
+    ''' Everyone credited on a Janelia deposit under one DOI prefix.
 
-        Read from our own DataCite copies. Zenodo has no institutional account
-        list - it is open to anyone - so the people credited on the deposits we
-        hold are the available population, as with protocols.io.
+        Read from our own DataCite copies. Neither Zenodo nor Dryad publishes an
+        institutional account list - both are open to anyone - so the people
+        credited on the deposits we hold are the available population, as with
+        protocols.io.
         Keyword arguments:
-          None
+          prefix: DOI prefix regex identifying the platform
         Returns:
           Dict of name to {orcid, affiliations, janelia, dois}
     '''
     out = {}
-    for rec in DB['dis'].dois.find({"doi": {"$regex": "^10.5281/"}},
+    for rec in DB['dis'].dois.find({"doi": {"$regex": prefix}},
                                    {"doi": 1, "creators": 1}):
         for auth in rec.get('creators') or []:
             name = _datacite_person_name(auth)
@@ -9767,9 +9768,9 @@ def _zenodo_authors():
                 text = str(aff.get('name') if isinstance(aff, dict) else aff).strip()
                 if text:
                     entry['affiliations'].add(text)
-                    if ZENODO_JANELIA.search(text):
+                    if DEPOSIT_JANELIA.search(text):
                         entry['janelia'] = True
-                    elif ZENODO_HHMI.search(text):
+                    elif DEPOSIT_HHMI.search(text):
                         entry['hhmi'] = True
             if not entry['orcid']:
                 entry['orcid'] = _orcid_from_creator(auth)
@@ -9791,30 +9792,32 @@ def _orcid_from_creator(auth):
     return str(orcid).rstrip('/').rsplit('/', maxsplit=1)[-1] if orcid else None
 
 
-@app.route('/zenodo_users')
-def show_zenodo_users():
-    '''
-    Return Zenodo depositors matched against the Janelia roster
-    ---
-    tags:
-      - DOI
-    responses:
-      '200':
-        description: HTML report
-      '500':
-        description: MongoDB error
-    '''
+def _depositor_report(platform, prefix, route, depositor_label):
+    """ A platform report of the people credited on its deposits.
+
+        Zenodo and Dryad are the same page with different words: both are
+        DataCite, both publish no account list, both record an affiliation
+        free text. Written once rather than twice so the matching rules
+        cannot drift apart between them.
+        Keyword arguments:
+          platform: display name
+          prefix: DOI prefix regex
+          route: this report's own path, for the scope toggle
+          depositor_label: heading for the name column
+        Returns:
+          Flask response
+    """
     try:
         from rapidfuzz import fuzz, process  # pylint: disable=import-outside-toplevel
     except ImportError:
         fuzz = process = None
     everyone = request.args.get('scope') == 'all'
     try:
-        authors = _zenodo_authors()
+        authors = _datacite_depositors(prefix)
         _, by_orcid, by_name, roster = _roster_index()
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not list Zenodo users"),
+                               title=render_warning(f"Could not list {platform} users"),
                                message=error_message(err))
     keys = list(by_name)
     rows = []
@@ -9860,18 +9863,17 @@ def show_zenodo_users():
         [r['person']['employeeId'] for r in rows
          if r.get('person') and r['person'].get('employeeId')])
     counts = collections.Counter(r['kind'] for r in rows)
-    html = ("<p>Everyone credited on a Janelia Zenodo deposit, matched against the "
-            "roster by ORCID and then by name. Zenodo publishes no list of the people "
-            "at an institution, so this is drawn from the depositors of the records we "
-            "hold.</p>"
+    html = (f"<p>Everyone credited on a Janelia {escape(platform)} deposit, matched "
+            "against the roster by ORCID and then by name. "
+            f"{escape(platform)} publishes no list of the people at an institution, so "
+            "this is drawn from the depositors of the records we hold.</p>"
             "<p>Shown by default: everybody the roster recognises, plus anyone whose "
-            "affiliation says Janelia. A Zenodo deposit is often a software release "
-            "carrying its whole contributor list, so the other view adds a further "
-            "thousand or so collaborators from elsewhere.</p>")
-    # Unfiltered this is 1,581 people and four in five are strangers: a Zenodo
-    # deposit is often a software release carrying its whole contributor list.
-    # Zenodo is the only one of these platforms that records an affiliation, so
-    # it is the only one where that can be narrowed honestly.
+            "affiliation says Janelia. A deposit carries its whole author list, most of "
+            "whom are collaborators elsewhere, so the other view is a good deal "
+            "longer.</p>")
+    # Unfiltered, most of these names are strangers - a deposit carries its
+    # whole author list. Zenodo and Dryad both record an affiliation, which is
+    # what makes narrowing possible here and not on the other platforms.
     shown = "Janelia people" if not everyone else "Everyone credited"
     # The app's chip bar, as the tag and affiliation filters use, rather than
     # two links in a sentence: a control that changes what the table holds
@@ -9880,9 +9882,9 @@ def show_zenodo_users():
     # border rather than the dimmed pipe the year pulldown draws. overflow
     # hidden so the divider cannot poke past the rounded corner.
     html += filter_frame('Showing',
-                            (("Janelia people", "/zenodo_users",
+                            (("Janelia people", route,
                               total_janelia, not everyone),
-                             ("Everyone credited", "/zenodo_users?scope=all",
+                             ("Everyone credited", f"{route}?scope=all",
                               total_all, everyone)))
     cards = [(shown, f"{len(rows):,}"),
              ("Deposits", f"{len({d for r in rows for d in r['dois']}):,}")]
@@ -9908,9 +9910,9 @@ def show_zenodo_users():
         how = escape(row['how'])
         if row['score'] is not None:
             how += f" ({row['score']:.0f})"
-        shown_dois = ' '.join(doi_link(d) for d in row['dois'][:ZENODO_EXAMPLES])
-        if len(row['dois']) > ZENODO_EXAMPLES:
-            shown_dois += f" &hellip; (+{len(row['dois']) - ZENODO_EXAMPLES:,})"
+        shown_dois = ' '.join(doi_link(d) for d in row['dois'][:DEPOSIT_EXAMPLES])
+        if len(row['dois']) > DEPOSIT_EXAMPLES:
+            shown_dois += f" &hellip; (+{len(row['dois']) - DEPOSIT_EXAMPLES:,})"
         # Every spelling of the affiliation is kept: a depositor who writes it
         # one way on one record and another way on the next is exactly how the
         # Janelia filter misses somebody, and the column is where that shows.
@@ -9922,20 +9924,113 @@ def show_zenodo_users():
                       safe(shown_dois),
                       safe(deposit_logos(
                           elsewhere.get((row.get('person') or {}).get('employeeId')),
-                          px=25, orcid=person_orcid(row), exclude='Zenodo'))])
+                          px=25, orcid=person_orcid(row), exclude=platform))])
         fileoutput += f"{row['name']}\t{row['orcid'] or ''}\t{labels[row['kind']]}\t" \
                       f"{row['how']}\t{row['score'] or ''}\t{aff}\t{len(row['dois'])}\t" \
                       f"{', '.join(row['dois'])}\n"
-    html += create_downloadable('zenodo_users',
+    html += create_downloadable(route.lstrip('/'),
                                 ['Name', 'ORCID', 'Status', 'Matched by', 'Score',
                                  'Affiliation', 'Deposits', 'DOIs'], fileoutput)
-    html += render_table(['Depositor', 'Status', 'Roster name', 'Matched by',
+    html += render_table([depositor_label, 'Status', 'Roster name', 'Matched by',
                           'Affiliation', 'Deposits', 'Examples', 'Also on'], trows,
                          css="tablesorter numbers-scroll")
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title="Zenodo users", html=html,
+                                         title=f"{platform} users", html=html,
                                          navbar=generate_navbar('DataCite')))
+
+
+@app.route('/dryad_dois/<string:year>')
+@app.route('/dryad_dois')
+def show_dryad_dois(year='All'):
+    '''
+    Return Janelia Dryad deposits
+    ---
+    tags:
+      - DOI
+    responses:
+      '200':
+        description: HTML page
+      '500':
+        description: MongoDB error
+    '''
+    payload = {"doi": {"$regex": "^10.5061/"}}
+    if year != 'All':
+        payload['jrc_publishing_date'] = {"$regex": f"^{year}"}
+    try:
+        rows = list(DB['dis'].dois.find(payload))
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get Dryad DOIs"),
+                               message=error_message(err))
+    # No explicit selected: the request-aware shadow reads the year out of the
+    # path and renders 'All' as "(all years)", which is what every sibling
+    # page shows. Passing selected=year put a bare "All" on the button.
+    html = year_pulldown('dryad_dois') + "<br><br>"
+    if not rows:
+        # escape(): year is a path segment, and render_warning's output reaches
+        # the template through {{ html|safe }}.
+        msg = "No Dryad DOIs were found"
+        if year != 'All':
+            msg += f" for publishing year {escape(year)}"
+        html += render_warning(msg, 'warning')
+        endpoint_access()
+        return make_response(render_template('general.html', urlroot=request.url_root,
+                                             title="Dryad deposits", html=html,
+                                             navbar=generate_navbar('DataCite')))
+    # Dryad versions a dataset by suffixing the DOI, but only one of ours is
+    # versioned, so there is no concept grouping here as there is for Zenodo and
+    # protocols.io. standard_doi_table's own version filter covers that case.
+    linked = sum(1 for r in rows if r.get('jrc_dataset_supplement'))
+    cited = sum(1 for r in rows if r.get('jrc_citation_count'))
+    # No count card: standard_doi_table prints its own "Number of DOIs", and
+    # only that one is updated by the version filter, so a card beside it would
+    # disagree with it the moment anybody clicked.
+    html += stat_cards([("Linked to a paper", f"{linked:,}"),
+                        ("Cited at least once", f"{cited:,}"),
+                        ("Depositors",
+                         f"{len({a for r in rows for a in (r.get('jrc_author') or [])}):,}")])
+    html += ("<p>Datasets deposited to Dryad. A Dryad deposit usually accompanies a "
+             "paper, which is why most carry a link to one &mdash; that link is "
+             "<code>jrc_dataset_supplement</code>, and the related DOIs page shows it "
+             "from the other side.</p>")
+    table, _, _ = standard_doi_table(rows, download_name='dryad_dois')
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="Dryad deposits", html=html + table,
+                                         navbar=generate_navbar('DataCite')))
+
+
+@app.route('/dryad_users')
+def show_dryad_users():
+    '''
+    Return Dryad depositors matched against the Janelia roster
+    ---
+    tags:
+      - DOI
+    responses:
+      '200':
+        description: HTML report
+      '500':
+        description: MongoDB error
+    '''
+    return _depositor_report('Dryad', '^10.5061/', '/dryad_users', 'Depositor')
+
+
+@app.route('/zenodo_users')
+def show_zenodo_users():
+    '''
+    Return Zenodo depositors matched against the Janelia roster
+    ---
+    tags:
+      - DOI
+    responses:
+      '200':
+        description: HTML report
+      '500':
+        description: MongoDB error
+    '''
+    return _depositor_report('Zenodo', '^10.5281/', '/zenodo_users', 'Depositor')
 
 
 @app.route('/orcid_mismatch')
