@@ -242,7 +242,7 @@ def handle_invalid_usage(error):
 
 
 # ******************************************************************************
-# * Restricted reports                                                         *
+# * Restricted pages                                                         *
 # ******************************************************************************
 
 # The four platform user reports pair named people with the deposits they are
@@ -265,14 +265,14 @@ def handle_invalid_usage(error):
 #                       moment the service sends it to the other. Generate once:
 #                           python3 -c "import secrets; print(secrets.token_hex(32))"
 #
-#   DIS_REPORT_USERS    who may look, as comma-separated name:hash pairs. The
+#   DIS_RESTRICTED_USERS    who may look, as comma-separated name:hash pairs. The
 #                       hash is a werkzeug password hash, so no password is
 #                       stored anywhere. Add a person with:
 #                           python3 -c "from werkzeug.security import generate_password_hash as g; \
 #                                       print('alice:' + g(input('password: ')))"
 #                       The hash itself contains colons, so only the FIRST colon
 #                       separates the name from it.
-RESTRICTED_SESSION_KEY = 'dis_report_user'
+RESTRICTED_SESSION_KEY = 'dis_restricted_user'
 # Local development is plain HTTP, and a Secure cookie is not stored over plain
 # HTTP - the login would appear to succeed and then bounce straight back to the
 # form. Production is HTTPS at the router, so Secure is the default and the
@@ -284,13 +284,13 @@ app.config['SESSION_COOKIE_SECURE'] = not ALLOW_HTTP_SESSION
 app.secret_key = os.environ.get('DIS_SESSION_SECRET') or ''
 
 
-def _report_users():
-    ''' The people allowed to see the restricted reports
+def _restricted_users():
+    ''' The people allowed to see the restricted pages
         Returns:
           Dict of name to password hash, empty if the variable is unset
     '''
     out = {}
-    for entry in os.environ.get('DIS_REPORT_USERS', '').split(','):
+    for entry in os.environ.get('DIS_RESTRICTED_USERS', '').split(','):
         entry = entry.strip()
         if ':' not in entry:
             continue
@@ -309,12 +309,12 @@ def _restriction_unavailable():
         Returns:
           Message string, or None
     '''
-    fix = (" Run utility/bin/manage_report_users.py to generate the values and the"
+    fix = (" Run utility/bin/manage_restricted_users.py to generate the values and the"
            " commands that install them.")
     if not app.secret_key:
         return "DIS_SESSION_SECRET is not set, so this page cannot verify a login." + fix
-    if not _report_users():
-        return "DIS_REPORT_USERS is not set, so nobody is permitted on this page." + fix
+    if not _restricted_users():
+        return "DIS_RESTRICTED_USERS is not set, so nobody is permitted on this page." + fix
     return None
 
 
@@ -331,21 +331,21 @@ def restricted(view):
         if problem:
             print(f"Restricted page {request.path} refused: {problem}")
             return make_response(render_template('error.html', urlroot=request.url_root,
-                                                 title=render_warning("Restricted report"),
+                                                 title=render_warning("Restricted page"),
                                                  message=problem), 503)
         if not session.get(RESTRICTED_SESSION_KEY):
             # full_path appends a bare '?' when there is no query string, which
             # would otherwise show up in the address bar after signing in.
             target = request.full_path.rstrip('?')
-            return redirect(url_for('report_login', next=target))
+            return redirect(url_for('restricted_login', next=target))
         return view(*args, **kwargs)
     return wrapper
 
 
-@app.route('/report_login', methods=['GET', 'POST'])
-def report_login():
+@app.route('/restricted_login', methods=['GET', 'POST'])
+def restricted_login():
     '''
-    Sign in to the restricted reports
+    Sign in to the restricted pages
     ---
     tags:
       - Navigation
@@ -358,7 +358,7 @@ def report_login():
     problem = _restriction_unavailable()
     if problem:
         return make_response(render_template('error.html', urlroot=request.url_root,
-                                             title=render_warning("Restricted report"),
+                                             title=render_warning("Restricted page"),
                                              message=problem), 503)
     # Only ever a path on this site: an open redirect here would hand an
     # attacker a janelia.org link that lands on their page.
@@ -368,7 +368,7 @@ def report_login():
     note = ""
     if request.method == 'POST':
         name = request.form.get('username', '').strip()
-        digest = _report_users().get(name)
+        digest = _restricted_users().get(name)
         # check_password_hash on a known-bad hash when the user is unknown, so a
         # wrong name and a wrong password cost the same time to reject.
         reference = digest or generate_password_hash('_no_such_user_')
@@ -376,10 +376,10 @@ def report_login():
             session.clear()
             session[RESTRICTED_SESSION_KEY] = name
             session.permanent = False
-            print(f"Restricted report sign-in: {name} from {request.remote_addr}")
+            print(f"Restricted page sign-in: {name} from {request.remote_addr}")
             return redirect(nxt)
         check_password_hash(reference, request.form.get('password', ''))
-        print(f"Restricted report sign-in FAILED for {name!r} from {request.remote_addr}")
+        print(f"Restricted page sign-in FAILED for {name!r} from {request.remote_addr}")
         note = render_warning("That name and password were not recognized.", 'warning')
     elif not ALLOW_HTTP_SESSION and not request.is_secure \
          and request.headers.get('X-Forwarded-Proto', 'http') != 'https':
@@ -391,7 +391,7 @@ def report_login():
     html = f"""{note}
 <p>These reports name individual people, so they are limited to a few readers
 until the site has proper accounts.</p>
-<form method="post" action="{escape(url_for('report_login'))}" class="form-inline">
+<form method="post" action="{escape(url_for('restricted_login'))}" class="form-inline">
   <input type="hidden" name="next" value="{escape(nxt)}">
   <div class="form-group" style="margin-right:8px;">
     <label for="username" style="margin-right:6px;">Name</label>
@@ -411,10 +411,10 @@ until the site has proper accounts.</p>
                                          navbar=generate_navbar('')))
 
 
-@app.route('/report_logout')
-def report_logout():
+@app.route('/restricted_logout')
+def restricted_logout():
     '''
-    Sign out of the restricted reports
+    Sign out of the restricted pages
     ---
     tags:
       - Navigation

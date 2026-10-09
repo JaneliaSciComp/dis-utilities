@@ -1,6 +1,6 @@
-''' The roster format shared by manage_report_users.py and the application.
+''' The roster format shared by manage_restricted_users.py and the application.
 
-    manage_report_users.py builds a werkzeug-format scrypt hash using only the
+    manage_restricted_users.py builds a werkzeug-format scrypt hash using only the
     standard library, so that adding a reader does not require a web framework.
     That is a copy of somebody else's format, and a copy can drift - so the
     compatibility test here hashes with the tool and verifies with the real
@@ -16,11 +16,11 @@ from pathlib import Path
 
 import pytest
 
-TOOL = Path(__file__).resolve().parents[1] / 'utility' / 'bin' / 'manage_report_users.py'
+TOOL = Path(__file__).resolve().parents[1] / 'utility' / 'bin' / 'manage_restricted_users.py'
 
 
 def _load():
-    spec = importlib.util.spec_from_file_location('manage_report_users', TOOL)
+    spec = importlib.util.spec_from_file_location('manage_restricted_users', TOOL)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod

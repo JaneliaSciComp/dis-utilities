@@ -1,5 +1,5 @@
-""" manage_report_users.py
-    Manage who may read the restricted platform user reports (/figshare_users,
+""" manage_restricted_users.py
+    Manage who may read the restricted platform user pages (/figshare_users,
     /protocolsio_users, /zenodo_users, /dryad_users).
 
     Those pages are gated by two environment variables, both of which belong in
@@ -7,7 +7,7 @@
     in through envFrom:
 
       DIS_SESSION_SECRET  signs the session cookie
-      DIS_REPORT_USERS    name:hash pairs, comma-separated
+      DIS_RESTRICTED_USERS    name:hash pairs, comma-separated
 
     There is no file to edit - the values live in the Secret (production) or in
     your shell (local development). This program builds the strings and prints
@@ -19,10 +19,10 @@
     application verifies against, but it is produced here with the standard
     library alone: werkzeug arrives with Flask and so lives in the api venv,
     and this is a command-line tool that should run under whichever python is
-    to hand. tests/test_report_users.py pins the two formats together.
+    to hand. tests/test_restricted_users.py pins the two formats together.
 
     Adding somebody MERGES with the existing roster rather than replacing it -
-    rewriting DIS_REPORT_USERS with a single entry is how you would silently
+    rewriting DIS_RESTRICTED_USERS with a single entry is how you would silently
     lock out everybody else.
 """
 
@@ -45,7 +45,7 @@ SEPARATOR = ':'
 # is a command-line tool that should run under whichever python is to hand, and
 # a web framework is a strange thing to install to hash a password.
 # The output is byte-for-byte what werkzeug's generate_password_hash produces,
-# which test_report_users.py asserts against the real library.
+# which test_restricted_users.py asserts against the real library.
 SCRYPT_N, SCRYPT_R, SCRYPT_P = 32768, 8, 1
 SCRYPT_SALT_LEN = 16
 SCRYPT_DKLEN = 64
@@ -69,7 +69,7 @@ def generate_password_hash(password):
 
 
 def parse_users(raw):
-    ''' Parse a DIS_REPORT_USERS value
+    ''' Parse a DIS_RESTRICTED_USERS value
         Keyword arguments:
           raw: the variable's value, or None
         Returns:
@@ -88,7 +88,7 @@ def parse_users(raw):
 
 
 def format_users(users):
-    ''' Render a roster back into a DIS_REPORT_USERS value
+    ''' Render a roster back into a DIS_RESTRICTED_USERS value
         Keyword arguments:
           users: dict of name to hash
         Returns:
@@ -104,7 +104,7 @@ def current_roster():
     '''
     if ARG.CURRENT:
         return parse_users(ARG.CURRENT)
-    return parse_users(os.environ.get('DIS_REPORT_USERS'))
+    return parse_users(os.environ.get('DIS_RESTRICTED_USERS'))
 
 
 def ask_password(name):
@@ -140,7 +140,7 @@ def show_install(users, session_secret=None):
     '''
     value = format_users(users)
     print("\n" + "=" * 78)
-    print(f"DIS_REPORT_USERS now holds {len(users)} reader(s): {', '.join(users) or '(none)'}")
+    print(f"DIS_RESTRICTED_USERS now holds {len(users)} reader(s): {', '.join(users) or '(none)'}")
     print("=" * 78)
     if session_secret:
         print("\nA new DIS_SESSION_SECRET was generated. Note that installing it signs")
@@ -148,16 +148,34 @@ def show_install(users, session_secret=None):
     print("OpenShift (production) - both replicas read the same Secret, which is what\n"
           "keeps a session alive when the Service moves a browser between pods:\n")
     cmd = "  oc -n dis-utilities set data secret/dis-utilities-secrets \\\n" \
-          f"      DIS_REPORT_USERS='{value}'"
+          f"      DIS_RESTRICTED_USERS='{value}'"
     if session_secret:
         cmd += f" \\\n      DIS_SESSION_SECRET='{session_secret}'"
     print(cmd)
     print("\n  oc -n dis-utilities rollout restart deployment/dis-utilities")
     print("\nLocal development - note DIS_ALLOW_HTTP_SESSION, without which the signed\n"
           "cookie is dropped over plain HTTP and the sign-in appears to fail:\n")
-    print(f"  export DIS_REPORT_USERS='{value}'")
+    print(f"  export DIS_RESTRICTED_USERS='{value}'")
     print(f"  export DIS_SESSION_SECRET='{session_secret or '<your existing secret>'}'")
     print("  export DIS_ALLOW_HTTP_SESSION=1")
+    print()
+
+
+def show_secret_only(session_secret):
+    ''' Print the commands that install a new session secret, roster untouched
+        Keyword arguments:
+          session_secret: the generated secret
+        Returns:
+          None
+    '''
+    print("\n" + "=" * 78)
+    print("New DIS_SESSION_SECRET - installing this signs EVERYONE out immediately,")
+    print("which is how you revoke access in a hurry. The roster is unchanged.")
+    print("=" * 78)
+    print("\n  oc -n dis-utilities set data secret/dis-utilities-secrets \\")
+    print(f"      DIS_SESSION_SECRET='{session_secret}'")
+    print("\n  oc -n dis-utilities rollout restart deployment/dis-utilities")
+    print(f"\n  export DIS_SESSION_SECRET='{session_secret}'   # local development")
     print()
 
 
@@ -172,12 +190,17 @@ def processing():
     session_secret = secrets.token_hex(32) if ARG.NEW_SECRET else None
     if ARG.LIST:
         if not users:
-            print("No readers configured (DIS_REPORT_USERS is empty or unset).")
-            print("Nobody can open the restricted reports; they answer 503.")
-            return
-        print(f"{len(users)} reader(s) configured:")
-        for name in users:
-            print(f"  {name}")
+            print("No readers configured (DIS_RESTRICTED_USERS is empty or unset).")
+            print("Nobody can open the restricted pages; they answer 503.")
+        else:
+            print(f"{len(users)} reader(s) configured:")
+            for name in users:
+                print(f"  {name}")
+        if session_secret:
+            # --list --new-secret is the revoke path: rotate the signing key and
+            # every existing cookie dies, without disturbing the roster. Listing
+            # and returning early here would have dropped the secret silently.
+            show_secret_only(session_secret)
         return
     if ARG.REMOVE:
         if ARG.REMOVE not in users:
@@ -203,8 +226,8 @@ def processing():
 
 if __name__ == '__main__':
     PARSER = argparse.ArgumentParser(
-        description="Manage readers of the restricted platform user reports",
-        epilog="The roster is read from DIS_REPORT_USERS in the environment unless "
+        description="Manage readers of the restricted platform user pages",
+        epilog="The roster is read from DIS_RESTRICTED_USERS in the environment unless "
                "--current is given. Nothing is written anywhere: the commands to "
                "install the result are printed for you to run.")
     PARSER.add_argument('--user', dest='USER', action='store',
@@ -214,7 +237,7 @@ if __name__ == '__main__':
     PARSER.add_argument('--list', dest='LIST', action='store_true', default=False,
                         help='List the configured readers and exit')
     PARSER.add_argument('--current', dest='CURRENT', action='store',
-                        help='Existing DIS_REPORT_USERS value to merge into, if it '
+                        help='Existing DIS_RESTRICTED_USERS value to merge into, if it '
                              'is not in this shell (e.g. copied out of the Secret)')
     PARSER.add_argument('--new-secret', dest='NEW_SECRET', action='store_true',
                         default=False,
