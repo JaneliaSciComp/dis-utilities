@@ -50,7 +50,8 @@ NAV = {"Home": "",
                                      "protocols.io deposits": "protocolsio_dois",
                                      "protocols.io users": "protocolsio_users"},
                     "Zenodo": {"Zenodo metrics": "zenodo_stats",
-                               "Zenodo deposits": "zenodo_groups"}},
+                               "Zenodo deposits": "zenodo_groups",
+                               "Zenodo users": "zenodo_users"}},
        "Authorship": {"Authors": "orcid_entry",
                       "DOIs by authorship": "dois_author",
                       "Uncredited Janelia authors": "dois_uncredited",
@@ -514,6 +515,27 @@ def random_string(strlen=8):
     '''
     cmps = string.ascii_letters + string.digits
     return ''.join(random.choice(cmps) for i in range(strlen))
+
+
+def filter_frame(label, options):
+    ''' A bordered control saying what the table below is showing.
+
+        Styled by .filter-frame in main.css rather than inline, because the
+        status badge taught us what happens when a style is pasted into three
+        reports and then needs changing in all three.
+        Keyword arguments:
+          label: the compartment on the left, e.g. "Showing"
+          options: list of (text, href, count, active). count may be None.
+        Returns:
+          HTML string
+    '''
+    chips = ''.join(
+        f"<a class='tag-chip{' active' if active else ''}' href='{href}'>{escape(text)}"
+        + (f"<span class='tag-chip-count'>{count:,}</span>" if count is not None else '')
+        + "</a>"
+        for text, href, count, active in options)
+    return (f"<div class='filter-frame'><span class='filter-frame-label'>{escape(label)}"
+            f"</span><span class='filter-frame-items'>{chips}</span></div>")
 
 
 def create_downloadable(name, header, content, label=None):

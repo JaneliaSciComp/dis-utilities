@@ -615,6 +615,38 @@ hr {border-color: var(--muted-border);
   color: #e74c3c;
 }
 
+/* Filter frame: a bold label in its own compartment, then the controls that
+   say what the table below is showing. Sized to Bootstrap's .btn - same
+   .25rem radius, .375rem/.75rem padding, 1.5 line height, 1px border - so it
+   stands beside the download button as a sibling rather than a near-miss. The
+   colour is what differs: the table accent for a control that describes what
+   you are looking at, the button's green for the one that takes it away. */
+.filter-frame {
+  display: inline-block;
+  border: 1px solid var(--table-accent);
+  border-radius: .25rem;
+  line-height: 1.5;
+  margin-bottom: 14px;
+  /* so the label's divider cannot cross the rounded corner */
+  overflow: hidden;
+}
+.filter-frame-label {
+  display: inline-block;
+  padding: .375rem .75rem;
+  font-weight: bold;
+  border-right: 1px solid var(--table-accent);
+  vertical-align: middle;
+}
+.filter-frame-items {
+  display: inline-block;
+  padding: .375rem .75rem .375rem .25rem;
+  vertical-align: middle;
+}
+.filter-frame .tag-chip {
+  margin: 0 0 0 6px;
+  text-decoration: none;
+}
+
 .tag-chip {
   display: inline-block;
   margin: 3px 4px 3px 0;

@@ -41,7 +41,7 @@ import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
 import dis_plots as DP
 from dis_html import (DOWNLOAD_ICON, add_jrc_fields, add_subjects, cell,
-                      create_downloadable, dloop, doi_link, fcell,
+                      create_downloadable, dloop, doi_link, fcell, filter_frame,
                       generate_navbar, get_license,
                       oa_status_rank, registrar_switch, render_table, render_warning,
                       safe, see_also, stat_cards, tab_button, tab_pane, tiny_badge,
@@ -54,7 +54,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.83.2"
+__version__ = "120.84.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -9035,18 +9035,18 @@ ROSTER_NAME_CUTOFF = 85
 # roster as alumni whether or not they are still here, so alumni alone does not
 # mean departed.
 ROSTER_USER_KINDS = (
-    ('current', 'Current Janelian', '#1c6b3a', '#ffffff',
+    ('current', 'Janelian', '#1c6b3a', '#ffffff',
      'An employee on the roster who is not marked alumni.'),
-    ('contingent', 'Contingent worker', '#2e6f9e', '#ffffff',
+    ('contingent', 'Contingent', '#2e6f9e', '#ffffff',
      'Carried on the roster as a contingent worker. Shown apart from employees '
      'because the roster marks many of them alumni whether or not they are '
      'still here, so the alumni flag does not say whether they have left.'),
-    ('former', 'No longer at Janelia', '#c9a227', '#1a1a1a',
-     'An employee marked alumni. A figshare account that may no longer need '
-     'its quota.'),
+    ('former', 'Alumni', '#c9a227', '#1a1a1a',
+     'An employee marked alumni. An account here may no longer need its quota, '
+     'and work deposited since they left is worth a look.'),
     ('unknown', 'Unknown', '#8b2f2f', '#ffffff',
-     'No roster match on email, ORCID or name. Either someone outside Janelia '
-     'with an account here, or a roster gap.'))
+     'Nothing on the roster matched. Either somebody from outside Janelia, '
+     'which a shared or collaborator account legitimately is, or a roster gap.'))
 
 
 def _figshare_accounts():
@@ -9128,6 +9128,45 @@ def _flag_duplicates(rows, label_of):
             continue
         for row in members:
             row['duplicate'] = [label_of(other) for other in members if other is not row]
+
+
+def _status_legend():
+    """ The key for the status badges.
+
+        Rendered with the badges themselves rather than text tinted with their
+        background colour: #1c6b3a and #8b2f2f are chosen to sit behind white
+        text, and as foreground text on the page's own dark blue they are too
+        dim to read. Showing the badge also makes the key and the column
+        obviously the same thing.
+        Keyword arguments:
+          None
+        Returns:
+          HTML string
+    """
+    items = ''.join(f"<li style='margin-bottom:3px'>{_status_badge(key)} "
+                    f"&mdash; {escape(blurb)}</li>"
+                    for key, _, _, _, blurb in ROSTER_USER_KINDS)
+    return f"<ul style='margin-top:6px; max-width:880px'>{items}</ul>"
+
+
+def _status_badge(kind):
+    """ The coloured pill for one roster status.
+
+        inline-block with nowrap: as a plain inline span the pill wraps mid-
+        label when the column is narrow, and the rounded background breaks
+        across two lines with it, which reads as a rendering fault rather than
+        a long word. Kept on one line the column simply takes the width it
+        needs.
+        Keyword arguments:
+          kind: a key from ROSTER_USER_KINDS
+        Returns:
+          HTML string
+    """
+    label = {k: lab for k, lab, _, _, _ in ROSTER_USER_KINDS}[kind]
+    bgc, fgc = {k: (b, f) for k, _, b, f, _ in ROSTER_USER_KINDS}[kind]
+    return (f"<span style='background:{bgc}; color:{fgc}; padding:2px 9px; "
+            "border-radius:10px; font-size:0.85em; display:inline-block; "
+            f"white-space:nowrap'>{escape(label)}</span>")
 
 
 def _name_cell(row):
@@ -9226,19 +9265,13 @@ def show_figshare_users():
     html += stat_cards([("Accounts", f"{len(rows):,}")]
                        + [(label, f"{counts.get(key, 0):,}")
                           for key, label, _, _, _ in ROSTER_USER_KINDS])
-    html += "<ul style='margin-top:6px'>"
-    for _, label, bgc, _, blurb in ROSTER_USER_KINDS:
-        html += f"<li><b style='color:{bgc}'>{escape(label)}</b> &mdash; {escape(blurb)}</li>"
-    html += "</ul>"
+    html += _status_legend()
     trows = []
     fileoutput = ""
     order = {key: num for num, (key, _, _, _, _) in enumerate(ROSTER_USER_KINDS)}
     for row in sorted(rows, key=lambda r: (order[r['kind']], r['name'].lower())):
         label = dict((k, lab) for k, lab, _, _, _ in ROSTER_USER_KINDS)[row['kind']]
-        colors = dict((k, (bgc, fgc)) for k, _, bgc, fgc, _ in ROSTER_USER_KINDS)[row['kind']]
-        badge = (f"<span style='background:{colors[0]}; color:{colors[1]}; "
-                 f"padding:2px 8px; border-radius:10px; font-size:0.85em'>"
-                 f"{escape(label)}</span>")
+        badge = _status_badge(row['kind'])
         person = row['person']
         roster_name = ''
         if person:
@@ -9365,8 +9398,8 @@ def show_protocolsio_users():
                         ("Protocol DOIs", f"{len({d for r in rows for d in r['dois']}):,}")]
                        + [(label, f"{counts.get(key, 0):,}")
                           for key, label, _, _, _ in ROSTER_USER_KINDS])
+    html += _status_legend()
     labels = {k: lab for k, lab, _, _, _ in ROSTER_USER_KINDS}
-    colors = {k: (bgc, fgc) for k, _, bgc, fgc, _ in ROSTER_USER_KINDS}
     order = {key: num for num, (key, _, _, _, _) in enumerate(ROSTER_USER_KINDS)}
     trows = []
     fileoutput = ""
@@ -9374,9 +9407,7 @@ def show_protocolsio_users():
     # count is a sortable column, so leading with it here would only make the
     # two pages disagree.
     for row in sorted(rows, key=lambda r: (order[r['kind']], r['name'].lower())):
-        bgc, fgc = colors[row['kind']]
-        badge = (f"<span style='background:{bgc}; color:{fgc}; padding:2px 8px; "
-                 f"border-radius:10px; font-size:0.85em'>{escape(labels[row['kind']])}</span>")
+        badge = _status_badge(row['kind'])
         person = row['person']
         roster_name = ''
         if person:
@@ -9411,6 +9442,237 @@ def show_protocolsio_users():
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="protocols.io users", html=html,
+                                         navbar=generate_navbar('DataCite')))
+
+
+# Affiliation strings that mean Janelia. Free text typed by the depositor, so
+# this is a pattern rather than a lookup: "HHMI Janelia Research Campus",
+# "Howard Hughes Medical Institute", "Janelia Research Campus, HHMI" and a
+# dozen other arrangements all occur.
+ZENODO_JANELIA = re.compile(r'janelia', re.I)
+# HHMI without Janelia is not Janelia. HHMI investigators are hosted at
+# universities all over the country, and they deposit: David Baker writes
+# "Howard Hughes Medical Institute, University of Washington". Such a person is
+# only kept when the roster also knows them, which is evidence this particular
+# HHMI affiliate is one of ours.
+ZENODO_HHMI = re.compile(r'hhmi|howard hughes', re.I)
+# Example DOIs shown per author before the rest become a count.
+ZENODO_EXAMPLES = 2
+
+
+def _datacite_person_name(auth):
+    """ A creator's name as "Given Family".
+
+        DataCite carries the name twice: as structured givenName/familyName,
+        and as a single `name` that Zenodo writes inverted - "Aaron, Jesse" on
+        half the entries. The structured pair is present on 94% of them and is
+        unambiguous, so it wins; the inverted string is only unpicked when it
+        is all there is. Taking `name` first left most people matching through
+        the fuzzy matcher for want of a comma.
+        Keyword arguments:
+          auth: a DataCite creator entry
+        Returns:
+          Name string, possibly empty
+    """
+    given = ' '.join(str(auth.get('givenName') or '').split())
+    family = ' '.join(str(auth.get('familyName') or '').split())
+    if given or family:
+        return f"{given} {family}".strip()
+    name = ' '.join(str(auth.get('name') or '').split())
+    if name.count(',') == 1:
+        family, _, given = name.partition(',')
+        return f"{given.strip()} {family.strip()}".strip()
+    return name
+
+
+def _zenodo_authors():
+    ''' Everyone credited on a Janelia Zenodo deposit.
+
+        Read from our own DataCite copies. Zenodo has no institutional account
+        list - it is open to anyone - so the people credited on the deposits we
+        hold are the available population, as with protocols.io.
+        Keyword arguments:
+          None
+        Returns:
+          Dict of name to {orcid, affiliations, janelia, dois}
+    '''
+    out = {}
+    for rec in DB['dis'].dois.find({"doi": {"$regex": "^10.5281/"}},
+                                   {"doi": 1, "creators": 1}):
+        for auth in rec.get('creators') or []:
+            name = _datacite_person_name(auth)
+            if not name:
+                continue
+            entry = out.setdefault(name, {'orcid': None, 'affiliations': set(),
+                                          'janelia': False, 'hhmi': False,
+                                          'dois': set()})
+            entry['dois'].add(rec['doi'])
+            for aff in auth.get('affiliation') or []:
+                text = str(aff.get('name') if isinstance(aff, dict) else aff).strip()
+                if text:
+                    entry['affiliations'].add(text)
+                    if ZENODO_JANELIA.search(text):
+                        entry['janelia'] = True
+                    elif ZENODO_HHMI.search(text):
+                        entry['hhmi'] = True
+            if not entry['orcid']:
+                entry['orcid'] = _orcid_from_creator(auth)
+    return out
+
+
+def _orcid_from_creator(auth):
+    ''' The ORCID on a DataCite creator, wherever it is carried
+        Keyword arguments:
+          auth: a creator entry
+        Returns:
+          Bare ORCID, or None
+    '''
+    orcid = auth.get('ORCID') or auth.get('orcid')
+    if not orcid:
+        orcid = next((nid.get('nameIdentifier')
+                      for nid in auth.get('nameIdentifiers') or []
+                      if nid.get('nameIdentifierScheme') == 'ORCID'), None)
+    return str(orcid).rstrip('/').rsplit('/', maxsplit=1)[-1] if orcid else None
+
+
+@app.route('/zenodo_users')
+def show_zenodo_users():
+    '''
+    Return Zenodo depositors matched against the Janelia roster
+    ---
+    tags:
+      - DOI
+    responses:
+      '200':
+        description: HTML report
+      '500':
+        description: MongoDB error
+    '''
+    try:
+        from rapidfuzz import fuzz, process  # pylint: disable=import-outside-toplevel
+    except ImportError:
+        fuzz = process = None
+    everyone = request.args.get('scope') == 'all'
+    try:
+        authors = _zenodo_authors()
+        _, by_orcid, by_name, roster = _roster_index()
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not list Zenodo users"),
+                               message=error_message(err))
+    keys = list(by_name)
+    rows = []
+    for name, entry in authors.items():
+        idx, how, score, matched = None, '', None, None
+        if entry['orcid'] and entry['orcid'] in by_orcid:
+            idx, how = by_orcid[entry['orcid']], 'ORCID'
+        elif name.lower() in by_name:
+            idx, how = by_name[name.lower()], 'name'
+        elif keys and fuzz is not None:
+            hit = process.extractOne(name.lower(), keys, scorer=fuzz.token_sort_ratio,
+                                     score_cutoff=ROSTER_NAME_CUTOFF)
+            if hit:
+                idx, how, score, matched = by_name[hit[0]], 'fuzzy name', hit[1], hit[0]
+        person = roster[idx] if idx is not None else None
+        # Kept if we recognise the person at all, or if the affiliation says
+        # Janelia. Filtering on the affiliation alone dropped 125 people the
+        # roster knows: 50 left the field empty, and seven wrote "Advanced
+        # Imaging Center, Howard Hughes Medical Institute", which is Janelia
+        # without the word. An unmatched name needs the affiliation to earn
+        # its place, which is what keeps the 1,092 strangers out.
+        # Kept if we recognise the person at all, or if the affiliation says
+        # Janelia. Filtering on the affiliation alone dropped 125 people the
+        # roster knows: 50 left the field empty, and seven wrote "Advanced
+        # Imaging Center, Howard Hughes Medical Institute", which is Janelia
+        # without the word. An unmatched name needs the affiliation to earn
+        # its place, which is what keeps the strangers out.
+        keep = bool(person or entry['janelia'])
+        rows.append({'keep': keep, 'name': name, 'orcid': entry['orcid'],
+                     'dois': sorted(entry['dois']),
+                     'affiliations': sorted(entry['affiliations']),
+                     'kind': _classify_janelian(person) if person else 'unknown',
+                     'how': how, 'score': score, 'matched': matched, 'person': person})
+    # Both totals come from the one pass, so each chip can carry its count.
+    total_all = len(rows)
+    total_janelia = sum(1 for r in rows if r['keep'])
+    if not everyone:
+        rows = [r for r in rows if r['keep']]
+    _flag_duplicates(rows, lambda r: r['name'])
+    counts = collections.Counter(r['kind'] for r in rows)
+    html = ("<p>Everyone credited on a Janelia Zenodo deposit, matched against the "
+            "roster by ORCID and then by name. Zenodo publishes no list of the people "
+            "at an institution, so this is drawn from the depositors of the records we "
+            "hold.</p>"
+            "<p>Shown by default: everybody the roster recognises, plus anyone whose "
+            "affiliation says Janelia. A Zenodo deposit is often a software release "
+            "carrying its whole contributor list, so the other view adds a further "
+            "thousand or so collaborators from elsewhere.</p>")
+    # Unfiltered this is 1,581 people and four in five are strangers: a Zenodo
+    # deposit is often a software release carrying its whole contributor list.
+    # Zenodo is the only one of these platforms that records an affiliation, so
+    # it is the only one where that can be narrowed honestly.
+    shown = "Janelia people" if not everyone else "Everyone credited"
+    # The app's chip bar, as the tag and affiliation filters use, rather than
+    # two links in a sentence: a control that changes what the table holds
+    # should not read as prose.
+    # A hugging frame with the label in its own compartment, divided by a real
+    # border rather than the dimmed pipe the year pulldown draws. overflow
+    # hidden so the divider cannot poke past the rounded corner.
+    html += filter_frame('Showing',
+                            (("Janelia people", "/zenodo_users",
+                              total_janelia, not everyone),
+                             ("Everyone credited", "/zenodo_users?scope=all",
+                              total_all, everyone)))
+    cards = [(shown, f"{len(rows):,}"),
+             ("Deposits", f"{len({d for r in rows for d in r['dois']}):,}")]
+    cards += [(label, f"{counts.get(key, 0):,}") for key, label, _, _, _ in ROSTER_USER_KINDS]
+    html += stat_cards(cards)
+    html += _status_legend()
+    labels = {k: lab for k, lab, _, _, _ in ROSTER_USER_KINDS}
+    order = {key: num for num, (key, _, _, _, _) in enumerate(ROSTER_USER_KINDS)}
+    trows = []
+    fileoutput = ""
+    for row in sorted(rows, key=lambda r: (order[r['kind']], r['name'].lower())):
+        badge = _status_badge(row['kind'])
+        person = row['person']
+        roster_name = ''
+        if person:
+            roster_name = row['matched'].title() if row['matched'] else \
+                f"{(person.get('given') or ['?'])[0]} {(person.get('family') or ['?'])[0]}"
+            if person.get('userIdO365'):
+                roster_name = f"<a href='/userui/{escape(person['userIdO365'])}'>" \
+                              f"{escape(roster_name)}</a>"
+            else:
+                roster_name = escape(roster_name)
+        how = escape(row['how'])
+        if row['score'] is not None:
+            how += f" ({row['score']:.0f})"
+        shown_dois = ' '.join(doi_link(d) for d in row['dois'][:ZENODO_EXAMPLES])
+        if len(row['dois']) > ZENODO_EXAMPLES:
+            shown_dois += f" &hellip; (+{len(row['dois']) - ZENODO_EXAMPLES:,})"
+        # Every spelling of the affiliation is kept: a depositor who writes it
+        # one way on one record and another way on the next is exactly how the
+        # Janelia filter misses somebody, and the column is where that shows.
+        aff = '; '.join(row['affiliations'])
+        trows.append([_name_cell(row),
+                      safe(f"<a href='{ORCID}{escape(row['orcid'])}' target='_blank'>"
+                           f"{escape(row['orcid'])}</a>") if row['orcid'] else '',
+                      safe(badge), safe(roster_name), safe(how),
+                      cell(aff[:60] + ('&hellip;' if len(aff) > 60 else ''), sort=aff),
+                      cell(f"{len(row['dois']):,}", sort=len(row['dois']), align='right'),
+                      safe(shown_dois)])
+        fileoutput += f"{row['name']}\t{row['orcid'] or ''}\t{labels[row['kind']]}\t" \
+                      f"{row['how']}\t{row['score'] or ''}\t{aff}\t{len(row['dois'])}\t" \
+                      f"{', '.join(row['dois'])}\n"
+    html += create_downloadable('zenodo_users',
+                                ['Name', 'ORCID', 'Status', 'Matched by', 'Score',
+                                 'Affiliation', 'Deposits', 'DOIs'], fileoutput)
+    html += render_table(['Depositor', 'ORCID', 'Status', 'Roster name', 'Matched by',
+                          'Affiliation', 'Deposits', 'Examples'], trows,
+                         css="tablesorter numbers-scroll")
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="Zenodo users", html=html,
                                          navbar=generate_navbar('DataCite')))
 
 
@@ -19332,6 +19594,59 @@ def _award_label(entry):
     return entry['spellings'].most_common(1)[0][0]
 
 
+def _award_funder_groups(index):
+    """ Award index collapsed to one entry per funder.
+
+        Built whether or not the grouped view is being rendered, because the
+        view switch shows how many funders the awards collapse to, and a
+        count derived any other way would disagree with the table.
+        Keyword arguments:
+          index: the _award_index result
+        Returns:
+          Dict of group key to funder detail
+    """
+    # An entry with no ID whose name is exactly a funder we hold is that
+    # funder - "Medical Research Council" deposited without an identifier is
+    # not a second council. Exact string equality only, never similarity:
+    # that is what keeps "Wellcome" (100004440) out of "Wellcome Trust"
+    # (100010269), which are different registry entries.
+    #
+    # Eight names in the registry belong to more than one ID - "Human
+    # Frontier Science Program" is 100004412 and 501100000854 - and there is
+    # nothing in a deposit to say which was meant. Those stay unresolved
+    # rather than being assigned to whichever came back first.
+    by_name = collections.defaultdict(set)
+    registry = {}
+    for known in DB['dis'].funder.find({}, {"id": 1, "name": 1}):
+        if known.get('name'):
+            by_name[known['name'].strip().lower()].add(known['id'])
+            registry[known['id']] = known['name']
+    resolve = {name: next(iter(ids)) for name, ids in by_name.items() if len(ids) == 1}
+    funders = {}
+    for (afid, _), entry in index.items():
+        name = entry['funder'].strip().lower()
+        gfid = afid or resolve.get(name)
+        gkey = gfid or f"name:{name}"
+        group = funders.setdefault(gkey, {'funder': entry['funder'], 'fid': gfid,
+                                          'awards': 0, 'dois': set()})
+        group['awards'] += 1
+        group['dois'].update(entry['dois'])
+    # Label an identified funder with the registry's own name rather than
+    # whichever spelling a deposit happened to use. Two deposits can type
+    # "Wellcome Trust" while carrying different IDs, which rendered as two
+    # identical rows; the registry calls those Wellcome Trust and Wellcome.
+    for group in funders.values():
+        if group['fid'] and group['fid'] in registry:
+            group['funder'] = registry[group['fid']]
+    # Eight registry names really do belong to two funders apiece. Nothing
+    # distinguishes them on screen, so those carry their ID.
+    shown = collections.Counter(g['funder'] for g in funders.values())
+    for group in funders.values():
+        if group['fid'] and shown[group['funder']] > 1:
+            group['funder'] = f"{group['funder']} [{group['fid']}]"
+    return funders
+
+
 @app.route('/awards')
 def show_awards():
     '''
@@ -19394,57 +19709,16 @@ def show_awards():
     # alongside everything else rather than being hidden.
     grouped = request.args.get('group') == 'funder' and not fid
     # Only offered on the unfiltered page: narrowed to one funder, grouping by
-    # funder is a table of one row. The view you are on is plain text rather
-    # than a styled button - a primary button linking to the page it is already
-    # on reads as an action and does nothing.
+    # funder is a table of one row.
     if not fid:
-        flat = "Every award" if not grouped \
-            else "<a href='/awards'>Every award</a>"
-        grp = "Grouped by funder" if grouped \
-            else "<a href='/awards?group=funder'>Grouped by funder</a>"
-        html += f"<p><b>View:</b> {flat} &middot; {grp}</p>"
+        html += filter_frame('View',
+                             (("Every award", "/awards", len(index), not grouped),
+                              ("Grouped by funder", "/awards?group=funder",
+                               len(_award_funder_groups(index)), grouped)))
     rows = []
     fileoutput = ""
     if grouped:
-        # An entry with no ID whose name is exactly a funder we hold is that
-        # funder - "Medical Research Council" deposited without an identifier is
-        # not a second council. Exact string equality only, never similarity:
-        # that is what keeps "Wellcome" (100004440) out of "Wellcome Trust"
-        # (100010269), which are different registry entries.
-        #
-        # Eight names in the registry belong to more than one ID - "Human
-        # Frontier Science Program" is 100004412 and 501100000854 - and there is
-        # nothing in a deposit to say which was meant. Those stay unresolved
-        # rather than being assigned to whichever came back first.
-        by_name = collections.defaultdict(set)
-        registry = {}
-        for known in DB['dis'].funder.find({}, {"id": 1, "name": 1}):
-            if known.get('name'):
-                by_name[known['name'].strip().lower()].add(known['id'])
-                registry[known['id']] = known['name']
-        resolve = {name: next(iter(ids)) for name, ids in by_name.items() if len(ids) == 1}
-        funders = {}
-        for (afid, _), entry in index.items():
-            name = entry['funder'].strip().lower()
-            gfid = afid or resolve.get(name)
-            gkey = gfid or f"name:{name}"
-            group = funders.setdefault(gkey, {'funder': entry['funder'], 'fid': gfid,
-                                              'awards': 0, 'dois': set()})
-            group['awards'] += 1
-            group['dois'].update(entry['dois'])
-        # Label an identified funder with the registry's own name rather than
-        # whichever spelling a deposit happened to use. Two deposits can type
-        # "Wellcome Trust" while carrying different IDs, which rendered as two
-        # identical rows; the registry calls those Wellcome Trust and Wellcome.
-        for group in funders.values():
-            if group['fid'] and group['fid'] in registry:
-                group['funder'] = registry[group['fid']]
-        # Eight registry names really do belong to two funders apiece. Nothing
-        # distinguishes them on screen, so those carry their ID.
-        shown = collections.Counter(g['funder'] for g in funders.values())
-        for group in funders.values():
-            if group['fid'] and shown[group['funder']] > 1:
-                group['funder'] = f"{group['funder']} [{group['fid']}]"
+        funders = _award_funder_groups(index)
         for group in sorted(funders.values(),
                             key=lambda g: (-len(g['dois']), g['funder'].lower())):
             funder_cell = escape(group['funder'])
