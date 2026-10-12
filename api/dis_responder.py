@@ -7375,8 +7375,7 @@ def dois_mytags(year='All', show='full'):
     ident += f"<tr><td>Also see:</td><td><a href='/mypapers'>" \
              + "Publications credited to this person</a></td></tr>"
     ident += "</table><br>"
-    htmlp = year_pulldown("dois/mytags", suffix=f"/{show}" if show != 'full' else '') \
-            + journal_buttons(show, f"/dois/mytags/{year}") + "<br>"
+    htmlp = year_pulldown("dois/mytags", suffix=f"/{show}" if show != 'full' else '') + "<br>"
     title = "DOIs for my affiliations"
     if year != 'All':
         title += f" ({year})"
@@ -7423,10 +7422,18 @@ def dois_mytags(year='All', show='full'):
     # credit_mark are shared with /mypapers and /userui so the three cannot
     # disagree about what counts as credit.
     my_eids = credit_eids(row)
+    # The journals/preprints toggle belongs beside the version filter, the way
+    # /mypapers has it: both change which rows the table shows. Rendered up with
+    # the year pulldown it was separated from its sibling by the affiliation
+    # line and the whole chip bar. standard_doi_table emits the version button
+    # itself, so the toggle is spliced in ahead of it - the person page splices
+    # the same control into the same output for the same reason.
     html, cnt, _ = standard_doi_table(
         works, count_card=True, download_name='my_affiliations',
         mark_fn=(lambda work: credit_mark(work, my_eids)) if my_eids else None,
         class_fn=lambda work: ' '.join(tag_class[name] for name in row_tags[work['doi']]))
+    html = html.replace("<button id='verbtn'",
+                        journal_buttons(show, f"/dois/mytags/{year}") + "<button id='verbtn'", 1)
     chipbar = ""
     if cnt and len(tags) > 1:
         chips = "".join(
@@ -7442,7 +7449,12 @@ def dois_mytags(year='All', show='full'):
     if cnt:
         html = f"{ident}{htmlp}Affiliations: {taglinks}<br><br>{chipbar}{html}"
     else:
+        # The toggle is spliced into the table above, which this path has none of.
+        # Repeated here on purpose: an empty list is exactly when somebody needs
+        # it, because "journals only" may be what emptied it, and without the
+        # button the only way back is editing the URL.
         html = ident + htmlp + f"Affiliations: {taglinks}<br><br>" \
+               + journal_buttons(show, f"/dois/mytags/{year}") \
                + render_warning("No DOIs were found for these affiliations.", 'warning')
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
