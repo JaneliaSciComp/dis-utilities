@@ -699,27 +699,38 @@ def profile():
     person = current_user()
     record = _auth_record(person.get('orcid')) or {}
     orcid = person.get('orcid')
-    rows = [['Name', display_person_name(person)],
-            ['ORCID iD', safe(f"<a href='https://orcid.org/{escape(orcid)}' target='_blank' "
-                              f"rel='noopener'>{escape(orcid)}</a>")],
-            ['At Janelia', safe(janelia_tenure(person))]]
-    if person.get('userIdO365'):
-        rows.append(['User ID', person['userIdO365']])
-    if person.get('affiliations'):
-        rows.append(['Affiliations', safe(affiliation_links(person))])
-    rows.append(['Worker type', person.get('workerType') or '-'])
-    # Authorizations are not built yet; say so rather than implying none exist.
-    rows.append(['Authorizations',
-                 safe("<span style='color:#888'>Everyone can see almost every page. "
-                      "Named authorizations - for cost data, for administration - "
-                      "are not in place yet.</span>")])
-    if record.get('last_login'):
-        rows.append(['Last sign-in', str(record['last_login'])[:19]])
     html = (f"<div style='display:flex; align-items:center; gap:18px; margin-bottom:18px;'>"
             f"{avatar_html(person, record.get('photoURL'), px=AVATAR_PROFILE_PX)}"
             f"<h3 style='margin:0'>{escape(display_person_name(person))}</h3></div>")
-    html += render_table(['', ''], rows, css='borderless')
+    # Built the same way as the person page at /orcidui, and for the same reason:
+    # person_platform_logos() returns a <tr>, not a block, so it has to be
+    # appended INSIDE a table. Handed to render_table() it landed after the
+    # closing tag, the browser discarded the cells, and "Also on:" collapsed
+    # against the logos.
+    html += "<table class='borderless'>"
+    html += f"<tr><td>Given name:</td><td>{escape(', '.join(sorted(person.get('given') or [])))}" \
+            "</td></tr>"
+    html += f"<tr><td>Family name:</td><td>{escape(', '.join(sorted(person.get('family') or [])))}" \
+            "</td></tr>"
+    html += f"<tr><td>ORCID:</td><td><a href='{ORCID}{escape(orcid)}' target='_blank' " \
+            f"rel='noopener'>{escape(orcid)}</a></td></tr>"
+    if person.get('userIdO365'):
+        link = f"<a href='{WORKDAY}{escape(person['userIdO365'])}' target='_blank'>" \
+               f"{escape(person['userIdO365'])}</a>"
+        html += f"<tr><td>User ID:</td><td>{link}</td></tr>"
+    tenure = janelia_tenure(person)
+    if tenure:
+        html += f"<tr><td>At Janelia:</td><td>{tenure}</td></tr>"
+    if person.get('affiliations'):
+        html += "<tr><td>Affiliations:</td><td>" + affiliation_links(person) + "</td></tr>"
     html += person_platform_logos(person)
+    if record.get('last_login'):
+        html += f"<tr><td>Last sign-in:</td><td>{escape(str(record['last_login'])[:19])}</td></tr>"
+    # Authorizations are not built yet; say so rather than implying none exist.
+    html += ("<tr><td>Authorizations:</td><td><span style='color:#888'>Everyone can see "
+             "almost every page. Named authorizations - for cost data, for administration "
+             "- are not in place yet.</span></td></tr>")
+    html += "</table><br>"
     # The API token is step 7 of docs/AUTHENTICATION_PLAN.md. Named here because
     # this is where people will come looking for it.
     html += ("<h4 style='margin-top:28px;'>API token</h4>"
