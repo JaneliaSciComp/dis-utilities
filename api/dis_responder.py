@@ -12584,13 +12584,20 @@ def metrics_panel(rows):
 begins when you arrived. They are not an assessment, they are not compared with
 anyone else's, and they are not used in any review.</p>
 {stat_cards(cards, div_id='mymetrics')}
-<p>Citation counts: {curve}.</p>
+<p><b>What these mean.</b> Your <b>h-index is {met['h_index']}</b>: {met['h_index']} of your
+papers have each been cited at least {met['h_index']} times. It goes up only when an
+additional paper reaches that many citations, so it rewards a body of steadily-cited work
+rather than one much-cited paper. The <b>median</b> is the middle value &mdash; half your
+papers are cited more than {met['median']:,.0f} times, half less. We show the median rather
+than the average because one paper usually carries a large share of the total, which makes
+an average say more about that paper than about the rest.</p>
+<p><b>How your citations are spread:</b> {curve}.</p>
 <p><b>Last five complete years ({met['window']}):</b> {met['recent_works']:,} articles and
 preprints, {met['recent_total']:,} citations, h-index {met['recent_h']:,}.
 This window is the one figure here unaffected by the database holding only your
 Janelia-affiliated work &mdash; if you have been at Janelia longer than five years it is
 the same number your full publication record would give.</p>
-<p style="color:#888; max-width:52em;">The h-index cannot exceed your
+<p style="color:#888; max-width:52em;"><b>What they do not tell you.</b> The h-index cannot exceed your
 {met['works']:,} articles and preprints here, so for a recent arrival it measures time
 at Janelia more than anything else. Expect these figures to be lower than Google
 Scholar, which counts your whole career and from a different index. The median is shown
