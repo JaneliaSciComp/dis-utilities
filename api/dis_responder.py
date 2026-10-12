@@ -286,6 +286,11 @@ ORCID_RE = re.compile(r'^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$')
 # with 2 replicas x 3 gunicorn workers the worst case is 6 writes a minute
 # per active person - still nothing, and it avoids any shared state.
 LAST_SEEN_THROTTLE = 60
+# Avatar diameters. The Janelia logo beside it in the header is 72px tall, so
+# the badge sits at roughly three quarters of that - clearly present without
+# competing with the logo.
+AVATAR_PX = 52
+AVATAR_PROFILE_PX = 120
 # Local development is plain HTTP, and a Secure cookie is not stored over plain
 # HTTP - the sign-in would appear to succeed and then bounce straight back to
 # the form. Production is HTTPS at the router, so Secure is the default and the
@@ -423,7 +428,7 @@ def _refresh_photo(person):
         pass
 
 
-def avatar_html(person, photo_url=None, px=36):
+def avatar_html(person, photo_url=None, px=None):
     ''' A circular avatar for a person: their photograph, or their initials.
 
         ORCID holds no photographs - it has no such field - so the picture comes
@@ -439,6 +444,7 @@ def avatar_html(person, photo_url=None, px=36):
     '''
     if not person:
         return safe('')
+    px = px or AVATAR_PX
     name = display_person_name(person)
     tip = escape(f"{name} - your profile", quote=True)
     if photo_url:
@@ -711,7 +717,7 @@ def profile():
     if record.get('last_login'):
         rows.append(['Last sign-in', str(record['last_login'])[:19]])
     html = (f"<div style='display:flex; align-items:center; gap:18px; margin-bottom:18px;'>"
-            f"{avatar_html(person, record.get('photoURL'), px=96)}"
+            f"{avatar_html(person, record.get('photoURL'), px=AVATAR_PROFILE_PX)}"
             f"<h3 style='margin:0'>{escape(display_person_name(person))}</h3></div>")
     html += render_table(['', ''], rows, css='borderless')
     html += person_platform_logos(person)
