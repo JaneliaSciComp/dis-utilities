@@ -12828,10 +12828,19 @@ def source_metrics(year='All'):  # pylint: disable=too-many-locals
             # displays it per person.
             fwci = sorted(r['jrc_openalex_impact']['fwci'] for r in rows
                           if (r.get('jrc_openalex_impact') or {}).get('fwci') is not None)
+            # "checked" and "cited" are different populations and the page used to
+            # conflate them: the query selects DOIs that have BEEN LOOKED UP, which
+            # is every one of them, while the row was labelled "DOIs cited" and its
+            # share read 100%. Fewer than half are actually cited, which is also why
+            # the median over the whole set was zero - DataCite deposits outnumber
+            # articles and are rarely cited.
+            cited_counts = [c for c in counts if c > 0]
             cite[obtained] = {"dois": len(counts), "all": all_dois,
+                              "cited": len(cited_counts),
+                              "cited_pct": len(cited_counts) / len(counts) * 100 if counts else 0,
                               "reach": len(counts) / all_dois * 100 if all_dois else 0,
                               "total": sum(counts),
-                              "median": statistics.median(counts) if counts else 0,
+                              "median": statistics.median(cited_counts) if cited_counts else 0,
                               "fwci": statistics.median(fwci) if fwci else None,
                               "fwci_n": len(fwci),
                               **citation_impact_indices(nonver)}
@@ -12864,12 +12873,16 @@ def source_metrics(year='All'):  # pylint: disable=too-many-locals
                                message=error_message(err))
     # Combined column (pooled, not per-source sums - see pooled_* above)
     pooled_nonver = [c for c, _ in pooled_nonver_works]
+    pooled_cited = [c for c in pooled_counts if c > 0]
     c_all = cite['Crossref']['all'] + cite['DataCite']['all']
     c_dois = cite['Crossref']['dois'] + cite['DataCite']['dois']
     cite['Combined'] = {"dois": c_dois, "all": c_all,
                         "reach": c_dois / c_all * 100 if c_all else 0,
+                        "cited": len(pooled_cited),
+                        "cited_pct": (len(pooled_cited) / len(pooled_counts) * 100
+                                      if pooled_counts else 0),
                         "total": sum(pooled_counts),
-                        "median": statistics.median(pooled_counts) if pooled_counts else 0,
+                        "median": statistics.median(pooled_cited) if pooled_cited else 0,
                         "fwci": statistics.median(pooled_fwci) if pooled_fwci else None,
                         "fwci_n": len(pooled_fwci),
                         **citation_impact_indices(pooled_nonver)}
@@ -12942,10 +12955,14 @@ def source_metrics(year='All'):  # pylint: disable=too-many-locals
                 cells.append(f"{val:,}")
         return cells
     # ----- citations by source -----
-    crows = [mrow("DOIs cited", cite, 'dois'),
-             mrow("Reach (% of DOIs)", cite, 'reach', 'pct'),
+    # Labels follow /citation_metrics, which drew this distinction when zeros
+    # began to be stored and which this page was never brought into line with.
+    crows = [mrow("Checked for citations", cite, 'dois'),
+             mrow("Checked (% of all DOIs)", cite, 'reach', 'pct'),
+             mrow("Cited", cite, 'cited'),
+             mrow("Cited (% of checked)", cite, 'cited_pct', 'pct'),
              mrow("Citations", cite, 'total'),
-             mrow("Median / DOI", cite, 'median', 'median'),
+             mrow("Median per cited DOI", cite, 'median', 'median'),
              mrow("h-index", cite, 'h_index'),
              mrow("g-index", cite, 'g_index')]
     if h5_range:
