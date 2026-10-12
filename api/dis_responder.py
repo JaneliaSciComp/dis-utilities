@@ -282,6 +282,10 @@ RESTRICTED_SESSION_KEY = 'orcid'
 # an orcid document is published by endpoints that are open today.
 AUTH_COLLECTION = 'user_auth'
 ORCID_RE = re.compile(r'^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$')
+# Seconds between last_seen writes for one person. Per worker process, so
+# with 2 replicas x 3 gunicorn workers the worst case is 6 writes a minute
+# per active person - still nothing, and it avoids any shared state.
+LAST_SEEN_THROTTLE = 60
 # Local development is plain HTTP, and a Secure cookie is not stored over plain
 # HTTP - the sign-in would appear to succeed and then bounce straight back to
 # the form. Production is HTTPS at the router, so Secure is the default and the
@@ -356,7 +360,34 @@ def current_user():
             person = None
         if may_sign_in(person):
             g.dis_user = person
+            _touch_last_seen(orcid)
     return g.dis_user
+
+
+def _touch_last_seen(orcid):
+    ''' Record that this person is using the site, at most once a minute.
+
+        A signed cookie leaves no server-side record, so there is otherwise no
+        way to answer "who is actually using this". Throttled because this runs
+        on every authenticated request: without it, a single page with a dozen
+        assets would be a dozen writes.
+
+        Failure is ignored on purpose - a page must not break because a
+        timestamp could not be written.
+        Keyword arguments:
+          orcid: ORCID iD
+        Returns:
+          None
+    '''
+    now = datetime.now()
+    seen = app.config.setdefault('LAST_SEEN_WRITTEN', {})
+    if (now - seen.get(orcid, datetime.min)).total_seconds() < LAST_SEEN_THROTTLE:
+        return
+    seen[orcid] = now
+    try:
+        DB['dis'][AUTH_COLLECTION].update_one({"orcid": orcid}, {"$set": {"last_seen": now}})
+    except Exception:
+        pass
 
 
 def _auth_record(orcid):
@@ -416,7 +447,19 @@ def restricted(view):
             return make_response(render_template('error.html', urlroot=request.url_root,
                                                  title=render_warning("Restricted page"),
                                                  message=problem), 503)
-        if not session.get(RESTRICTED_SESSION_KEY):
+        # current_user(), not a bare session check: it re-reads the orcid
+        # document and re-applies the access rule on EVERY request, so somebody
+        # who leaves - or whose alumni flag is flipped by the nightly People
+        # sync - loses access at their next page load rather than whenever they
+        # happen to close their browser. It is also what records last_seen.
+        if not current_user():
+            if session.get(RESTRICTED_SESSION_KEY):
+                # A valid-looking cookie for somebody the roster no longer
+                # permits. Clear it, or they carry a dead session around and
+                # the sign-in form cannot explain why.
+                print(f"Session ended: {session.get(RESTRICTED_SESSION_KEY)} no longer "
+                      f"passes the access rule")
+                session.clear()
             # full_path appends a bare '?' when there is no query string, which
             # would otherwise show up in the address bar after signing in.
             target = request.full_path.rstrip('?')

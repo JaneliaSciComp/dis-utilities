@@ -182,6 +182,25 @@ def ask_password(name):
         return first
 
 
+def describe_activity(last_seen):
+    ''' How recently somebody was using the site
+        Keyword arguments:
+          last_seen: datetime, or None
+        Returns:
+          Readable string
+    '''
+    if not last_seen:
+        return '-'
+    secs = (datetime.now() - last_seen).total_seconds()
+    if secs < 120:
+        return 'now'
+    if secs < 3600:
+        return f"{int(secs // 60)} min ago"
+    if secs < 86400:
+        return f"{int(secs // 3600)} hr ago"
+    return f"{int(secs // 86400)} days ago"
+
+
 def list_users():
     ''' Report who may sign in
         Keyword arguments:
@@ -198,19 +217,23 @@ def list_users():
               "pages will send everyone to the sign-in form and refuse them.")
         return
     print(f"{len(rows)} credential(s):\n")
-    print(f"  {'ORCID iD':22} {'name':28} {'added':12} {'last sign-in'}")
+    print(f"  {'ORCID iD':22} {'name':26} {'added':12} {'last sign-in':20} {'active'}")
     for row in rows:
         person = DB['dis'].orcid.find_one({"orcid": row['orcid']})
         if person:
             name = display_name(person)
             allowed, _ = may_sign_in(person)
             if not allowed:
-                name += "  [BLOCKED by the access rule]"
+                name += "  [BLOCKED]"
         else:
-            name = "*** no longer in the orcid collection ***"
+            name = "*** not in orcid collection ***"
         last = row.get('last_login')
-        print(f"  {row['orcid']:22} {name:28} {str(row.get('created', ''))[:10]:12} "
-              f"{str(last)[:19] if last else 'never'}")
+        print(f"  {row['orcid']:22} {name:26} {str(row.get('created', ''))[:10]:12} "
+              f"{(str(last)[:19] if last else 'never'):20} {describe_activity(row.get('last_seen'))}")
+    print("\nActivity is when the person last loaded a page, recorded at most once a")
+    print("minute. A signed cookie leaves no server-side record, so this is the")
+    print("closest thing to a session list - somebody idle for an hour may still")
+    print("hold a valid session, and closing the browser ends it without a trace.")
 
 
 def add_user():
