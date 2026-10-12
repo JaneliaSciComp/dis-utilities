@@ -7389,8 +7389,8 @@ def dois_mytags(year='All', show='full'):
     # The same person from the other angle: this page is what their affiliations
     # published, /mypapers is what they are credited with. A reader on one had no
     # way to reach the other.
-    ident += f"<tr><td>Also see:</td><td><a href='/mypapers'>" \
-             + "Publications credited to this person</a></td></tr>"
+    ident += "<tr><td>Also see:</td><td><a href='/mypapers'>" \
+             + "Publications credited to me</a></td></tr>"
     ident += "</table><br>"
     htmlp = year_pulldown("dois/mytags", suffix=f"/{show}" if show != 'full' else '') + "<br>"
     title = "DOIs for my affiliations"
@@ -7405,9 +7405,9 @@ def dois_mytags(year='All', show='full'):
         return make_response(render_template(
             'general.html', urlroot=request.url_root, title=title,
             html=ident + render_warning(
-                "We have no group, affiliations or managed teams on file for this "
-                "person, so there is nothing to search for. This is about the "
-                "affiliation record, not about their publications.", 'warning'),
+                "We have no group, affiliations or managed teams on file for you, "
+                "so there is nothing to search for. This is about the affiliation "
+                "record, not about your publications.", 'warning'),
             navbar=generate_navbar('Tag/affiliation')))
     # Sorted, and marked current or past where we can tell. An unknown split shows
     # the affiliations unmarked rather than calling them all past, which is what a
@@ -18824,7 +18824,7 @@ def my_papers_body(orc, show, year='All'):
     # The affiliation view of the same person: this page is what they are credited
     # with, /dois/mytags is what their affiliations published.
     ident += "<tr><td>Also see:</td><td><a href='/dois/mytags'>" \
-             + "DOIs from this person's affiliations</a></td></tr>"
+             + "DOIs from my affiliations</a></td></tr>"
     ident += "</table>"
     if not rows:
         empty = ("We have no publications on file for you in that year."
