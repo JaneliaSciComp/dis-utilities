@@ -287,9 +287,8 @@ ORCID_RE = re.compile(r'^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$')
 # per active person - still nothing, and it avoids any shared state.
 LAST_SEEN_THROTTLE = 60
 # Avatar diameters. The Janelia logo beside it in the header is 72px tall, so
-# the badge sits at roughly three quarters of that - clearly present without
-# competing with the logo.
-AVATAR_PX = 52
+# the badge sits just under that - present without overtopping the logo.
+AVATAR_PX = 62
 AVATAR_PROFILE_PX = 120
 # Local development is plain HTTP, and a Secure cookie is not stored over plain
 # HTTP - the sign-in would appear to succeed and then bounce straight back to
