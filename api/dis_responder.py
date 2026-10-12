@@ -810,11 +810,60 @@ def profile():
              "<p style='color:#888'>Not issued yet. When the REST endpoints require "
              "authentication, your token will be shown here, once, with a button to "
              "replace it.</p>")
-    html += (f"<p style='margin-top:24px;'><a class='btn btn-outline-secondary' "
-             f"href='{escape(url_for('logout'))}'>Sign out</a></p>")
+    html += ("<p style='margin-top:24px;'>"
+             "<a class='btn btn-outline-info' href='/mypapers'>My publications</a>&nbsp;"
+             "<a class='btn btn-outline-info' href='/mymetrics'>My metrics</a>&nbsp;"
+             f"<a class='btn btn-outline-secondary' href='{escape(url_for('logout'))}'>"
+             "Sign out</a></p>")
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="Your profile", html=html,
+                                         navbar=generate_navbar('')))
+
+
+@app.route('/mymetrics')
+@restricted
+def mymetrics():
+    '''
+    Show the signed-in person descriptive metrics for their own publications
+    ---
+    tags:
+      - DOI
+    responses:
+      '200':
+        description: HTML page
+      '302':
+        description: Not signed in, redirected to the sign-in form
+    '''
+    person = current_user()
+    eids = credit_eids(person)
+    if not eids:
+        endpoint_access()
+        return make_response(render_template(
+            'general.html', urlroot=request.url_root, title="My publication metrics",
+            html=render_warning("You have no employee ID on file, so no publication can be "
+                                "matched to you here.", 'warning'),
+            navbar=generate_navbar('')))
+    try:
+        rows = list(DB['dis'].dois.find({"jrc_author": {"$in": eids}}))
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get your publications"),
+                               message=error_message(err))
+    ident = "<table class='borderless'>" \
+            + f"<tr><td>Name:</td><td>{escape(display_person_name(person))}</td></tr>" \
+            + f"<tr><td>ORCID:</td><td><a href='{ORCID}{escape(person['orcid'])}' " \
+            + f"target='_blank' rel='noopener'>{escape(person['orcid'])}</a></td></tr>"
+    tenure = janelia_tenure(person)
+    if tenure:
+        ident += f"<tr><td>At Janelia:</td><td>{tenure}</td></tr>"
+    ident += "<tr><td>Also see:</td><td><a href='/mypapers'>Publications credited to me</a>" \
+             " &middot; <a href='/dois/mytags'>DOIs from my affiliations</a></td></tr>"
+    ident += "</table>"
+    html = ident + metrics_panel(rows)
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="My publication metrics", html=html,
                                          navbar=generate_navbar('')))
 
 
@@ -12530,8 +12579,7 @@ def metrics_panel(rows):
              ("Citations to them", f"{met['total']:,}"),
              ("Median per paper", f"{met['median']:,.0f}"),
              ("h-index", f"{met['h_index']:,}")]
-    html = f"""<h4 style="margin-top:26px;">Your publication metrics</h4>
-<p style="color:#888; max-width:52em;">Descriptive figures about your own record.
+    html = f"""<p style="color:#888; max-width:52em;">Descriptive figures about your own record.
 They are not an assessment, they are not compared with anyone else's, and they are
 not used in any review.</p>
 {stat_cards(cards, div_id='mymetrics')}
@@ -19006,7 +19054,8 @@ def my_papers_body(orc, show, year='All'):
     # The affiliation view of the same person: this page is what they are credited
     # with, /dois/mytags is what their affiliations published.
     ident += "<tr><td>Also see:</td><td><a href='/dois/mytags'>" \
-             + "DOIs from my affiliations</a></td></tr>"
+             + "DOIs from my affiliations</a> &middot; " \
+             + "<a href='/mymetrics'>My publication metrics</a></td></tr>"
     ident += "</table>"
     if not rows:
         empty = ("We have no publications on file for you in that year."
@@ -19058,7 +19107,7 @@ def my_papers_body(orc, show, year='All'):
                                      extra_headers=['In the deposit'],
                                      extra_fn=lambda row: [evidence_cell(match_evidence(row, orc),
                                                                          oid, row['doi'])])
-    return ident + stat_cards(cards, div_id='mypapers-stats') + note + metrics_panel(rows) \
+    return ident + stat_cards(cards, div_id='mypapers-stats') + note \
            + year_pulldown(f"mypapers/{show}", query=True) + "<br><br>" \
            + journal_buttons(show, "/mypapers",
                              '' if year == 'All' else f"?year={year}") + cbutton + table
