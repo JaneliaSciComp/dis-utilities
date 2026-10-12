@@ -12504,6 +12504,114 @@ SOURCE_METRIC_USAGE_FIELDS = ("jrc_figshare_counts", "jrc_zenodo_counts",
                               "jrc_protocolsio_counts", "jrc_elife_counts")
 
 
+def metrics_panel(rows):
+    ''' The metrics block on a person's own publications page.
+
+        Shown only to the person themselves. These are descriptive figures about
+        their own record, not an assessment: HHMI is a DORA signatory, and DORA's
+        2024 guidance on indicators is explicit that field-weighted means such as
+        FWCI are "not suitable for evaluating individual researchers". Nothing
+        here is comparative, nothing is ranked against anybody, and the page says
+        so.
+
+        Every number is paired with what it does not tell you. The corpus holds
+        Janelia-affiliated work, so lifetime figures are truncated at the hire
+        date; the five-year block is the part that is not.
+        Keyword arguments:
+          rows: dois records for one person
+        Returns:
+          HTML string
+    '''
+    met = author_metrics(rows)
+    if not met['works']:
+        return ""
+    curve = ", ".join(f"<b>{n:,}</b> with &ge;{t}" for t, n in met['thresholds'])
+    cards = [("Articles &amp; preprints", f"{met['works']:,}"),
+             ("Citations to them", f"{met['total']:,}"),
+             ("Median per paper", f"{met['median']:,.0f}"),
+             ("h-index", f"{met['h_index']:,}")]
+    html = f"""<h4 style="margin-top:26px;">Your publication metrics</h4>
+<p style="color:#888; max-width:52em;">Descriptive figures about your own record.
+They are not an assessment, they are not compared with anyone else's, and they are
+not used in any review.</p>
+{stat_cards(cards, div_id='mymetrics')}
+<p>Citation counts: {curve}.</p>
+<p><b>Last five complete years ({met['window']}):</b> {met['recent_works']:,} articles and
+preprints, {met['recent_total']:,} citations, h-index {met['recent_h']:,}.
+This window is the one figure here unaffected by the database holding only your
+Janelia-affiliated work &mdash; if you have been at Janelia longer than five years it is
+the same number your full publication record would give.</p>
+<p style="color:#888; max-width:52em;">Lifetime figures count only work affiliated with
+Janelia, so they omit anything published before you arrived, and the h-index cannot
+exceed your {met['works']:,} articles and preprints here. Expect them to be lower than
+Google Scholar, which counts everything and from a different index. The median is shown
+rather than the mean because citation counts are very skewed &mdash; one paper often
+carries a quarter of the total."""
+    if met['other']:
+        html += f"""</p>
+<p style="color:#888; max-width:52em;">Your {met['other']:,} other outputs &mdash; datasets,
+software, protocols &mdash; are excluded from these figures. Such work is very rarely
+cited in a way any index can see (across 1.2 million Zenodo deposits, around 1% of
+datasets and 3% of software are traceably cited), so counting them would drag every
+figure down while saying nothing about their value."""
+    return html + "</p>"
+
+
+def author_metrics(rows):
+    ''' Descriptive metrics for one person's own publications.
+
+        Scope decisions, each of which changes the numbers materially:
+
+        - ARTICLES AND PREPRINTS ONLY. Datasets, software and protocols are
+          almost never cited - across 1.2M Zenodo DOIs only 1.16% of datasets
+          and 3.24% of software are traceably cited at all - so mixing them in
+          drags every average toward zero and says nothing about either kind of
+          work. They are counted separately instead.
+        - VERSION-DEDUPED, so a .v1/.v2 series counts once.
+        - MEDIAN, NOT MEAN. Citation distributions are extremely skewed; in this
+          corpus one paper routinely carries a quarter to a third of a person's
+          citations, which makes the mean a readout of that one paper.
+        - A THRESHOLD CURVE rather than i10 alone. The 10 in i10 is arbitrary and
+          unnormalized - trivial in neuroscience, substantial in mathematics - so
+          showing several thresholds is more honest than privileging one.
+        - A FIVE-YEAR WINDOW alongside the lifetime figures. This is the one set
+          of numbers that is NOT distorted by holding only Janelia-affiliated
+          work: for anyone here longer than the window, the windowed figure is
+          identical to what it would be over their complete career corpus.
+
+        Keyword arguments:
+          rows: dois records for one person
+        Returns:
+          Dict of metrics
+    '''
+    # Versions are deduped out of BOTH counts, or a dataset with five versions
+    # reads as five outputs. Peer-review documents are dropped entirely: eLife
+    # deposits them as separate DOIs crediting the same people, and they are not
+    # anybody's research output.
+    live = [r for r in rows if not DL.is_version(r) and r.get('type') != 'peer-review']
+    scholarly = [r for r in live if DL.is_journal(r) or DL.is_preprint(r)]
+    other = [r for r in live if not (DL.is_journal(r) or DL.is_preprint(r))]
+    counts = sorted((r.get('jrc_citation_count') or 0 for r in scholarly), reverse=True)
+    cited = [c for c in counts if c > 0]
+    idx = citation_impact_indices(counts)
+    # Complete calendar years only - the current year is partial and would show
+    # as a dip every January.
+    cutoff = datetime.now().year - 5
+    recent = [r for r in scholarly
+              if (r.get('jrc_publishing_date') or '')[:4].isdigit()
+              and int(r['jrc_publishing_date'][:4]) >= cutoff
+              and int(r['jrc_publishing_date'][:4]) < datetime.now().year]
+    rcounts = sorted((r.get('jrc_citation_count') or 0 for r in recent), reverse=True)
+    return {'works': len(scholarly), 'other': len(other), 'cited': len(cited),
+            'total': sum(cited),
+            'median': statistics.median(cited) if cited else 0,
+            'h_index': idx['h_index'],
+            'thresholds': [(t, sum(1 for c in cited if c >= t)) for t in (10, 50, 100, 500)],
+            'recent_works': len(recent), 'recent_total': sum(rcounts),
+            'recent_h': citation_impact_indices(rcounts)['h_index'],
+            'window': f"{cutoff}-{datetime.now().year - 1}"}
+
+
 def citation_impact_indices(counts):
     ''' Compute h-, g-, i10- and i100-index from a list of per-work citation
         counts (classic scholarly-impact measures). Callers pass version-deduped
@@ -14856,6 +14964,7 @@ def dois_author(year='All'):
 
 @app.route('/dois_top_author/<string:year>')
 @app.route('/dois_top_author')
+@restricted
 def dois_top_author(year='All'):
     ''' Show top first and last authors
     '''
@@ -18949,7 +19058,7 @@ def my_papers_body(orc, show, year='All'):
                                      extra_headers=['In the deposit'],
                                      extra_fn=lambda row: [evidence_cell(match_evidence(row, orc),
                                                                          oid, row['doi'])])
-    return ident + stat_cards(cards, div_id='mypapers-stats') + note \
+    return ident + stat_cards(cards, div_id='mypapers-stats') + note + metrics_panel(rows) \
            + year_pulldown(f"mypapers/{show}", query=True) + "<br><br>" \
            + journal_buttons(show, "/mypapers",
                              '' if year == 'All' else f"?year={year}") + cbutton + table
