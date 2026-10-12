@@ -517,19 +517,27 @@ def with_openalex_auth(params):
     return params
 
 
-def openalex_citing(doi, existing_oa_count=None):  # pylint: disable=too-many-return-statements
+def openalex_citing(doi, existing_oa_count=None, impact=None):  # pylint: disable=too-many-return-statements
     ''' Get the set of DOIs citing this DOI from OpenAlex
         Keyword arguments:
           doi: DOI string
           existing_oa_count: previously-stored OpenAlex citation count (or None).
                              If the live cited_by_count matches this, pagination is
                              skipped and _OA_UNCHANGED is returned.
+          impact: optional dict, filled in with this work's field-normalized
+                  standing. Passed in rather than returned because this function
+                  has four early returns - unknown work, uncited work, unchanged
+                  count, error - and the standing is worth keeping in the first
+                  three of them. It rides along on a request we already make, so
+                  it costs no extra calls.
         Returns:
           set of citing DOIs (empty if the work is unknown or uncited),
           _OA_UNCHANGED if the count is unchanged, or None on error
     '''
     resp = get_with_retry(f"{OPENALEX_WORK}{doi.lower()}",
-                          with_openalex_auth({'select': 'id,cited_by_count'}), 20)
+                          with_openalex_auth(
+                              {'select': 'id,cited_by_count,fwci,'
+                                         'citation_normalized_percentile'}), 20)
     if resp is not None and resp.status_code == 404:
         return set()
     if resp is None or resp.status_code != 200:
@@ -541,6 +549,19 @@ def openalex_citing(doi, existing_oa_count=None):  # pylint: disable=too-many-re
         data = resp.json()
     except Exception:
         return None
+    if impact is not None:
+        # citation_normalized_percentile is OpenAlex's own classification,
+        # partitioned by publication year x work type x subfield. We inherit their
+        # subfield assignment; it is journal-shaped and so is weakest exactly where
+        # Janelia publishes most - interdisciplinary work in generalist venues.
+        # Stored with the source named so a reader knows whose classification it is.
+        pct = data.get('citation_normalized_percentile') or {}
+        if data.get('fwci') is not None or pct.get('value') is not None:
+            impact.update({'source': 'openalex',
+                           'fwci': data.get('fwci'),
+                           'percentile': pct.get('value'),
+                           'top_1_percent': pct.get('is_in_top_1_percent'),
+                           'top_10_percent': pct.get('is_in_top_10_percent')})
     if not data.get('cited_by_count'):
         return set()
     if existing_oa_count is not None and data['cited_by_count'] == existing_oa_count:
@@ -1035,12 +1056,17 @@ def fetch_doi(row):
     pio = bool(ARG.SOURCE == 'crossref' and protocolsio_doi(doi)
                and os.environ.get('PROTOCOLS_API_TOKEN'))
     eid = elife_article_id(doi, row.get('type')) if ARG.SOURCE == 'crossref' else None
+    # Filled in by openalex_citing on the request it already makes.
+    impact = {}
     return {'row': row,
             'doi': doi,
+            'oa_impact': impact,
             'native': row.get(SOURCES[ARG.SOURCE]['count_field'], 0) or 0,
             'existing': row.get('jrc_citation_count'),
             'existing_dois': row.get('jrc_citing_dois') or [],
-            'openalex': openalex_citing(doi, (row.get('jrc_citation_sources') or {}).get('openalex')),
+            'openalex': openalex_citing(doi,
+                                        (row.get('jrc_citation_sources') or {}).get('openalex'),
+                                        impact),
             'scholex': scholix_citing(doi),
             'datacite_dois': DATACITE_CITING.get(doi),
             'is_figshare': bool(fid),
@@ -1311,6 +1337,13 @@ def finalize_doi(res, monitor=None):
                   'jrc_citation_updated': datetime.now()}
     if fields and ARG.CITING_DOIS and cc['citing']:   # the citing-DOI list is optional
         fields['jrc_citing_dois'] = cc['citing']
+    # Field-normalized standing, if OpenAlex had any. Written whenever the other
+    # citation fields are, and only when non-empty: OpenAlex has no percentile for
+    # a work it does not classify, and an absent field says that more honestly
+    # than a stored null. Kept out of the high-water-mark logic above - unlike a
+    # citation count this is a percentile and can legitimately fall.
+    if fields and res.get('oa_impact'):
+        fields['jrc_openalex_impact'] = res['oa_impact']
     if combined > previous:
         COUNT['increased'] += 1
         HITS.append((doi, previous, native, combined, oa_n, sx_n, dc_n, wos_n))

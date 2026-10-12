@@ -29,8 +29,11 @@ import concurrent.futures
 import dateutil.parser
 import dateutil.tz
 import bson
-from flask import (Flask, make_response, render_template, request, jsonify, redirect, send_file)
+from flask import (Flask, g, make_response, render_template, request, jsonify, redirect,
+                   send_file, session, url_for)
+from functools import wraps
 from flask_cors import CORS
+from werkzeug.security import check_password_hash, generate_password_hash
 from apispec import APISpec
 from apispec.yaml_utils import load_yaml_from_docstring
 import pandas as pd
@@ -40,9 +43,9 @@ from packaging.version import Version
 import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
 import dis_plots as DP
-from dis_html import (DOWNLOAD_ICON, add_jrc_fields, add_subjects, cell,
+from dis_html import (DOWNLOAD_ICON, NAV, add_jrc_fields, add_subjects, cell,
                       create_downloadable, dloop, doi_link, fcell, filter_frame,
-                      generate_navbar, get_license,
+                      generate_navbar as _generate_navbar, get_license,
                       oa_status_rank, registrar_switch, render_table, render_warning,
                       safe, see_also, stat_cards, tab_button, tab_pane, tiny_badge,
                       two_col, year_pulldown as _year_pulldown)
@@ -236,6 +239,647 @@ def handle_invalid_usage(error):
     response = jsonify(error.to_dict())
     response.status_code = error.status_code
     return response
+
+
+# ******************************************************************************
+# * Restricted pages                                                         *
+# ******************************************************************************
+
+# The four platform user reports pair named people with the deposits they are
+# credited on. The underlying DOIs are public and the roster is visible
+# elsewhere on the site, so this is not secrecy - it is keeping the convenient
+# aggregation to the people who need it until the application grows a real login
+# and authorization model. When that lands, delete this section and the
+# @restricted decorators; the rest of the app never learned about users.
+#
+# Deliberately NOT done at the edge: production is OpenShift, where the route
+# runs browser -> HAProxy -> Service -> gunicorn with no proxy of our own in
+# between, so there is nowhere outside the application to put a check.
+#
+# One secret, in the dis-utilities-secrets Secret the deployment already pulls
+# in via envFrom:
+#
+#   DIS_SESSION_SECRET  signs the session cookie. It MUST be the same string in
+#                       every replica - the deployment runs 2 - or a browser
+#                       that signs in against one pod is signed out the moment
+#                       the Service sends it to the other. Generate once:
+#                           python3 -c "import secrets; print(secrets.token_hex(32))"
+#                       Rotating it signs everybody out, which is the revoke.
+#
+# Who may sign in is NOT configuration - it is the user_auth collection plus the
+# orcid collection, managed with utility/bin/manage_restricted_users.py. See
+# utility/bin/RESTRICTED_PAGES.md.
+RESTRICTED_SESSION_KEY = 'orcid'
+# The interim sign-in is by ORCID iD and a password assigned with
+# utility/bin/manage_restricted_users.py. The iD is the point: the session holds
+# a real ORCID iD, which is exactly what the orcid.org callback will set, so
+# current_user() and everything above it already works against real orcid
+# documents and survives the switch. Only the password check is thrown away.
+#
+# Credentials live in the user_auth collection, NOT on the orcid document:
+# /orcid/<oid>, /orcid/active, /orcid/works/<oid> and /orcidapi/<oid> project
+# with {'_id': 0}, which excludes the id and nothing else, so anything added to
+# an orcid document is published by endpoints that are open today.
+AUTH_COLLECTION = 'user_auth'
+ORCID_RE = re.compile(r'^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$')
+# Seconds between last_seen writes for one person. Per worker process, so
+# with 2 replicas x 3 gunicorn workers the worst case is 6 writes a minute
+# per active person - still nothing, and it avoids any shared state.
+LAST_SEEN_THROTTLE = 60
+# Avatar diameters. The Janelia logo beside it in the header is 72px tall, so
+# the badge sits just under that - present without overtopping the logo.
+AVATAR_PX = 62
+AVATAR_PROFILE_PX = 120
+# Local development is plain HTTP, and a Secure cookie is not stored over plain
+# HTTP - the sign-in would appear to succeed and then bounce straight back to
+# the form. Production is HTTPS at the router, so Secure is the default and the
+# escape hatch has to be set deliberately.
+ALLOW_HTTP_SESSION = os.environ.get('DIS_ALLOW_HTTP_SESSION') == '1'
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['SESSION_COOKIE_SECURE'] = not ALLOW_HTTP_SESSION
+# Must be identical in every replica. The deployment runs two, and the session
+# is a signed cookie with no server-side store, so a per-pod value would log
+# people out as the Service moved them between pods.
+app.secret_key = os.environ.get('DIS_SESSION_SECRET') or ''
+
+
+def may_sign_in(person):
+    ''' Whether an orcid document is allowed to sign in
+        DECIDED 2026-10-12: an alumnus keeps access if and only if they are a
+        contingent worker. Note alumni means departed - it is set with an
+        alumni_date when someone drops out of People, and cleared when they
+        return - so this admits departed contingent workers, while a former
+        employee who came back already has the flag cleared.
+        Keyword arguments:
+          person: orcid collection document
+        Returns:
+          True if they may sign in
+    '''
+    if not person:
+        return False
+    if person.get('alumni') is True and person.get('workerType') != 'Contingent Worker':
+        return False
+    return True
+
+
+def display_person_name(person):
+    ''' A readable name from an orcid document
+        Keyword arguments:
+          person: orcid collection document, or None
+        Returns:
+          Name string
+    '''
+    if not person:
+        return 'unknown'
+    given = (person.get('given') or [''])[0]
+    family = (person.get('family') or [''])[0]
+    return f"{given} {family}".strip() or 'unnamed'
+
+
+def current_user():
+    ''' The orcid document for the signed-in person, or None.
+
+        This is the seam. Everything that needs to know who is looking - the
+        avatar, /profile, authorization checks, API tokens - reads this and
+        nothing else, so replacing the interim password sign-in with orcid.org
+        changes only what puts the iD into the session.
+
+        The session stores the iD alone; the document is looked up per request
+        and memoized on g, so a person removed from the roster, or newly failing
+        the access rule, loses access on their next request without any action.
+        Keyword arguments:
+          None
+        Returns:
+          orcid collection document, or None
+    '''
+    if 'dis_user' in g:
+        return g.dis_user
+    g.dis_user = None
+    orcid = session.get(RESTRICTED_SESSION_KEY)
+    if orcid and DB:
+        try:
+            person = DB['dis'].orcid.find_one({"orcid": orcid})
+        except Exception:
+            person = None
+        if may_sign_in(person):
+            g.dis_user = person
+            _touch_last_seen(orcid)
+    return g.dis_user
+
+
+def _touch_last_seen(orcid):
+    ''' Record that this person is using the site, at most once a minute.
+
+        A signed cookie leaves no server-side record, so there is otherwise no
+        way to answer "who is actually using this". Throttled because this runs
+        on every authenticated request: without it, a single page with a dozen
+        assets would be a dozen writes.
+
+        Failure is ignored on purpose - a page must not break because a
+        timestamp could not be written.
+        Keyword arguments:
+          orcid: ORCID iD
+        Returns:
+          None
+    '''
+    now = datetime.now()
+    seen = app.config.setdefault('LAST_SEEN_WRITTEN', {})
+    if (now - seen.get(orcid, datetime.min)).total_seconds() < LAST_SEEN_THROTTLE:
+        return
+    seen[orcid] = now
+    try:
+        DB['dis'][AUTH_COLLECTION].update_one({"orcid": orcid}, {"$set": {"last_seen": now}})
+    except Exception:
+        pass
+
+
+def _refresh_photo(person):
+    ''' Cache this person's People photograph on their credential.
+
+        Done once at sign-in, not per request: the People call has a five second
+        timeout and the avatar is on every page. Stored on the user_auth
+        document rather than the orcid one because /orcid/<oid> and its three
+        siblings project with {'_id': 0}, publishing whatever is on an orcid
+        document. A photo URL is not a secret, but keeping the rule simple -
+        nothing new goes on orcid documents - is worth more than the exception.
+
+        Entirely best-effort: no photograph simply means initials.
+        Keyword arguments:
+          person: orcid collection document
+        Returns:
+          None
+    '''
+    eid = person.get('userIdO365')
+    if not eid:
+        return
+    try:
+        rec = JRC.call_people_by_id(eid)
+        url = (rec or {}).get('photoURL')
+    except Exception as err:
+        print(f"Could not fetch a People photo for {eid}: {error_message(err)}")
+        return
+    try:
+        DB['dis'][AUTH_COLLECTION].update_one(
+            {"orcid": person.get('orcid')},
+            {"$set": {"photoURL": url, "photo_checked": datetime.now()}})
+    except Exception:
+        pass
+
+
+def avatar_html(person, photo_url=None, px=None):
+    ''' A circular avatar for a person: their photograph, or their initials.
+
+        ORCID holds no photographs - it has no such field - so the picture comes
+        from HHMI People, whose records carry a photoURL. When there is none,
+        initials on a color derived from the ORCID iD, so a person's badge is
+        the same every time they see it.
+        Keyword arguments:
+          person: orcid collection document
+          photo_url: People photoURL, if known
+          px: diameter in pixels
+        Returns:
+          Safe HTML
+    '''
+    if not person:
+        return safe('')
+    px = px or AVATAR_PX
+    name = display_person_name(person)
+    tip = escape(f"{name} - your profile", quote=True)
+    if photo_url:
+        return safe(f"<span class='dis-avatar' style='width:{px}px;height:{px}px' "
+                    f"title='{tip}'><img src='{escape(photo_url)}' alt='{escape(name)}'></span>")
+    given = (person.get('given') or [''])[0]
+    family = (person.get('family') or [''])[0]
+    initials = (given[:1] + family[:1]).upper() or '?'
+    # Hue from the iD so the badge is stable for a person and distinct between
+    # people; fixed saturation and lightness keep white text readable on it.
+    # A digest rather than a character sum: ORCID iDs are nearly all digits, so
+    # summing them clusters badly - two colleagues came out 2 degrees apart.
+    hue = int(hashlib.md5(str(person.get('orcid') or name).encode()).hexdigest()[:6], 16) % 360
+    return safe(f"<span class='dis-avatar dis-avatar-initials' "
+                f"style='width:{px}px;height:{px}px;line-height:{px}px;"
+                f"background:hsl({hue},42%,38%);font-size:{int(px * 0.4)}px' "
+                f"title='{tip}'>{escape(initials)}</span>")
+
+
+def _restricted_targets():
+    ''' Menu targets that require a sign-in.
+
+        Derived from the @restricted decorator rather than listed by hand, so
+        gating an endpoint hides its menu entry with no second edit. Cached on
+        app.config: the route table does not change after start-up.
+        Keyword arguments:
+          None
+        Returns:
+          Set of NAV values, e.g. {'figshare_users'}
+    '''
+    cached = app.config.get('RESTRICTED_TARGETS')
+    if cached is not None:
+        return cached
+    out = set()
+    for rule in app.url_map.iter_rules():
+        view = app.view_functions.get(rule.endpoint)
+        if getattr(view, 'dis_restricted', False):
+            # NAV values are paths without the leading slash, and menu entries
+            # never carry parameters, so only the static rules can match.
+            if '<' not in str(rule):
+                out.add(str(rule).lstrip('/'))
+    app.config['RESTRICTED_TARGETS'] = out
+    return out
+
+
+def _visible_nav(nav, hidden):
+    ''' A copy of the menu without the entries a signed-out viewer cannot open.
+        Keyword arguments:
+          nav: menu dict, possibly nested
+          hidden: set of NAV values to drop
+        Returns:
+          Filtered dict
+    '''
+    out = {}
+    for label, value in nav.items():
+        if isinstance(value, dict):
+            kept = _visible_nav(value, hidden)
+            # A submenu emptied by the filter would otherwise render as a
+            # heading that opens onto nothing.
+            if kept:
+                out[label] = kept
+        elif value not in hidden:
+            out[label] = value
+    return out
+
+
+def generate_navbar(active):
+    ''' Request-aware wrapper around dis_html.generate_navbar.
+
+        Menu entries for pages requiring a sign-in are hidden from anyone who is
+        not signed in. This is tidiness, not security - the pages themselves are
+        guarded by @restricted, and hiding a link protects nothing on its own.
+        Without it, every signed-out visitor sees four entries that bounce them
+        to a sign-in form they may have no way to satisfy.
+
+        The shadow lives here, as year_pulldown's does, so dis_html stays
+        request-free.
+        Keyword arguments:
+          active: heading to mark as current
+        Returns:
+          Navigation bar HTML
+    '''
+    hidden = _restricted_targets()
+    if not hidden or current_user():
+        return _generate_navbar(active)
+    return _generate_navbar(active, menu=_visible_nav(NAV, hidden))
+
+
+@app.context_processor
+def inject_viewer():
+    ''' Make the signed-in person available to every template.
+
+        base.html has had an empty avatar slot since the initial import; this is
+        what fills it. A context processor rather than a keyword argument
+        because there are 469 render_template calls and none of them should
+        have to know about this.
+
+        Defensive throughout: it runs for error pages too, including ones
+        rendered before the database is reachable.
+        Keyword arguments:
+          None
+        Returns:
+          Dict of template variables
+    '''
+    try:
+        person = current_user()
+        if not person:
+            return {'face': '', 'viewer': None}
+        record = _auth_record(person.get('orcid')) or {}
+        return {'face': avatar_html(person, record.get('photoURL')), 'viewer': person}
+    except Exception:
+        return {'face': '', 'viewer': None}
+
+
+def _auth_record(orcid):
+    ''' The interim credential for an ORCID iD
+        Keyword arguments:
+          orcid: ORCID iD
+        Returns:
+          user_auth document, or None
+    '''
+    try:
+        return DB['dis'][AUTH_COLLECTION].find_one({"orcid": orcid})
+    except Exception:
+        return None
+
+
+def _credential_count():
+    ''' How many interim credentials exist
+        Returns:
+          Count, or 0 if the collection is unreachable
+    '''
+    try:
+        return DB['dis'][AUTH_COLLECTION].count_documents({})
+    except Exception:
+        return 0
+
+
+def _restriction_unavailable():
+    ''' Why the gate cannot run, or None if it can.
+        Missing configuration denies access rather than granting it: a report
+        that silently stopped being restricted would look exactly like one that
+        was working.
+        Returns:
+          Message string, or None
+    '''
+    if not app.secret_key:
+        return ("DIS_SESSION_SECRET is not set, so this page cannot verify a sign-in."
+                " It must be set, and identical, in every replica.")
+    if not _credential_count():
+        return ("No sign-in credentials are configured, so nobody is permitted on this"
+                " page. Run utility/bin/manage_restricted_users.py --orcid <iD> --write"
+                " to add one.")
+    return None
+
+
+def restricted(view):
+    ''' Require a signed-in reader for a view
+        Keyword arguments:
+          view: view function
+        Returns:
+          Wrapped view
+    '''
+    @wraps(view)
+    def wrapper(*args, **kwargs):
+        problem = _restriction_unavailable()
+        if problem:
+            print(f"Restricted page {request.path} refused: {problem}")
+            return make_response(render_template('error.html', urlroot=request.url_root,
+                                                 title=render_warning("Restricted page"),
+                                                 message=problem), 503)
+        # current_user(), not a bare session check: it re-reads the orcid
+        # document and re-applies the access rule on EVERY request, so somebody
+        # who leaves - or whose alumni flag is flipped by the nightly People
+        # sync - loses access at their next page load rather than whenever they
+        # happen to close their browser. It is also what records last_seen.
+        if not current_user():
+            if session.get(RESTRICTED_SESSION_KEY):
+                # A valid-looking cookie for somebody the roster no longer
+                # permits. Clear it, or they carry a dead session around and
+                # the sign-in form cannot explain why.
+                print(f"Session ended: {session.get(RESTRICTED_SESSION_KEY)} no longer "
+                      f"passes the access rule")
+                session.clear()
+            # full_path appends a bare '?' when there is no query string, which
+            # would otherwise show up in the address bar after signing in.
+            target = request.full_path.rstrip('?')
+            return redirect(url_for('login', next=target))
+        return view(*args, **kwargs)
+    # Marked so the navigation menu can find out what is gated without being
+    # told twice. A hand-kept list would drift the first time an endpoint is
+    # added to or taken off the decorator.
+    wrapper.dis_restricted = True
+    return wrapper
+
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    '''
+    Sign in to the restricted pages
+    ---
+    tags:
+      - Navigation
+    responses:
+      '200':
+        description: Sign-in form
+      '302':
+        description: Signed in, redirected onward
+    '''
+    problem = _restriction_unavailable()
+    if problem:
+        return make_response(render_template('error.html', urlroot=request.url_root,
+                                             title=render_warning("Restricted page"),
+                                             message=problem), 503)
+    # Only ever a path on this site: an open redirect here would hand an
+    # attacker a janelia.org link that lands on their page.
+    nxt = request.values.get('next') or '/'
+    if not nxt.startswith('/') or nxt.startswith('//'):
+        nxt = '/'
+    note = ""
+    if request.method == 'POST':
+        orcid = request.form.get('orcid', '').strip()
+        # A malformed iD is rejected the same way as a wrong password, and takes
+        # the same path, so the form cannot be used to discover which iDs exist.
+        record = _auth_record(orcid) if ORCID_RE.match(orcid) else None
+        digest = record.get('password') if record else None
+        # check_password_hash against a known-bad hash when the iD is unknown, so
+        # a wrong iD and a wrong password cost the same time to reject.
+        reference = digest or generate_password_hash('_no_such_user_')
+        matched = check_password_hash(reference, request.form.get('password', ''))
+        person = DB['dis'].orcid.find_one({"orcid": orcid}) if (digest and matched) else None
+        if digest and matched and may_sign_in(person):
+            session.clear()
+            session[RESTRICTED_SESSION_KEY] = orcid
+            session.permanent = False
+            try:
+                DB['dis'][AUTH_COLLECTION].update_one({"orcid": orcid},
+                                                      {"$set": {"last_login": datetime.now()}})
+            except Exception:
+                pass    # a sign-in must not fail because a timestamp could not be written
+            _refresh_photo(person)
+            print(f"Sign-in: {orcid} ({display_person_name(person)}) from {request.remote_addr}")
+            return redirect(nxt)
+        if digest and matched:
+            # Correct credentials, but the roster no longer permits them. Say so
+            # rather than claiming the password is wrong - it is not, and they
+            # would otherwise keep retyping it.
+            print(f"Sign-in REFUSED by the access rule: {orcid} from {request.remote_addr}")
+            note = render_warning("Those credentials are correct, but this ORCID iD no "
+                                  "longer has access. Please contact DIS.", 'warning')
+        else:
+            print(f"Sign-in FAILED for {orcid!r} from {request.remote_addr}")
+            note = render_warning("That ORCID iD and password were not recognized.",
+                                  'warning')
+    elif not ALLOW_HTTP_SESSION and not request.is_secure \
+         and request.headers.get('X-Forwarded-Proto', 'http') != 'https':
+        # Without this the developer sees a successful POST, no cookie, and an
+        # immediate bounce back to this form with no explanation anywhere.
+        note = render_warning("This page is being served over plain HTTP, so the signed "
+                              "cookie will not be stored. Set DIS_ALLOW_HTTP_SESSION=1 "
+                              "for local testing.", 'warning')
+    # ORCID's brand guidelines: the iD icon is used as supplied and not altered,
+    # and it is written "ORCID iD" - lower-case i, upper-case D.
+    icon = ("<img src='/static/images/ORCID-iD_icon_16x16.png' alt='' "
+            "style='vertical-align:-2px; margin-right:4px;'>")
+    # Derived from the server-side regex rather than retyped, so the two cannot
+    # disagree about what an iD looks like. It also has to be built OUTSIDE the
+    # f-string below: {4} inside one is a replacement field, so writing the
+    # quantifier inline renders "\d4" and nothing can ever match it.
+    html_pattern = ORCID_RE.pattern.strip('^$')
+    html = f"""{note}
+<p>Signing in to DIS requires an <strong>ORCID iD</strong>. This is a site about
+published work, so the people who need it are authors - and an ORCID iD is how
+an author is identified unambiguously, whatever name they publish under.</p>
+
+<h4 style="margin-top:22px;">I have an ORCID iD</h4>
+<p>Enter it below with the password you were given. If you do not have a
+password yet, or have forgotten it, contact DIS.</p>
+<form method="post" action="{escape(url_for('login'))}" class="form-inline">
+  <input type="hidden" name="next" value="{escape(nxt)}">
+  <div class="form-group" style="margin-right:8px;">
+    <label for="orcid" style="margin-right:6px;">ORCID iD</label>
+    <input class="form-control" type="text" id="orcid" name="orcid"
+           placeholder="0000-0000-0000-0000" pattern="{html_pattern}"
+           size="21" autocomplete="username" autofocus required>
+  </div>
+  <div class="form-group" style="margin-right:8px;">
+    <label for="password" style="margin-right:6px;">Password</label>
+    <input class="form-control" type="password" id="password" name="password"
+           autocomplete="current-password" required>
+  </div>
+  <button type="submit" class="btn btn-outline-success">Sign in</button>
+</form>
+
+<h4 style="margin-top:26px;">I do not have an ORCID iD</h4>
+<p>Registering for one is free, takes a couple of minutes, and gives you an
+identifier that stays with you for the rest of your career - across name
+changes, institutions and fields.</p>
+<p>{icon}<a href="https://orcid.org/register" target="_blank"
+   rel="noopener">Register for an ORCID iD at orcid.org</a></p>
+<p>Once you have one, contact DIS so it can be added to your Janelia record and
+a password issued. The library staff are also happy to help you set one up.</p>
+<p style="color:#888; font-size:0.9em; margin-top:22px;">The password above is
+temporary. DIS will soon sign in through orcid.org directly, and you will use
+your ORCID credentials rather than one assigned here.</p>"""
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="Sign in", html=html,
+                                         navbar=generate_navbar('')))
+
+
+@app.route('/profile')
+@restricted
+def profile():
+    '''
+    Show the signed-in person's own profile
+    ---
+    tags:
+      - Navigation
+    responses:
+      '200':
+        description: HTML page
+      '302':
+        description: Not signed in, redirected to the sign-in form
+    '''
+    person = current_user()
+    record = _auth_record(person.get('orcid')) or {}
+    orcid = person.get('orcid')
+    html = (f"<div style='display:flex; align-items:center; gap:18px; margin-bottom:18px;'>"
+            f"{avatar_html(person, record.get('photoURL'), px=AVATAR_PROFILE_PX)}"
+            f"<h3 style='margin:0'>{escape(display_person_name(person))}</h3></div>")
+    # Built the same way as the person page at /orcidui, and for the same reason:
+    # person_platform_logos() returns a <tr>, not a block, so it has to be
+    # appended INSIDE a table. Handed to render_table() it landed after the
+    # closing tag, the browser discarded the cells, and "Also on:" collapsed
+    # against the logos.
+    html += "<table class='borderless'>"
+    html += f"<tr><td>Given name:</td><td>{escape(', '.join(sorted(person.get('given') or [])))}" \
+            "</td></tr>"
+    html += f"<tr><td>Family name:</td><td>{escape(', '.join(sorted(person.get('family') or [])))}" \
+            "</td></tr>"
+    html += f"<tr><td>ORCID:</td><td><a href='{ORCID}{escape(orcid)}' target='_blank' " \
+            f"rel='noopener'>{escape(orcid)}</a></td></tr>"
+    if person.get('userIdO365'):
+        link = f"<a href='{WORKDAY}{escape(person['userIdO365'])}' target='_blank'>" \
+               f"{escape(person['userIdO365'])}</a>"
+        html += f"<tr><td>User ID:</td><td>{link}</td></tr>"
+    tenure = janelia_tenure(person)
+    if tenure:
+        html += f"<tr><td>At Janelia:</td><td>{tenure}</td></tr>"
+    if person.get('affiliations'):
+        html += "<tr><td>Affiliations:</td><td>" + affiliation_links(person) + "</td></tr>"
+    html += person_platform_logos(person)
+    if record.get('last_login'):
+        html += f"<tr><td>Last sign-in:</td><td>{escape(str(record['last_login'])[:19])}</td></tr>"
+    # Authorizations are not built yet; say so rather than implying none exist.
+    html += ("<tr><td>Authorizations:</td><td><span style='color:#888'>Everyone can see "
+             "almost every page. Named authorizations - for cost data, for administration "
+             "- are not in place yet.</span></td></tr>")
+    html += "</table><br>"
+    # The API token is step 7 of docs/AUTHENTICATION_PLAN.md. Named here because
+    # this is where people will come looking for it.
+    html += ("<h4 style='margin-top:28px;'>API token</h4>"
+             "<p style='color:#888'>Not issued yet. When the REST endpoints require "
+             "authentication, your token will be shown here, once, with a button to "
+             "replace it.</p>")
+    html += ("<p style='margin-top:24px;'>"
+             "<a class='btn btn-outline-info' href='/mypapers'>My publications</a>&nbsp;"
+             "<a class='btn btn-outline-info' href='/mymetrics'>My metrics</a>&nbsp;"
+             f"<a class='btn btn-outline-secondary' href='{escape(url_for('logout'))}'>"
+             "Sign out</a></p>")
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="Your profile", html=html,
+                                         navbar=generate_navbar('')))
+
+
+@app.route('/mymetrics')
+@restricted
+def mymetrics():
+    '''
+    Show the signed-in person descriptive metrics for their own publications
+    ---
+    tags:
+      - DOI
+    responses:
+      '200':
+        description: HTML page
+      '302':
+        description: Not signed in, redirected to the sign-in form
+    '''
+    person = current_user()
+    eids = credit_eids(person)
+    if not eids:
+        endpoint_access()
+        return make_response(render_template(
+            'general.html', urlroot=request.url_root, title="My publication metrics",
+            html=render_warning("You have no employee ID on file, so no publication can be "
+                                "matched to you here.", 'warning'),
+            navbar=generate_navbar('')))
+    try:
+        rows = list(DB['dis'].dois.find({"jrc_author": {"$in": eids}}))
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get your publications"),
+                               message=error_message(err))
+    ident = "<table class='borderless'>" \
+            + f"<tr><td>Name:</td><td>{escape(display_person_name(person))}</td></tr>" \
+            + f"<tr><td>ORCID:</td><td><a href='{ORCID}{escape(person['orcid'])}' " \
+            + f"target='_blank' rel='noopener'>{escape(person['orcid'])}</a></td></tr>"
+    tenure = janelia_tenure(person)
+    if tenure:
+        ident += f"<tr><td>At Janelia:</td><td>{tenure}</td></tr>"
+    ident += "<tr><td>Also see:</td><td><a href='/mypapers'>Publications credited to me</a>" \
+             " &middot; <a href='/dois/mytags'>DOIs from my affiliations</a></td></tr>"
+    ident += "</table>"
+    html = ident + metrics_panel(rows)
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="My publication metrics", html=html,
+                                         navbar=generate_navbar('')))
+
+
+@app.route('/logout')
+def logout():
+    '''
+    Sign out of the restricted pages
+    ---
+    tags:
+      - Navigation
+    responses:
+      '302':
+        description: Signed out, redirected home
+    '''
+    session.pop(RESTRICTED_SESSION_KEY, None)
+    return redirect('/')
 
 
 # Environment variables holding a credential. Several are put into query
@@ -1146,6 +1790,30 @@ def evidence_legend():
     return ", ".join(parts[:-1]) + " and " + parts[-1]
 
 
+def credit_mark_help(you=False):
+    ''' What the green checkmark means, shared by every page that draws one.
+        Factored out for the same reason evidence_help was: it existed on the
+        person pages, /dois/mytags needed it, and a second copy drifts from the
+        first as soon as either changes.
+        Keyword arguments:
+          you: second person ("you") rather than third ("this author")
+        Returns:
+          HTML string
+    '''
+    who = "you" if you else "the author"
+    their = "your" if you else "their"
+    they_were = "you were" if you else "they were"
+    return f"""
+    <p>A green checkmark (<i class='fa-solid fa-circle-check' style='color: lime'></i>)
+    indicates that automated or manual curation has determined that {who} contributed to
+    the publication while {they_were} a Janelia employee. It is not uncommon for check
+    marks to not appear for former employees. A publication without one most likely means
+    affiliation or ORCID information was not provided to Crossref/DataCite. If one of
+    {their} publications has no check, or is missing altogether, please email the DOI to
+    the Library at {LIBRARY}.</p>
+    """
+
+
 def evidence_help(you=False, check_all=False):
     ''' The "In the deposit" explanation, shared by every page that shows the column.
         Written once because it was written twice and was on its way to three times:
@@ -1295,15 +1963,8 @@ def generate_works_table(rows, name=None, show="full", eid=None, orc=None):
     # no single employee, so no check ever renders - show no preamble then, rather than
     # describing a checkmark that isn't there.
     if eid:
-        preamble = f'''
-    The works below were searched for using this author's name and ORCID. A green checkmark
-    (<i class='fa-solid fa-circle-check' style='color: lime'></i>) indicates that automated or
-    manual curation has determined that the author contributed to the publication while they were
-    a Janelia employee. It is not uncommon for check marks to not appear for former employees. If
-    you have a publication below without a check mark, it's most likely that affiliation or ORCID
-    information was not provided to Crossref/DataCite. If one of your publications doesn't have a
-    check (or is missing), please email the DOI to the Library at {LIBRARY}.
-    '''
+        preamble = "<p>The works below were searched for using this author's name " \
+                   "and ORCID.</p>" + credit_mark_help()
         # The deposit column and its check buttons render only when orc is set, so
         # describe them only then - a name search has neither.
         if orc:
@@ -6802,26 +7463,18 @@ def andy():
 # * UI endpoints (personalized)                                                *
 # ******************************************************************************
 
-@app.route('/dois/mytags/<string:orcid>/<string:year>/<string:show>')
-@app.route('/dois/mytags/<string:orcid>/<string:year>')
-@app.route('/dois/mytags/<string:orcid>')
+@app.route('/dois/mytags/<string:year>/<string:show>')
+@app.route('/dois/mytags/<string:year>')
 @app.route('/dois/mytags')
-def dois_mytags(orcid="0000-0001-8374-6008", year='All', show='full'):
+@restricted
+def dois_mytags(year='All', show='full'):
     ''' Show DOIs an author's affiliations
     '''
-    try:
-        row = DB['dis'].orcid.find_one({"orcid": orcid})
-    except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not find DOIs for my affiliations"),
-                               message=error_message(err))
-    if not row:
-        # find_one returns None for an ORCID we do not hold, and every line below
-        # reads the record. Authentication will supply a known ORCID, but the route
-        # also takes one from the URL, where a typo should not be a 500.
-        return render_template('warning.html', urlroot=request.url_root,
-                               title=render_warning(f"Could not find ORCID {orcid}", 'warning'),
-                               message="There is nobody with that ORCID in the orcid collection.")
+    # "My" means the signed-in person. The ORCID used to come from the URL, with
+    # one developer's iD as the default, which made the page show somebody else's
+    # affiliations to anybody who loaded it bare.
+    row = current_user()
+    orcid = row['orcid']
     # Tested for truth, not presence: a record can carry group as an empty string,
     # and "if 'group' in row" is true for that. An empty tag reaches the $in query
     # harmlessly but renders as an empty link in the tag list.
@@ -6858,11 +7511,10 @@ def dois_mytags(orcid="0000-0001-8374-6008", year='All', show='full'):
     # The same person from the other angle: this page is what their affiliations
     # published, /mypapers is what they are credited with. A reader on one had no
     # way to reach the other.
-    ident += f"<tr><td>Also see:</td><td><a href='/mypapers/{escape(orcid)}'>" \
-             + "Publications credited to this person</a></td></tr>"
+    ident += "<tr><td>Also see:</td><td><a href='/mypapers'>" \
+             + "Publications credited to me</a></td></tr>"
     ident += "</table><br>"
-    htmlp = year_pulldown(f"dois/mytags/{orcid}", suffix=f"/{show}" if show != 'full' else '') \
-            + journal_buttons(show, f"/dois/mytags/{orcid}/{year}") + "<br>"
+    htmlp = year_pulldown("dois/mytags", suffix=f"/{show}" if show != 'full' else '') + "<br>"
     title = "DOIs for my affiliations"
     if year != 'All':
         title += f" ({year})"
@@ -6875,9 +7527,9 @@ def dois_mytags(orcid="0000-0001-8374-6008", year='All', show='full'):
         return make_response(render_template(
             'general.html', urlroot=request.url_root, title=title,
             html=ident + render_warning(
-                "We have no group, affiliations or managed teams on file for this "
-                "person, so there is nothing to search for. This is about the "
-                "affiliation record, not about their publications.", 'warning'),
+                "We have no group, affiliations or managed teams on file for you, "
+                "so there is nothing to search for. This is about the affiliation "
+                "record, not about your publications.", 'warning'),
             navbar=generate_navbar('Tag/affiliation')))
     # Sorted, and marked current or past where we can tell. An unknown split shows
     # the affiliations unmarked rather than calling them all past, which is what a
@@ -6902,9 +7554,25 @@ def dois_mytags(orcid="0000-0001-8374-6008", year='All', show='full'):
             tag_counts[name] += 1
     # A DOI can match several of someone's affiliations, so a row carries a class
     # for each - filterByTag asks only that the row holds the one chip's class.
+    # A green check before the DOI where the signed-in person is themselves
+    # credited on the work, the same marker the person pages use. This page is
+    # what their affiliations published, which is mostly other people's work -
+    # the check is what separates their own from the rest. credit_eids and
+    # credit_mark are shared with /mypapers and /userui so the three cannot
+    # disagree about what counts as credit.
+    my_eids = credit_eids(row)
+    # The journals/preprints toggle belongs beside the version filter, the way
+    # /mypapers has it: both change which rows the table shows. Rendered up with
+    # the year pulldown it was separated from its sibling by the affiliation
+    # line and the whole chip bar. standard_doi_table emits the version button
+    # itself, so the toggle is spliced in ahead of it - the person page splices
+    # the same control into the same output for the same reason.
     html, cnt, _ = standard_doi_table(
         works, count_card=True, download_name='my_affiliations',
+        mark_fn=(lambda work: credit_mark(work, my_eids)) if my_eids else None,
         class_fn=lambda work: ' '.join(tag_class[name] for name in row_tags[work['doi']]))
+    html = html.replace("<button id='verbtn'",
+                        journal_buttons(show, f"/dois/mytags/{year}") + "<button id='verbtn'", 1)
     chipbar = ""
     if cnt and len(tags) > 1:
         chips = "".join(
@@ -6918,9 +7586,20 @@ def dois_mytags(orcid="0000-0001-8374-6008", year='All', show='full'):
                    "only its DOIs; click it again to show them all. A DOI credited to "
                    "more than one of these appears under each.</span></p>")
     if cnt:
-        html = f"{ident}{htmlp}Affiliations: {taglinks}<br><br>{chipbar}{html}"
+        # The check needs explaining here more than on the person pages: this
+        # list is mostly other people's work, so the mark is what separates the
+        # reader's own from the rest rather than a detail about a list that is
+        # already all theirs.
+        note = ("<p>These are the works published by your affiliations - most of them "
+                "by other people.</p>" + credit_mark_help(you=True))
+        html = f"{ident}{htmlp}Affiliations: {taglinks}<br><br>{note}{chipbar}{html}"
     else:
+        # The toggle is spliced into the table above, which this path has none of.
+        # Repeated here on purpose: an empty list is exactly when somebody needs
+        # it, because "journals only" may be what emptied it, and without the
+        # button the only way back is editing the URL.
         html = ident + htmlp + f"Affiliations: {taglinks}<br><br>" \
+               + journal_buttons(show, f"/dois/mytags/{year}") \
                + render_warning("No DOIs were found for these affiliations.", 'warning')
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
@@ -9465,6 +10144,7 @@ def _classify_janelian(row):
 
 
 @app.route('/figshare_users')
+@restricted
 def show_figshare_users():
     '''
     Return figshare account holders matched against the Janelia roster
@@ -9607,6 +10287,7 @@ def _protocolsio_authors():
 
 
 @app.route('/protocolsio_users')
+@restricted
 def show_protocolsio_users():
     '''
     Return protocols.io authors matched against the Janelia roster
@@ -10014,6 +10695,7 @@ def show_dryad_dois(year='All'):
 
 
 @app.route('/dryad_users')
+@restricted
 def show_dryad_users():
     '''
     Return Dryad depositors matched against the Janelia roster
@@ -10030,6 +10712,7 @@ def show_dryad_users():
 
 
 @app.route('/zenodo_users')
+@restricted
 def show_zenodo_users():
     '''
     Return Zenodo depositors matched against the Janelia roster
@@ -11868,6 +12551,121 @@ def citation_metrics(source='datacite'):
 # protocols.io has none, so it contributes 0 to downloads).
 SOURCE_METRIC_USAGE_FIELDS = ("jrc_figshare_counts", "jrc_zenodo_counts",
                               "jrc_protocolsio_counts", "jrc_elife_counts")
+
+
+def metrics_panel(rows):
+    ''' The metrics block on a person's own publications page.
+
+        Shown only to the person themselves. These are descriptive figures about
+        their own record, not an assessment: HHMI is a DORA signatory, and DORA's
+        2024 guidance on indicators is explicit that field-weighted means such as
+        FWCI are "not suitable for evaluating individual researchers". Nothing
+        here is comparative, nothing is ranked against anybody, and the page says
+        so.
+
+        Every number is paired with what it does not tell you. The corpus holds
+        Janelia-affiliated work, so lifetime figures are truncated at the hire
+        date; the five-year block is the part that is not.
+        Keyword arguments:
+          rows: dois records for one person
+        Returns:
+          HTML string
+    '''
+    met = author_metrics(rows)
+    if not met['works']:
+        return ""
+    curve = ", ".join(f"<b>{n:,}</b> with &ge;{t}" for t, n in met['thresholds'])
+    cards = [("Janelia articles &amp; preprints", f"{met['works']:,}"),
+             ("Citations to them", f"{met['total']:,}"),
+             ("Median per paper", f"{met['median']:,.0f}"),
+             ("h-index", f"{met['h_index']:,}")]
+    html = f"""<p style="color:#888; max-width:52em;">Descriptive figures about your
+<b>Janelia-affiliated</b> publications &mdash; the work this database holds, which
+begins when you arrived. They are not an assessment, they are not compared with
+anyone else's, and they are not used in any review.</p>
+{stat_cards(cards, div_id='mymetrics')}
+<p><b>What these mean.</b> Your <b>h-index is {met['h_index']}</b>: {met['h_index']} of your
+papers have each been cited at least {met['h_index']} times. It goes up only when an
+additional paper reaches that many citations, so it rewards a body of steadily-cited work
+rather than one much-cited paper. The <b>median</b> is the middle value &mdash; half your
+papers are cited more than {met['median']:,.0f} times, half less. We show the median rather
+than the average because one paper usually carries a large share of the total, which makes
+an average say more about that paper than about the rest.</p>
+<p><b>How your citations are spread:</b> {curve}.</p>
+<p><b>Last five complete years ({met['window']}):</b> {met['recent_works']:,} articles and
+preprints, {met['recent_total']:,} citations, h-index {met['recent_h']:,}.
+This window is the one figure here unaffected by the database holding only your
+Janelia-affiliated work &mdash; if you have been at Janelia longer than five years it is
+the same number your full publication record would give.</p>
+<p style="color:#888; max-width:52em;"><b>What they do not tell you.</b> The h-index cannot exceed your
+{met['works']:,} articles and preprints here, so for a recent arrival it measures time
+at Janelia more than anything else. Expect these figures to be lower than Google
+Scholar, which counts your whole career and from a different index. The median is shown
+rather than the mean because citation counts are very skewed &mdash; one paper often
+carries a quarter of the total."""
+    if met['other']:
+        html += f"""</p>
+<p style="color:#888; max-width:52em;">Your {met['other']:,} other outputs &mdash; datasets,
+software, protocols &mdash; are excluded from these figures. Such work is very rarely
+cited in a way any index can see (across 1.2 million Zenodo deposits, around 1% of
+datasets and 3% of software are traceably cited), so counting them would drag every
+figure down while saying nothing about their value."""
+    return html + "</p>"
+
+
+def author_metrics(rows):
+    ''' Descriptive metrics for one person's own publications.
+
+        Scope decisions, each of which changes the numbers materially:
+
+        - ARTICLES AND PREPRINTS ONLY. Datasets, software and protocols are
+          almost never cited - across 1.2M Zenodo DOIs only 1.16% of datasets
+          and 3.24% of software are traceably cited at all - so mixing them in
+          drags every average toward zero and says nothing about either kind of
+          work. They are counted separately instead.
+        - VERSION-DEDUPED, so a .v1/.v2 series counts once.
+        - MEDIAN, NOT MEAN. Citation distributions are extremely skewed; in this
+          corpus one paper routinely carries a quarter to a third of a person's
+          citations, which makes the mean a readout of that one paper.
+        - A THRESHOLD CURVE rather than i10 alone. The 10 in i10 is arbitrary and
+          unnormalized - trivial in neuroscience, substantial in mathematics - so
+          showing several thresholds is more honest than privileging one.
+        - A FIVE-YEAR WINDOW alongside the lifetime figures. This is the one set
+          of numbers that is NOT distorted by holding only Janelia-affiliated
+          work: for anyone here longer than the window, the windowed figure is
+          identical to what it would be over their complete career corpus.
+
+        Keyword arguments:
+          rows: dois records for one person
+        Returns:
+          Dict of metrics
+    '''
+    # Versions are deduped out of BOTH counts, or a dataset with five versions
+    # reads as five outputs. Peer-review documents are dropped entirely: eLife
+    # deposits them as separate DOIs crediting the same people, and they are not
+    # anybody's research output.
+    live = [r for r in rows if not DL.is_version(r) and r.get('type') != 'peer-review']
+    scholarly = [r for r in live if DL.is_journal(r) or DL.is_preprint(r)]
+    other = [r for r in live if not (DL.is_journal(r) or DL.is_preprint(r))]
+    counts = sorted((r.get('jrc_citation_count') or 0 for r in scholarly), reverse=True)
+    cited = [c for c in counts if c > 0]
+    idx = citation_impact_indices(counts)
+    # Complete calendar years only - the current year is partial and would show
+    # as a dip every January.
+    cutoff = datetime.now().year - 5
+    recent = [r for r in scholarly
+              if (r.get('jrc_publishing_date') or '')[:4].isdigit()
+              and int(r['jrc_publishing_date'][:4]) >= cutoff
+              and int(r['jrc_publishing_date'][:4]) < datetime.now().year]
+    rcounts = sorted((r.get('jrc_citation_count') or 0 for r in recent), reverse=True)
+    return {'works': len(scholarly), 'other': len(other), 'cited': len(cited),
+            'total': sum(cited),
+            'median': statistics.median(cited) if cited else 0,
+            'h_index': idx['h_index'],
+            'thresholds': [(t, sum(1 for c in cited if c >= t)) for t in (10, 50, 100, 500)],
+            'recent_works': len(recent), 'recent_total': sum(rcounts),
+            'recent_h': citation_impact_indices(rcounts)['h_index'],
+            'window': f"{cutoff}-{datetime.now().year - 1}"}
 
 
 def citation_impact_indices(counts):
@@ -14222,6 +15020,7 @@ def dois_author(year='All'):
 
 @app.route('/dois_top_author/<string:year>')
 @app.route('/dois_top_author')
+@restricted
 def dois_top_author(year='All'):
     ''' Show top first and last authors
     '''
@@ -18262,15 +19061,16 @@ def my_papers_body(orc, show, year='All'):
         ident += f"<tr><td>At Janelia:</td><td>{tenure}</td></tr>"
     # The affiliation view of the same person: this page is what they are credited
     # with, /dois/mytags is what their affiliations published.
-    ident += f"<tr><td>Also see:</td><td><a href='/dois/mytags/{escape(oid)}'>" \
-             + "DOIs from this person's affiliations</a></td></tr>"
+    ident += "<tr><td>Also see:</td><td><a href='/dois/mytags'>" \
+             + "DOIs from my affiliations</a> &middot; " \
+             + "<a href='/mymetrics'>My publication metrics</a></td></tr>"
     ident += "</table>"
     if not rows:
         empty = ("We have no publications on file for you in that year."
                  if year != 'All'
                  else "We have no publications on file for you yet. If that looks wrong, "
                       f"email the Library at {LIBRARY}.")
-        return ident + year_pulldown(f"mypapers/{oid}/{show}", query=True) \
+        return ident + year_pulldown(f"mypapers/{show}", query=True) \
                + "<br><br>" + render_warning(empty, 'warning')
     cards = [("Publications", f"<span id='totalrows'>{len(rows):,}</span>"),
              ("Credited to you at Janelia",
@@ -18316,8 +19116,8 @@ def my_papers_body(orc, show, year='All'):
                                      extra_fn=lambda row: [evidence_cell(match_evidence(row, orc),
                                                                          oid, row['doi'])])
     return ident + stat_cards(cards, div_id='mypapers-stats') + note \
-           + year_pulldown(f"mypapers/{oid}/{show}", query=True) + "<br><br>" \
-           + journal_buttons(show, f"/mypapers/{oid}",
+           + year_pulldown(f"mypapers/{show}", query=True) + "<br><br>" \
+           + journal_buttons(show, "/mypapers",
                              '' if year == 'All' else f"?year={year}") + cbutton + table
 
 
@@ -18378,11 +19178,15 @@ def author_evidence(pid, doi):
                     "cls": "evidence-none"})
 
 
-@app.route('/mypapers/<string:oid>/<string:show>')
-@app.route('/mypapers/<string:oid>')
-def show_my_papers(oid, show='full'):
+@app.route('/mypapers/<string:show>')
+@app.route('/mypapers')
+@restricted
+def show_my_papers(show='full'):
     ''' Show one author their own publications, keyed by ORCID
     '''
+    # "My" means the signed-in person. The iD used to come from the URL, so the
+    # page would show anybody's publications to anybody who typed their iD.
+    oid = current_user()['orcid']
     try:
         recs = list(DB['dis'].orcid.find({"orcid": oid}))
     except Exception as err:

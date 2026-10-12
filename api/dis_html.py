@@ -442,9 +442,14 @@ def generate_navbar_items(items):
     return html
 
 
-def generate_navbar(active):
+def generate_navbar(active, menu=None):
     ''' Generate the web navigation bar
         Keyword arguments:
+          active: heading to mark as current
+          menu: menu to render, defaulting to the module's NAV. Passed in by the
+               request-aware shadow in dis_responder, which drops entries the
+               viewer may not open - this module stays request-free.
+        Returns:
           Navigation bar
     '''
     nav = '''
@@ -452,7 +457,9 @@ def generate_navbar(active):
       <div class="collapse navbar-collapse" id="navbarSupportedContent">
         <ul class="navbar-nav mr-auto">
     '''
-    for heading, subhead in NAV.items():
+    # Named menu, not nav: the accumulator below is called nav, and a parameter
+    # of that name is overwritten before this line is ever reached.
+    for heading, subhead in (NAV if menu is None else menu).items():
         basic = '<li class="nav-item active">' if heading == active else '<li class="nav-item">'
         drop = '<li class="nav-item dropdown active">' if heading == active \
                else '<li class="nav-item dropdown">'
