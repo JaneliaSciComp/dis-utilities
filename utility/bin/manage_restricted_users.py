@@ -1,56 +1,101 @@
 """ manage_restricted_users.py
-    Manage who may read the restricted platform user pages (/figshare_users,
-    /protocolsio_users, /zenodo_users, /dryad_users).
+    Manage who may sign in to the restricted DIS pages.
 
-    Those pages are gated by two environment variables, both of which belong in
-    the dis-utilities-secrets Secret that the OpenShift deployment already pulls
-    in through envFrom:
+    This is the INTERIM sign-in, in place until the site authenticates against
+    orcid.org. A person signs in with their ORCID iD and a password assigned
+    here. The iD is the point: the session it establishes holds a real ORCID
+    iD, which is exactly what the orcid.org callback will set later, so
+    everything built on top of it - the avatar, /profile, authorizations -
+    is already working against real orcid documents and survives the switch
+    untouched. Only the password half is thrown away.
 
-      DIS_SESSION_SECRET  signs the session cookie
-      DIS_RESTRICTED_USERS    name:hash pairs, comma-separated
+    Credentials live in the `user_auth` collection, keyed by ORCID iD, and are
+    deliberately NOT on the orcid document itself: /orcid/<oid>, /orcid/active,
+    /orcid/works/<oid> and /orcidapi/<oid> all project with {'_id': 0}, which
+    excludes the id and nothing else, so any field added to an orcid document
+    is published as JSON by endpoints that are unauthenticated today.
 
-    There is no file to edit - the values live in the Secret (production) or in
-    your shell (local development). This program builds the strings and prints
-    the commands that install them; it never contacts the cluster itself, so a
-    mistake here cannot change production.
+    Passwords are hashed with scrypt in werkzeug's format (the application
+    verifies them with werkzeug); the hash is produced here with the standard
+    library so this runs under any python. tests/test_restricted_users.py pins
+    the two formats together.
 
-    Passwords are hashed before they go anywhere, so no password is stored or
-    printed back. The hash is werkzeug's scrypt format, which is what the
-    application verifies against, but it is produced here with the standard
-    library alone: werkzeug arrives with Flask and so lives in the api venv,
-    and this is a command-line tool that should run under whichever python is
-    to hand. tests/test_restricted_users.py pins the two formats together.
+    Granting access requires the iD to be in the orcid collection AND to pass
+    the access rule:
 
-    Adding somebody MERGES with the existing roster rather than replacing it -
-    rewriting DIS_RESTRICTED_USERS with a single entry is how you would silently
-    lock out everybody else.
+        (alumni is not True) or (workerType == 'Contingent Worker')
+
+    so a person who leaves is refused at their next sign-in with no action
+    here, and access cannot be granted to somebody the roster does not know.
+
+    When orcid.org sign-in lands: drop this collection, delete this program,
+    and remove the password branch from the application.
 """
 
-__version__ = '1.0.0'
+__version__ = '2.0.0'
 
 import argparse
 from getpass import getpass
 import hashlib
-import os
+import re
 import secrets
 import string
 import sys
+from datetime import datetime
+from operator import attrgetter
 
-ARG = None
-# Matches the application's reader: split on the FIRST colon only, because a
-# werkzeug hash ("scrypt:32768:8:1$...") contains colons of its own.
-SEPARATOR = ':'
-# werkzeug's own defaults, reproduced here so this program needs nothing but the
-# standard library. werkzeug ships with Flask and so lives in the api venv; this
-# is a command-line tool that should run under whichever python is to hand, and
-# a web framework is a strange thing to install to hash a password.
-# The output is byte-for-byte what werkzeug's generate_password_hash produces,
-# which test_restricted_users.py asserts against the real library.
+import jrc_common.jrc_common as JRC
+
+# Database
+DB = {}
+# Globals
+ARG = LOGGER = None
+# The collection holding interim credentials. Separate from `orcid` on purpose
+# - see the module docstring.
+COLLECTION = 'user_auth'
+# 0000-0002-1825-0097 : four groups of four, final character may be X.
+ORCID_RE = re.compile(r'^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$')
+# werkzeug's own defaults, reproduced with the standard library so this program
+# needs no web framework to hash a password. Byte-for-byte identical output.
 SCRYPT_N, SCRYPT_R, SCRYPT_P = 32768, 8, 1
 SCRYPT_SALT_LEN = 16
 SCRYPT_DKLEN = 64
 # n=32768, r=8 needs about 128 MiB; the default maxmem of 0 refuses it.
 SCRYPT_MAXMEM = 132 * 1024 * 1024
+MIN_PASSWORD = 8
+
+
+def terminate_program(msg=None):
+    ''' Terminate the program gracefully
+        Keyword arguments:
+          msg: error message or object
+        Returns:
+          None
+    '''
+    if msg:
+        if not isinstance(msg, str):
+            msg = f"An exception of type {type(msg).__name__} occurred. Arguments:\n{msg.args}"
+        LOGGER.critical(msg)
+    sys.exit(-1 if msg else 0)
+
+
+def initialize_program():
+    ''' Intialize the program
+        Keyword arguments:
+          None
+        Returns:
+          None
+    '''
+    try:
+        dbconfig = JRC.get_config("databases")
+    except Exception as err:
+        terminate_program(err)
+    dbo = attrgetter(f"dis.{ARG.MANIFOLD}.write")(dbconfig)
+    LOGGER.info("Connecting to %s %s on %s as %s", dbo.name, ARG.MANIFOLD, dbo.host, dbo.user)
+    try:
+        DB['dis'] = JRC.connect_database(dbo)
+    except Exception as err:
+        terminate_program(err)
 
 
 def generate_password_hash(password):
@@ -68,49 +113,56 @@ def generate_password_hash(password):
     return f"scrypt:{SCRYPT_N}:{SCRYPT_R}:{SCRYPT_P}${salt}${digest}"
 
 
-def parse_users(raw):
-    ''' Parse a DIS_RESTRICTED_USERS value
+def may_sign_in(person):
+    ''' Whether an orcid document is allowed to sign in
         Keyword arguments:
-          raw: the variable's value, or None
+          person: orcid collection document
         Returns:
-          Dict of name to hash, insertion-ordered
+          (True, None) or (False, reason)
     '''
-    users = {}
-    for entry in (raw or '').split(','):
-        entry = entry.strip()
-        if SEPARATOR not in entry:
-            continue
-        name, _, digest = entry.partition(SEPARATOR)
-        name, digest = name.strip(), digest.strip()
-        if name and digest:
-            users[name] = digest
-    return users
+    if person.get('alumni') is True and person.get('workerType') != 'Contingent Worker':
+        return False, (f"{person.get('workerType') or 'This person'} is flagged as alumni and is "
+                       "not a contingent worker, so the access rule excludes them")
+    return True, None
 
 
-def format_users(users):
-    ''' Render a roster back into a DIS_RESTRICTED_USERS value
+def person_for(orcid):
+    ''' The orcid document for an iD, if it may sign in
         Keyword arguments:
-          users: dict of name to hash
+          orcid: ORCID iD
         Returns:
-          Comma-separated string
+          The document, or None after reporting why not
     '''
-    return ','.join(f"{name}{SEPARATOR}{digest}" for name, digest in users.items())
+    try:
+        person = DB['dis'].orcid.find_one({"orcid": orcid})
+    except Exception as err:
+        terminate_program(err)
+    if not person:
+        LOGGER.error("%s is not in the orcid collection, so access cannot be granted", orcid)
+        return None
+    allowed, why = may_sign_in(person)
+    if not allowed:
+        LOGGER.error("%s: %s", orcid, why)
+        return None
+    return person
 
 
-def current_roster():
-    ''' The roster to start from: --current wins, else the environment
+def display_name(person):
+    ''' A readable name from an orcid document
+        Keyword arguments:
+          person: orcid collection document
         Returns:
-          Dict of name to hash
+          Name string
     '''
-    if ARG.CURRENT:
-        return parse_users(ARG.CURRENT)
-    return parse_users(os.environ.get('DIS_RESTRICTED_USERS'))
+    given = (person.get('given') or [''])[0]
+    family = (person.get('family') or [''])[0]
+    return f"{given} {family}".strip() or '(no name)'
 
 
 def ask_password(name):
     ''' Prompt twice for a password, without echoing it
         Keyword arguments:
-          name: user name, for the prompt
+          name: who the password is for, for the prompt
         Returns:
           Password string
     '''
@@ -122,127 +174,188 @@ def ask_password(name):
         if first != getpass("Repeat password: "):
             print("  They did not match - try again.")
             continue
-        if len(first) < 8:
+        if len(first) < MIN_PASSWORD:
             # A short password on a page that is only mildly sensitive is still
             # a password somebody will reuse. Refused rather than warned about.
-            print("  Please use at least 8 characters.")
+            print(f"  Please use at least {MIN_PASSWORD} characters.")
             continue
         return first
 
 
-def show_install(users, session_secret=None):
-    ''' Print the commands that install these values
+def list_users():
+    ''' Report who may sign in
         Keyword arguments:
-          users: dict of name to hash
-          session_secret: a freshly generated secret, or None
+          None
         Returns:
           None
     '''
-    value = format_users(users)
-    print("\n" + "=" * 78)
-    print(f"DIS_RESTRICTED_USERS now holds {len(users)} reader(s): {', '.join(users) or '(none)'}")
-    print("=" * 78)
-    if session_secret:
-        print("\nA new DIS_SESSION_SECRET was generated. Note that installing it signs")
-        print("EVERYONE out, which is also how you revoke access in a hurry.\n")
-    print("OpenShift (production) - both replicas read the same Secret, which is what\n"
-          "keeps a session alive when the Service moves a browser between pods:\n")
-    cmd = "  oc -n dis-utilities set data secret/dis-utilities-secrets \\\n" \
-          f"      DIS_RESTRICTED_USERS='{value}'"
-    if session_secret:
-        cmd += f" \\\n      DIS_SESSION_SECRET='{session_secret}'"
-    print(cmd)
-    print("\n  oc -n dis-utilities rollout restart deployment/dis-utilities")
-    print("\nLocal development - note DIS_ALLOW_HTTP_SESSION, without which the signed\n"
-          "cookie is dropped over plain HTTP and the sign-in appears to fail:\n")
-    print(f"  export DIS_RESTRICTED_USERS='{value}'")
-    print(f"  export DIS_SESSION_SECRET='{session_secret or '<your existing secret>'}'")
-    print("  export DIS_ALLOW_HTTP_SESSION=1")
-    print()
+    try:
+        rows = list(DB['dis'][COLLECTION].find({}).sort("orcid", 1))
+    except Exception as err:
+        terminate_program(err)
+    if not rows:
+        print(f"No credentials in {COLLECTION}. Nobody can sign in; the restricted "
+              "pages will send everyone to the sign-in form and refuse them.")
+        return
+    print(f"{len(rows)} credential(s):\n")
+    print(f"  {'ORCID iD':22} {'name':28} {'added':12} {'last sign-in'}")
+    for row in rows:
+        person = DB['dis'].orcid.find_one({"orcid": row['orcid']})
+        if person:
+            name = display_name(person)
+            allowed, _ = may_sign_in(person)
+            if not allowed:
+                name += "  [BLOCKED by the access rule]"
+        else:
+            name = "*** no longer in the orcid collection ***"
+        last = row.get('last_login')
+        print(f"  {row['orcid']:22} {name:28} {str(row.get('created', ''))[:10]:12} "
+              f"{str(last)[:19] if last else 'never'}")
 
 
-def show_secret_only(session_secret):
-    ''' Print the commands that install a new session secret, roster untouched
+def add_user():
+    ''' Add or update a credential
         Keyword arguments:
-          session_secret: the generated secret
+          None
         Returns:
           None
     '''
-    print("\n" + "=" * 78)
-    print("New DIS_SESSION_SECRET - installing this signs EVERYONE out immediately,")
-    print("which is how you revoke access in a hurry. The roster is unchanged.")
-    print("=" * 78)
-    print("\n  oc -n dis-utilities set data secret/dis-utilities-secrets \\")
-    print(f"      DIS_SESSION_SECRET='{session_secret}'")
-    print("\n  oc -n dis-utilities rollout restart deployment/dis-utilities")
-    print(f"\n  export DIS_SESSION_SECRET='{session_secret}'   # local development")
-    print()
+    orcid = (ARG.ORCID or input("ORCID iD: ")).strip()
+    if not ORCID_RE.match(orcid):
+        terminate_program(f"{orcid} is not an ORCID iD (expected 0000-0000-0000-0000)")
+    person = person_for(orcid)
+    if not person:
+        terminate_program("Refusing to grant access")
+    try:
+        existing = DB['dis'][COLLECTION].find_one({"orcid": orcid})
+    except Exception as err:
+        terminate_program(err)
+    if existing and not ARG.FORCE:
+        terminate_program(f"{orcid} already has a password. Use --force to change it.")
+    name = display_name(person)
+    print(f"\n  {orcid}  {name}")
+    if existing:
+        print("  (changing an existing password)")
+    password = ask_password(name)
+    now = datetime.now()
+    record = {"orcid": orcid, "password": generate_password_hash(password), "updated": now}
+    if not existing:
+        record['created'] = now
+    if not ARG.WRITE:
+        print(f"\n  Would {'update' if existing else 'add'} {orcid} ({name}) "
+              f"in {COLLECTION}. Use --write to commit.")
+        return
+    try:
+        DB['dis'][COLLECTION].update_one({"orcid": orcid}, {"$set": record}, upsert=True)
+    except Exception as err:
+        terminate_program(err)
+    print(f"\n  {'Updated' if existing else 'Added'} {orcid} ({name}).")
+    print("  Effective immediately - no deployment restart is needed.")
+
+
+def remove_user():
+    ''' Remove a credential
+        Keyword arguments:
+          None
+        Returns:
+          None
+    '''
+    orcid = ARG.REMOVE.strip()
+    try:
+        existing = DB['dis'][COLLECTION].find_one({"orcid": orcid})
+    except Exception as err:
+        terminate_program(err)
+    if not existing:
+        terminate_program(f"{orcid} has no credential in {COLLECTION}")
+    person = DB['dis'].orcid.find_one({"orcid": orcid})
+    name = display_name(person) if person else '(not in orcid collection)'
+    if not ARG.WRITE:
+        print(f"  Would remove {orcid} ({name}) from {COLLECTION}. Use --write to commit.")
+        return
+    try:
+        DB['dis'][COLLECTION].delete_one({"orcid": orcid})
+    except Exception as err:
+        terminate_program(err)
+    print(f"  Removed {orcid} ({name}).")
+    print("  Any session they already hold stays valid until it is cleared - rotate")
+    print("  DIS_SESSION_SECRET if you need them out immediately.")
+
+
+def audit():
+    ''' Report credentials whose person no longer qualifies
+        Keyword arguments:
+          None
+        Returns:
+          None
+    '''
+    try:
+        rows = list(DB['dis'][COLLECTION].find({}))
+    except Exception as err:
+        terminate_program(err)
+    stale = []
+    for row in rows:
+        person = DB['dis'].orcid.find_one({"orcid": row['orcid']})
+        if not person:
+            stale.append((row['orcid'], 'no longer in the orcid collection'))
+            continue
+        allowed, why = may_sign_in(person)
+        if not allowed:
+            stale.append((row['orcid'], why))
+    if not stale:
+        print(f"All {len(rows)} credential(s) still qualify.")
+        return
+    print(f"{len(stale)} of {len(rows)} credential(s) no longer qualify:\n")
+    for orcid, why in stale:
+        print(f"  {orcid}  {why}")
+    print("\nThese people are already refused at sign-in - the application applies the")
+    print("same rule. Removing them here is tidying, not a security fix.")
 
 
 def processing():
-    ''' Add, remove or list readers
+    ''' Dispatch
         Keyword arguments:
           None
         Returns:
           None
     '''
-    users = current_roster()
-    session_secret = secrets.token_hex(32) if ARG.NEW_SECRET else None
     if ARG.LIST:
-        if not users:
-            print("No readers configured (DIS_RESTRICTED_USERS is empty or unset).")
-            print("Nobody can open the restricted pages; they answer 503.")
-        else:
-            print(f"{len(users)} reader(s) configured:")
-            for name in users:
-                print(f"  {name}")
-        if session_secret:
-            # --list --new-secret is the revoke path: rotate the signing key and
-            # every existing cookie dies, without disturbing the roster. Listing
-            # and returning early here would have dropped the secret silently.
-            show_secret_only(session_secret)
-        return
-    if ARG.REMOVE:
-        if ARG.REMOVE not in users:
-            print(f"{ARG.REMOVE} is not in the roster. Present: {', '.join(users) or '(none)'}")
-            sys.exit(1)
-        del users[ARG.REMOVE]
-        show_install(users, session_secret)
-        return
-    name = ARG.USER or input("User name: ").strip()
-    if not name:
-        print("A user name is required.")
-        sys.exit(1)
-    if SEPARATOR in name or ',' in name:
-        # Either character would corrupt the parse on the way back in.
-        print(f"A user name cannot contain '{SEPARATOR}' or ','.")
-        sys.exit(1)
-    if name in users and not ARG.FORCE:
-        print(f"{name} already has access. Re-run with --force to change the password.")
-        sys.exit(1)
-    users[name] = generate_password_hash(ask_password(name))
-    show_install(users, session_secret)
+        list_users()
+    elif ARG.AUDIT:
+        audit()
+    elif ARG.REMOVE:
+        remove_user()
+    else:
+        add_user()
 
+
+# -----------------------------------------------------------------------------
 
 if __name__ == '__main__':
     PARSER = argparse.ArgumentParser(
-        description="Manage readers of the restricted platform user pages",
-        epilog="The roster is read from DIS_RESTRICTED_USERS in the environment unless "
-               "--current is given. Nothing is written anywhere: the commands to "
-               "install the result are printed for you to run.")
-    PARSER.add_argument('--user', dest='USER', action='store',
-                        help='User name to add (prompted for if omitted)')
+        description="Manage interim sign-in credentials for the restricted DIS pages",
+        epilog="Credentials are keyed by ORCID iD and stored in the user_auth collection. "
+               "This is temporary, pending orcid.org sign-in.")
+    PARSER.add_argument('--orcid', dest='ORCID', action='store',
+                        help='ORCID iD to add (prompted for if omitted)')
     PARSER.add_argument('--remove', dest='REMOVE', action='store',
-                        help='Remove this user from the roster')
+                        help='Remove this ORCID iD\'s credential')
     PARSER.add_argument('--list', dest='LIST', action='store_true', default=False,
-                        help='List the configured readers and exit')
-    PARSER.add_argument('--current', dest='CURRENT', action='store',
-                        help='Existing DIS_RESTRICTED_USERS value to merge into, if it '
-                             'is not in this shell (e.g. copied out of the Secret)')
-    PARSER.add_argument('--new-secret', dest='NEW_SECRET', action='store_true',
-                        default=False,
-                        help='Also generate a DIS_SESSION_SECRET (signs everyone out)')
+                        help='List who may sign in')
+    PARSER.add_argument('--audit', dest='AUDIT', action='store_true', default=False,
+                        help='Report credentials whose person no longer qualifies')
     PARSER.add_argument('--force', dest='FORCE', action='store_true', default=False,
-                        help='Allow changing the password of an existing user')
+                        help='Allow changing an existing password')
+    PARSER.add_argument('--manifold', dest='MANIFOLD', action='store',
+                        default='prod', choices=['dev', 'prod'],
+                        help='MongoDB manifold (dev, [prod])')
+    PARSER.add_argument('--write', dest='WRITE', action='store_true',
+                        default=False, help='Write to database')
+    PARSER.add_argument('--verbose', dest='VERBOSE', action='store_true',
+                        default=False, help='Flag, Chatty')
+    PARSER.add_argument('--debug', dest='DEBUG', action='store_true',
+                        default=False, help='Flag, Very chatty')
     ARG = PARSER.parse_args()
+    LOGGER = JRC.setup_logging(ARG)
+    initialize_program()
     processing()
+    terminate_program()

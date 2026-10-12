@@ -29,7 +29,7 @@ import concurrent.futures
 import dateutil.parser
 import dateutil.tz
 import bson
-from flask import (Flask, make_response, render_template, request, jsonify, redirect,
+from flask import (Flask, g, make_response, render_template, request, jsonify, redirect,
                    send_file, session, url_for)
 from functools import wraps
 from flask_cors import CORS
@@ -272,33 +272,118 @@ def handle_invalid_usage(error):
 #                                       print('alice:' + g(input('password: ')))"
 #                       The hash itself contains colons, so only the FIRST colon
 #                       separates the name from it.
-RESTRICTED_SESSION_KEY = 'dis_restricted_user'
+RESTRICTED_SESSION_KEY = 'orcid'
+# The interim sign-in is by ORCID iD and a password assigned with
+# utility/bin/manage_restricted_users.py. The iD is the point: the session holds
+# a real ORCID iD, which is exactly what the orcid.org callback will set, so
+# current_user() and everything above it already works against real orcid
+# documents and survives the switch. Only the password check is thrown away.
+#
+# Credentials live in the user_auth collection, NOT on the orcid document:
+# /orcid/<oid>, /orcid/active, /orcid/works/<oid> and /orcidapi/<oid> project
+# with {'_id': 0}, which excludes the id and nothing else, so anything added to
+# an orcid document is published by endpoints that are open today.
+AUTH_COLLECTION = 'user_auth'
+ORCID_RE = re.compile(r'^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$')
 # Local development is plain HTTP, and a Secure cookie is not stored over plain
-# HTTP - the login would appear to succeed and then bounce straight back to the
-# form. Production is HTTPS at the router, so Secure is the default and the
+# HTTP - the sign-in would appear to succeed and then bounce straight back to
+# the form. Production is HTTPS at the router, so Secure is the default and the
 # escape hatch has to be set deliberately.
 ALLOW_HTTP_SESSION = os.environ.get('DIS_ALLOW_HTTP_SESSION') == '1'
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_SECURE'] = not ALLOW_HTTP_SESSION
+# Must be identical in every replica. The deployment runs two, and the session
+# is a signed cookie with no server-side store, so a per-pod value would log
+# people out as the Service moved them between pods.
 app.secret_key = os.environ.get('DIS_SESSION_SECRET') or ''
 
 
-def _restricted_users():
-    ''' The people allowed to see the restricted pages
+def may_sign_in(person):
+    ''' Whether an orcid document is allowed to sign in
+        DECIDED 2026-10-12: an alumnus keeps access if and only if they are a
+        contingent worker. Note alumni means departed - it is set with an
+        alumni_date when someone drops out of People, and cleared when they
+        return - so this admits departed contingent workers, while a former
+        employee who came back already has the flag cleared.
+        Keyword arguments:
+          person: orcid collection document
         Returns:
-          Dict of name to password hash, empty if the variable is unset
+          True if they may sign in
     '''
-    out = {}
-    for entry in os.environ.get('DIS_RESTRICTED_USERS', '').split(','):
-        entry = entry.strip()
-        if ':' not in entry:
-            continue
-        name, _, digest = entry.partition(':')
-        name, digest = name.strip(), digest.strip()
-        if name and digest:
-            out[name] = digest
-    return out
+    if not person:
+        return False
+    if person.get('alumni') is True and person.get('workerType') != 'Contingent Worker':
+        return False
+    return True
+
+
+def display_person_name(person):
+    ''' A readable name from an orcid document
+        Keyword arguments:
+          person: orcid collection document, or None
+        Returns:
+          Name string
+    '''
+    if not person:
+        return 'unknown'
+    given = (person.get('given') or [''])[0]
+    family = (person.get('family') or [''])[0]
+    return f"{given} {family}".strip() or 'unnamed'
+
+
+def current_user():
+    ''' The orcid document for the signed-in person, or None.
+
+        This is the seam. Everything that needs to know who is looking - the
+        avatar, /profile, authorization checks, API tokens - reads this and
+        nothing else, so replacing the interim password sign-in with orcid.org
+        changes only what puts the iD into the session.
+
+        The session stores the iD alone; the document is looked up per request
+        and memoized on g, so a person removed from the roster, or newly failing
+        the access rule, loses access on their next request without any action.
+        Keyword arguments:
+          None
+        Returns:
+          orcid collection document, or None
+    '''
+    if 'dis_user' in g:
+        return g.dis_user
+    g.dis_user = None
+    orcid = session.get(RESTRICTED_SESSION_KEY)
+    if orcid and DB:
+        try:
+            person = DB['dis'].orcid.find_one({"orcid": orcid})
+        except Exception:
+            person = None
+        if may_sign_in(person):
+            g.dis_user = person
+    return g.dis_user
+
+
+def _auth_record(orcid):
+    ''' The interim credential for an ORCID iD
+        Keyword arguments:
+          orcid: ORCID iD
+        Returns:
+          user_auth document, or None
+    '''
+    try:
+        return DB['dis'][AUTH_COLLECTION].find_one({"orcid": orcid})
+    except Exception:
+        return None
+
+
+def _credential_count():
+    ''' How many interim credentials exist
+        Returns:
+          Count, or 0 if the collection is unreachable
+    '''
+    try:
+        return DB['dis'][AUTH_COLLECTION].count_documents({})
+    except Exception:
+        return 0
 
 
 def _restriction_unavailable():
@@ -309,12 +394,13 @@ def _restriction_unavailable():
         Returns:
           Message string, or None
     '''
-    fix = (" Run utility/bin/manage_restricted_users.py to generate the values and the"
-           " commands that install them.")
     if not app.secret_key:
-        return "DIS_SESSION_SECRET is not set, so this page cannot verify a login." + fix
-    if not _restricted_users():
-        return "DIS_RESTRICTED_USERS is not set, so nobody is permitted on this page." + fix
+        return ("DIS_SESSION_SECRET is not set, so this page cannot verify a sign-in."
+                " It must be set, and identical, in every replica.")
+    if not _credential_count():
+        return ("No sign-in credentials are configured, so nobody is permitted on this"
+                " page. Run utility/bin/manage_restricted_users.py --orcid <iD> --write"
+                " to add one.")
     return None
 
 
@@ -367,20 +453,38 @@ def restricted_login():
         nxt = '/'
     note = ""
     if request.method == 'POST':
-        name = request.form.get('username', '').strip()
-        digest = _restricted_users().get(name)
-        # check_password_hash on a known-bad hash when the user is unknown, so a
-        # wrong name and a wrong password cost the same time to reject.
+        orcid = request.form.get('orcid', '').strip()
+        # A malformed iD is rejected the same way as a wrong password, and takes
+        # the same path, so the form cannot be used to discover which iDs exist.
+        record = _auth_record(orcid) if ORCID_RE.match(orcid) else None
+        digest = record.get('password') if record else None
+        # check_password_hash against a known-bad hash when the iD is unknown, so
+        # a wrong iD and a wrong password cost the same time to reject.
         reference = digest or generate_password_hash('_no_such_user_')
-        if digest and check_password_hash(reference, request.form.get('password', '')):
+        matched = check_password_hash(reference, request.form.get('password', ''))
+        person = DB['dis'].orcid.find_one({"orcid": orcid}) if (digest and matched) else None
+        if digest and matched and may_sign_in(person):
             session.clear()
-            session[RESTRICTED_SESSION_KEY] = name
+            session[RESTRICTED_SESSION_KEY] = orcid
             session.permanent = False
-            print(f"Restricted page sign-in: {name} from {request.remote_addr}")
+            try:
+                DB['dis'][AUTH_COLLECTION].update_one({"orcid": orcid},
+                                                      {"$set": {"last_login": datetime.now()}})
+            except Exception:
+                pass    # a sign-in must not fail because a timestamp could not be written
+            print(f"Sign-in: {orcid} ({display_person_name(person)}) from {request.remote_addr}")
             return redirect(nxt)
-        check_password_hash(reference, request.form.get('password', ''))
-        print(f"Restricted page sign-in FAILED for {name!r} from {request.remote_addr}")
-        note = render_warning("That name and password were not recognized.", 'warning')
+        if digest and matched:
+            # Correct credentials, but the roster no longer permits them. Say so
+            # rather than claiming the password is wrong - it is not, and they
+            # would otherwise keep retyping it.
+            print(f"Sign-in REFUSED by the access rule: {orcid} from {request.remote_addr}")
+            note = render_warning("Those credentials are correct, but this ORCID iD no "
+                                  "longer has access. Please contact DIS.", 'warning')
+        else:
+            print(f"Sign-in FAILED for {orcid!r} from {request.remote_addr}")
+            note = render_warning("That ORCID iD and password were not recognized.",
+                                  'warning')
     elif not ALLOW_HTTP_SESSION and not request.is_secure \
          and request.headers.get('X-Forwarded-Proto', 'http') != 'https':
         # Without this the developer sees a successful POST, no cookie, and an
@@ -389,14 +493,16 @@ def restricted_login():
                               "cookie will not be stored. Set DIS_ALLOW_HTTP_SESSION=1 "
                               "for local testing.", 'warning')
     html = f"""{note}
-<p>These reports name individual people, so they are limited to a few readers
-until the site has proper accounts.</p>
+<p>These pages name individual people, so they are limited to a few readers
+until the site signs in through <strong>orcid.org</strong>. For now, use your
+ORCID iD with the password you were given.</p>
 <form method="post" action="{escape(url_for('restricted_login'))}" class="form-inline">
   <input type="hidden" name="next" value="{escape(nxt)}">
   <div class="form-group" style="margin-right:8px;">
-    <label for="username" style="margin-right:6px;">Name</label>
-    <input class="form-control" type="text" id="username" name="username"
-           autocomplete="username" autofocus required>
+    <label for="orcid" style="margin-right:6px;">ORCID iD</label>
+    <input class="form-control" type="text" id="orcid" name="orcid"
+           placeholder="0000-0000-0000-0000" pattern="\\d{4}-\\d{4}-\\d{4}-\\d{3}[\\dX]"
+           size="21" autocomplete="username" autofocus required>
   </div>
   <div class="form-group" style="margin-right:8px;">
     <label for="password" style="margin-right:6px;">Password</label>
