@@ -43,9 +43,9 @@ from packaging.version import Version
 import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
 import dis_plots as DP
-from dis_html import (DOWNLOAD_ICON, add_jrc_fields, add_subjects, cell,
+from dis_html import (DOWNLOAD_ICON, NAV, add_jrc_fields, add_subjects, cell,
                       create_downloadable, dloop, doi_link, fcell, filter_frame,
-                      generate_navbar, get_license,
+                      generate_navbar as _generate_navbar, get_license,
                       oa_status_rank, registrar_switch, render_table, render_warning,
                       safe, see_also, stat_cards, tab_button, tab_pane, tiny_badge,
                       two_col, year_pulldown as _year_pulldown)
@@ -463,6 +463,75 @@ def avatar_html(person, photo_url=None, px=None):
                 f"title='{tip}'>{escape(initials)}</span>")
 
 
+def _restricted_targets():
+    ''' Menu targets that require a sign-in.
+
+        Derived from the @restricted decorator rather than listed by hand, so
+        gating an endpoint hides its menu entry with no second edit. Cached on
+        app.config: the route table does not change after start-up.
+        Keyword arguments:
+          None
+        Returns:
+          Set of NAV values, e.g. {'figshare_users'}
+    '''
+    cached = app.config.get('RESTRICTED_TARGETS')
+    if cached is not None:
+        return cached
+    out = set()
+    for rule in app.url_map.iter_rules():
+        view = app.view_functions.get(rule.endpoint)
+        if getattr(view, 'dis_restricted', False):
+            # NAV values are paths without the leading slash, and menu entries
+            # never carry parameters, so only the static rules can match.
+            if '<' not in str(rule):
+                out.add(str(rule).lstrip('/'))
+    app.config['RESTRICTED_TARGETS'] = out
+    return out
+
+
+def _visible_nav(nav, hidden):
+    ''' A copy of the menu without the entries a signed-out viewer cannot open.
+        Keyword arguments:
+          nav: menu dict, possibly nested
+          hidden: set of NAV values to drop
+        Returns:
+          Filtered dict
+    '''
+    out = {}
+    for label, value in nav.items():
+        if isinstance(value, dict):
+            kept = _visible_nav(value, hidden)
+            # A submenu emptied by the filter would otherwise render as a
+            # heading that opens onto nothing.
+            if kept:
+                out[label] = kept
+        elif value not in hidden:
+            out[label] = value
+    return out
+
+
+def generate_navbar(active):
+    ''' Request-aware wrapper around dis_html.generate_navbar.
+
+        Menu entries for pages requiring a sign-in are hidden from anyone who is
+        not signed in. This is tidiness, not security - the pages themselves are
+        guarded by @restricted, and hiding a link protects nothing on its own.
+        Without it, every signed-out visitor sees four entries that bounce them
+        to a sign-in form they may have no way to satisfy.
+
+        The shadow lives here, as year_pulldown's does, so dis_html stays
+        request-free.
+        Keyword arguments:
+          active: heading to mark as current
+        Returns:
+          Navigation bar HTML
+    '''
+    hidden = _restricted_targets()
+    if not hidden or current_user():
+        return _generate_navbar(active)
+    return _generate_navbar(active, menu=_visible_nav(NAV, hidden))
+
+
 @app.context_processor
 def inject_viewer():
     ''' Make the signed-in person available to every template.
@@ -564,6 +633,10 @@ def restricted(view):
             target = request.full_path.rstrip('?')
             return redirect(url_for('login', next=target))
         return view(*args, **kwargs)
+    # Marked so the navigation menu can find out what is gated without being
+    # told twice. A hand-kept list would drift the first time an endpoint is
+    # added to or taken off the decorator.
+    wrapper.dis_restricted = True
     return wrapper
 
 
