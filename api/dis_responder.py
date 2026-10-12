@@ -256,22 +256,19 @@ def handle_invalid_usage(error):
 # runs browser -> HAProxy -> Service -> gunicorn with no proxy of our own in
 # between, so there is nowhere outside the application to put a check.
 #
-# Two secrets, both belonging in the dis-utilities-secrets Secret that the
-# deployment already pulls in via envFrom:
+# One secret, in the dis-utilities-secrets Secret the deployment already pulls
+# in via envFrom:
 #
 #   DIS_SESSION_SECRET  signs the session cookie. It MUST be the same string in
 #                       every replica - the deployment runs 2 - or a browser
-#                       that authenticates against one pod is logged out the
-#                       moment the service sends it to the other. Generate once:
+#                       that signs in against one pod is signed out the moment
+#                       the Service sends it to the other. Generate once:
 #                           python3 -c "import secrets; print(secrets.token_hex(32))"
+#                       Rotating it signs everybody out, which is the revoke.
 #
-#   DIS_RESTRICTED_USERS    who may look, as comma-separated name:hash pairs. The
-#                       hash is a werkzeug password hash, so no password is
-#                       stored anywhere. Add a person with:
-#                           python3 -c "from werkzeug.security import generate_password_hash as g; \
-#                                       print('alice:' + g(input('password: ')))"
-#                       The hash itself contains colons, so only the FIRST colon
-#                       separates the name from it.
+# Who may sign in is NOT configuration - it is the user_auth collection plus the
+# orcid collection, managed with utility/bin/manage_restricted_users.py. See
+# utility/bin/RESTRICTED_PAGES.md.
 RESTRICTED_SESSION_KEY = 'orcid'
 # The interim sign-in is by ORCID iD and a password assigned with
 # utility/bin/manage_restricted_users.py. The iD is the point: the session holds
@@ -423,13 +420,13 @@ def restricted(view):
             # full_path appends a bare '?' when there is no query string, which
             # would otherwise show up in the address bar after signing in.
             target = request.full_path.rstrip('?')
-            return redirect(url_for('restricted_login', next=target))
+            return redirect(url_for('login', next=target))
         return view(*args, **kwargs)
     return wrapper
 
 
-@app.route('/restricted_login', methods=['GET', 'POST'])
-def restricted_login():
+@app.route('/login', methods=['GET', 'POST'])
+def login():
     '''
     Sign in to the restricted pages
     ---
@@ -492,11 +489,19 @@ def restricted_login():
         note = render_warning("This page is being served over plain HTTP, so the signed "
                               "cookie will not be stored. Set DIS_ALLOW_HTTP_SESSION=1 "
                               "for local testing.", 'warning')
+    # ORCID's brand guidelines: the iD icon is used as supplied and not altered,
+    # and it is written "ORCID iD" - lower-case i, upper-case D.
+    icon = ("<img src='/static/images/ORCID-iD_icon_16x16.png' alt='' "
+            "style='vertical-align:-2px; margin-right:4px;'>")
     html = f"""{note}
-<p>These pages name individual people, so they are limited to a few readers
-until the site signs in through <strong>orcid.org</strong>. For now, use your
-ORCID iD with the password you were given.</p>
-<form method="post" action="{escape(url_for('restricted_login'))}" class="form-inline">
+<p>Signing in to DIS requires an <strong>ORCID iD</strong>. This is a site about
+published work, so the people who need it are authors - and an ORCID iD is how
+an author is identified unambiguously, whatever name they publish under.</p>
+
+<h4 style="margin-top:22px;">I have an ORCID iD</h4>
+<p>Enter it below with the password you were given. If you do not have a
+password yet, or have forgotten it, contact DIS.</p>
+<form method="post" action="{escape(url_for('login'))}" class="form-inline">
   <input type="hidden" name="next" value="{escape(nxt)}">
   <div class="form-group" style="margin-right:8px;">
     <label for="orcid" style="margin-right:6px;">ORCID iD</label>
@@ -510,15 +515,27 @@ ORCID iD with the password you were given.</p>
            autocomplete="current-password" required>
   </div>
   <button type="submit" class="btn btn-outline-success">Sign in</button>
-</form>"""
+</form>
+
+<h4 style="margin-top:26px;">I do not have an ORCID iD</h4>
+<p>Registering for one is free, takes a couple of minutes, and gives you an
+identifier that stays with you for the rest of your career - across name
+changes, institutions and fields.</p>
+<p>{icon}<a href="https://orcid.org/register" target="_blank"
+   rel="noopener">Register for an ORCID iD at orcid.org</a></p>
+<p>Once you have one, contact DIS so it can be added to your Janelia record and
+a password issued. The library staff are also happy to help you set one up.</p>
+<p style="color:#888; font-size:0.9em; margin-top:22px;">The password above is
+temporary. DIS will soon sign in through orcid.org directly, and you will use
+your ORCID credentials rather than one assigned here.</p>"""
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="Sign in", html=html,
                                          navbar=generate_navbar('')))
 
 
-@app.route('/restricted_logout')
-def restricted_logout():
+@app.route('/logout')
+def logout():
     '''
     Sign out of the restricted pages
     ---
