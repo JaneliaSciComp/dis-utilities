@@ -12575,13 +12575,14 @@ def metrics_panel(rows):
     if not met['works']:
         return ""
     curve = ", ".join(f"<b>{n:,}</b> with &ge;{t}" for t, n in met['thresholds'])
-    cards = [("Articles &amp; preprints", f"{met['works']:,}"),
+    cards = [("Janelia articles &amp; preprints", f"{met['works']:,}"),
              ("Citations to them", f"{met['total']:,}"),
              ("Median per paper", f"{met['median']:,.0f}"),
              ("h-index", f"{met['h_index']:,}")]
-    html = f"""<p style="color:#888; max-width:52em;">Descriptive figures about your own record.
-They are not an assessment, they are not compared with anyone else's, and they are
-not used in any review.</p>
+    html = f"""<p style="color:#888; max-width:52em;">Descriptive figures about your
+<b>Janelia-affiliated</b> publications &mdash; the work this database holds, which
+begins when you arrived. They are not an assessment, they are not compared with
+anyone else's, and they are not used in any review.</p>
 {stat_cards(cards, div_id='mymetrics')}
 <p>Citation counts: {curve}.</p>
 <p><b>Last five complete years ({met['window']}):</b> {met['recent_works']:,} articles and
@@ -12589,10 +12590,10 @@ preprints, {met['recent_total']:,} citations, h-index {met['recent_h']:,}.
 This window is the one figure here unaffected by the database holding only your
 Janelia-affiliated work &mdash; if you have been at Janelia longer than five years it is
 the same number your full publication record would give.</p>
-<p style="color:#888; max-width:52em;">Lifetime figures count only work affiliated with
-Janelia, so they omit anything published before you arrived, and the h-index cannot
-exceed your {met['works']:,} articles and preprints here. Expect them to be lower than
-Google Scholar, which counts everything and from a different index. The median is shown
+<p style="color:#888; max-width:52em;">The h-index cannot exceed your
+{met['works']:,} articles and preprints here, so for a recent arrival it measures time
+at Janelia more than anything else. Expect these figures to be lower than Google
+Scholar, which counts your whole career and from a different index. The median is shown
 rather than the mean because citation counts are very skewed &mdash; one paper often
 carries a quarter of the total."""
     if met['other']:
