@@ -137,3 +137,63 @@ def test_the_rule_is_written_the_same_way_in_both_places():
     app = (ROOT / 'api' / 'dis_responder.py').read_text(encoding='utf-8')
     assert pattern.search(tool), "the tool's access rule changed shape"
     assert pattern.search(app), "the application's access rule no longer matches the tool's"
+
+
+# --- the avatar ------------------------------------------------------------
+#
+# avatar_html lives in dis_responder, which needs Flask and a good deal else,
+# so these import it only when that is possible.
+
+def _responder():
+    return pytest.importorskip('dis_responder')
+
+
+def test_initials_come_from_given_and_family():
+    D = _responder()
+    out = str(D.avatar_html({'orcid': '0000-0001-2345-6789',
+                             'given': ['Nelson'], 'family': ['Spruston']}))
+    assert '>NS</span>' in out
+    assert 'dis-avatar-initials' in out
+
+
+def test_a_person_with_no_name_still_gets_a_badge():
+    ''' Rendering must not fail on a sparse record. '''
+    D = _responder()
+    out = str(D.avatar_html({'orcid': '0000-0001-2345-6789', 'given': [], 'family': []}))
+    assert '>?</span>' in out
+
+
+def test_a_photograph_wins_over_initials():
+    D = _responder()
+    out = str(D.avatar_html({'orcid': '0000-0001-2345-6789', 'given': ['A'], 'family': ['B']},
+                            photo_url='https://example.org/a.jpg'))
+    assert '<img src=' in out
+    assert 'dis-avatar-initials' not in out
+
+
+def test_the_badge_colour_is_stable_for_a_person():
+    ''' Someone's badge should not change between page loads. '''
+    D = _responder()
+    person = {'orcid': '0000-0001-2345-6789', 'given': ['A'], 'family': ['B']}
+    assert str(D.avatar_html(person)) == str(D.avatar_html(person))
+
+
+def test_two_people_do_not_share_a_clustered_colour():
+    ''' ORCID iDs are nearly all digits, so summing their characters put two
+        colleagues two degrees apart. The hue comes from a digest instead.
+    '''
+    import re
+    D = _responder()
+    hues = []
+    for oid in ('0000-0003-3118-1636', '0000-0002-9830-2415', '0000-0002-5795-0635'):
+        out = str(D.avatar_html({'orcid': oid, 'given': ['A'], 'family': ['B']}))
+        hues.append(int(re.search(r'hsl\((\d+)', out).group(1)))
+    assert len(set(hues)) == 3
+    assert max(hues) - min(hues) > 10, f"hues are clustered: {hues}"
+
+
+def test_a_hostile_photo_url_cannot_break_out_of_the_attribute():
+    D = _responder()
+    out = str(D.avatar_html({'orcid': '0000-0001-2345-6789', 'given': ['A'], 'family': ['B']},
+                            photo_url="x' onerror='alert(1)"))
+    assert "onerror='alert(1)" not in out

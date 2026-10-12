@@ -390,6 +390,100 @@ def _touch_last_seen(orcid):
         pass
 
 
+def _refresh_photo(person):
+    ''' Cache this person's People photograph on their credential.
+
+        Done once at sign-in, not per request: the People call has a five second
+        timeout and the avatar is on every page. Stored on the user_auth
+        document rather than the orcid one because /orcid/<oid> and its three
+        siblings project with {'_id': 0}, publishing whatever is on an orcid
+        document. A photo URL is not a secret, but keeping the rule simple -
+        nothing new goes on orcid documents - is worth more than the exception.
+
+        Entirely best-effort: no photograph simply means initials.
+        Keyword arguments:
+          person: orcid collection document
+        Returns:
+          None
+    '''
+    eid = person.get('userIdO365')
+    if not eid:
+        return
+    try:
+        rec = JRC.call_people_by_id(eid)
+        url = (rec or {}).get('photoURL')
+    except Exception as err:
+        print(f"Could not fetch a People photo for {eid}: {error_message(err)}")
+        return
+    try:
+        DB['dis'][AUTH_COLLECTION].update_one(
+            {"orcid": person.get('orcid')},
+            {"$set": {"photoURL": url, "photo_checked": datetime.now()}})
+    except Exception:
+        pass
+
+
+def avatar_html(person, photo_url=None, px=36):
+    ''' A circular avatar for a person: their photograph, or their initials.
+
+        ORCID holds no photographs - it has no such field - so the picture comes
+        from HHMI People, whose records carry a photoURL. When there is none,
+        initials on a color derived from the ORCID iD, so a person's badge is
+        the same every time they see it.
+        Keyword arguments:
+          person: orcid collection document
+          photo_url: People photoURL, if known
+          px: diameter in pixels
+        Returns:
+          Safe HTML
+    '''
+    if not person:
+        return safe('')
+    name = display_person_name(person)
+    tip = escape(f"{name} - your profile", quote=True)
+    if photo_url:
+        return safe(f"<span class='dis-avatar' style='width:{px}px;height:{px}px' "
+                    f"title='{tip}'><img src='{escape(photo_url)}' alt='{escape(name)}'></span>")
+    given = (person.get('given') or [''])[0]
+    family = (person.get('family') or [''])[0]
+    initials = (given[:1] + family[:1]).upper() or '?'
+    # Hue from the iD so the badge is stable for a person and distinct between
+    # people; fixed saturation and lightness keep white text readable on it.
+    # A digest rather than a character sum: ORCID iDs are nearly all digits, so
+    # summing them clusters badly - two colleagues came out 2 degrees apart.
+    hue = int(hashlib.md5(str(person.get('orcid') or name).encode()).hexdigest()[:6], 16) % 360
+    return safe(f"<span class='dis-avatar dis-avatar-initials' "
+                f"style='width:{px}px;height:{px}px;line-height:{px}px;"
+                f"background:hsl({hue},42%,38%);font-size:{int(px * 0.4)}px' "
+                f"title='{tip}'>{escape(initials)}</span>")
+
+
+@app.context_processor
+def inject_viewer():
+    ''' Make the signed-in person available to every template.
+
+        base.html has had an empty avatar slot since the initial import; this is
+        what fills it. A context processor rather than a keyword argument
+        because there are 469 render_template calls and none of them should
+        have to know about this.
+
+        Defensive throughout: it runs for error pages too, including ones
+        rendered before the database is reachable.
+        Keyword arguments:
+          None
+        Returns:
+          Dict of template variables
+    '''
+    try:
+        person = current_user()
+        if not person:
+            return {'face': '', 'viewer': None}
+        record = _auth_record(person.get('orcid')) or {}
+        return {'face': avatar_html(person, record.get('photoURL')), 'viewer': person}
+    except Exception:
+        return {'face': '', 'viewer': None}
+
+
 def _auth_record(orcid):
     ''' The interim credential for an ORCID iD
         Keyword arguments:
@@ -512,6 +606,7 @@ def login():
                                                       {"$set": {"last_login": datetime.now()}})
             except Exception:
                 pass    # a sign-in must not fail because a timestamp could not be written
+            _refresh_photo(person)
             print(f"Sign-in: {orcid} ({display_person_name(person)}) from {request.remote_addr}")
             return redirect(nxt)
         if digest and matched:
@@ -579,6 +674,58 @@ your ORCID credentials rather than one assigned here.</p>"""
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="Sign in", html=html,
+                                         navbar=generate_navbar('')))
+
+
+@app.route('/profile')
+@restricted
+def profile():
+    '''
+    Show the signed-in person's own profile
+    ---
+    tags:
+      - Navigation
+    responses:
+      '200':
+        description: HTML page
+      '302':
+        description: Not signed in, redirected to the sign-in form
+    '''
+    person = current_user()
+    record = _auth_record(person.get('orcid')) or {}
+    orcid = person.get('orcid')
+    rows = [['Name', display_person_name(person)],
+            ['ORCID iD', safe(f"<a href='https://orcid.org/{escape(orcid)}' target='_blank' "
+                              f"rel='noopener'>{escape(orcid)}</a>")],
+            ['At Janelia', safe(janelia_tenure(person))]]
+    if person.get('userIdO365'):
+        rows.append(['User ID', person['userIdO365']])
+    if person.get('affiliations'):
+        rows.append(['Affiliations', safe(affiliation_links(person))])
+    rows.append(['Worker type', person.get('workerType') or '-'])
+    # Authorizations are not built yet; say so rather than implying none exist.
+    rows.append(['Authorizations',
+                 safe("<span style='color:#888'>Everyone can see almost every page. "
+                      "Named authorizations - for cost data, for administration - "
+                      "are not in place yet.</span>")])
+    if record.get('last_login'):
+        rows.append(['Last sign-in', str(record['last_login'])[:19]])
+    html = (f"<div style='display:flex; align-items:center; gap:18px; margin-bottom:18px;'>"
+            f"{avatar_html(person, record.get('photoURL'), px=96)}"
+            f"<h3 style='margin:0'>{escape(display_person_name(person))}</h3></div>")
+    html += render_table(['', ''], rows, css='borderless')
+    html += person_platform_logos(person)
+    # The API token is step 7 of docs/AUTHENTICATION_PLAN.md. Named here because
+    # this is where people will come looking for it.
+    html += ("<h4 style='margin-top:28px;'>API token</h4>"
+             "<p style='color:#888'>Not issued yet. When the REST endpoints require "
+             "authentication, your token will be shown here, once, with a button to "
+             "replace it.</p>")
+    html += (f"<p style='margin-top:24px;'><a class='btn btn-outline-secondary' "
+             f"href='{escape(url_for('logout'))}'>Sign out</a></p>")
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="Your profile", html=html,
                                          navbar=generate_navbar('')))
 
 
