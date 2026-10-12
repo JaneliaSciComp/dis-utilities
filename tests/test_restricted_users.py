@@ -113,6 +113,18 @@ def test_alumni_is_only_a_bar_when_exactly_true():
     assert MRU.may_sign_in({'alumni': '2024-01-01', 'workerType': 'Employee'})[0] is True
 
 
+def test_the_html_pattern_is_not_eaten_by_the_f_string():
+    ''' {4} inside an f-string is a replacement field, so writing the ORCID
+        quantifier inline rendered pattern="\\d4-\\d4-\\d4-\\d3[\\dX]" and the
+        browser refused every real iD with "Please match the requested format".
+        The attribute is now derived from the server-side regex; this asserts
+        nobody puts the literal back.
+    '''
+    app = (ROOT / 'api' / 'dis_responder.py').read_text(encoding='utf-8')
+    assert 'pattern="{html_pattern}"' in app, "the iD pattern is no longer derived"
+    assert 'html_pattern = ORCID_RE.pattern' in app, "derive it from ORCID_RE, do not retype it"
+
+
 def test_the_rule_is_written_the_same_way_in_both_places():
     ''' The tool decides who to GRANT a password to; the application decides
         who to LET IN. They must agree, and they are separate code because the

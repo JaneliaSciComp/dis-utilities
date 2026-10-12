@@ -493,6 +493,11 @@ def login():
     # and it is written "ORCID iD" - lower-case i, upper-case D.
     icon = ("<img src='/static/images/ORCID-iD_icon_16x16.png' alt='' "
             "style='vertical-align:-2px; margin-right:4px;'>")
+    # Derived from the server-side regex rather than retyped, so the two cannot
+    # disagree about what an iD looks like. It also has to be built OUTSIDE the
+    # f-string below: {4} inside one is a replacement field, so writing the
+    # quantifier inline renders "\d4" and nothing can ever match it.
+    html_pattern = ORCID_RE.pattern.strip('^$')
     html = f"""{note}
 <p>Signing in to DIS requires an <strong>ORCID iD</strong>. This is a site about
 published work, so the people who need it are authors - and an ORCID iD is how
@@ -506,7 +511,7 @@ password yet, or have forgotten it, contact DIS.</p>
   <div class="form-group" style="margin-right:8px;">
     <label for="orcid" style="margin-right:6px;">ORCID iD</label>
     <input class="form-control" type="text" id="orcid" name="orcid"
-           placeholder="0000-0000-0000-0000" pattern="\\d{4}-\\d{4}-\\d{4}-\\d{3}[\\dX]"
+           placeholder="0000-0000-0000-0000" pattern="{html_pattern}"
            size="21" autocomplete="username" autofocus required>
   </div>
   <div class="form-group" style="margin-right:8px;">
