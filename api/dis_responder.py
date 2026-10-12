@@ -7416,8 +7416,16 @@ def dois_mytags(year='All', show='full'):
             tag_counts[name] += 1
     # A DOI can match several of someone's affiliations, so a row carries a class
     # for each - filterByTag asks only that the row holds the one chip's class.
+    # A green check before the DOI where the signed-in person is themselves
+    # credited on the work, the same marker the person pages use. This page is
+    # what their affiliations published, which is mostly other people's work -
+    # the check is what separates their own from the rest. credit_eids and
+    # credit_mark are shared with /mypapers and /userui so the three cannot
+    # disagree about what counts as credit.
+    my_eids = credit_eids(row)
     html, cnt, _ = standard_doi_table(
         works, count_card=True, download_name='my_affiliations',
+        mark_fn=(lambda work: credit_mark(work, my_eids)) if my_eids else None,
         class_fn=lambda work: ' '.join(tag_class[name] for name in row_tags[work['doi']]))
     chipbar = ""
     if cnt and len(tags) > 1:
