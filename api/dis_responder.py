@@ -12579,26 +12579,6 @@ def metrics_panel(rows):
     # checked count, never the work count, and the two are shown separately
     # whenever they differ - OpenAlex does not classify everything, and a
     # backfill may still be running.
-    standing = ""
-    if met['checked']:
-        scope = (f"all {met['checked']:,} of your papers"
-                 if met['checked'] == met['works'] else
-                 f"the {met['checked']:,} of your {met['works']:,} papers that OpenAlex ranks")
-        standing = (f"<p><b>Compared with its own field.</b> Of {scope}, "
-                    f"<b>{met['top_10']:,}</b> are in the most-cited 10% of work published "
-                    f"in the same field and year, and <b>{met['top_1']:,}</b> in the most-cited "
-                    "1%. This measures each paper against work like it, rather than against a "
-                    "flat citation count, which is why it is here at all &mdash; citation rates "
-                    "differ several-fold between fields.</p>"
-                    "<p style='color:#888; max-width:52em;'>Read it with two things in mind. "
-                    "OpenAlex ranks a paper only once it has placed it in a field, which it "
-                    "mostly does not do for preprints or lightly-cited work &mdash; so the "
-                    "papers counted here are a higher-cited slice of your output, and these "
-                    "shares read high for everybody. And a paper's standing is measured against "
-                    "others from the same year, so recent work is compared with a group that "
-                    "has barely begun collecting citations: across this database a 2026 paper "
-                    "reaches the top 1% on about 16 citations, where a 2018 paper needs around "
-                    "360. Recent papers will slip down as their year fills in.</p>")
     cards = [("Janelia articles &amp; preprints", f"{met['works']:,}"),
              ("Citations to them", f"{met['total']:,}"),
              ("Median per paper", f"{met['median']:,.0f}"),
@@ -12616,7 +12596,6 @@ papers are cited more than {met['median']:,.0f} times, half less. We show the me
 than the average because one paper usually carries a large share of the total, which makes
 an average say more about that paper than about the rest.</p>
 <p><b>How your citations are spread:</b> {curve}.</p>
-{standing}
 <p><b>Last five complete years ({met['window']}):</b> {met['recent_works']:,} articles and
 preprints, {met['recent_total']:,} citations, h-index {met['recent_h']:,}.
 This window is the one figure here unaffected by the database holding only your
@@ -12683,18 +12662,16 @@ def author_metrics(rows):
               and int(r['jrc_publishing_date'][:4]) >= cutoff
               and int(r['jrc_publishing_date'][:4]) < datetime.now().year]
     rcounts = sorted((r.get('jrc_citation_count') or 0 for r in recent), reverse=True)
-    # Field-normalized standing, where OpenAlex has classified the work. The
-    # checked count is carried separately and shown: a backfill in progress, or a
-    # work OpenAlex does not classify, both mean the denominator is not the
-    # person's whole output, and a bare percentage would imply it was.
-    checked = [r for r in scholarly if (r.get('jrc_openalex_impact') or {}).get('percentile')
-               is not None]
+    # No field-normalized figure here, deliberately. jrc_openalex_impact holds
+    # one, but OpenAlex ranks a paper only once it has placed it in a field, which
+    # it mostly does not do for preprints or lightly-cited work - across this
+    # corpus 55% of ranked work sits in the nominal top 10% and 17% in the top 1%,
+    # because the ranked set is itself a high-cited slice. On a typical personal
+    # bibliography it also carries the instability DORA's 2024 indicator guidance
+    # objects to for FWCI: "unreliable at the scale of a typical bibliography".
+    # It stays in the database for corpus-level work, where the sample is large
+    # enough to mean something.
     return {'works': len(scholarly), 'other': len(other), 'cited': len(cited),
-            'checked': len(checked),
-            'top_10': sum(1 for r in checked
-                          if r['jrc_openalex_impact'].get('top_10_percent')),
-            'top_1': sum(1 for r in checked
-                         if r['jrc_openalex_impact'].get('top_1_percent')),
             'total': sum(cited),
             'median': statistics.median(cited) if cited else 0,
             'h_index': idx['h_index'],
