@@ -12927,18 +12927,7 @@ def source_metrics(year='All'):  # pylint: disable=too-many-locals
             + "eLife/protocols.io (Crossref). Impact indices (h/i10/i100) count " \
             + "each work once (versions merged). The citation and usage " \
             + "populations are largely different DOIs, so each has its own " \
-            + "denominator. " \
-            + "<b>Median FWCI</b>: each work's citations divided by what work of " \
-            + "the same field, year and type received on average, so 1.0 is the " \
-            + "world average for its kind; the median of those ratios. It is the " \
-            + "only figure here that compares like with like, which matters when " \
-            + "citation rates differ several-fold between fields. Two caveats: the " \
-            + "ratios are heavily skewed, which is why this is a median and not a " \
-            + "mean (the mean is roughly twice it), and OpenAlex ranks only work it " \
-            + "has placed in a field &mdash; mostly not preprints or lightly-cited " \
-            + "work &mdash; so <i>n</i> is smaller than the DOI count and skews to " \
-            + "well-cited work. Shown only where enough works are ranked to mean " \
-            + "anything, and not reported for individuals at all.</div>"
+            + "denominator. </div>"
 
     def mrow(label, data, key, kind='int'):
         ''' One 3-column (Combined/Crossref/DataCite) metric row, formatted. '''
@@ -12999,7 +12988,21 @@ def source_metrics(year='All'):  # pylint: disable=too-many-locals
              + "<b>i10-index</b> / <b>i100-index</b>: the number of works cited at " \
              + "least 10 / 100 times. Each counts a work once (versions merged), " \
              + "and is computed over the pooled works, so Combined is not the sum " \
-             + "of the columns.<br>Per-source detail: " \
+             + "of the columns.<br>" \
+             + "<b>Median FWCI</b> (field-weighted citation impact): a work\'s citations " \
+             + "divided by the average received by work of the same field, year and type, " \
+             + "so <b>1.0 is the world average for its kind</b> and 3.1 is three times it. " \
+             + "Shown as the median of those ratios, because they are heavily skewed - the " \
+             + "mean here is roughly twice the median, pulled up by a few very highly " \
+             + "cited works. It is the only figure on this page that compares like with " \
+             + "like, which matters because citation rates differ several-fold between " \
+             + "fields: an unadjusted count says as much about a field as about the work. " \
+             + "<i>n</i> is smaller than the DOI count because OpenAlex, whose " \
+             + "classification this is, rates a work only once it has placed it in a " \
+             + "field - mostly not preprints or lightly-cited work - so the rated set " \
+             + "skews well-cited and this reads high. Blank where too few works are rated " \
+             + "to mean anything, and deliberately absent from personal pages: it is " \
+             + "unreliable on a single researcher\'s bibliography.<br>Per-source detail: " \
              + "<a href='/citation_metrics/crossref'>Crossref metrics</a> &middot; " \
              + "<a href='/citation_metrics/datacite'>DataCite metrics</a></div>"
     # ----- citation concentration (how much of the total rides on the top works;
