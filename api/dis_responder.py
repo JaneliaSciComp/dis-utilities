@@ -1668,6 +1668,30 @@ def evidence_legend():
     return ", ".join(parts[:-1]) + " and " + parts[-1]
 
 
+def credit_mark_help(you=False):
+    ''' What the green checkmark means, shared by every page that draws one.
+        Factored out for the same reason evidence_help was: it existed on the
+        person pages, /dois/mytags needed it, and a second copy drifts from the
+        first as soon as either changes.
+        Keyword arguments:
+          you: second person ("you") rather than third ("this author")
+        Returns:
+          HTML string
+    '''
+    who = "you" if you else "the author"
+    their = "your" if you else "their"
+    they_were = "you were" if you else "they were"
+    return f"""
+    <p>A green checkmark (<i class='fa-solid fa-circle-check' style='color: lime'></i>)
+    indicates that automated or manual curation has determined that {who} contributed to
+    the publication while {they_were} a Janelia employee. It is not uncommon for check
+    marks to not appear for former employees. A publication without one most likely means
+    affiliation or ORCID information was not provided to Crossref/DataCite. If one of
+    {their} publications has no check, or is missing altogether, please email the DOI to
+    the Library at {LIBRARY}.</p>
+    """
+
+
 def evidence_help(you=False, check_all=False):
     ''' The "In the deposit" explanation, shared by every page that shows the column.
         Written once because it was written twice and was on its way to three times:
@@ -1817,15 +1841,8 @@ def generate_works_table(rows, name=None, show="full", eid=None, orc=None):
     # no single employee, so no check ever renders - show no preamble then, rather than
     # describing a checkmark that isn't there.
     if eid:
-        preamble = f'''
-    The works below were searched for using this author's name and ORCID. A green checkmark
-    (<i class='fa-solid fa-circle-check' style='color: lime'></i>) indicates that automated or
-    manual curation has determined that the author contributed to the publication while they were
-    a Janelia employee. It is not uncommon for check marks to not appear for former employees. If
-    you have a publication below without a check mark, it's most likely that affiliation or ORCID
-    information was not provided to Crossref/DataCite. If one of your publications doesn't have a
-    check (or is missing), please email the DOI to the Library at {LIBRARY}.
-    '''
+        preamble = "<p>The works below were searched for using this author's name " \
+                   "and ORCID.</p>" + credit_mark_help()
         # The deposit column and its check buttons render only when orc is set, so
         # describe them only then - a name search has neither.
         if orc:
@@ -7447,7 +7464,13 @@ def dois_mytags(year='All', show='full'):
                    "only its DOIs; click it again to show them all. A DOI credited to "
                    "more than one of these appears under each.</span></p>")
     if cnt:
-        html = f"{ident}{htmlp}Affiliations: {taglinks}<br><br>{chipbar}{html}"
+        # The check needs explaining here more than on the person pages: this
+        # list is mostly other people's work, so the mark is what separates the
+        # reader's own from the rest rather than a detail about a list that is
+        # already all theirs.
+        note = ("<p>These are the works published by your affiliations - most of them "
+                "by other people.</p>" + credit_mark_help(you=True))
+        html = f"{ident}{htmlp}Affiliations: {taglinks}<br><br>{note}{chipbar}{html}"
     else:
         # The toggle is spliced into the table above, which this path has none of.
         # Repeated here on purpose: an empty list is exactly when somebody needs
