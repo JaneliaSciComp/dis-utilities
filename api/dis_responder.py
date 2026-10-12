@@ -286,6 +286,13 @@ ORCID_RE = re.compile(r'^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$')
 # with 2 replicas x 3 gunicorn workers the worst case is 6 writes a minute
 # per active person - still nothing, and it avoids any shared state.
 LAST_SEEN_THROTTLE = 60
+# Fewest ranked works before a median FWCI is worth printing. DORA's 2024
+# indicator guidance allows FWCI only on "large datasets, typically comprising
+# thousands of papers, e.g., the aggregate output of a large department", and
+# rules it out for individuals because it is "unreliable at the scale of a
+# typical bibliography". The DataCite column has 25 ranked works, which is the
+# individual regime, not the department one - it shows a dash and its n.
+FWCI_MIN_WORKS = 1000
 # Avatar diameters. The Janelia logo beside it in the header is 72px tall, so
 # the badge sits just under that - present without overtopping the logo.
 AVATAR_PX = 62
@@ -12782,6 +12789,7 @@ def source_metrics(year='All'):  # pylint: disable=too-many-locals
     # not by summing the per-source columns.
     pooled_counts = []          # every cited DOI's count (combined total/median)
     pooled_nonver_works = []    # (count, pub_year) per non-versioned work
+    pooled_fwci = []            # per-work FWCI, for the pooled median
     try:
         for obtained in ("Crossref", "DataCite"):
             # Cited universe matches citation_metrics: DOIs carrying citation
@@ -12791,6 +12799,7 @@ def source_metrics(year='All'):  # pylint: disable=too-many-locals
             cmatch.update(ymatch)
             rows = list(coll.find(cmatch, {"doi": 1, "relation": 1,
                                            "jrc_citation_count": 1,
+                                           "jrc_openalex_impact": 1,
                                            "jrc_publishing_date": 1}))
             counts = [r.get('jrc_citation_count', 0) or 0 for r in rows]
             # Indices use non-versioned works only (a .v1/.v2 series is one work);
@@ -12807,16 +12816,31 @@ def source_metrics(year='All'):  # pylint: disable=too-many-locals
             amatch = {"jrc_obtained_from": obtained}
             amatch.update(ymatch)
             all_dois = coll.count_documents(amatch)
+            # Field-weighted citation impact, as the MEDIAN over works OpenAlex has
+            # ranked. Median rather than mean because the distribution is heavily
+            # outlier-dominated - across this corpus the mean is 6.7 against a
+            # median of 3.1, the difference being a handful of very highly cited
+            # works. DORA's 2024 indicator guidance permits FWCI only on "large
+            # datasets, typically comprising thousands of papers, e.g., the
+            # aggregate output of a large department", which this is and an
+            # individual's bibliography is not, and asks that it not be "reported
+            # beyond a single decimal place". Both are honored here; nothing
+            # displays it per person.
+            fwci = sorted(r['jrc_openalex_impact']['fwci'] for r in rows
+                          if (r.get('jrc_openalex_impact') or {}).get('fwci') is not None)
             cite[obtained] = {"dois": len(counts), "all": all_dois,
                               "reach": len(counts) / all_dois * 100 if all_dois else 0,
                               "total": sum(counts),
                               "median": statistics.median(counts) if counts else 0,
+                              "fwci": statistics.median(fwci) if fwci else None,
+                              "fwci_n": len(fwci),
                               **citation_impact_indices(nonver)}
             if h5_range:
                 h5c = [c for c, y in nonver_works if y and h5_range[0] <= y <= h5_range[1]]
                 cite[obtained]['h5'] = citation_impact_indices(h5c)['h_index']
             pooled_counts.extend(counts)
             pooled_nonver_works.extend(nonver_works)
+            pooled_fwci.extend(fwci)
             # Usage: sum views+downloads across whichever per-publisher count
             # field each DOI carries (protocols.io has no downloads -> adds 0).
             umatch = {"jrc_obtained_from": obtained,
@@ -12846,6 +12870,8 @@ def source_metrics(year='All'):  # pylint: disable=too-many-locals
                         "reach": c_dois / c_all * 100 if c_all else 0,
                         "total": sum(pooled_counts),
                         "median": statistics.median(pooled_counts) if pooled_counts else 0,
+                        "fwci": statistics.median(pooled_fwci) if pooled_fwci else None,
+                        "fwci_n": len(pooled_fwci),
                         **citation_impact_indices(pooled_nonver)}
     if h5_range:
         h5c = [c for c, y in pooled_nonver_works if y and h5_range[0] <= y <= h5_range[1]]
@@ -12888,7 +12914,18 @@ def source_metrics(year='All'):  # pylint: disable=too-many-locals
             + "eLife/protocols.io (Crossref). Impact indices (h/i10/i100) count " \
             + "each work once (versions merged). The citation and usage " \
             + "populations are largely different DOIs, so each has its own " \
-            + "denominator.</div>"
+            + "denominator. " \
+            + "<b>Median FWCI</b>: each work's citations divided by what work of " \
+            + "the same field, year and type received on average, so 1.0 is the " \
+            + "world average for its kind; the median of those ratios. It is the " \
+            + "only figure here that compares like with like, which matters when " \
+            + "citation rates differ several-fold between fields. Two caveats: the " \
+            + "ratios are heavily skewed, which is why this is a median and not a " \
+            + "mean (the mean is roughly twice it), and OpenAlex ranks only work it " \
+            + "has placed in a field &mdash; mostly not preprints or lightly-cited " \
+            + "work &mdash; so <i>n</i> is smaller than the DOI count and skews to " \
+            + "well-cited work. Shown only where enough works are ranked to mean " \
+            + "anything, and not reported for individuals at all.</div>"
 
     def mrow(label, data, key, kind='int'):
         ''' One 3-column (Combined/Crossref/DataCite) metric row, formatted. '''
@@ -12915,6 +12952,18 @@ def source_metrics(year='All'):  # pylint: disable=too-many-locals
         crows.append(mrow(f"h5-index ({h5_range[0]}–{h5_range[1]})", cite, 'h5'))
     crows.append(mrow("i10-index", cite, 'i10'))
     crows.append(mrow("i100-index", cite, 'i100'))
+    if any((cite[k].get('fwci_n') or 0) >= FWCI_MIN_WORKS for k in cite):
+        # One decimal place, as DORA's guidance asks, and the n it is drawn from
+        # on the same row - the ranked subset is smaller than the DOI count.
+        # safe(): render_table escapes cells, so the muted-n markup has to be
+        # marked trusted or it renders as literal tags.
+        crows.append(['Median FWCI'] + [
+            safe(f"{cite[k]['fwci']:.1f} <span style='color:#888'>"
+                 f"(n={cite[k]['fwci_n']:,})</span>")
+            if (cite[k].get('fwci_n') or 0) >= FWCI_MIN_WORKS else
+            safe(f"<span style='color:#888' title='Too few ranked works for a "
+                 f"meaningful value'>&ndash; (n={cite[k].get('fwci_n') or 0:,})</span>")
+            for k in ('Combined', 'Crossref', 'DataCite')])
     chtml = "<h4>Citations by source</h4>"
     chtml += render_table(['Metric', 'Combined', 'Crossref', 'DataCite'], crows,
                           table_id='src-cite', css='tablesorter numbers-scroll')
