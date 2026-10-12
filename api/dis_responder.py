@@ -12583,14 +12583,22 @@ def metrics_panel(rows):
     if met['checked']:
         scope = (f"all {met['checked']:,} of your papers"
                  if met['checked'] == met['works'] else
-                 f"the {met['checked']:,} of your {met['works']:,} papers that have been "
-                 "checked so far")
+                 f"the {met['checked']:,} of your {met['works']:,} papers that OpenAlex ranks")
         standing = (f"<p><b>Compared with its own field.</b> Of {scope}, "
                     f"<b>{met['top_10']:,}</b> are in the most-cited 10% of work published "
                     f"in the same field and year, and <b>{met['top_1']:,}</b> in the most-cited "
-                    "1%. This is OpenAlex's classification of field and year, not ours; it "
-                    "is the fairest comparison available here, because it measures each paper "
-                    "against work like it rather than against a flat citation count.</p>")
+                    "1%. This measures each paper against work like it, rather than against a "
+                    "flat citation count, which is why it is here at all &mdash; citation rates "
+                    "differ several-fold between fields.</p>"
+                    "<p style='color:#888; max-width:52em;'>Read it with two things in mind. "
+                    "OpenAlex ranks a paper only once it has placed it in a field, which it "
+                    "mostly does not do for preprints or lightly-cited work &mdash; so the "
+                    "papers counted here are a higher-cited slice of your output, and these "
+                    "shares read high for everybody. And a paper's standing is measured against "
+                    "others from the same year, so recent work is compared with a group that "
+                    "has barely begun collecting citations: across this database a 2026 paper "
+                    "reaches the top 1% on about 16 citations, where a 2018 paper needs around "
+                    "360. Recent papers will slip down as their year fills in.</p>")
     cards = [("Janelia articles &amp; preprints", f"{met['works']:,}"),
              ("Citations to them", f"{met['total']:,}"),
              ("Median per paper", f"{met['median']:,.0f}"),
