@@ -7324,26 +7324,18 @@ def andy():
 # * UI endpoints (personalized)                                                *
 # ******************************************************************************
 
-@app.route('/dois/mytags/<string:orcid>/<string:year>/<string:show>')
-@app.route('/dois/mytags/<string:orcid>/<string:year>')
-@app.route('/dois/mytags/<string:orcid>')
+@app.route('/dois/mytags/<string:year>/<string:show>')
+@app.route('/dois/mytags/<string:year>')
 @app.route('/dois/mytags')
-def dois_mytags(orcid="0000-0001-8374-6008", year='All', show='full'):
+@restricted
+def dois_mytags(year='All', show='full'):
     ''' Show DOIs an author's affiliations
     '''
-    try:
-        row = DB['dis'].orcid.find_one({"orcid": orcid})
-    except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not find DOIs for my affiliations"),
-                               message=error_message(err))
-    if not row:
-        # find_one returns None for an ORCID we do not hold, and every line below
-        # reads the record. Authentication will supply a known ORCID, but the route
-        # also takes one from the URL, where a typo should not be a 500.
-        return render_template('warning.html', urlroot=request.url_root,
-                               title=render_warning(f"Could not find ORCID {orcid}", 'warning'),
-                               message="There is nobody with that ORCID in the orcid collection.")
+    # "My" means the signed-in person. The ORCID used to come from the URL, with
+    # one developer's iD as the default, which made the page show somebody else's
+    # affiliations to anybody who loaded it bare.
+    row = current_user()
+    orcid = row['orcid']
     # Tested for truth, not presence: a record can carry group as an empty string,
     # and "if 'group' in row" is true for that. An empty tag reaches the $in query
     # harmlessly but renders as an empty link in the tag list.
@@ -7380,11 +7372,11 @@ def dois_mytags(orcid="0000-0001-8374-6008", year='All', show='full'):
     # The same person from the other angle: this page is what their affiliations
     # published, /mypapers is what they are credited with. A reader on one had no
     # way to reach the other.
-    ident += f"<tr><td>Also see:</td><td><a href='/mypapers/{escape(orcid)}'>" \
+    ident += f"<tr><td>Also see:</td><td><a href='/mypapers'>" \
              + "Publications credited to this person</a></td></tr>"
     ident += "</table><br>"
-    htmlp = year_pulldown(f"dois/mytags/{orcid}", suffix=f"/{show}" if show != 'full' else '') \
-            + journal_buttons(show, f"/dois/mytags/{orcid}/{year}") + "<br>"
+    htmlp = year_pulldown("dois/mytags", suffix=f"/{show}" if show != 'full' else '') \
+            + journal_buttons(show, f"/dois/mytags/{year}") + "<br>"
     title = "DOIs for my affiliations"
     if year != 'All':
         title += f" ({year})"
@@ -18788,7 +18780,7 @@ def my_papers_body(orc, show, year='All'):
         ident += f"<tr><td>At Janelia:</td><td>{tenure}</td></tr>"
     # The affiliation view of the same person: this page is what they are credited
     # with, /dois/mytags is what their affiliations published.
-    ident += f"<tr><td>Also see:</td><td><a href='/dois/mytags/{escape(oid)}'>" \
+    ident += "<tr><td>Also see:</td><td><a href='/dois/mytags'>" \
              + "DOIs from this person's affiliations</a></td></tr>"
     ident += "</table>"
     if not rows:
@@ -18796,7 +18788,7 @@ def my_papers_body(orc, show, year='All'):
                  if year != 'All'
                  else "We have no publications on file for you yet. If that looks wrong, "
                       f"email the Library at {LIBRARY}.")
-        return ident + year_pulldown(f"mypapers/{oid}/{show}", query=True) \
+        return ident + year_pulldown(f"mypapers/{show}", query=True) \
                + "<br><br>" + render_warning(empty, 'warning')
     cards = [("Publications", f"<span id='totalrows'>{len(rows):,}</span>"),
              ("Credited to you at Janelia",
@@ -18842,8 +18834,8 @@ def my_papers_body(orc, show, year='All'):
                                      extra_fn=lambda row: [evidence_cell(match_evidence(row, orc),
                                                                          oid, row['doi'])])
     return ident + stat_cards(cards, div_id='mypapers-stats') + note \
-           + year_pulldown(f"mypapers/{oid}/{show}", query=True) + "<br><br>" \
-           + journal_buttons(show, f"/mypapers/{oid}",
+           + year_pulldown(f"mypapers/{show}", query=True) + "<br><br>" \
+           + journal_buttons(show, "/mypapers",
                              '' if year == 'All' else f"?year={year}") + cbutton + table
 
 
@@ -18904,11 +18896,15 @@ def author_evidence(pid, doi):
                     "cls": "evidence-none"})
 
 
-@app.route('/mypapers/<string:oid>/<string:show>')
-@app.route('/mypapers/<string:oid>')
-def show_my_papers(oid, show='full'):
+@app.route('/mypapers/<string:show>')
+@app.route('/mypapers')
+@restricted
+def show_my_papers(show='full'):
     ''' Show one author their own publications, keyed by ORCID
     '''
+    # "My" means the signed-in person. The iD used to come from the URL, so the
+    # page would show anybody's publications to anybody who typed their iD.
+    oid = current_user()['orcid']
     try:
         recs = list(DB['dis'].orcid.find({"orcid": oid}))
     except Exception as err:
