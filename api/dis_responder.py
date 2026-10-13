@@ -57,7 +57,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.104.0"
+__version__ = "120.104.1"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -7867,7 +7867,7 @@ def _save_authorizations(orc, me):
     return render_warning("Saved.", 'success')
 
 
-def _name_rows(orc, field, label):
+def _name_rows(orc, field, label, singular):
     ''' One editable name list: the entries, each with a remove control
 
         given and family are LISTS of variants, not single names - they are what
@@ -7877,7 +7877,9 @@ def _name_rows(orc, field, label):
         Keyword arguments:
           orc: orcid collection document
           field: 'given' or 'family'
-          label: heading to show
+          label: heading to show, plural
+          singular: the same thing in the singular, for the "add a ..." box -
+                    lower-casing the heading gave "add a given names"
         Returns:
           HTML string
     '''
@@ -7900,7 +7902,8 @@ def _name_rows(orc, field, label):
             + "<input type='hidden' name='action' value='add'>" \
             + f"<input type='hidden' name='field' value='{escape(field)}'>" \
             + "<div class='flexcontainer'><div class='flexitem'>" \
-            + f"<input type='text' class='form-control' name='value' placeholder='add a {escape(label.lower())}'>" \
+            + "<input type='text' class='form-control' name='value' " \
+            + f"placeholder='add a {escape(singular)}'>" \
             + "</div><div class='flexitemauto'>" \
             + "<button type='submit' class='btn btn-outline-primary btn-sm'>Add</button>" \
             + "</div></div></form>"
@@ -7967,8 +7970,8 @@ def edit_person(rid):
             + "pull in somebody else's. The nightly sync adds variants of its own; " \
             + "entries are added and removed individually so a save here cannot " \
             + "discard them.</div>"
-    html += _name_rows(orc, 'given', 'Given names')
-    html += _name_rows(orc, 'family', 'Family names')
+    html += _name_rows(orc, 'given', 'Given names', 'given name')
+    html += _name_rows(orc, 'family', 'Family names', 'family name')
 
     # ----- authorizations -----
     html += "<h4 style='margin-top:28px'>Authorizations</h4>"
