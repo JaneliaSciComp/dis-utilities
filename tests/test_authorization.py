@@ -246,3 +246,16 @@ def test_table_cells_carrying_markup_are_marked_safe():
     for fragment in re.findall(r"[\"']<(?:a|span)[^\"']*", rows):
         start = rows.index(fragment)
         assert 'safe(' in rows[max(0, start - 200):start], fragment[:50]
+
+
+def test_the_403_message_is_plain_text():
+    ''' message= is autoescaped by the template (Safe.__html__), so HTML
+        entities reach the reader literally - "&quot;" printed as &quot; - and a
+        pre-escaped value is escaped a second time. The three sinks differ and
+        are easy to confuse: render_table cells need safe(), render_warning
+        escapes its own argument, and template message=/title= autoescape.
+    '''
+    block = SOURCE.split('def restricted(')[1].split('\ndef ')[0]
+    msg = block.split('This page needs')[1].split('), 403)')[0]
+    assert '&quot;' not in msg, 'entities are shown literally in an escaped sink'
+    assert 'escape(' not in msg, 'message= is already escaped by the template'

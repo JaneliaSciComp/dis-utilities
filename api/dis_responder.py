@@ -57,7 +57,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.102.1"
+__version__ = "120.102.2"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -741,12 +741,16 @@ def restricted(arg=None):
                 # ask for the right thing.
                 print(f"{person.get('orcid')} lacks '{term}' for {request.path}")
                 label = (CVTERM.get('authorization', {}).get(term) or {}).get('display', term)
+                # Plain text, no entities and no escape(): message= is
+                # autoescaped by the template (see Safe.__html__), so "&quot;"
+                # reached the reader as literal "&quot;" and an escaped label
+                # would have been escaped a second time.
                 return make_response(render_template(
                     'error.html', urlroot=request.url_root,
                     title=render_warning("Not authorized"),
-                    message=f"This page needs the &quot;{escape(str(label))}&quot; "
-                            "authorization, which your account does not have. "
-                            "An administrator can grant it."), 403)
+                    message=f'This page needs the "{label}" authorization, which '
+                            'your account does not have. An administrator can '
+                            'grant it.'), 403)
             return view(*args, **kwargs)
         # Marked so the navigation menu can find out what is gated without being
         # told twice. A hand-kept list would drift the first time an endpoint is
