@@ -363,12 +363,23 @@ def current_user():
     if 'dis_user' in g:
         return g.dis_user
     g.dis_user = None
+    g.dis_user_ambiguous = False
     orcid = session.get(RESTRICTED_SESSION_KEY)
     if orcid and DB:
         try:
-            person = DB['dis'].orcid.find_one({"orcid": orcid})
+            # limit(2) rather than find_one: an iD shared by two roster records
+            # would otherwise resolve to whichever one Mongo returned first, and
+            # these pages show a named person their own publications and
+            # citation metrics. /mypapers already refuses to guess in this case
+            # (see merge_roster_records); so does this, and for the same reason.
+            matches = list(DB['dis'].orcid.find({"orcid": orcid}).limit(2))
         except Exception:
-            person = None
+            matches = []
+        if len(matches) > 1:
+            print(f"Refusing to resolve {orcid}: shared by more than one roster record")
+            g.dis_user_ambiguous = True
+            return None
+        person = matches[0] if matches else None
         if may_sign_in(person):
             g.dis_user = person
             _touch_last_seen(orcid)
@@ -628,6 +639,18 @@ def restricted(view):
         # sync - loses access at their next page load rather than whenever they
         # happen to close their browser. It is also what records last_seen.
         if not current_user():
+            if getattr(g, 'dis_user_ambiguous', False):
+                # Do NOT clear the session or redirect: they would sign in
+                # again, land here again, and loop. Say what is wrong instead.
+                return make_response(render_template(
+                    'error.html', urlroot=request.url_root,
+                    title=render_warning("Could not identify you"),
+                    message="More than one person on the Janelia roster carries "
+                            "the ORCID iD you signed in with, so we cannot tell "
+                            "which of them you are. This page shows personal "
+                            "publication data, so it will not guess. Please ask "
+                            "for the duplicate roster records to be corrected."),
+                    409)
             if session.get(RESTRICTED_SESSION_KEY):
                 # A valid-looking cookie for somebody the roster no longer
                 # permits. Clear it, or they carry a dead session around and
