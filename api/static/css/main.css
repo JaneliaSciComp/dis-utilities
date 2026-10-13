@@ -812,3 +812,99 @@ a.tag-iris { color: var(--curator-iris); }
   user-select: none;
 }
 a:hover > .dis-avatar { border-color: var(--hhmi-blue, #028d96); }
+
+/* ---- /newhome tiles --------------------------------------------------------
+   A variant of div.homebox for a grid where some tiles carry controls rather
+   than being a single link. homebox is a fixed 350x200; an input, a button and
+   a reveal link do not fit in that, so these grow downward and keep a common
+   minimum so a row of mixed tiles still lines up. Kept separate from homebox
+   so /andy and / are untouched.                                             */
+/* Grid, not flex. Flex wraps to however many fit, which gave 5 across on a wide
+   screen, and it cannot equalize tile heights here because the link tiles are
+   wrapped in an <a> - the anchor stretches, the box inside it does not. A grid
+   caps the columns (max-width below allows exactly 4) and makes every tile in a
+   row the height of the tallest, which is what the control tiles need. */
+.nhgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, 270px);
+  justify-content: center;
+  gap: 18px;
+  max-width: 1134px;        /* 4 x 270 + 3 x 18 - the 4-across cap */
+  margin: 0 auto;
+}
+
+div.nhbox {
+  border: 2px solid var(--hhmi-green3);
+  /* Sized by the grid column; height: 100% fills the row so neighbours match.
+     Spacing is the grid gap, so no margin here. */
+  width: 100%;
+  height: 100%;
+  min-height: 185px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 14px;
+  margin: 0;
+  color: white;
+  background-color: darkgreen;
+  border-radius: 18px;
+}
+
+.nhtitle {
+  font-size: 1.05rem;
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+
+/* The one-line descriptions under a link tile's title. */
+.nhsub {
+  font-size: 0.85rem;
+  line-height: 1.25;
+  color: #d8ecd8;
+}
+
+/* Pushed to the bottom of the tile, so icons line up across a row whatever
+   each tile holds above them. */
+.nhicon {
+  margin-top: auto;
+  padding-top: 10px;
+}
+
+.nhctl {
+  width: 100%;
+}
+
+.nhctl .btn {
+  margin: 3px 2px;
+}
+
+/* The whole tile is the hit target on link tiles. */
+a.nhlink {
+  display: flex;            /* grid item: stretch, and let .nhbox fill the height */
+  text-decoration: none;
+  color: inherit;
+}
+
+a.nhlink:hover div.nhbox {
+  background-color: #111;
+  text-decoration: none;
+}
+
+/* "upload a list instead" - secondary, and the revealed form under it. */
+.nhmini {
+  font-size: 0.82rem;
+  margin-top: 8px;
+}
+
+.nhmini a {
+  color: #cfe8cf;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.nhreveal {
+  display: none;
+  margin-top: 8px;
+  font-size: 0.82rem;
+}

@@ -57,7 +57,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.99.1"
+__version__ = "120.100.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -7388,6 +7388,32 @@ def download(fname):
                                title='Download error', message=err)
 
 
+def home_datalists():
+    ''' Option lists for the typeahead controls the home pages share
+
+        /home and /newhome offer the same searches, so they draw their journal,
+        organization and project lists from here rather than each building its
+        own - two copies of this would drift the first time a list gains a
+        filter on one page and not the other.
+        Keyword arguments:
+          None
+        Returns:
+          (journals, orgs, projects), each a string of <option> elements
+    '''
+    journals = '<option>' \
+               + '</option><option>'.join(sorted(get_top_journals('All').keys())) \
+               + '</option>'
+    try:
+        rows = DB['dis']['org_group'].find({}).collation({"locale": "en"}).sort("group", 1)
+        olist = [row['group'] for row in rows]
+        plist = list(DB['dis']['project_map'].distinct("project"))
+    except Exception as err:
+        raise CustomException(err, "Could not read organization or project names") from err
+    orgs = '<option>' + '</option><option>'.join(sorted(olist)) + '</option>'
+    projects = '<option>' + '</option><option>'.join(sorted(plist)) + '</option>'
+    return journals, orgs, projects
+
+
 @app.route('/')
 @app.route('/home')
 @app.route('/<path:doi>')
@@ -7396,34 +7422,12 @@ def show_home(doi=None):
     '''
     if doi and doi != 'home':
         return show_doi_ui(doi)
-    jlist = get_top_journals('All').keys()
-    journals = '<option>'
-    journals += '</option><option>'.join(sorted(jlist))
-    journals += '</option>'
     try:
-        rows = DB['dis']['org_group'].find({}).collation({"locale": "en"}).sort("group", 1)
+        journals, orgs, projects = home_datalists()
     except Exception as err:
         return render_template('warning.html', urlroot=request.url_root,
-                                title=render_warning("Could not find organization names", 'error'),
+                                title=render_warning("Could not build the search lists", 'error'),
                                 message=error_message(err))
-    olist = []
-    for row in rows:
-        olist.append(row['group'])
-    orgs = '<option>'
-    orgs += '</option><option>'.join(sorted(olist))
-    orgs += '</option>'
-    try:
-        rows = DB['dis']['project_map'].distinct("project")
-    except Exception as err:
-        return render_template('warning.html', urlroot=request.url_root,
-                                title=render_warning("Could not find projects", 'error'),
-                                message=error_message(err))
-    plist = []
-    for row in rows:
-        plist.append(row)
-    projects = '<option>'
-    projects += '</option><option>'.join(sorted(plist))
-    projects += '</option>'
     endpoint_access()
     return make_response(render_template('home.html', urlroot=request.url_root,
                                          journals=journals, orgs=orgs, projects=projects,
@@ -7522,6 +7526,35 @@ def andy():
 # ******************************************************************************
 # * UI endpoints (personalized)                                                *
 # ******************************************************************************
+
+@app.route('/newhome')
+@restricted
+def show_new_home():
+    ''' Prototype home page: the same searches as /home, as a tile grid, with
+        the three personal pages alongside them.
+
+        Restricted deliberately. This is what the home page becomes once every
+        page requires a session, so there is no signed-out layout to design -
+        and current_user() is guaranteed by the time the template renders.
+        Named /newhome while it sits beside the real one.
+    '''
+    try:
+        journals, orgs, projects = home_datalists()
+    except Exception as err:
+        return render_template('warning.html', urlroot=request.url_root,
+                                title=render_warning("Could not build the search lists", 'error'),
+                                message=error_message(err))
+    person = current_user() or {}
+    given = (person.get('given') or [''])[0]
+    greeting = f"Welcome back, {escape(given)}." if given else "Welcome back."
+    greeting += " This is the Janelia Internal Research Information System (IRIS)," \
+                " the central record of Janelia research output."
+    endpoint_access()
+    return make_response(render_template('newhome.html', urlroot=request.url_root,
+                                         journals=journals, orgs=orgs, projects=projects,
+                                         greeting=greeting,
+                                         navbar=generate_navbar('Home')))
+
 
 @app.route('/dois/mytags/<string:year>/<string:show>')
 @app.route('/dois/mytags/<string:year>')
