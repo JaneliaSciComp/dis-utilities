@@ -57,7 +57,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.99.0"
+__version__ = "120.99.1"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -13155,19 +13155,37 @@ def source_metrics(year='All'):  # pylint: disable=too-many-locals
              + "and is computed over the pooled works, so Combined is not the sum " \
              + "of the columns.<br>" \
              + "<b>Median FWCI</b> (field-weighted citation impact): a work\'s citations " \
-             + "divided by the average received by work of the same field, year and type, " \
-             + "so <b>1.0 is the world average for its kind</b> and 3.1 is three times it. " \
-             + "Shown as the median of those ratios, because they are heavily skewed - the " \
-             + "mean here is roughly twice the median, pulled up by a few very highly " \
-             + "cited works. It is the only figure on this page that compares like with " \
-             + "like, which matters because citation rates differ several-fold between " \
-             + "fields: an unadjusted count says as much about a field as about the work. " \
+             + "divided by the citations expected for work of the same <b>subfield</b>, " \
+             + "year and type, so <b>1.0 is the world average for its kind</b> and 3.1 is " \
+             + "three times it. Subfield, not field: OpenAlex normalizes against the " \
+             + "subfield of a work\'s primary topic, so a paper lands in a bucket as narrow " \
+             + "as <i>Biophysics</i> rather than one as broad as <i>Biochemistry, Genetics " \
+             + "and Molecular Biology</i>. " \
+             + "<b>That bucket is decided per paper, not for this corpus.</b> Each work is " \
+             + "measured against its own cohort - a 2020 biophysics article against 2020 " \
+             + "biophysics articles, a 2023 neuroscience preprint against 2023 neuroscience " \
+             + "preprints - and arrives already normalized; nothing here assigns Janelia a " \
+             + "field. The corpus enters only at the last step, when the " \
+             + "median of those per-paper ratios is taken - the median rather than the " \
+             + "mean because they are heavily skewed, the mean here being roughly twice " \
+             + "the median, pulled up by a few very highly cited works. So it reads as " \
+             + "<i>the typical Janelia paper sits at N times its own subfield\'s " \
+             + "average</i>, not as a score for any one discipline. That per-paper step is " \
+             + "what makes it the " \
+             + "only figure on this page comparing like with like, and why a corpus " \
+             + "spanning several disciplines can carry one number at all: citation rates " \
+             + "differ several-fold between fields, so an unadjusted count says as much " \
+             + "about a field as about the work. " \
+             + "A work with several topics is normalized against the subfield of its " \
+             + "<i>primary</i> one only, which is worth remembering for genuinely " \
+             + "interdisciplinary work: the cohort is whichever subfield won. " \
              + "<i>n</i> is smaller than the DOI count because OpenAlex, whose " \
              + "classification this is, rates a work only once it has placed it in a " \
-             + "field - mostly not preprints or lightly-cited work - so the rated set " \
-             + "skews well-cited and this reads high. Blank where too few works are rated " \
-             + "to mean anything, and deliberately absent from personal pages: it is " \
-             + "unreliable on a single researcher\'s bibliography.<br>Per-source detail: " \
+             + "subfield - mostly not preprints or lightly-cited work - so the rated set " \
+             + "skews well-cited and this reads high. Normalizing per paper does not, " \
+             + "though, make a per-person average valid: the ratio needs a large sample " \
+             + "to settle, which is why this is blank where too few works are rated and " \
+             + "absent from personal pages altogether.<br>Per-source detail: " \
              + "<a href='/citation_metrics/crossref'>Crossref metrics</a> &middot; " \
              + "<a href='/citation_metrics/datacite'>DataCite metrics</a></div>"
     # ----- citation concentration (how much of the total rides on the top works;
