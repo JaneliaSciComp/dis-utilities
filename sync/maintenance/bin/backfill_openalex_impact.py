@@ -27,7 +27,7 @@
     pagination, so newly ingested DOIs are covered without running this again.
 """
 
-__version__ = '1.0.0'
+__version__ = '1.1.0'
 
 import argparse
 from operator import attrgetter
@@ -107,7 +107,9 @@ def fetch_impact(doi):
           (doi, impact dict or None, errored bool)
     '''
     resp = get_with_retry(f"{OPENALEX_WORK}{doi.lower()}",
-                          with_openalex_auth({'select': 'fwci,citation_normalized_percentile'}),
+                          with_openalex_auth({'select': 'fwci,'
+                                                        'citation_normalized_percentile,'
+                                                        'primary_topic'}),
                           20)
     if resp is not None and resp.status_code == 404:
         return doi, None, False          # OpenAlex does not hold it: a finding, not an error
@@ -120,11 +122,19 @@ def fetch_impact(doi):
     pct = data.get('citation_normalized_percentile') or {}
     if data.get('fwci') is None and pct.get('value') is None:
         return doi, None, False          # held but unclassified
-    return doi, {'source': 'openalex',
-                 'fwci': data.get('fwci'),
-                 'percentile': pct.get('value'),
-                 'top_1_percent': pct.get('is_in_top_1_percent'),
-                 'top_10_percent': pct.get('is_in_top_10_percent')}, False
+    impact = {'source': 'openalex',
+              'fwci': data.get('fwci'),
+              'percentile': pct.get('value'),
+              'top_1_percent': pct.get('is_in_top_1_percent'),
+              'top_10_percent': pct.get('is_in_top_10_percent')}
+    # Same shape sync_citations writes - see its openalex_citing for why the
+    # cohort and the confidence score are kept and field/domain are not.
+    topic = data.get('primary_topic') or {}
+    if topic:
+        impact.update({'topic': topic.get('display_name'),
+                       'topic_score': topic.get('score'),
+                       'subfield': (topic.get('subfield') or {}).get('display_name')})
+    return doi, impact, False
 
 
 def processing():

@@ -181,7 +181,7 @@
         (falling back to the native citationCount).
 '''
 
-__version__ = '1.14.0'
+__version__ = '1.15.0'
 
 import argparse
 import collections
@@ -537,7 +537,8 @@ def openalex_citing(doi, existing_oa_count=None, impact=None):  # pylint: disabl
     resp = get_with_retry(f"{OPENALEX_WORK}{doi.lower()}",
                           with_openalex_auth(
                               {'select': 'id,cited_by_count,fwci,'
-                                         'citation_normalized_percentile'}), 20)
+                                         'citation_normalized_percentile,'
+                                         'primary_topic'}), 20)
     if resp is not None and resp.status_code == 404:
         return set()
     if resp is None or resp.status_code != 200:
@@ -562,6 +563,23 @@ def openalex_citing(doi, existing_oa_count=None, impact=None):  # pylint: disabl
                            'percentile': pct.get('value'),
                            'top_1_percent': pct.get('is_in_top_1_percent'),
                            'top_10_percent': pct.get('is_in_top_10_percent')})
+            # The cohort the ratio was computed against, stored so the number is
+            # self-describing: an fwci of 1.56 means nothing without knowing
+            # 1.56x what. It also makes reclassification visible - OpenAlex
+            # moves works between topics, and without this a changed ratio has
+            # no recorded reason. Field and domain are omitted because both are
+            # derivable from the subfield.
+            #
+            # topic_score is kept deliberately. It is the confidence in the
+            # assignment, and a low one is precisely when a per-subfield
+            # comparison deserves suspicion. Janelia spans 105 subfields, much
+            # of it interdisciplinary work that no single topic describes well.
+            topic = data.get('primary_topic') or {}
+            if topic:
+                impact.update({'topic': topic.get('display_name'),
+                               'topic_score': topic.get('score'),
+                               'subfield': (topic.get('subfield')
+                                            or {}).get('display_name')})
     if not data.get('cited_by_count'):
         return set()
     if existing_oa_count is not None and data['cited_by_count'] == existing_oa_count:
