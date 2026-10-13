@@ -57,7 +57,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.103.1"
+__version__ = "120.103.2"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -956,7 +956,11 @@ def profile():
             auth_html += "<br>" + render_warning(f"Not in effect ({why}).", 'warning')
     if 'admin' in authorizations(person):
         auth_html += "<br><a href='/authorizations'>Manage authorizations</a>"
-    html += f"<tr><td>Authorizations:</td><td>{auth_html}</td></tr>"
+    # Both cells top-aligned: .borderless td does not set vertical-align, so the
+    # default centres the one-line label against a cell that can run to several
+    # lines, and the label floats to the middle of the list.
+    html += "<tr><td style='vertical-align:top'>Authorizations:</td>" \
+            + f"<td style='vertical-align:top'>{auth_html}</td></tr>"
     html += "</table><br>"
     # The API token is step 7 of docs/AUTHENTICATION_PLAN.md. Named here because
     # this is where people will come looking for it.
