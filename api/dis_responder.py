@@ -2397,11 +2397,15 @@ PLATFORM_LINK = {
 
 
 def get_orcid_from_db(oid, use_eid=False, bare=False, show="full"):
-    ''' Generate HTML for an ORCID or employeeId that is in the orcid collection
+    ''' Generate HTML for a person in the orcid collection
+
+        The lookup is by ORCID iD, or by O365 username when use_eid is set -
+        NOT by employeeId, which nothing here queries. The parameter keeps its
+        name because callers pass it positionally.
         Keyword arguments:
-          oid: ORCID or employeeId
-          use_eid: use employeeId boolean
-          bare: entry has no ORCID or employeeId
+          oid: ORCID iD, O365 username, or record _id when bare
+          use_eid: look up by userIdO365 rather than by ORCID iD
+          bare: oid is a record _id, for someone with neither identifier
         Returns:
           HTML, a list of DOIs, and full name
     '''
@@ -19210,20 +19214,30 @@ def show_oid_ui(oid, show='full'):
 @app.route('/userui/<string:eid>/<string:show>')
 @app.route('/userui/<string:eid>')
 def show_user_ui(eid, show='full'):
-    ''' Show user record by employeeId (user ID) or ORCID
+    ''' Show user record by ORCID iD, or by O365 username for someone who has
+        none. NOT by employeeId: the lookup below resolves the path segment
+        against the orcid collection's "orcid" field, or against "userIdO365"
+        when it looks like an address. A bare employee number matches neither
+        and lands on the not-found page, which used to say "Could not find user
+        ID", sending the reader off to try more employee numbers.
     '''
     try:
+        # use_eid selects userIdO365, not employeeId, despite the name.
         orciddata, _, full_name = get_orcid_from_db(eid, use_eid=bool('@' in eid),
                                                     bare=False, show=show)
     except CustomException as err:
         return render_template('error.html', urlroot=request.url_root,
-                                title=render_warning(f"Could not find user ID {eid}",
+                                title=render_warning(f"Could not look up {eid}",
                                                      'warning'),
                                 message=error_message(err))
     if not orciddata:
         return render_template('warning.html', urlroot=request.url_root,
-                               title=render_warning(f"Could not find user ID {eid}", 'warning'),
-                               message="Could not find any information for this employee ID")
+                               title=render_warning(f"Could not find {eid}", 'warning'),
+                               message="No roster record matches that ORCID iD or HHMI "
+                                       "username. This page takes an ORCID iD "
+                                       "(0000-0000-0000-0000) or an address such as "
+                                       "someone@hhmi.org - an employee number will not "
+                                       "find anybody.")
     return _render_person(orciddata, full_name, show, f"/userui/{eid}")
 
 
