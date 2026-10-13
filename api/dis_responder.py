@@ -57,7 +57,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.101.0"
+__version__ = "120.102.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -481,8 +481,8 @@ def avatar_html(person, photo_url=None, px=None):
                 f"title='{tip}'>{escape(initials)}</span>")
 
 
-def _restricted_targets():
-    ''' Menu targets that require a sign-in.
+def _gated_targets():
+    ''' Menu targets that require a sign-in, and what else they require.
 
         Derived from the @restricted decorator rather than listed by hand, so
         gating an endpoint hides its menu entry with no second edit. Cached on
@@ -490,20 +490,21 @@ def _restricted_targets():
         Keyword arguments:
           None
         Returns:
-          Set of NAV values, e.g. {'figshare_users'}
+          {NAV value: required authorization or None}, e.g.
+          {'figshare_users': 'datacite', 'mypapers': None}
     '''
-    cached = app.config.get('RESTRICTED_TARGETS')
+    cached = app.config.get('GATED_TARGETS')
     if cached is not None:
         return cached
-    out = set()
+    out = {}
     for rule in app.url_map.iter_rules():
         view = app.view_functions.get(rule.endpoint)
         if getattr(view, 'dis_restricted', False):
             # NAV values are paths without the leading slash, and menu entries
             # never carry parameters, so only the static rules can match.
             if '<' not in str(rule):
-                out.add(str(rule).lstrip('/'))
-    app.config['RESTRICTED_TARGETS'] = out
+                out[str(rule).lstrip('/')] = getattr(view, 'dis_authorization', None)
+    app.config['GATED_TARGETS'] = out
     return out
 
 
@@ -531,11 +532,13 @@ def _visible_nav(nav, hidden):
 def generate_navbar(active):
     ''' Request-aware wrapper around dis_html.generate_navbar.
 
-        Menu entries for pages requiring a sign-in are hidden from anyone who is
-        not signed in. This is tidiness, not security - the pages themselves are
-        guarded by @restricted, and hiding a link protects nothing on its own.
-        Without it, every signed-out visitor sees four entries that bounce them
-        to a sign-in form they may have no way to satisfy.
+        Menu entries are hidden from anyone who could not open them: everything
+        gated, from a signed-out viewer; and anything needing an authorization
+        they do not hold, from a signed-in one. This is tidiness, not security -
+        the pages themselves are guarded by @restricted, and hiding a link
+        protects nothing on its own. Without it, a reader sees entries that
+        bounce them to a sign-in form, or to a 403, with no way to satisfy
+        either.
 
         The shadow lives here, as year_pulldown's does, so dis_html stays
         request-free.
@@ -544,8 +547,14 @@ def generate_navbar(active):
         Returns:
           Navigation bar HTML
     '''
-    hidden = _restricted_targets()
-    if not hidden or current_user():
+    gated = _gated_targets()
+    if not gated:
+        return _generate_navbar(active)
+    person = current_user()
+    held = authorizations(person)
+    hidden = {nav for nav, term in gated.items()
+              if not person or (term and term not in held)}
+    if not hidden:
         return _generate_navbar(active)
     return _generate_navbar(active, menu=_visible_nav(NAV, hidden))
 
@@ -618,56 +627,135 @@ def _restriction_unavailable():
     return None
 
 
-def restricted(view):
-    ''' Require a signed-in reader for a view
+def may_be_authorized(person):
+    ''' Whether a roster record may hold an authorization at all
+
+        Two conditions, both checked here and again wherever an authorization is
+        used, so a grant cannot outlive the thing that justified it: somebody
+        who leaves keeps the stored list but stops passing any check.
+
+          - An ORCID iD. It is what a session is keyed by, so a record without
+            one can never be the signed-in person; a grant on it is inert.
+          - Not alumni. Note this is STRICTER than may_sign_in, which lets a
+            departed contingent worker keep access: they may sign in, but they
+            may not hold an authorization.
         Keyword arguments:
-          view: view function
+          person: orcid collection document, or None
         Returns:
-          Wrapped view
+          (True, "") or (False, reason)
     '''
-    @wraps(view)
-    def wrapper(*args, **kwargs):
-        problem = _restriction_unavailable()
-        if problem:
-            print(f"Restricted page {request.path} refused: {problem}")
-            return make_response(render_template('error.html', urlroot=request.url_root,
-                                                 title=render_warning("Restricted page"),
-                                                 message=problem), 503)
-        # current_user(), not a bare session check: it re-reads the orcid
-        # document and re-applies the access rule on EVERY request, so somebody
-        # who leaves - or whose alumni flag is flipped by the nightly People
-        # sync - loses access at their next page load rather than whenever they
-        # happen to close their browser. It is also what records last_seen.
-        if not current_user():
-            if getattr(g, 'dis_user_ambiguous', False):
-                # Do NOT clear the session or redirect: they would sign in
-                # again, land here again, and loop. Say what is wrong instead.
+    if not person:
+        return False, "no record"
+    if not person.get('orcid'):
+        return False, "no ORCID iD"
+    if person.get('alumni') is True:
+        return False, "alumni"
+    return True, ""
+
+
+def authorizations(person):
+    ''' The authorization terms a person holds
+
+        Stored as a list of cvterm names on the orcid record, under the cv
+        "authorization". "admin" means everything: an administrator passes any
+        check without the specific term being listed, so adding a term to the cv
+        never has to be followed by re-granting it to every admin.
+
+        Nobody failing may_be_authorized holds anything, whatever is stored on
+        their record - the stored list is a grant, not a standing permission.
+
+        Reads the cv rather than a hard-coded tuple, so a term added to cvterm
+        appears as a checkbox and as a valid grant with no code change.
+        Keyword arguments:
+          person: orcid collection document, or None
+        Returns:
+          Set of authorization names (empty for a signed-out viewer)
+    '''
+    if not person or not may_be_authorized(person)[0]:
+        return set()
+    held = {a for a in (person.get('authorization') or []) if a}
+    if 'admin' in held:
+        return held | set(CVTERM.get('authorization') or {})
+    return held
+
+
+def restricted(arg=None):
+    ''' Require a signed-in reader, and optionally an authorization
+
+        Two forms:
+          @restricted                 any signed-in reader
+          @restricted('datacite')     signed in AND holding that authorization
+
+        One decorator rather than two, so an authorization check can never be
+        applied to a page that forgot the sign-in check beneath it.
+        Keyword arguments:
+          arg: the decorated view (bare form) or an authorization name
+        Returns:
+          Decorator, or the wrapped view
+    '''
+    term = None if callable(arg) else arg
+
+    def decorate(view):
+        @wraps(view)
+        def wrapper(*args, **kwargs):
+            problem = _restriction_unavailable()
+            if problem:
+                print(f"Restricted page {request.path} refused: {problem}")
+                return make_response(render_template('error.html', urlroot=request.url_root,
+                                                     title=render_warning("Restricted page"),
+                                                     message=problem), 503)
+            # current_user(), not a bare session check: it re-reads the orcid
+            # document and re-applies the access rule on EVERY request, so
+            # somebody who leaves - or whose alumni flag is flipped by the
+            # nightly People sync - loses access at their next page load rather
+            # than whenever they happen to close their browser. It is also what
+            # records last_seen.
+            person = current_user()
+            if not person:
+                if getattr(g, 'dis_user_ambiguous', False):
+                    # Do NOT clear the session or redirect: they would sign in
+                    # again, land here again, and loop. Say what is wrong instead.
+                    return make_response(render_template(
+                        'error.html', urlroot=request.url_root,
+                        title=render_warning("Could not identify you"),
+                        message="More than one person on the Janelia roster carries "
+                                "the ORCID iD you signed in with, so we cannot tell "
+                                "which of them you are. This page shows personal "
+                                "publication data, so it will not guess. Please ask "
+                                "for the duplicate roster records to be corrected."),
+                        409)
+                if session.get(RESTRICTED_SESSION_KEY):
+                    # A valid-looking cookie for somebody the roster no longer
+                    # permits. Clear it, or they carry a dead session around and
+                    # the sign-in form cannot explain why.
+                    print(f"Session ended: {session.get(RESTRICTED_SESSION_KEY)} no longer "
+                          f"passes the access rule")
+                    session.clear()
+                # full_path appends a bare '?' when there is no query string, which
+                # would otherwise show up in the address bar after signing in.
+                target = request.full_path.rstrip('?')
+                return redirect(url_for('login', next=target))
+            if term and term not in authorizations(person):
+                # 403, not a redirect: they are signed in correctly and signing
+                # in again changes nothing. Name the authorization so they can
+                # ask for the right thing.
+                print(f"{person.get('orcid')} lacks '{term}' for {request.path}")
+                label = (CVTERM.get('authorization', {}).get(term) or {}).get('display', term)
                 return make_response(render_template(
                     'error.html', urlroot=request.url_root,
-                    title=render_warning("Could not identify you"),
-                    message="More than one person on the Janelia roster carries "
-                            "the ORCID iD you signed in with, so we cannot tell "
-                            "which of them you are. This page shows personal "
-                            "publication data, so it will not guess. Please ask "
-                            "for the duplicate roster records to be corrected."),
-                    409)
-            if session.get(RESTRICTED_SESSION_KEY):
-                # A valid-looking cookie for somebody the roster no longer
-                # permits. Clear it, or they carry a dead session around and
-                # the sign-in form cannot explain why.
-                print(f"Session ended: {session.get(RESTRICTED_SESSION_KEY)} no longer "
-                      f"passes the access rule")
-                session.clear()
-            # full_path appends a bare '?' when there is no query string, which
-            # would otherwise show up in the address bar after signing in.
-            target = request.full_path.rstrip('?')
-            return redirect(url_for('login', next=target))
-        return view(*args, **kwargs)
-    # Marked so the navigation menu can find out what is gated without being
-    # told twice. A hand-kept list would drift the first time an endpoint is
-    # added to or taken off the decorator.
-    wrapper.dis_restricted = True
-    return wrapper
+                    title=render_warning("Not authorized"),
+                    message=f"This page needs the &quot;{escape(str(label))}&quot; "
+                            "authorization, which your account does not have. "
+                            "An administrator can grant it."), 403)
+            return view(*args, **kwargs)
+        # Marked so the navigation menu can find out what is gated without being
+        # told twice. A hand-kept list would drift the first time an endpoint is
+        # added or opened up.
+        wrapper.dis_restricted = True
+        wrapper.dis_authorization = term
+        return wrapper
+
+    return decorate(arg) if callable(arg) else decorate
 
 
 @app.route('/login', methods=['GET', 'POST'])
@@ -7541,6 +7629,201 @@ def andy():
 # * UI endpoints (personalized)                                                *
 # ******************************************************************************
 
+def _person_label(orc):
+    ''' A person's name with whatever identifies them, for an admin list
+        Keyword arguments:
+          orc: orcid collection document
+        Returns:
+          Escaped HTML string
+    '''
+    name = display_person_name(orc) or '(no name)'
+    ident = orc.get('orcid') or orc.get('userIdO365') or orc.get('employeeId') or ''
+    out = escape(str(name))
+    if ident:
+        out += f" <span style='color:#888'>({escape(str(ident))})</span>"
+    return out
+
+
+def _authorization_terms():
+    ''' The authorization cv, as (name, display, definition) in display order
+
+        Read from cvterm rather than hard-coded, so adding a term to the cv adds
+        a checkbox here and a valid grant everywhere else with no code change.
+        Keyword arguments:
+          None
+        Returns:
+          List of tuples
+    '''
+    terms = CVTERM.get('authorization') or {}
+    out = [(name, (rec or {}).get('display', name), (rec or {}).get('definition', ''))
+           for name, rec in terms.items()]
+    return sorted(out, key=lambda t: t[1].lower())
+
+
+@app.route('/authorizations')
+@restricted('admin')
+def show_authorizations():
+    ''' Who holds which authorization, and a search to grant one to anybody else
+    '''
+    held = []
+    try:
+        rows = DB['dis'].orcid.find({"authorization": {"$exists": True, "$ne": []}})
+        held = sorted(rows, key=lambda r: (display_person_name(r) or '').lower())
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not read authorizations"),
+                               message=error_message(err))
+    rows_html = []
+    for orc in held:
+        granted = ", ".join(escape(a) for a in sorted(orc.get('authorization') or []))
+        when = str(orc.get('authorization_updated') or '')[:19]
+        rows_html.append([_person_label(orc), granted, escape(when),
+                          f"<a href='/authorization/{orc['_id']}'>Edit</a>"])
+    html = ""
+    if rows_html:
+        html += render_table(['Person', 'Authorizations', 'Last changed', ''], rows_html,
+                             table_id='auths', css='tablesorter standard')
+    else:
+        html += render_warning("Nobody holds an authorization yet.", 'warning')
+    # Search rather than a 2,383-entry pulldown. 1,398 of those records have no
+    # ORCID iD at all, so people are found by name and identified by _id.
+    query = (request.args.get('q') or '').strip()
+    html += "<br><h4>Grant an authorization</h4>" \
+            + "<form method='GET' action='/authorizations'>" \
+            + "<div class='flexcontainer'><div class='flexitem'>" \
+            + f"<input type='text' class='form-control' name='q' value='{escape(query)}' " \
+            + "placeholder='family or given name'></div>" \
+            + "<div class='flexitemauto'>" \
+            + "<button type='submit' class='btn btn-primary'>Search</button>" \
+            + "</div></div></form>"
+    if query:
+        try:
+            # Anchored, case-insensitive: a bare substring over 2,383 records
+            # returns most of the roster for a common fragment.
+            pat = {"$regex": "^" + re.escape(query), "$options": "i"}
+            found = list(DB['dis'].orcid.find({"$or": [{"family": pat}, {"given": pat}]})
+                         .limit(50))
+        except Exception as err:
+            return render_template('error.html', urlroot=request.url_root,
+                                   title=render_warning("Could not search the roster"),
+                                   message=error_message(err))
+        if found:
+            frows = []
+            for o in sorted(found, key=lambda r: (display_person_name(r) or '').lower()):
+                ok, why = may_be_authorized(o)
+                frows.append([
+                    _person_label(o),
+                    ", ".join(escape(a) for a in sorted(o.get('authorization') or [])) or
+                    "<span style='color:#888'>none</span>",
+                    # No link where a grant could not take: an Edit that leads to
+                    # a refusal is worse than saying why up front.
+                    f"<a href='/authorization/{o['_id']}'>Edit</a>" if ok else
+                    f"<span style='color:#888'>cannot be authorized ({escape(why)})</span>"])
+            html += render_table(['Person', 'Authorizations', ''], frows,
+                                 table_id='found', css='tablesorter standard')
+            if len(found) == 50:
+                html += render_warning("Showing the first 50 matches; narrow the name.",
+                                       'warning')
+        else:
+            # render_warning escapes its own message - see tests/test_escaping.py
+            html += render_warning(f"No roster record starts with {query}.", 'warning')
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="Authorizations", html=html,
+                                         navbar=generate_navbar('')))
+
+
+@app.route('/authorization/<string:rid>', methods=['GET', 'POST'])
+@restricted('admin')
+def edit_authorization(rid):
+    ''' Edit one person's authorizations
+
+        Keyed by the orcid record's _id, not by ORCID iD: 1,398 of the 2,383
+        roster records have no iD, and they are as grantable as any other.
+    '''
+    try:
+        orc = DB['dis'].orcid.find_one({"_id": bson.ObjectId(rid)})
+    except Exception:
+        orc = None
+    if not orc:
+        return render_template('warning.html', urlroot=request.url_root,
+                               title=render_warning("No such person", 'warning'),
+                               message="That roster record does not exist.")
+    me = current_user() or {}
+    eligible, why = may_be_authorized(orc)
+    note = ""
+    if request.method == 'POST' and not eligible:
+        note = render_warning(f"This person cannot hold an authorization ({why}). "
+                              "An ORCID iD is required, and alumni are excluded.",
+                              'warning')
+    elif request.method == 'POST':
+        chosen = {t for t in request.form.getlist('auth')
+                  if t in (CVTERM.get('authorization') or {})}
+        # An admin removing their own admin could leave nobody able to grant it
+        # back, and the only way out would be a hand-written database update.
+        if str(orc['_id']) == str(me.get('_id')) and 'admin' in authorizations(me) \
+           and 'admin' not in chosen:
+            note = render_warning("You cannot remove your own Administrator "
+                                  "authorization. Ask another administrator.", 'warning')
+        else:
+            try:
+                DB['dis'].orcid.update_one(
+                    {"_id": orc['_id']},
+                    {"$set": {"authorization": sorted(chosen),
+                              "authorization_updated": datetime.now(),
+                              "authorization_updated_by": me.get('orcid')}})
+            except Exception as err:
+                return render_template('error.html', urlroot=request.url_root,
+                                       title=render_warning("Could not save"),
+                                       message=error_message(err))
+            print(f"Authorizations for {orc['_id']} set to {sorted(chosen)} "
+                  f"by {me.get('orcid')}")
+            orc = DB['dis'].orcid.find_one({"_id": orc['_id']}) or orc
+            note = render_warning("Saved.", 'success')
+    current = set(orc.get('authorization') or [])
+    boxes = ""
+    for name, display, definition in _authorization_terms():
+        checked = " checked" if name in current else ""
+        boxes += "<div style='margin-bottom:10px'>" \
+                 + f"<label><input type='checkbox' name='auth' value='{escape(name)}'" \
+                 + f"{checked}> <b>{escape(display)}</b></label>"
+        if definition:
+            boxes += f"<div style='font-size:0.85em; color:#a8c4e0; margin-left:24px'>" \
+                     + f"{escape(definition)}</div>"
+        boxes += "</div>"
+    html = note + f"<h4>{_person_label(orc)}</h4>"
+    if not eligible:
+        html += render_warning(f"This person cannot hold an authorization ({why}). "
+                               "An ORCID iD is required, and alumni are excluded.",
+                               'warning')
+    elif not _auth_record(orc.get('orcid') or ''):
+        html += render_warning("This person has no sign-in, so an authorization "
+                               "granted here does nothing until one is issued with "
+                               "manage_restricted_users.py.", 'warning')
+    if eligible:
+        html += f"<form method='POST' action='/authorization/{orc['_id']}'>" \
+                + boxes \
+                + "<button type='submit' class='btn btn-primary'>Save</button>&nbsp;" \
+                + "<a class='btn btn-outline-secondary' href='/authorizations'>Back</a>" \
+                + "</form>"
+    else:
+        # Show what is stored, but offer no way to change it: the POST would be
+        # refused anyway, and a form that cannot succeed is a trap.
+        html += (boxes.replace('<input type="checkbox"', '<input type="checkbox" disabled')
+                 if current else "<div style='color:#888'>No authorizations.</div>") \
+                + "<br><a class='btn btn-outline-secondary' href='/authorizations'>Back</a>"
+    if orc.get('authorization_updated'):
+        html += f"<div style='font-size:0.85em; color:#888; margin-top:14px'>Last changed " \
+                + f"{escape(str(orc['authorization_updated'])[:19])}"
+        if orc.get('authorization_updated_by'):
+            html += f" by {escape(str(orc['authorization_updated_by']))}"
+        html += "</div>"
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="Edit authorizations", html=html,
+                                         navbar=generate_navbar('')))
+
+
 @app.route('/newhome')
 @restricted
 def show_new_home():
@@ -10251,7 +10534,7 @@ def _classify_janelian(row):
 
 
 @app.route('/figshare_users')
-@restricted
+@restricted('datacite')
 def show_figshare_users():
     '''
     Return figshare account holders matched against the Janelia roster
@@ -10394,7 +10677,7 @@ def _protocolsio_authors():
 
 
 @app.route('/protocolsio_users')
-@restricted
+@restricted('datacite')
 def show_protocolsio_users():
     '''
     Return protocols.io authors matched against the Janelia roster
@@ -10802,7 +11085,7 @@ def show_dryad_dois(year='All'):
 
 
 @app.route('/dryad_users')
-@restricted
+@restricted('datacite')
 def show_dryad_users():
     '''
     Return Dryad depositors matched against the Janelia roster
@@ -10819,7 +11102,7 @@ def show_dryad_users():
 
 
 @app.route('/zenodo_users')
-@restricted
+@restricted('datacite')
 def show_zenodo_users():
     '''
     Return Zenodo depositors matched against the Janelia roster
