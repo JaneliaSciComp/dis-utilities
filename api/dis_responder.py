@@ -13157,17 +13157,27 @@ def source_metrics(year='All'):  # pylint: disable=too-many-locals
              + "<b>Median FWCI</b> (field-weighted citation impact): a work\'s citations " \
              + "divided by the average received by work of the same field, year and type, " \
              + "so <b>1.0 is the world average for its kind</b> and 3.1 is three times it. " \
-             + "Shown as the median of those ratios, because they are heavily skewed - the " \
-             + "mean here is roughly twice the median, pulled up by a few very highly " \
-             + "cited works. It is the only figure on this page that compares like with " \
-             + "like, which matters because citation rates differ several-fold between " \
-             + "fields: an unadjusted count says as much about a field as about the work. " \
+             + "<b>The field is decided per paper, not for this corpus.</b> Each work is " \
+             + "measured against its own cohort - a 2019 nanotechnology paper against 2019 " \
+             + "nanotechnology papers, a 2023 neuroscience preprint against 2023 " \
+             + "neuroscience preprints - and arrives already normalized; nothing here " \
+             + "assigns Janelia a field. The corpus enters only at the last step, when the " \
+             + "median of those per-paper ratios is taken - the median rather than the " \
+             + "mean because they are heavily skewed, the mean here being roughly twice " \
+             + "the median, pulled up by a few very highly cited works. So it reads as " \
+             + "<i>the typical Janelia paper sits at N times its own field\'s average</i>, " \
+             + "not as a score for any one field. That per-paper step is what makes it the " \
+             + "only figure on this page comparing like with like, and why a corpus " \
+             + "spanning several disciplines can carry one number at all: citation rates " \
+             + "differ several-fold between fields, so an unadjusted count says as much " \
+             + "about a field as about the work. " \
              + "<i>n</i> is smaller than the DOI count because OpenAlex, whose " \
              + "classification this is, rates a work only once it has placed it in a " \
              + "field - mostly not preprints or lightly-cited work - so the rated set " \
-             + "skews well-cited and this reads high. Blank where too few works are rated " \
-             + "to mean anything, and deliberately absent from personal pages: it is " \
-             + "unreliable on a single researcher\'s bibliography.<br>Per-source detail: " \
+             + "skews well-cited and this reads high. Normalizing per paper does not, " \
+             + "though, make a per-person average valid: the ratio needs a large sample " \
+             + "to settle, which is why this is blank where too few works are rated and " \
+             + "absent from personal pages altogether.<br>Per-source detail: " \
              + "<a href='/citation_metrics/crossref'>Crossref metrics</a> &middot; " \
              + "<a href='/citation_metrics/datacite'>DataCite metrics</a></div>"
     # ----- citation concentration (how much of the total rides on the top works;
