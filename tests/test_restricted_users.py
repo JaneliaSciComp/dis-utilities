@@ -197,3 +197,19 @@ def test_a_hostile_photo_url_cannot_break_out_of_the_attribute():
     out = str(D.avatar_html({'orcid': '0000-0001-2345-6789', 'given': ['A'], 'family': ['B']},
                             photo_url="x' onerror='alert(1)"))
     assert "onerror='alert(1)" not in out
+
+
+# --- a shared ORCID iD -----------------------------------------------------
+
+def test_a_shared_orcid_is_refused_rather_than_guessed():
+    ''' Two roster records on one iD must not resolve to "whichever Mongo
+        returned first" on pages that show a named person their own
+        publications and citation metrics. /mypapers already refuses to guess
+        (merge_roster_records); current_user has to refuse too.
+    '''
+    app = (ROOT / 'api' / 'dis_responder.py').read_text(encoding='utf-8')
+    assert 'find({"orcid": orcid}).limit(2)' in app, \
+        'current_user must detect a shared iD, not find_one past it'
+    assert 'dis_user_ambiguous' in app
+    assert 'More than one person on the Janelia roster' in app, \
+        'the ambiguous case needs an explanation, not a redirect loop'

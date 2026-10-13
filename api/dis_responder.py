@@ -286,6 +286,13 @@ ORCID_RE = re.compile(r'^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$')
 # with 2 replicas x 3 gunicorn workers the worst case is 6 writes a minute
 # per active person - still nothing, and it avoids any shared state.
 LAST_SEEN_THROTTLE = 60
+# Fewest ranked works before a median FWCI is worth printing. DORA's 2024
+# indicator guidance allows FWCI only on "large datasets, typically comprising
+# thousands of papers, e.g., the aggregate output of a large department", and
+# rules it out for individuals because it is "unreliable at the scale of a
+# typical bibliography". The DataCite column has 25 ranked works, which is the
+# individual regime, not the department one - it shows a dash and its n.
+FWCI_MIN_WORKS = 1000
 # Avatar diameters. The Janelia logo beside it in the header is 72px tall, so
 # the badge sits just under that - present without overtopping the logo.
 AVATAR_PX = 62
@@ -356,12 +363,23 @@ def current_user():
     if 'dis_user' in g:
         return g.dis_user
     g.dis_user = None
+    g.dis_user_ambiguous = False
     orcid = session.get(RESTRICTED_SESSION_KEY)
     if orcid and DB:
         try:
-            person = DB['dis'].orcid.find_one({"orcid": orcid})
+            # limit(2) rather than find_one: an iD shared by two roster records
+            # would otherwise resolve to whichever one Mongo returned first, and
+            # these pages show a named person their own publications and
+            # citation metrics. /mypapers already refuses to guess in this case
+            # (see merge_roster_records); so does this, and for the same reason.
+            matches = list(DB['dis'].orcid.find({"orcid": orcid}).limit(2))
         except Exception:
-            person = None
+            matches = []
+        if len(matches) > 1:
+            print(f"Refusing to resolve {orcid}: shared by more than one roster record")
+            g.dis_user_ambiguous = True
+            return None
+        person = matches[0] if matches else None
         if may_sign_in(person):
             g.dis_user = person
             _touch_last_seen(orcid)
@@ -621,6 +639,18 @@ def restricted(view):
         # sync - loses access at their next page load rather than whenever they
         # happen to close their browser. It is also what records last_seen.
         if not current_user():
+            if getattr(g, 'dis_user_ambiguous', False):
+                # Do NOT clear the session or redirect: they would sign in
+                # again, land here again, and loop. Say what is wrong instead.
+                return make_response(render_template(
+                    'error.html', urlroot=request.url_root,
+                    title=render_warning("Could not identify you"),
+                    message="More than one person on the Janelia roster carries "
+                            "the ORCID iD you signed in with, so we cannot tell "
+                            "which of them you are. This page shows personal "
+                            "publication data, so it will not guess. Please ask "
+                            "for the duplicate roster records to be corrected."),
+                    409)
             if session.get(RESTRICTED_SESSION_KEY):
                 # A valid-looking cookie for somebody the roster no longer
                 # permits. Clear it, or they carry a dead session around and
@@ -810,9 +840,11 @@ def profile():
              "<p style='color:#888'>Not issued yet. When the REST endpoints require "
              "authentication, your token will be shown here, once, with a button to "
              "replace it.</p>")
+    # /mypapers and /mymetrics are deliberately NOT linked from here. Both work
+    # and both are reachable by URL, but they are still experimental and this
+    # page is the one every signed-in reader lands on, so linking them would
+    # publicize them before they are ready. Restore the buttons when they are.
     html += ("<p style='margin-top:24px;'>"
-             "<a class='btn btn-outline-info' href='/mypapers'>My publications</a>&nbsp;"
-             "<a class='btn btn-outline-info' href='/mymetrics'>My metrics</a>&nbsp;"
              f"<a class='btn btn-outline-secondary' href='{escape(url_for('logout'))}'>"
              "Sign out</a></p>")
     endpoint_access()
@@ -1561,8 +1593,36 @@ def single_name_search_payload(given, family):
                    ]}
 
 
+def deposit_orcid_payload(orcid):
+    ''' Match deposits that name this ORCID iD among their authors.
+
+        Nothing writes a top-level "orcid" onto a dois document - the iD lives
+        where each registrar puts it, as a URL: Crossref in author[].ORCID,
+        DataCite in creators[].nameIdentifiers[].nameIdentifier. Anchored at the
+        end so one iD cannot match another by prefix, and tolerant of the
+        http/https variants both registrars emit.
+        Keyword arguments:
+          orcid: ORCID iD
+        Returns:
+          Payload
+    '''
+    tail = {"$regex": re.escape(orcid) + "$"}
+    return {"$or": [{"author.ORCID": tail},
+                    {"creators.nameIdentifiers.nameIdentifier": tail}]}
+
+
 def orcid_payload(oid, orc, eid=None):
     ''' Generate a payload for searching the dois collection by ORCID or employeeId
+
+        Three ways a work can belong to someone: Janelia credited them
+        (jrc_author), their name matches, or their ORCID iD is in the deposit.
+
+        The iD for that third clause is taken from the roster record rather than
+        from oid, because /userui passes an employeeId as oid - which used to
+        build {"orcid": "<employeeId>"} and match nothing. The old clause queried
+        a top-level "orcid" field that no dois document has ever carried, so this
+        arm was dead for every caller; restoring it finds works whose author
+        names do not match any stored variant.
         Keyword arguments:
           oid: ORCID or employeeId
           orc: orcid record
@@ -1570,20 +1630,16 @@ def orcid_payload(oid, orc, eid=None):
         Returns:
           Payload
     '''
-    payload = {}
-    # Name only search
-    npayload = name_search_payload(orc['given'], orc['family'])
-    if eid and not oid:
-        # Employee ID only search
-        payload = {"$or": [{"jrc_author": eid}, npayload]}
-    elif oid and eid:
-        # Search by either name or employee ID
-        payload = {"$or": [{"orcid": oid}, {"jrc_author": eid}, npayload]}
-    elif oid and not eid:
-        # Search by either name or ORCID
-        payload = {"$or": [{"orcid": oid}, npayload]}
-    payload = payload or npayload
-    return payload
+    # Name search is always in play.
+    clauses = [name_search_payload(orc['given'], orc['family'])]
+    if eid:
+        clauses.append({"jrc_author": eid})
+    ident = orc.get('orcid')
+    if not ident and oid and ORCID_RE.match(str(oid)):
+        ident = oid
+    if ident:
+        clauses.append(deposit_orcid_payload(ident))
+    return {"$or": clauses} if len(clauses) > 1 else clauses[0]
 
 
 def author_doi_count(given, family):
@@ -2343,11 +2399,15 @@ PLATFORM_LINK = {
 
 
 def get_orcid_from_db(oid, use_eid=False, bare=False, show="full"):
-    ''' Generate HTML for an ORCID or employeeId that is in the orcid collection
+    ''' Generate HTML for a person in the orcid collection
+
+        The lookup is by ORCID iD, or by O365 username when use_eid is set -
+        NOT by employeeId, which nothing here queries. The parameter keeps its
+        name because callers pass it positionally.
         Keyword arguments:
-          oid: ORCID or employeeId
-          use_eid: use employeeId boolean
-          bare: entry has no ORCID or employeeId
+          oid: ORCID iD, O365 username, or record _id when bare
+          use_eid: look up by userIdO365 rather than by ORCID iD
+          bare: oid is a record _id, for someone with neither identifier
         Returns:
           HTML, a list of DOIs, and full name
     '''
@@ -12008,7 +12068,13 @@ def citation_list(source='datacite'):
     obtained = obtained_from[source]
     # Year comes from a query param (the path segment is reserved for the source)
     year = request.args.get('year', 'All')
-    payload = {"jrc_obtained_from": obtained, "jrc_citation_count": {"$exists": 1}}
+    # $gt: 0, not $exists. sync_citations writes a zero when it looked a DOI up
+    # and found nothing citing it, so $exists means CHECKED, not cited - it pulls
+    # in the ~6,550 uncited DOIs, which would dilute "Avg. per DOI" and contradict
+    # both inbound links ("Cited", "Show all cited works") and the page's own
+    # "DOIs with citations". The checked-vs-cited gap belongs on /source_metrics,
+    # which is the page about coverage.
+    payload = {"jrc_obtained_from": obtained, "jrc_citation_count": {"$gt": 0}}
     if year != 'All':
         payload["jrc_publishing_date"] = {"$regex": "^" + year}
     coll = DB['dis'].dois
@@ -12166,6 +12232,7 @@ def citation_metrics(source='datacite'):
                                       {"doi": 1, "relation": 1,
                                        "jrc_citation_count": 1, "jrc_citation_sources": 1,
                                        "jrc_citation_updated": 1, "jrc_publishing_date": 1,
+                                       "jrc_preprint": 1,
                                        "types": 1, "type": 1, "subtype": 1}))
         all_dois = coll.count_documents({"jrc_obtained_from": obtained})
         year_all = {rec['_id']: rec['dois'] for rec in coll.aggregate(
@@ -12193,30 +12260,34 @@ def citation_metrics(source='datacite'):
     # Version-deduped view: dataset .v1/.v2/... are separate dois records counted
     # separately upstream, so per-work impact metrics and the most-cited list use
     # only non-versioned records to avoid counting one work several times.
+    # ...and a preprint and the article it became are then merged into one work,
+    # exactly as /source_metrics and /mymetrics do it. Without this the Crossref
+    # h-index here (381) and the Crossref column on /source_metrics (365) would
+    # describe the same corpus and disagree.
     nonver = [row for row in cited_rows if not DL.is_version(row)]
-    nonver_counts = sorted((row.get('jrc_citation_count', 0) or 0 for row in nonver),
+    nonver_counts = sorted((cnt for _, cnt in merge_preprint_pairs(nonver)),
                            reverse=True)
     nonver_counts = [c for c in nonver_counts if c > 0]
-    # h-index: largest h such that h works are each cited >= h times. i10/i100:
-    # works cited at least 10/100 times (classic scholarly-impact measures).
-    h_index = 0
-    for idx, cnt in enumerate(nonver_counts, start=1):
-        if cnt >= idx:
-            h_index = idx
-        else:
-            break
-    i10_index = sum(1 for c in nonver_counts if c >= 10)
-    i100_index = sum(1 for c in nonver_counts if c >= 100)
-    # Which single source best approximates the unique total? jrc_citation_count
-    # is the deduplicated union of citing DOIs (OpenAlex + ScholeXplorer, floored
-    # by the registrar's bare count and WoS), so a lone source usually undercounts
-    # it. For each cited DOI find the source whose standalone count is nearest the
+    # Use the shared helper rather than a second inline h-loop: /source_metrics
+    # and /mymetrics both go through citation_impact_indices, and three
+    # hand-rolled copies of the same definition is how two pages come to report
+    # different h-indices for the same corpus.
+    _idx = citation_impact_indices(nonver_counts)
+    h_index = _idx['h_index']
+    i10_index = _idx['i10']
+    i100_index = _idx['i100']
+    # Which single source best approximates the stored total? jrc_citation_count
+    # is NOT simply a deduplicated union - it is the largest figure anything has
+    # reported: max(registrar's own count, Web of Science, len(deduplicated union
+    # of citing DOIs from OpenAlex + ScholeXplorer)), and then max'd again against
+    # the value stored on the previous run, so it never falls (sync_citations.py
+    # combined = max(fresh, previous)). A lone source usually undercounts it. For each cited DOI find the source whose standalone count is nearest the
     # unique total (ties split the credit evenly), and accumulate the aggregate
     # error and coverage that make a source the best single-source proxy.
     close_stats = {}
     close_analyzed = 0
-    # Union lift: how often (and how much) the deduped total beats the single best
-    # source - the payoff of combining sources rather than trusting the strongest.
+    # Combined lift: how often (and how much) the stored total beats the single
+    # best source. Not purely a dedup payoff - see the note where it is rendered.
     union_exceed = 0
     best_single_sum = 0
     for row in cited_rows:
@@ -12266,13 +12337,18 @@ def citation_metrics(source='datacite'):
                  ("Cited", f"<a href='/citation_list/{source}'>{cite_dois:,}</a>"),
                  ("% of checked that are cited",
                   f"{cite_dois/checked_dois*100:,.1f}%" if checked_dois else "0%"),
-                 ("Total citations", f"{cite_total:,}"),
-                 ("Total unique citations", f"{unique_total:,}"),
+                 # "Total citations" is the stored per-DOI sum on every other
+                 # page, so it means that here too; the per-source sum, which
+                 # counts a citing work once for each source that found it, is
+                 # named for what it is instead of competing for the same label.
+                 ("Sum across sources", f"{cite_total:,}"),
+                 ("Total citations", f"{unique_total:,}"),
                  ("Avg. per cited DOI",
                   f"{unique_total/cite_dois:,.1f}" if cite_dois else "0"),
                  ("Median per cited DOI",
                   f"{statistics.median(counts):,.1f}" if counts else "0"),
-                 ("h-index / i10-index", f"{h_index:,} / {i10_index:,}")]
+                 ("h-index / i10-index (per work)",
+                  f"{h_index:,} / {i10_index:,}")]
     if close_winner:
         win_pct = close_stats[close_winner]['wins'] / close_analyzed * 100
         card_list.append(("Closest source to unique total",
@@ -12306,13 +12382,22 @@ def citation_metrics(source='datacite'):
     other = 'crossref' if source == 'datacite' else 'datacite'
     switch = registrar_switch(f"/citation_metrics/{other}", obtained_from[other])
     chtml = "<h4>Citations by source</h4>"
-    chtml += render_table(['Source', 'DOIs', 'Citations'], trows, table_id='sources',
+    # "DOIs answered": sync_citations stores a source's reply even when it is 0,
+    # so this counts DOIs the source responded about, not DOIs it found citations
+    # for. Sitting directly under cards that separate checked from cited, a bare
+    # "DOIs" reads as the latter.
+    chtml += render_table(['Source', 'DOIs answered', 'Citations'], trows,
+                          table_id='sources',
                           css='tablesorter numbers-scroll',
                           footer=[fcell('Total', colspan=2),
                                   fcell(f"{cite_total:,}", align='center')])
     chtml += f"<div style='{note_style} max-width:460px'>A citing work found by more " \
-             + "than one source counts once per source here; &quot;Total unique " \
-             + "citations&quot; is the deduplicated figure.</div><br>"
+             + "than one source counts once per source here, which is what " \
+             + "&quot;Sum across sources&quot; adds up. &quot;Total citations&quot; " \
+             + "counts it once - though that figure is also floored by the " \
+             + "registrar's and Web of Science's own totals, and by what we " \
+             + "recorded last run, so it is a high-water mark rather than a " \
+             + "measurement.</div><br>"
     # Closest source to the unique total: per source, how often its standalone
     # count is nearest jrc_citation_count (win share), plus the aggregate coverage
     # and mean absolute distance that quantify it as a single-source proxy.
@@ -12344,15 +12429,20 @@ def citation_metrics(source='datacite'):
                  + "source's summed count as a share of that total, and &quot;Avg. " \
                  + "distance&quot; is its mean gap from it. &quot;Exact&quot; is DOIs " \
                  + "where the source equals the total.</div>"
-        # Union lift: the concrete payoff of deduping across sources.
+        # "Lift" over the best single source. Note this is not a pure dedup
+        # payoff: jrc_citation_count is also floored by the registrar's count,
+        # WoS, and the previous run's value, so part of any gap comes from those
+        # floors rather than from combining citing-DOI lists.
         union_lift_pct = (unique_total - best_single_sum) / best_single_sum * 100 \
             if best_single_sum else 0
         xhtml += f"<div style='{note_style} max-width:460px; margin-top:6px'>" \
-                 + "<b>Union lift:</b> the deduped union exceeds the best single source " \
-                 + f"on <b>{union_exceed:,}</b> of {close_analyzed:,} cited DOIs " \
-                 + f"(<b>{union_exceed/close_analyzed*100:.1f}%</b>), a " \
+                 + "<b>Combined lift:</b> the stored total exceeds the best single " \
+                 + f"source on <b>{union_exceed:,}</b> of {close_analyzed:,} cited " \
+                 + f"DOIs (<b>{union_exceed/close_analyzed*100:.1f}%</b>), a " \
                  + f"<b>{union_lift_pct:+.1f}%</b> gain over trusting the strongest " \
-                 + "source alone.</div><br>"
+                 + "source alone. Some of that gap is dedup across citing-DOI " \
+                 + "lists and some is the registrar/WoS floor and the never-falling " \
+                 + "high-water mark.</div><br>"
     # Citations and cited DOIs per type of work. The two registrars name the type
     # in different fields and different vocabularies - DataCite in
     # types.resourceTypeGeneral ("Dataset", "Software"), Crossref in type, refined
@@ -12413,7 +12503,11 @@ def citation_metrics(source='datacite'):
         ydata['Cited'].append(pct)
     yhtml = "<h4>Citations by publishing year</h4>"
     # Table shows years newest-first; the chart keeps ascending (chronological) order
-    yhtml += render_table(['Year', 'DOIs', 'Cited DOIs', '% cited', 'Unique citations'],
+    # "% of DOIs cited", not "% cited": this divides by every DOI of that year,
+    # where the card above divides by the DOIs actually checked. Both are useful;
+    # identical labels on different denominators are not.
+    yhtml += render_table(['Year', 'DOIs', 'Cited DOIs', '% of DOIs cited',
+                           'Unique citations'],
                           ytrows[::-1], table_id='years', css='tablesorter numbers-scroll')
     if request.args.get('fmt') == 'json':
         result = initialize_result()
@@ -12497,7 +12591,8 @@ def citation_metrics(source='datacite'):
                 for yr in ydata['Year']}
         script, year_div = DP.dual_axis_chart(ydata, title="Citations by publishing year",
                                               x_field='Year', bar_field='Citations',
-                                              line_field='Cited', line_label='% cited',
+                                              line_field='Cited',
+                                              line_label='% of DOIs cited',
                                               bar_format="0,0", line_format="0%",
                                               width=650, height=400, nav=ynav)
         chartscript += script
@@ -12511,7 +12606,7 @@ def citation_metrics(source='datacite'):
     # "Cited works" describes the corpus - which years and which kinds of output
     # attract citations - and is what most readers come for. "Citation sources"
     # describes the harvesting itself: which services found those citations and how
-    # well any one of them stands in for the deduplicated union. That second group
+    # well any one of them stands in for the combined stored total. That second group
     # is pipeline diagnostics, so it sits behind a tab instead of between the
     # reader and the findings, as it did when all four sections ran down one page.
     # Cards and notes stay above the tabs: they summarise both halves, and the
@@ -12553,6 +12648,18 @@ SOURCE_METRIC_USAGE_FIELDS = ("jrc_figshare_counts", "jrc_zenodo_counts",
                               "jrc_protocolsio_counts", "jrc_elife_counts")
 
 
+def fmt_median(value):
+    ''' A median, with the half shown when there is one. "%.0f" rounds 2.5 to 2
+        (banker's rounding), which silently understates. /source_metrics already
+        formats medians this way; this is the same rule.
+        Keyword arguments:
+          value: numeric median
+        Returns:
+          Formatted string
+    '''
+    return f"{value:,.0f}" if float(value).is_integer() else f"{value:,.1f}"
+
+
 def metrics_panel(rows):
     ''' The metrics block on a person's own publications page.
 
@@ -12575,9 +12682,13 @@ def metrics_panel(rows):
     if not met['works']:
         return ""
     curve = ", ".join(f"<b>{n:,}</b> with &ge;{t}" for t, n in met['thresholds'])
+    # Only shown once something has been checked. The denominator is always the
+    # checked count, never the work count, and the two are shown separately
+    # whenever they differ - OpenAlex does not classify everything, and a
+    # backfill may still be running.
     cards = [("Janelia articles &amp; preprints", f"{met['works']:,}"),
              ("Citations to them", f"{met['total']:,}"),
-             ("Median per paper", f"{met['median']:,.0f}"),
+             ("Median per cited paper", fmt_median(met['median'])),
              ("h-index", f"{met['h_index']:,}")]
     html = f"""<p style="color:#888; max-width:52em;">Descriptive figures about your
 <b>Janelia-affiliated</b> publications &mdash; the work this database holds, which
@@ -12587,8 +12698,9 @@ anyone else's, and they are not used in any review.</p>
 <p><b>What these mean.</b> Your <b>h-index is {met['h_index']}</b>: {met['h_index']} of your
 papers have each been cited at least {met['h_index']} times. It goes up only when an
 additional paper reaches that many citations, so it rewards a body of steadily-cited work
-rather than one much-cited paper. The <b>median</b> is the middle value &mdash; half your
-papers are cited more than {met['median']:,.0f} times, half less. We show the median rather
+rather than one much-cited paper. The <b>median</b> is the middle value of your
+<b>{met['cited']:,} cited</b> papers &mdash; half of those are cited more than
+{fmt_median(met['median'])} times, half less. We show the median rather
 than the average because one paper usually carries a large share of the total, which makes
 an average say more about that paper than about the rest.</p>
 <p><b>How your citations are spread:</b> {curve}.</p>
@@ -12613,6 +12725,60 @@ figure down while saying nothing about their value."""
     return html + "</p>"
 
 
+def merge_preprint_pairs(rows):
+    ''' Collapse a preprint and the article it became into a single work.
+
+        A preprint and its published version are two dois records crediting the
+        same people for the same research. Counted separately they inflate the
+        work count and - because each half can independently clear the h bar -
+        the h- and i10-indices with it. Both indices are defined over WORKS, not
+        over DOI records, so the pair has to become one. This is not a small
+        correction: it merges 12 of 62 works for one Janelia lab head and 6 of
+        16 for another.
+
+        jrc_preprint links the two. It usually sits on the journal-side record
+        pointing back at the preprint, but not always, so links are followed in
+        both directions.
+
+        Citations are MAXed, not summed. The two records are counted
+        independently upstream and a paper's citers frequently cite both halves,
+        so adding them would double-count the overlap.
+
+        Keyword arguments:
+          rows: scholarly dois records (version-deduped by the caller)
+        Returns:
+          List of (representative row, citation count) - one entry per work
+    '''
+    held = {row['doi'].lower(): row for row in rows if row.get('doi')}
+    linked = {key: set() for key in held}
+    for key, row in held.items():
+        for other in (row.get('jrc_preprint') or []):
+            okey = other.lower()
+            if okey in held:
+                linked[key].add(okey)
+                linked[okey].add(key)
+    works = []
+    seen = set()
+    for key in held:
+        if key in seen:
+            continue
+        # Walk the connected component: a preprint, its article, and anything
+        # further either of them names.
+        group, stack = [], [key]
+        while stack:
+            cur = stack.pop()
+            if cur in seen:
+                continue
+            seen.add(cur)
+            group.append(held[cur])
+            stack.extend(linked[cur] - seen)
+        # The published article is the better representative: its date is the
+        # work's publication date, which is what the five-year window wants.
+        rep = next((g for g in group if DL.is_journal(g)), group[0])
+        works.append((rep, max((g.get('jrc_citation_count') or 0) for g in group)))
+    return works
+
+
 def author_metrics(rows):
     ''' Descriptive metrics for one person's own publications.
 
@@ -12623,7 +12789,8 @@ def author_metrics(rows):
           and 3.24% of software are traceably cited at all - so mixing them in
           drags every average toward zero and says nothing about either kind of
           work. They are counted separately instead.
-        - VERSION-DEDUPED, so a .v1/.v2 series counts once.
+        - VERSION-DEDUPED, so a .v1/.v2 series counts once, and
+          PREPRINT-DEDUPED, so a preprint and the article it became count once.
         - MEDIAN, NOT MEAN. Citation distributions are extremely skewed; in this
           corpus one paper routinely carries a quarter to a third of a person's
           citations, which makes the mean a readout of that one paper.
@@ -12647,18 +12814,29 @@ def author_metrics(rows):
     live = [r for r in rows if not DL.is_version(r) and r.get('type') != 'peer-review']
     scholarly = [r for r in live if DL.is_journal(r) or DL.is_preprint(r)]
     other = [r for r in live if not (DL.is_journal(r) or DL.is_preprint(r))]
-    counts = sorted((r.get('jrc_citation_count') or 0 for r in scholarly), reverse=True)
+    # One work per publication, not one per DOI record - see merge_preprint_pairs.
+    works = merge_preprint_pairs(scholarly)
+    counts = sorted((c for _, c in works), reverse=True)
     cited = [c for c in counts if c > 0]
     idx = citation_impact_indices(counts)
     # Complete calendar years only - the current year is partial and would show
     # as a dip every January.
     cutoff = datetime.now().year - 5
-    recent = [r for r in scholarly
-              if (r.get('jrc_publishing_date') or '')[:4].isdigit()
-              and int(r['jrc_publishing_date'][:4]) >= cutoff
-              and int(r['jrc_publishing_date'][:4]) < datetime.now().year]
-    rcounts = sorted((r.get('jrc_citation_count') or 0 for r in recent), reverse=True)
-    return {'works': len(scholarly), 'other': len(other), 'cited': len(cited),
+    recent = [(rep, cnt) for rep, cnt in works
+              if (rep.get('jrc_publishing_date') or '')[:4].isdigit()
+              and int(rep['jrc_publishing_date'][:4]) >= cutoff
+              and int(rep['jrc_publishing_date'][:4]) < datetime.now().year]
+    rcounts = sorted((c for _, c in recent), reverse=True)
+    # No field-normalized figure here, deliberately. jrc_openalex_impact holds
+    # one, but OpenAlex ranks a paper only once it has placed it in a field, which
+    # it mostly does not do for preprints or lightly-cited work - across this
+    # corpus 55% of ranked work sits in the nominal top 10% and 17% in the top 1%,
+    # because the ranked set is itself a high-cited slice. On a typical personal
+    # bibliography it also carries the instability DORA's 2024 indicator guidance
+    # objects to for FWCI: "unreliable at the scale of a typical bibliography".
+    # It stays in the database for corpus-level work, where the sample is large
+    # enough to mean something.
+    return {'works': len(works), 'other': len(other), 'cited': len(cited),
             'total': sum(cited),
             'median': statistics.median(cited) if cited else 0,
             'h_index': idx['h_index'],
@@ -12689,7 +12867,10 @@ def citation_impact_indices(counts):
         else:
             break
     # g-index: largest g where cumulative citations of the top g works >= g^2.
-    # Capped at the actual work count (no fictitious zero-citation padding).
+    # Zeros are dropped above, so g is capped at the number of CITED works - not
+    # at the work count, and not zero-padded as Egghe's original allows. On a
+    # small, well-cited set that cap binds and g pins to the cited-work count,
+    # carrying no information; it only discriminates on larger sets.
     g_index = 0
     cumulative = 0
     for idx, cnt in enumerate(ordered, start=1):
@@ -12769,41 +12950,70 @@ def source_metrics(year='All'):  # pylint: disable=too-many-locals
     # not by summing the per-source columns.
     pooled_counts = []          # every cited DOI's count (combined total/median)
     pooled_nonver_works = []    # (count, pub_year) per non-versioned work
+    pooled_fwci = []            # per-work FWCI, for the pooled median
     try:
         for obtained in ("Crossref", "DataCite"):
             # Cited universe matches citation_metrics: DOIs carrying citation
-            # sources. jrc_citation_count is the deduplicated union total.
+            # sources. jrc_citation_count is the largest total any source has
+            # reported, never falling between runs - not a plain union.
             cmatch = {"jrc_obtained_from": obtained,
                       "jrc_citation_sources": {"$exists": True}}
             cmatch.update(ymatch)
             rows = list(coll.find(cmatch, {"doi": 1, "relation": 1,
                                            "jrc_citation_count": 1,
+                                           "jrc_openalex_impact": 1,
+                                           "jrc_preprint": 1,
                                            "jrc_publishing_date": 1}))
             counts = [r.get('jrc_citation_count', 0) or 0 for r in rows]
             # Indices use non-versioned works only (a .v1/.v2 series is one work);
-            # DL.is_version needs doi + relation, both projected above. Keep each
-            # work's publishing year alongside its count for the h5 window.
+            # DL.is_version needs doi + relation, both projected above. A preprint
+            # and the article it became are then merged into one work by
+            # merge_preprint_pairs - corpus-wide that is 868 pairs, and leaving
+            # them split overstates the institutional h by 16 and i10 by 623.
+            # Keep each work's publishing year alongside its count for h5.
             nonver_works = []
-            for row in rows:
-                if DL.is_version(row):
-                    continue
+            for row, cnt in merge_preprint_pairs([r for r in rows
+                                                  if not DL.is_version(r)]):
                 yname = (row.get('jrc_publishing_date') or '')[:4]
-                nonver_works.append((row.get('jrc_citation_count', 0) or 0,
-                                     int(yname) if yname.isdigit() else None))
+                nonver_works.append((cnt, int(yname) if yname.isdigit() else None))
             nonver = [c for c, _ in nonver_works]
             amatch = {"jrc_obtained_from": obtained}
             amatch.update(ymatch)
             all_dois = coll.count_documents(amatch)
+            # Field-weighted citation impact, as the MEDIAN over works OpenAlex has
+            # ranked. Median rather than mean because the distribution is heavily
+            # outlier-dominated - across this corpus the mean is 6.7 against a
+            # median of 3.1, the difference being a handful of very highly cited
+            # works. DORA's 2024 indicator guidance permits FWCI only on "large
+            # datasets, typically comprising thousands of papers, e.g., the
+            # aggregate output of a large department", which this is and an
+            # individual's bibliography is not, and asks that it not be "reported
+            # beyond a single decimal place". Both are honored here; nothing
+            # displays it per person.
+            fwci = sorted(r['jrc_openalex_impact']['fwci'] for r in rows
+                          if (r.get('jrc_openalex_impact') or {}).get('fwci') is not None)
+            # "checked" and "cited" are different populations and the page used to
+            # conflate them: the query selects DOIs that have BEEN LOOKED UP, which
+            # is every one of them, while the row was labelled "DOIs cited" and its
+            # share read 100%. Fewer than half are actually cited, which is also why
+            # the median over the whole set was zero - DataCite deposits outnumber
+            # articles and are rarely cited.
+            cited_counts = [c for c in counts if c > 0]
             cite[obtained] = {"dois": len(counts), "all": all_dois,
+                              "cited": len(cited_counts),
+                              "cited_pct": len(cited_counts) / len(counts) * 100 if counts else 0,
                               "reach": len(counts) / all_dois * 100 if all_dois else 0,
                               "total": sum(counts),
-                              "median": statistics.median(counts) if counts else 0,
+                              "median": statistics.median(cited_counts) if cited_counts else 0,
+                              "fwci": statistics.median(fwci) if fwci else None,
+                              "fwci_n": len(fwci),
                               **citation_impact_indices(nonver)}
             if h5_range:
                 h5c = [c for c, y in nonver_works if y and h5_range[0] <= y <= h5_range[1]]
                 cite[obtained]['h5'] = citation_impact_indices(h5c)['h_index']
             pooled_counts.extend(counts)
             pooled_nonver_works.extend(nonver_works)
+            pooled_fwci.extend(fwci)
             # Usage: sum views+downloads across whichever per-publisher count
             # field each DOI carries (protocols.io has no downloads -> adds 0).
             umatch = {"jrc_obtained_from": obtained,
@@ -12827,12 +13037,18 @@ def source_metrics(year='All'):  # pylint: disable=too-many-locals
                                message=error_message(err))
     # Combined column (pooled, not per-source sums - see pooled_* above)
     pooled_nonver = [c for c, _ in pooled_nonver_works]
+    pooled_cited = [c for c in pooled_counts if c > 0]
     c_all = cite['Crossref']['all'] + cite['DataCite']['all']
     c_dois = cite['Crossref']['dois'] + cite['DataCite']['dois']
     cite['Combined'] = {"dois": c_dois, "all": c_all,
                         "reach": c_dois / c_all * 100 if c_all else 0,
+                        "cited": len(pooled_cited),
+                        "cited_pct": (len(pooled_cited) / len(pooled_counts) * 100
+                                      if pooled_counts else 0),
                         "total": sum(pooled_counts),
-                        "median": statistics.median(pooled_counts) if pooled_counts else 0,
+                        "median": statistics.median(pooled_cited) if pooled_cited else 0,
+                        "fwci": statistics.median(pooled_fwci) if pooled_fwci else None,
+                        "fwci_n": len(pooled_fwci),
                         **citation_impact_indices(pooled_nonver)}
     if h5_range:
         h5c = [c for c, y in pooled_nonver_works if y and h5_range[0] <= y <= h5_range[1]]
@@ -12858,7 +13074,7 @@ def source_metrics(year='All'):  # pylint: disable=too-many-locals
     grp_label = ("font-size:0.8em; color:#a8c4e0; text-transform:uppercase; "
                  "letter-spacing:0.05em; font-weight:bold; margin-bottom:5px;")
     cards = f"<div style='{grp_label}'>Citations</div>" \
-            + stat_cards([("DOIs cited", f"{cite['Combined']['dois']:,}"),
+            + stat_cards([("DOIs cited", f"{cite['Combined']['cited']:,}"),
                           ("Total citations", f"{cite['Combined']['total']:,}"),
                           ("h-index", f"{cite['Combined']['h_index']:,}")],
                          div_id='src-cite-stats')
@@ -12869,13 +13085,14 @@ def source_metrics(year='All'):  # pylint: disable=too-many-locals
                           div_id='src-use-stats')
     intro = "<div style='font-size:0.9em; color:#a8c4e0; max-width:640px; " \
             + "margin:-8px 0 16px 0'>All Janelia DOIs, split by registration " \
-            + "source (Crossref vs. DataCite) regardless of publisher. Citations " \
-            + "are the deduplicated union count; usage is the common views + " \
+            + "source (Crossref vs. DataCite) regardless of publisher. A citation " \
+            + "count is the highest figure any source has reported for that DOI " \
+            + "and never falls between runs; usage is the common views + " \
             + "downloads subset summed across figshare/Zenodo (DataCite) and " \
             + "eLife/protocols.io (Crossref). Impact indices (h/i10/i100) count " \
             + "each work once (versions merged). The citation and usage " \
             + "populations are largely different DOIs, so each has its own " \
-            + "denominator.</div>"
+            + "denominator. </div>"
 
     def mrow(label, data, key, kind='int'):
         ''' One 3-column (Combined/Crossref/DataCite) metric row, formatted. '''
@@ -12892,16 +13109,32 @@ def source_metrics(year='All'):  # pylint: disable=too-many-locals
                 cells.append(f"{val:,}")
         return cells
     # ----- citations by source -----
-    crows = [mrow("DOIs cited", cite, 'dois'),
-             mrow("Reach (% of DOIs)", cite, 'reach', 'pct'),
+    # Labels follow /citation_metrics, which drew this distinction when zeros
+    # began to be stored and which this page was never brought into line with.
+    crows = [mrow("Checked for citations", cite, 'dois'),
+             mrow("Checked (% of all DOIs)", cite, 'reach', 'pct'),
+             mrow("Cited", cite, 'cited'),
+             mrow("Cited (% of checked)", cite, 'cited_pct', 'pct'),
              mrow("Citations", cite, 'total'),
-             mrow("Median / DOI", cite, 'median', 'median'),
+             mrow("Median per cited DOI", cite, 'median', 'median'),
              mrow("h-index", cite, 'h_index'),
              mrow("g-index", cite, 'g_index')]
     if h5_range:
         crows.append(mrow(f"h5-index ({h5_range[0]}–{h5_range[1]})", cite, 'h5'))
     crows.append(mrow("i10-index", cite, 'i10'))
     crows.append(mrow("i100-index", cite, 'i100'))
+    if any((cite[k].get('fwci_n') or 0) >= FWCI_MIN_WORKS for k in cite):
+        # One decimal place, as DORA's guidance asks, and the n it is drawn from
+        # on the same row - the ranked subset is smaller than the DOI count.
+        # safe(): render_table escapes cells, so the muted-n markup has to be
+        # marked trusted or it renders as literal tags.
+        crows.append(['Median FWCI'] + [
+            safe(f"{cite[k]['fwci']:.1f} <span style='color:#888'>"
+                 f"(n={cite[k]['fwci_n']:,})</span>")
+            if (cite[k].get('fwci_n') or 0) >= FWCI_MIN_WORKS else
+            safe(f"<span style='color:#888' title='Too few ranked works for a "
+                 f"meaningful value'>&ndash; (n={cite[k].get('fwci_n') or 0:,})</span>")
+            for k in ('Combined', 'Crossref', 'DataCite')])
     chtml = "<h4>Citations by source</h4>"
     chtml += render_table(['Metric', 'Combined', 'Crossref', 'DataCite'], crows,
                           table_id='src-cite', css='tablesorter numbers-scroll')
@@ -12920,7 +13153,21 @@ def source_metrics(year='All'):  # pylint: disable=too-many-locals
              + "<b>i10-index</b> / <b>i100-index</b>: the number of works cited at " \
              + "least 10 / 100 times. Each counts a work once (versions merged), " \
              + "and is computed over the pooled works, so Combined is not the sum " \
-             + "of the columns.<br>Per-source detail: " \
+             + "of the columns.<br>" \
+             + "<b>Median FWCI</b> (field-weighted citation impact): a work\'s citations " \
+             + "divided by the average received by work of the same field, year and type, " \
+             + "so <b>1.0 is the world average for its kind</b> and 3.1 is three times it. " \
+             + "Shown as the median of those ratios, because they are heavily skewed - the " \
+             + "mean here is roughly twice the median, pulled up by a few very highly " \
+             + "cited works. It is the only figure on this page that compares like with " \
+             + "like, which matters because citation rates differ several-fold between " \
+             + "fields: an unadjusted count says as much about a field as about the work. " \
+             + "<i>n</i> is smaller than the DOI count because OpenAlex, whose " \
+             + "classification this is, rates a work only once it has placed it in a " \
+             + "field - mostly not preprints or lightly-cited work - so the rated set " \
+             + "skews well-cited and this reads high. Blank where too few works are rated " \
+             + "to mean anything, and deliberately absent from personal pages: it is " \
+             + "unreliable on a single researcher\'s bibliography.<br>Per-source detail: " \
              + "<a href='/citation_metrics/crossref'>Crossref metrics</a> &middot; " \
              + "<a href='/citation_metrics/datacite'>DataCite metrics</a></div>"
     # ----- citation concentration (how much of the total rides on the top works;
@@ -13241,7 +13488,8 @@ def figshare_metrics(year='All'):  # pylint: disable=too-many-locals,too-many-br
                         ("Total shares", f"{usage['Shares']:,}")],
                        div_id='fig-stats')
     cards += stat_cards([("Downloads / view", f"{conv*100:,.1f}%"),
-                         ("DOIs cited", f"{cited_dois:,} ({cited_dois/total*100:,.1f}%)"),
+                         ("DOIs cited",
+                          f"{cited_dois:,} ({cited_dois/total*100:,.1f}% of deposits)"),
                          ("Total citations", f"{cite_total:,}")],
                         div_id='fig-stats2')
     intro = "<div style='font-size:0.85em; color:#a8c4e0; max-width:620px; " \
@@ -13959,7 +14207,8 @@ def zenodo_stats(year='All'):  # pylint: disable=too-many-locals,too-many-branch
                         ("Total downloads", f"{usage['Downloads']:,}")],
                        div_id='zen-stats')
     cards += stat_cards([("Downloads / view", f"{conv*100:,.1f}%"),
-                         ("DOIs cited", f"{cited_dois:,} ({cited_dois/total*100:,.1f}%)"),
+                         ("DOIs cited",
+                          f"{cited_dois:,} ({cited_dois/total*100:,.1f}% of deposits)"),
                          ("Total citations", f"{cite_total:,}")],
                         div_id='zen-stats2')
     intro = "<div style='font-size:0.85em; color:#a8c4e0; max-width:620px; " \
@@ -14211,7 +14460,8 @@ def protocolsio_stats(year='All'):  # pylint: disable=too-many-locals,too-many-b
                         ("Total exports", f"{usage['Exports']:,}")],
                        div_id='pio-stats')
     cards += stat_cards([("Exports / view", f"{conv*100:,.1f}%"),
-                         ("DOIs cited", f"{cited_dois:,} ({cited_dois/total*100:,.1f}%)"),
+                         ("DOIs cited",
+                          f"{cited_dois:,} ({cited_dois/total*100:,.1f}% of deposits)"),
                          ("Total citations", f"{cite_total:,}")],
                         div_id='pio-stats2')
     intro = "<div style='font-size:0.85em; color:#a8c4e0; max-width:620px; " \
@@ -14651,7 +14901,8 @@ def elife_stats(year='All'):  # pylint: disable=too-many-locals,too-many-branche
                         ("Total downloads", f"{usage['Downloads']:,}")],
                        div_id='eli-stats')
     cards += stat_cards([("Downloads / view", f"{conv*100:,.1f}%"),
-                         ("DOIs cited", f"{cited_dois:,} ({cited_dois/total*100:,.1f}%)"),
+                         ("DOIs cited",
+                          f"{cited_dois:,} ({cited_dois/total*100:,.1f}% of deposits)"),
                          ("Total citations", f"{cite_total:,}")],
                         div_id='eli-stats2')
     intro = "<div style='font-size:0.85em; color:#a8c4e0; max-width:620px; " \
@@ -18965,20 +19216,30 @@ def show_oid_ui(oid, show='full'):
 @app.route('/userui/<string:eid>/<string:show>')
 @app.route('/userui/<string:eid>')
 def show_user_ui(eid, show='full'):
-    ''' Show user record by employeeId (user ID) or ORCID
+    ''' Show user record by ORCID iD, or by O365 username for someone who has
+        none. NOT by employeeId: the lookup below resolves the path segment
+        against the orcid collection's "orcid" field, or against "userIdO365"
+        when it looks like an address. A bare employee number matches neither
+        and lands on the not-found page, which used to say "Could not find user
+        ID", sending the reader off to try more employee numbers.
     '''
     try:
+        # use_eid selects userIdO365, not employeeId, despite the name.
         orciddata, _, full_name = get_orcid_from_db(eid, use_eid=bool('@' in eid),
                                                     bare=False, show=show)
     except CustomException as err:
         return render_template('error.html', urlroot=request.url_root,
-                                title=render_warning(f"Could not find user ID {eid}",
+                                title=render_warning(f"Could not look up {eid}",
                                                      'warning'),
                                 message=error_message(err))
     if not orciddata:
         return render_template('warning.html', urlroot=request.url_root,
-                               title=render_warning(f"Could not find user ID {eid}", 'warning'),
-                               message="Could not find any information for this employee ID")
+                               title=render_warning(f"Could not find {eid}", 'warning'),
+                               message="No roster record matches that ORCID iD or HHMI "
+                                       "username. This page takes an ORCID iD "
+                                       "(0000-0000-0000-0000) or an address such as "
+                                       "someone@hhmi.org - an employee number will not "
+                                       "find anybody.")
     return _render_person(orciddata, full_name, show, f"/userui/{eid}")
 
 
@@ -19720,12 +19981,28 @@ def openalex_stats():
                         ("i10-index", f"{stats.get('i10_index', 0):,}"),
                         ("2-yr mean citedness", f"{stats.get('2yr_mean_citedness', 0):.2f}")],
                        div_id='oa-inst-stats')
+    # Two things a reader will otherwise work out for themselves and mistrust
+    # the page over. The i10 caveat is emitted only when it is actually true, so
+    # it cannot go stale if OpenAlex ever reconciles the two figures.
+    reconcile = ""
+    if stats.get('i10_index', 0) > works:
+        reconcile = f" Note that OpenAlex reports an i10-index of " \
+                    + f"{stats.get('i10_index', 0):,} against a works count of " \
+                    + f"{works:,}: its summary statistics are computed over a " \
+                    + "broader affiliation-matched set than the works total, so " \
+                    + "the two do not reconcile. That is upstream, not a display " \
+                    + "error here."
     note = "<div style='font-size:0.85em; color:#a8c4e0; max-width:700px; " \
            + "margin:-8px 0 16px 0'>OpenAlex institution " \
            + f"<a href='https://openalex.org/{JANELIA_OPENALEX_ID}' target='_blank'>" \
            + f"{JANELIA_OPENALEX_ID}</a> (ROR 013sk6x84); works and citations are " \
            + "affiliation-matched. Yearly counts reflect OpenAlex's own " \
-           + "attribution and may not match the dois collection.</div>"
+           + "attribution and may not match the dois collection. Nor are these " \
+           + "indices comparable with the h-index on " \
+           + "<a href='/source_metrics'>source metrics</a>: that one is computed " \
+           + "over the Janelia-curated dois collection using our own combined " \
+           + "citation counts, across a smaller corpus, and is substantially " \
+           + f"lower.{reconcile}</div>"
     glossary = "<div style='font-size:0.85em; color:#a8c4e0; max-width:700px; " \
                + "margin:0 0 16px 0'><b>h-index</b>: h works each cited at least h " \
                + "times.<br><b>i10-index</b>: number of works with at least 10 " \
