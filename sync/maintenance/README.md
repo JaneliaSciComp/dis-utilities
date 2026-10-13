@@ -38,12 +38,37 @@ It exists because backfilling *through* the sync is prohibitive: a
 ScholeXplorer for citing DOIs, and this field comes from neither ScholeXplorer
 nor the pagination. One OpenAlex work lookup takes about 0.7 seconds.
 
-A re-run is almost always wasted. The DOIs it leaves without the field are not
+A routine re-run is wasted. The DOIs it leaves without the field are not
 failures: they are works OpenAlex holds but has never *ranked*, mostly
 preprints and lightly-cited papers, and it will keep returning nothing for
-them. Re-run only to retry genuine lookup errors, or with `--all` to
-re-baseline existing values - unlike a citation count, a percentile can
-legitimately fall, so it is deliberately kept out of the high-water-mark logic.
+them. Re-run to retry genuine lookup errors, or with `--all` to re-baseline
+existing values - unlike a citation count, a percentile can legitimately fall,
+so it is deliberately kept out of the high-water-mark logic.
+
+**One `--all` pass is outstanding.** Since v1.1.0 the program also records the
+cohort the ratio was computed against - `subfield`, `topic` and `topic_score` -
+and records written before that carry only the ratio. The nightly sync fills
+these in as it revisits each DOI, so this is a catch-up rather than a
+necessity:
+
+    ./venv/bin/python backfill_openalex_impact.py --all --write
+
+### Why the cohort is stored
+
+An FWCI of 1.56 means nothing without knowing 1.56x *what*. OpenAlex normalizes
+against the subfield of a work's **primary topic**, together with its
+publication year and type - so the comparison group for one paper is, say, 2020
+Biophysics articles, decided per paper and never for the corpus as a whole.
+Janelia's output spans 105 subfields, so a single median hides a great deal;
+storing the cohort is what makes a per-subfield breakdown possible later.
+
+`topic_score` is the confidence in that assignment, and it is kept because a low
+one is exactly when a per-subfield comparison deserves suspicion: 0.96 on a
+neuroscience paper is a safe bet, 0.56 on an interdisciplinary one is not.
+Field and domain are omitted - both are derivable from the subfield.
+
+The classification is OpenAlex's opinion, not a fact about the paper, and
+nothing in the UI presents it as more than that.
 
 Delete it once the corpus is covered.
 
