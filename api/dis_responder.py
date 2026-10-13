@@ -57,7 +57,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.100.0"
+__version__ = "120.101.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -7422,6 +7422,20 @@ def show_home(doi=None):
     '''
     if doi and doi != 'home':
         return show_doi_ui(doi)
+    # A signed-in reader gets the tile home page. This is what makes /newhome
+    # the home page in practice without moving any route: signing in straight at
+    # /login has no ?next= and so defaults to '/', which lands here and bounces
+    # onward. Anonymous visitors keep this page untouched.
+    #
+    # current_user(), not a bare session check: it re-reads the roster record and
+    # re-applies the access rule, so a cookie for somebody who no longer has
+    # access is not sent to a restricted page that would only bounce them again.
+    #
+    # ?classic is the way back. Without it there is no way to reach this page
+    # while signed in, which would make the two impossible to compare - and this
+    # page is still the one anonymous visitors get.
+    if current_user() and 'classic' not in request.args:
+        return redirect('/newhome')
     try:
         journals, orgs, projects = home_datalists()
     except Exception as err:
