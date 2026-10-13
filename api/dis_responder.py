@@ -57,7 +57,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.103.0"
+__version__ = "120.103.1"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -553,7 +553,7 @@ def generate_navbar(active):
     person = current_user()
     held = authorizations(person)
     hidden = {nav for nav, term in gated.items()
-              if not person or (term and term not in held)}
+              if not person or (term and not {'admin', term} & held)}
     if not hidden:
         return _generate_navbar(active)
     return _generate_navbar(active, menu=_visible_nav(NAV, hidden))
@@ -735,7 +735,10 @@ def restricted(arg=None):
                 # would otherwise show up in the address bar after signing in.
                 target = request.full_path.rstrip('?')
                 return redirect(url_for('login', next=target))
-            if term and term not in authorizations(person):
+            # {'admin', term} rather than term alone: authorizations() expands
+            # admin by reading the cv, so a cvterm load that failed at start-up
+            # would silently strip an administrator of everything but "admin".
+            if term and not {'admin', term} & authorizations(person):
                 # 403, not a redirect: they are signed in correctly and signing
                 # in again changes nothing. Name the authorization so they can
                 # ask for the right thing.
@@ -7711,6 +7714,15 @@ def show_authorizations():
     rows_html = []
     for orc in held:
         granted = ", ".join(sorted(orc.get('authorization') or []))
+        # A holder can lose eligibility after being granted - they leave, or the
+        # iD comes off the record - and the stored list stays. /profile says so
+        # to the holder; this list has to say so to the administrator, or the
+        # grant reads as active.
+        ok, why = may_be_authorized(orc)
+        if not ok:
+            granted = safe(f"<s>{escape(granted)}</s> "
+                           f"<span style='color:#888'>(not in effect: "
+                           f"{escape(why)})</span>")
         when = str(orc.get('authorization_updated') or '')[:19]
         rows_html.append([_person_label(orc), granted, when,
                           safe(f"<a href='/authorization/{orc['_id']}'>Edit</a>")])
@@ -7820,9 +7832,14 @@ def edit_authorization(rid):
     boxes = ""
     for name, display, definition in _authorization_terms():
         checked = " checked" if name in current else ""
+        # Built disabled rather than produced and then string-replaced: the
+        # replacement searched for double quotes while these are written with
+        # single ones, so it silently never fired and an ineligible person's
+        # boxes rendered live.
+        locked = "" if eligible else " disabled"
         boxes += "<div style='margin-bottom:10px'>" \
                  + f"<label><input type='checkbox' name='auth' value='{escape(name)}'" \
-                 + f"{checked}> <b>{escape(display)}</b></label>"
+                 + f"{checked}{locked}> <b>{escape(display)}</b></label>"
         if definition:
             boxes += f"<div style='font-size:0.85em; color:#a8c4e0; margin-left:24px'>" \
                      + f"{escape(definition)}</div>"
@@ -7845,8 +7862,7 @@ def edit_authorization(rid):
     else:
         # Show what is stored, but offer no way to change it: the POST would be
         # refused anyway, and a form that cannot succeed is a trap.
-        html += (boxes.replace('<input type="checkbox"', '<input type="checkbox" disabled')
-                 if current else "<div style='color:#888'>No authorizations.</div>") \
+        html += (boxes if current else "<div style='color:#888'>No authorizations.</div>") \
                 + "<br><a class='btn btn-outline-secondary' href='/authorizations'>Back</a>"
     if orc.get('authorization_updated'):
         html += f"<div style='font-size:0.85em; color:#888; margin-top:14px'>Last changed " \

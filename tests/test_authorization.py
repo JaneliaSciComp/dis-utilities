@@ -279,3 +279,37 @@ def test_the_profile_shows_what_was_granted_not_what_it_expands_to():
     '''
     block = SOURCE.split('def profile()')[1].split('\ndef ')[0]
     assert 'Administrator carries every' in block
+
+
+# --- review findings -------------------------------------------------------
+
+def test_an_admin_passes_even_if_the_cv_failed_to_load():
+    ''' authorizations() expands "admin" by reading the cv. If the cvterm load
+        failed at start-up, that expansion is empty and an administrator would
+        be silently stripped of everything but "admin" itself - so the checks
+        test for admin directly rather than relying on the expansion.
+    '''
+    block = SOURCE.split('def restricted(')[1].split('\ndef ')[0]
+    assert "not {'admin', term} & authorizations(person)" in block
+    nav = SOURCE.split('def generate_navbar')[1].split('\ndef ')[0]
+    assert "not {'admin', term} & held" in nav
+
+
+def test_the_checkboxes_are_built_disabled_not_patched_afterwards():
+    ''' They were produced with single quotes and then string-replaced on
+        double quotes, so the replacement never fired and an ineligible
+        person's boxes rendered live.
+    '''
+    block = SOURCE.split('def edit_authorization')[1].split('\ndef ')[0]
+    assert 'locked = "" if eligible else " disabled"' in block
+    assert "boxes.replace(" not in block, 'build the state, do not patch it'
+
+
+def test_an_inert_grant_is_marked_in_the_admin_list():
+    ''' A holder can lose eligibility after being granted. /profile tells the
+        holder; the admin list has to tell the administrator, or the grant
+        reads as active.
+    '''
+    block = SOURCE.split('def show_authorizations')[1].split('\ndef ')[0]
+    assert 'not in effect' in block
+    assert 'may_be_authorized(orc)' in block
