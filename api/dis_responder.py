@@ -840,9 +840,11 @@ def profile():
              "<p style='color:#888'>Not issued yet. When the REST endpoints require "
              "authentication, your token will be shown here, once, with a button to "
              "replace it.</p>")
+    # /mypapers and /mymetrics are deliberately NOT linked from here. Both work
+    # and both are reachable by URL, but they are still experimental and this
+    # page is the one every signed-in reader lands on, so linking them would
+    # publicize them before they are ready. Restore the buttons when they are.
     html += ("<p style='margin-top:24px;'>"
-             "<a class='btn btn-outline-info' href='/mypapers'>My publications</a>&nbsp;"
-             "<a class='btn btn-outline-info' href='/mymetrics'>My metrics</a>&nbsp;"
              f"<a class='btn btn-outline-secondary' href='{escape(url_for('logout'))}'>"
              "Sign out</a></p>")
     endpoint_access()
