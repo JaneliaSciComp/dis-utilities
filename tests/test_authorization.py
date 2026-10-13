@@ -223,3 +223,26 @@ def test_the_editor_refuses_an_ineligible_grant():
     '''
     assert 'cannot hold an authorization' in SOURCE
     assert "if request.method == 'POST' and not eligible:" in SOURCE
+
+
+# --- rendering -------------------------------------------------------------
+
+def test_person_label_is_marked_as_html():
+    ''' render_table escapes any cell that is not Safe, so a label returning a
+        bare str printed its own markup as text on the page. Marked at the
+        source rather than at each call site, so a new caller cannot forget.
+    '''
+    label = SOURCE.split('def _person_label')[1].split('\ndef ')[0]
+    assert 'return safe(out)' in label, '_person_label must return a Safe value'
+
+
+def test_table_cells_carrying_markup_are_marked_safe():
+    ''' Every <a> and <span> built into a row of the admin tables sits inside a
+        safe(), or render_table will show the tags to the reader.
+    '''
+    block = SOURCE.split('def show_authorizations')[1].split('\ndef ')[0]
+    rows = block.split('rows_html.append(')[1].split(')])')[0] + \
+           block.split('frows.append(')[1].split(')])')[0]
+    for fragment in re.findall(r"[\"']<(?:a|span)[^\"']*", rows):
+        start = rows.index(fragment)
+        assert 'safe(' in rows[max(0, start - 200):start], fragment[:50]

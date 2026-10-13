@@ -57,7 +57,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.102.0"
+__version__ = "120.102.1"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -7641,7 +7641,9 @@ def _person_label(orc):
     out = escape(str(name))
     if ident:
         out += f" <span style='color:#888'>({escape(str(ident))})</span>"
-    return out
+    # Safe, because render_table escapes any cell that is not: returning a bare
+    # str printed the markup as text.
+    return safe(out)
 
 
 def _authorization_terms():
@@ -7675,10 +7677,10 @@ def show_authorizations():
                                message=error_message(err))
     rows_html = []
     for orc in held:
-        granted = ", ".join(escape(a) for a in sorted(orc.get('authorization') or []))
+        granted = ", ".join(sorted(orc.get('authorization') or []))
         when = str(orc.get('authorization_updated') or '')[:19]
-        rows_html.append([_person_label(orc), granted, escape(when),
-                          f"<a href='/authorization/{orc['_id']}'>Edit</a>"])
+        rows_html.append([_person_label(orc), granted, when,
+                          safe(f"<a href='/authorization/{orc['_id']}'>Edit</a>")])
     html = ""
     if rows_html:
         html += render_table(['Person', 'Authorizations', 'Last changed', ''], rows_html,
@@ -7713,12 +7715,13 @@ def show_authorizations():
                 ok, why = may_be_authorized(o)
                 frows.append([
                     _person_label(o),
-                    ", ".join(escape(a) for a in sorted(o.get('authorization') or [])) or
-                    "<span style='color:#888'>none</span>",
+                    safe(", ".join(sorted(o.get('authorization') or [])) or
+                         "<span style='color:#888'>none</span>"),
                     # No link where a grant could not take: an Edit that leads to
                     # a refusal is worse than saying why up front.
-                    f"<a href='/authorization/{o['_id']}'>Edit</a>" if ok else
-                    f"<span style='color:#888'>cannot be authorized ({escape(why)})</span>"])
+                    safe(f"<a href='/authorization/{o['_id']}'>Edit</a>" if ok else
+                         f"<span style='color:#888'>cannot be authorized "
+                         f"({escape(why)})</span>")])
             html += render_table(['Person', 'Authorizations', ''], frows,
                                  table_id='found', css='tablesorter standard')
             if len(found) == 50:
