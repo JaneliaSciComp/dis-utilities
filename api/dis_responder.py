@@ -57,7 +57,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.104.1"
+__version__ = "120.105.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -7820,10 +7820,16 @@ def _save_name(orc, me):
                                   "entry directly. Add the replacement first, then "
                                   "remove this one.", 'warning')
         operation = {"$pull": {field: value}}
+        # Removed, not refused - an admin may have a good reason - but said
+        # plainly, because update_preferred_name re-inserts the People value at
+        # position 0 on every run and the removal would otherwise look like a
+        # bug in this page.
+        restored = value == current[0]
     else:
         if value in current:
             return render_warning(f"{value} is already on this record.", 'warning')
         operation = {"$addToSet": {field: value}}
+        restored = False
     operation["$set"] = {"names_updated": datetime.now(),
                          "names_updated_by": me.get('orcid')}
     try:
@@ -7832,6 +7838,12 @@ def _save_name(orc, me):
         print(f"Could not save name: {err}")
         return render_warning("Could not save that change.", 'error')
     print(f"Name {action}: {field}={value!r} on {orc['_id']} by {me.get('orcid')}")
+    if action == 'remove' and restored:
+        return render_warning(f"Removed {value}, but it was the first entry - the "
+                              "name HHMI holds. The nightly People sync puts that "
+                              "value back at the front of the list, so expect it to "
+                              "return unless it has also changed in People.",
+                              'warning')
     return render_warning("Saved.", 'success')
 
 
@@ -7883,21 +7895,31 @@ def _name_rows(orc, field, label, singular):
         Returns:
           HTML string
     '''
-    values = sorted(v for v in (orc.get(field) or []) if v)
+    # Stored order, NOT sorted: position 0 is where update_janelians_from_people
+    # puts the name People holds, so sorting would hide which entry that is and
+    # make the warning below unattachable to anything the reader can see.
+    values = [v for v in (orc.get(field) or []) if v]
     html = f"<h5 style='margin-top:18px'>{escape(label)}</h5>"
     if not values:
         html += "<div style='color:#888'>None.</div>"
-    for value in values:
+    for idx, value in enumerate(values):
+        first = idx == 0
+        badge = 'badge-primary' if first else 'badge-secondary'
+        tip = ("Preferred name: the nightly People sync puts its value here, so "
+               "removing this one is likely to be undone by morning."
+               if first else f"Remove {value}")
         # One form per entry: forms cannot nest, and a single form with a
         # per-row submit would need the row identity in the button name.
         html += "<form method='POST' style='display:inline-block; margin:0 8px 6px 0'>" \
                 + "<input type='hidden' name='action' value='remove'>" \
                 + f"<input type='hidden' name='field' value='{escape(field)}'>" \
                 + f"<input type='hidden' name='value' value='{escape(value)}'>" \
-                + f"<span class='badge badge-secondary' style='font-size:0.95em'>{escape(value)}" \
+                + f"<span class='badge {badge}' style='font-size:0.95em' " \
+                + f"title='{escape(tip)}'>{escape(value)}" \
+                + ("&nbsp;&#9733;" if first else "") \
                 + "&nbsp;<button type='submit' class='btn btn-sm' style='padding:0 4px; " \
                 + "background:transparent; border:none; color:#f8d7da'" \
-                + f" title='Remove {escape(value)}'>&times;</button></span></form>"
+                + f" title='{escape(tip)}'>&times;</button></span></form>"
     html += "<form method='POST' style='margin-top:6px'>" \
             + "<input type='hidden' name='action' value='add'>" \
             + f"<input type='hidden' name='field' value='{escape(field)}'>" \
@@ -7969,7 +7991,9 @@ def edit_person(rid):
             + "can drop works from this person's pages and adding a loose one can " \
             + "pull in somebody else's. The nightly sync adds variants of its own; " \
             + "entries are added and removed individually so a save here cannot " \
-            + "discard them.</div>"
+            + "discard them. The starred first entry is where the nightly People " \
+            + "sync writes the name HHMI holds &mdash; removing that one is " \
+            + "usually undone by the next run.</div>"
     html += _name_rows(orc, 'given', 'Given names', 'given name')
     html += _name_rows(orc, 'family', 'Family names', 'family name')
 

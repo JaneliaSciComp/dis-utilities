@@ -375,9 +375,32 @@ def test_the_last_family_name_cannot_be_removed():
 
 
 def test_removing_one_of_several_pulls_it():
-    (kind, _), writes = save_name(PERSON, 'remove', 'given', 'Rob')
+    ''' Not the first entry - see the preferred-name test below. '''
+    (kind, _), writes = save_name(PERSON, 'remove', 'given', 'Robert')
     assert kind == 'success'
-    assert writes[0]['$pull'] == {'given': 'Rob'}
+    assert writes[0]['$pull'] == {'given': 'Robert'}
+
+
+def test_removing_the_first_entry_warns_but_still_removes():
+    ''' Position 0 is where update_janelians_from_people writes the name HHMI
+        holds, re-inserting it on every run. The removal is allowed - an admin
+        may have a reason - but it is said plainly, or it looks like this page
+        failed when the value reappears overnight.
+    '''
+    (kind, msg), writes = save_name(PERSON, 'remove', 'given', 'Rob')
+    assert writes[0]['$pull'] == {'given': 'Rob'}, 'the removal must still happen'
+    assert kind == 'warning'
+    assert 'People sync' in msg
+
+
+def test_the_first_entry_is_marked_in_the_list():
+    ''' The warning is unattachable to anything the reader can see unless the
+        entries are shown in stored order, so the list is not sorted.
+    '''
+    block = SOURCE.split('def _name_rows')[1].split('\ndef ')[0]
+    assert 'values = [v for v in (orc.get(field) or []) if v]' in block, \
+        'stored order, not sorted'
+    assert 'first = idx == 0' in block
 
 
 def test_adding_uses_addtoset():
