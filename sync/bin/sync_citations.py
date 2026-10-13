@@ -181,7 +181,7 @@
         (falling back to the native citationCount).
 '''
 
-__version__ = '1.13.1'
+__version__ = '1.14.0'
 
 import argparse
 import collections
