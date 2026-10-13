@@ -1,0 +1,307 @@
+{% extends "base.html" %}
+{#
+  Prototype replacement for home.html. Same searches, presented as a tile grid
+  in the manner of landing.html (/andy) rather than a stacked list of form rows,
+  plus the three personal pages at the top.
+
+  The route is @restricted, which is the point: this is what the home page
+  becomes once every page needs a session, so there is no signed-out variant to
+  design. current_user() is therefore guaranteed by the time this renders.
+
+  The JS is lifted from home.html unchanged so the two cannot disagree about
+  where a search goes while both pages exist. When home.html retires, this
+  becomes the only copy.
+#}
+{% block script %}
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jquery-cookie/1.4.1/jquery.cookie.min.js"></script>
+<script src="{{ url_for('static', filename='js/bootstrap-autocomplete/autocomplete.js') }}"></script>
+<script>
+$(document).on('keypress', 'input', function(e) {
+  if (e.which === 13) {
+    var focusedElement = $(':focus');
+    var eid = focusedElement.attr('id');
+    e.preventDefault();
+    if (eid == 'doi') {
+        find_doi();
+    }
+    else if (eid == 'findby-input') {
+        find_by();
+    }
+    else if (eid == 'input-orglist') {
+        find_orgs();
+    }
+    else if (eid == 'oid') {
+        find_oid();
+    }
+    else if (eid == 'name') {
+        find_names();
+    }
+  }
+  return;
+});
+  function find_doi() {
+    var val = $('#doi').val().trim();
+    if (!val) {
+      alert("You must enter a DOI or PMID");
+      return;
+    }
+    var tokens = val.split(/\s+/).filter(Boolean);
+    if (tokens.length > 1) {
+      // A whitespace-separated list -> POST to the batch report. POST (not a GET
+      // path) avoids URL-length and slash-encoding problems with many DOIs. A
+      // single entry falls through to the normal /doiui route below.
+      var form = document.createElement('form');
+      form.method = 'POST';
+      form.action = '/doiui_batch';
+      var input = document.createElement('input');
+      input.type = 'hidden';
+      input.name = 'dois';
+      input.value = val;
+      form.appendChild(input);
+      document.body.appendChild(form);
+      form.submit();
+      return;
+    }
+    window.location = "/doiui/" + tokens[0];
+  }
+  // The file-upload form is hidden until asked for: pasting an identifier is the
+  // common case, and the picker plus filename plus submit button do not fit a
+  // tile alongside the input without making this one tile twice the height of
+  // every other.
+  function toggle_upload() {
+    var box = document.getElementById('doiupload');
+    var shown = box.style.display === 'block';
+    box.style.display = shown ? 'none' : 'block';
+    document.getElementById('uploadtoggle').textContent =
+      shown ? 'upload a list instead' : 'never mind, let me type one';
+    return false;
+  }
+  // Consolidated "Find DOIs by ..." control: the #findby-type pulldown picks the
+  // term, one #findby-input box holds the value, one button dispatches. The journal
+  // and project terms carry a datalist for typeahead, swapped onto the shared input
+  // when selected (findby_changed).
+  var FINDBY = {
+    name:    {route: '/doisui_name/', placeholder: '', prompt: 'a name'},
+    title:   {route: '/titlesui/',    placeholder: '', prompt: 'a title'},
+    ack:     {route: '/acksui/',      placeholder: '', prompt: 'acknowledgement text'},
+    journal: {route: '/journal/', placeholder: 'Select a journal', prompt: 'a journal', list: 'list-journal'},
+    project: {route: '/tag/',     placeholder: 'Select a project', prompt: 'a project', list: 'list-proj', path: true}
+  };
+  function findby_changed() {
+    var cfg = FINDBY[$('#findby-type').val()];
+    var input = document.getElementById('findby-input');
+    input.value = '';   // clear any value typed under the previously-selected term
+    input.placeholder = cfg.placeholder;
+    if (cfg.list) {
+      input.setAttribute('list', cfg.list);
+      $('#findby-input').autocomplete();   // (re)bind bootstrap-autocomplete to the datalist
+    } else {
+      input.removeAttribute('list');
+    }
+  }
+  function find_by() {
+    var cfg = FINDBY[$('#findby-type').val()];
+    var val = $('#findby-input').val().trim();
+    if (!val) {
+      alert("You must enter " + cfg.prompt);
+      return;
+    }
+    window.location = cfg.route + (cfg.path ? val : encodeURIComponent(val));
+  }
+  // Sync the input's placeholder/datalist to the pulldown on load (covers a browser
+  // restoring a previously-selected term).
+  document.addEventListener('DOMContentLoaded', function() { findby_changed(); }, false);
+  function find_orgs() {
+    if (!$('#input-orglist').val()) {
+      alert("You must enter an organization");
+      return;
+    }
+    url = "/org_detail/" + encodeURIComponent($("#input-orglist").val());
+    window.location = url;
+  }
+  function find_orgs_authors() {
+    if (!$('#input-orglist').val()) {
+      alert("You must enter an organization");
+      return;
+    }
+    url = "/org_authors/" + encodeURIComponent($("#input-orglist").val());
+    window.location = url;
+  }
+  function find_orgs_summary() {
+    if (!$('#input-orglist').val()) {
+      alert("You must enter an organization");
+      return;
+    }
+    const currentYear = new Date().getFullYear();
+    url = "/org_summary/" + encodeURIComponent($("#input-orglist").val()) + "/" + currentYear;
+    window.location = url;
+  }
+  function find_orgs_year() {
+    if (!$('#input-orglist').val()) {
+      alert("You must enter an organization");
+      return;
+    }
+    url = "/org_year/" + encodeURIComponent($("#input-orglist").val())
+    window.location = url;
+  }
+  function find_oid() {
+    if (!$('#oid').val()) {
+      alert("You must enter an ORCID");
+      return;
+    }
+    url = "/orcidui/" + encodeURIComponent($("#oid").val());
+    window.location = url;
+  }
+  function find_names() {
+    if (!$('#name').val()) {
+      alert("You must enter a name");
+      return;
+    }
+    url = "/namesui/" + encodeURIComponent($("#name").val());
+    window.location = url;
+  }
+</script>
+{% endblock %}
+{% block onload %}
+onload="tableInitialize();"
+{% endblock %}
+
+{% block content %}
+<h4 style="text-align: center; margin-top: 18px;">{{ greeting | safe }}</h4>
+
+<div class="nhgrid">
+
+  <!-- ---- the three personal pages ---------------------------------------- -->
+  <a class="nhlink" href="/mypapers">
+    <div class="nhbox">
+      <div class="nhtitle">My papers</div>
+      <div class="nhsub">Everything Janelia credits you with, plus anything found
+           under your name or ORCID without credit &mdash; each marked so you
+           can tell which is which.</div>
+      <div class="nhicon"><i class="fa-solid fa-file-lines fa-2x"></i></div>
+    </div>
+  </a>
+
+  <a class="nhlink" href="/dois/mytags">
+    <div class="nhbox">
+      <div class="nhtitle">My tags</div>
+      <div class="nhsub">DOIs tagged with your group, your affiliations and anything
+           you manage. Filter by year, or to journals and preprints only.</div>
+      <div class="nhicon"><i class="fa-solid fa-tags fa-2x"></i></div>
+    </div>
+  </a>
+
+  <a class="nhlink" href="/mymetrics">
+    <div class="nhbox">
+      <div class="nhtitle">My metrics</div>
+      <div class="nhsub">Works, citations, median per cited paper and h-index over
+           your Janelia articles and preprints, with a five-year window.</div>
+      <div class="nhicon"><i class="fa-solid fa-chart-line fa-2x"></i></div>
+    </div>
+  </a>
+
+  <!-- ---- find a DOI or PMID ---------------------------------------------- -->
+  <div class="nhbox">
+    <div class="nhtitle">Find a DOI or PMID</div>
+    <div class="nhctl">
+      <input type="text" class="form-control" id="doi"
+             placeholder="one or more, space-separated">
+      <button type="button" class="btn btn-primary" onclick="find_doi();">Look up</button>
+      <div class="nhmini">
+        <a id="uploadtoggle" onclick="return toggle_upload();">upload a list instead</a>
+      </div>
+      <!-- Hidden until asked for; see toggle_upload(). Posts to /doiui_batch, the
+           same endpoint the multi-identifier paste path uses. -->
+      <div class="nhreveal" id="doiupload">
+        <form method="POST" action="/doiui_batch" enctype="multipart/form-data" style="margin:0;">
+          <input type="file" name="file" id="doifile"
+                 accept=".txt,.csv,.tsv,text/plain" style="display:none"
+                 onchange="document.getElementById('doifilename').textContent =
+                           this.files.length ? this.files[0].name : 'No file chosen';">
+          <label for="doifile" class="btn btn-outline-secondary btn-sm" style="margin:0;">Choose file</label>
+          <span id="doifilename" style="margin:0 6px; font-style:italic; color:#cfe8cf;">No file chosen</span>
+          <button type="submit" class="btn btn-outline-primary btn-sm">Upload list</button>
+        </form>
+      </div>
+    </div>
+    <div class="nhicon"><i class="fa-solid fa-magnifying-glass fa-2x"></i></div>
+  </div>
+
+  <!-- ---- find DOIs by <term> --------------------------------------------- -->
+  <div class="nhbox">
+    <div class="nhtitle">Find DOIs by</div>
+    <div class="nhctl">
+      <select class="form-control" id="findby-type" onchange="findby_changed();">
+        <option value="title">title</option>
+        <option value="ack">acknowledgement</option>
+        <option value="name">last name</option>
+        <option value="journal">journal</option>
+        <option value="project">project</option>
+      </select>
+      <input type="text" class="form-control" id="findby-input" style="margin-top:6px;">
+      <button type="button" class="btn btn-primary" onclick="find_by();">Look up</button>
+    </div>
+    <div class="nhicon"><i class="fa-solid fa-list-ul fa-2x"></i></div>
+  </div>
+
+  <!-- ---- find DOIs by organization --------------------------------------- -->
+  <div class="nhbox">
+    <div class="nhtitle">Find DOIs by organization</div>
+    <div class="nhctl">
+      <input type="text" class="form-control" placeholder="Select an organization"
+             list="list-org" id="input-orglist">
+      <div style="margin-top:6px;">
+        <button type="submit" id="doio2" class="btn btn-primary btn-sm"
+                onclick="find_orgs_summary(); return false;" href="#">Summary</button>
+        <button type="submit" id="doio" class="btn btn-primary btn-sm"
+                onclick="find_orgs(); return false;" href="#">Details</button>
+        <button type="submit" id="doiy" class="btn btn-primary btn-sm"
+                onclick="find_orgs_year(); return false;" href="#">Yearly</button>
+        <button type="submit" id="doia" class="btn btn-primary btn-sm"
+                onclick="find_orgs_authors(); return false;" href="#">Authors</button>
+      </div>
+    </div>
+    <div class="nhicon"><i class="fa-solid fa-sitemap fa-2x"></i></div>
+  </div>
+
+  <!-- ---- find authors by name -------------------------------------------- -->
+  <div class="nhbox">
+    <div class="nhtitle">Find authors by name</div>
+    <div class="nhctl">
+      <input type="text" class="form-control" id="name" placeholder="family name">
+      <button type="submit" id="nameb" class="btn btn-primary"
+              onclick="find_names(); return false;" href="#">Look up</button>
+    </div>
+    <div class="nhicon"><i class="fa-solid fa-user-group fa-2x"></i></div>
+  </div>
+
+  <!-- ---- find an ORCID --------------------------------------------------- -->
+  <div class="nhbox">
+    <div class="nhtitle">Find an ORCID</div>
+    <div class="nhctl">
+      <input type="text" class="form-control" id="oid" placeholder="0000-0000-0000-0000">
+      <button type="submit" id="oidb" class="btn btn-primary"
+              onclick="find_oid(); return false;" href="#">Look up</button>
+    </div>
+    <div class="nhicon"><i class="fa-brands fa-orcid fa-2x"></i></div>
+  </div>
+
+</div>
+
+<!-- Datalists shared by the tiles above; findby_changed() swaps the journal and
+     project lists onto #findby-input via its list= attribute. -->
+<datalist id="list-journal">
+  {{ journals | safe }}
+</datalist>
+<datalist id="list-proj">
+  {{ projects | safe }}
+</datalist>
+<datalist id="list-org">
+  {{ orgs | safe }}
+</datalist>
+<script>
+  document.addEventListener('DOMContentLoaded', e => {
+      $('#input-orglist').autocomplete()
+  }, false);
+</script>
+{% endblock %}
