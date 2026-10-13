@@ -1591,8 +1591,36 @@ def single_name_search_payload(given, family):
                    ]}
 
 
+def deposit_orcid_payload(orcid):
+    ''' Match deposits that name this ORCID iD among their authors.
+
+        Nothing writes a top-level "orcid" onto a dois document - the iD lives
+        where each registrar puts it, as a URL: Crossref in author[].ORCID,
+        DataCite in creators[].nameIdentifiers[].nameIdentifier. Anchored at the
+        end so one iD cannot match another by prefix, and tolerant of the
+        http/https variants both registrars emit.
+        Keyword arguments:
+          orcid: ORCID iD
+        Returns:
+          Payload
+    '''
+    tail = {"$regex": re.escape(orcid) + "$"}
+    return {"$or": [{"author.ORCID": tail},
+                    {"creators.nameIdentifiers.nameIdentifier": tail}]}
+
+
 def orcid_payload(oid, orc, eid=None):
     ''' Generate a payload for searching the dois collection by ORCID or employeeId
+
+        Three ways a work can belong to someone: Janelia credited them
+        (jrc_author), their name matches, or their ORCID iD is in the deposit.
+
+        The iD for that third clause is taken from the roster record rather than
+        from oid, because /userui passes an employeeId as oid - which used to
+        build {"orcid": "<employeeId>"} and match nothing. The old clause queried
+        a top-level "orcid" field that no dois document has ever carried, so this
+        arm was dead for every caller; restoring it finds works whose author
+        names do not match any stored variant.
         Keyword arguments:
           oid: ORCID or employeeId
           orc: orcid record
@@ -1600,20 +1628,16 @@ def orcid_payload(oid, orc, eid=None):
         Returns:
           Payload
     '''
-    payload = {}
-    # Name only search
-    npayload = name_search_payload(orc['given'], orc['family'])
-    if eid and not oid:
-        # Employee ID only search
-        payload = {"$or": [{"jrc_author": eid}, npayload]}
-    elif oid and eid:
-        # Search by either name or employee ID
-        payload = {"$or": [{"orcid": oid}, {"jrc_author": eid}, npayload]}
-    elif oid and not eid:
-        # Search by either name or ORCID
-        payload = {"$or": [{"orcid": oid}, npayload]}
-    payload = payload or npayload
-    return payload
+    # Name search is always in play.
+    clauses = [name_search_payload(orc['given'], orc['family'])]
+    if eid:
+        clauses.append({"jrc_author": eid})
+    ident = orc.get('orcid')
+    if not ident and oid and ORCID_RE.match(str(oid)):
+        ident = oid
+    if ident:
+        clauses.append(deposit_orcid_payload(ident))
+    return {"$or": clauses} if len(clauses) > 1 else clauses[0]
 
 
 def author_doi_count(given, family):
