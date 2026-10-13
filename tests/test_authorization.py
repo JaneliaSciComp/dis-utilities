@@ -159,7 +159,7 @@ def test_the_datacite_user_reports_require_datacite(route):
     assert _decorator_above(route) == "@restricted('datacite')", route
 
 
-@pytest.mark.parametrize('route', ['/authorizations', '/authorization/<string:rid>'])
+@pytest.mark.parametrize('route', ['/authorizations', '/person/<string:rid>'])
 def test_the_admin_pages_require_admin(route):
     assert _decorator_above(route) == "@restricted('admin')", route
 
@@ -213,7 +213,7 @@ def test_people_are_keyed_by_record_id_not_orcid():
         anything, but they are still reachable - and keying the editor on an iD
         would put most of the roster out of reach of even being looked at.
     '''
-    assert "@app.route('/authorization/<string:rid>'" in SOURCE
+    assert "@app.route('/person/<string:rid>'" in SOURCE
     assert 'bson.ObjectId(rid)' in SOURCE
 
 
@@ -222,7 +222,7 @@ def test_the_editor_refuses_an_ineligible_grant():
         rendered for an ineligible person, but a hand-made POST must still fail.
     '''
     assert 'cannot hold an authorization' in SOURCE
-    assert "if request.method == 'POST' and not eligible:" in SOURCE
+    assert 'elif not eligible:' in SOURCE
 
 
 # --- rendering -------------------------------------------------------------
@@ -300,7 +300,7 @@ def test_the_checkboxes_are_built_disabled_not_patched_afterwards():
         double quotes, so the replacement never fired and an ineligible
         person's boxes rendered live.
     '''
-    block = SOURCE.split('def edit_authorization')[1].split('\ndef ')[0]
+    block = SOURCE.split('def edit_person')[1].split('\ndef ')[0]
     assert 'locked = "" if eligible else " disabled"' in block
     assert "boxes.replace(" not in block, 'build the state, do not patch it'
 
@@ -313,3 +313,104 @@ def test_an_inert_grant_is_marked_in_the_admin_list():
     block = SOURCE.split('def show_authorizations')[1].split('\ndef ')[0]
     assert 'not in effect' in block
     assert 'may_be_authorized(orc)' in block
+
+
+# --- editing name variants --------------------------------------------------
+
+class _Form(dict):
+    def getlist(self, key):
+        return []
+
+
+def _save_name_harness():
+    ''' _save_name with its Flask and Mongo dependencies stubbed, plus the list
+        of update operations it issued.
+    '''
+    import datetime as _dt
+    writes = []
+
+    class _Coll:
+        def update_one(self, _flt, operation):
+            writes.append(operation)
+
+    req = type('R', (), {'form': _Form()})()
+    ns = {'request': req,
+          'render_warning': lambda msg, kind='warning': (kind, msg),
+          'DB': {'dis': type('D', (), {'orcid': _Coll()})()},
+          'print': lambda *a, **k: None,
+          'datetime': _dt.datetime}
+    tree = ast.parse(SOURCE)
+    node = next(n for n in tree.body
+                if isinstance(n, ast.FunctionDef) and n.name == '_save_name')
+    exec(ast.get_source_segment(SOURCE, node), ns)    # pylint: disable=W0122
+
+    def call(orc, action, field, value):
+        writes.clear()
+        req.form = _Form({'action': action, 'field': field, 'value': value})
+        return ns['_save_name'](orc, {'orcid': 'ADMIN'}), list(writes)
+    return call
+
+
+save_name = _save_name_harness()
+PERSON = {'_id': 1, 'given': ['Rob', 'Robert'], 'family': ['Svirskas']}
+
+
+def test_the_last_given_name_cannot_be_removed():
+    ''' orc['given'][0] is indexed without a guard in five places in
+        dis_responder and in several sync programs, so an empty list is an
+        IndexError on the person pages and a crash in the nightly run.
+    '''
+    (kind, msg), writes = save_name({'_id': 1, 'given': ['Rob'], 'family': ['S']},
+                                    'remove', 'given', 'Rob')
+    assert kind == 'warning'
+    assert writes == [], 'nothing may be written'
+    assert 'only given name' in msg
+
+
+def test_the_last_family_name_cannot_be_removed():
+    (kind, _), writes = save_name({'_id': 1, 'given': ['Rob'], 'family': ['S']},
+                                  'remove', 'family', 'S')
+    assert kind == 'warning'
+    assert writes == []
+
+
+def test_removing_one_of_several_pulls_it():
+    (kind, _), writes = save_name(PERSON, 'remove', 'given', 'Rob')
+    assert kind == 'success'
+    assert writes[0]['$pull'] == {'given': 'Rob'}
+
+
+def test_adding_uses_addtoset():
+    ''' Never a whole-array $set: add_orcid_name_variants, fix_middle_names and
+        update_janelians_from_people all write these lists, and rebuilding the
+        array from a stale read would discard what they added in between.
+    '''
+    (kind, _), writes = save_name(PERSON, 'add', 'given', 'Bob')
+    assert kind == 'success'
+    assert writes[0]['$addToSet'] == {'given': 'Bob'}
+
+
+def test_no_name_write_ever_sets_the_whole_array():
+    for action, value in (('add', 'Bob'), ('remove', 'Rob')):
+        _, writes = save_name(PERSON, action, 'given', value)
+        for operation in writes:
+            assert set(operation.get('$set', {})) <= {'names_updated', 'names_updated_by'}, \
+                '$set may only carry the audit fields, never given/family'
+
+
+@pytest.mark.parametrize('action,field,value,why', [
+    ('remove', 'given', 'Nope', 'not on the record'),
+    ('add', 'given', 'Rob', 'already there'),
+    ('add', 'given', '   ', 'blank'),
+    ('add', 'nickname', 'X', 'not an editable field'),
+])
+def test_rejected_without_writing(action, field, value, why):
+    (kind, _), writes = save_name(PERSON, action, field, value)
+    assert kind == 'warning', why
+    assert writes == [], why
+
+
+def test_a_name_change_records_who_and_when():
+    _, writes = save_name(PERSON, 'add', 'given', 'Bob')
+    assert writes[0]['$set']['names_updated_by'] == 'ADMIN'
+    assert 'names_updated' in writes[0]['$set']

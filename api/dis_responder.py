@@ -57,7 +57,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.103.2"
+__version__ = "120.104.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -7729,7 +7729,7 @@ def show_authorizations():
                            f"{escape(why)})</span>")
         when = str(orc.get('authorization_updated') or '')[:19]
         rows_html.append([_person_label(orc), granted, when,
-                          safe(f"<a href='/authorization/{orc['_id']}'>Edit</a>")])
+                          safe(f"<a href='/person/{orc['_id']}'>Edit</a>")])
     html = ""
     if rows_html:
         html += render_table(['Person', 'Authorizations', 'Last changed', ''], rows_html,
@@ -7768,7 +7768,7 @@ def show_authorizations():
                          "<span style='color:#888'>none</span>"),
                     # No link where a grant could not take: an Edit that leads to
                     # a refusal is worse than saying why up front.
-                    safe(f"<a href='/authorization/{o['_id']}'>Edit</a>" if ok else
+                    safe(f"<a href='/person/{o['_id']}'>Edit</a>" if ok else
                          f"<span style='color:#888'>cannot be authorized "
                          f"({escape(why)})</span>")])
             html += render_table(['Person', 'Authorizations', ''], frows,
@@ -7785,13 +7785,141 @@ def show_authorizations():
                                          navbar=generate_navbar('')))
 
 
-@app.route('/authorization/<string:rid>', methods=['GET', 'POST'])
+def _save_name(orc, me):
+    ''' Add or remove one name variant
+
+        $addToSet and $pull, never a whole-array $set: add_orcid_name_variants,
+        fix_middle_names and update_janelians_from_people all write these lists,
+        and rebuilding the array from what this page read would discard anything
+        they added in between.
+        Keyword arguments:
+          orc: orcid collection document
+          me: the signed-in administrator
+        Returns:
+          Rendered note
+    '''
+    field = request.form.get('field', '')
+    value = (request.form.get('value') or '').strip()
+    action = request.form.get('action', '')
+    if field not in ('given', 'family'):
+        return render_warning("Unknown name field.", 'warning')
+    if not value:
+        return render_warning("Enter a name.", 'warning')
+    current = [v for v in (orc.get(field) or []) if v]
+    if action == 'remove':
+        if value not in current:
+            return render_warning(f"{value} is not in that list.", 'warning')
+        # A list must never go empty. orc['given'][0] and orc['family'][0] are
+        # indexed without a guard in five places in this file and in several
+        # sync programs, so an empty list is an IndexError on the person pages
+        # and a crash in the nightly run - not a cosmetic problem.
+        if len(current) <= 1:
+            return render_warning(f"{value} is the only {field} name on this record, "
+                                  "and a record has to keep at least one of each: the "
+                                  "person pages and the sync programs read the first "
+                                  "entry directly. Add the replacement first, then "
+                                  "remove this one.", 'warning')
+        operation = {"$pull": {field: value}}
+    else:
+        if value in current:
+            return render_warning(f"{value} is already on this record.", 'warning')
+        operation = {"$addToSet": {field: value}}
+    operation["$set"] = {"names_updated": datetime.now(),
+                         "names_updated_by": me.get('orcid')}
+    try:
+        DB['dis'].orcid.update_one({"_id": orc['_id']}, operation)
+    except Exception as err:
+        print(f"Could not save name: {err}")
+        return render_warning("Could not save that change.", 'error')
+    print(f"Name {action}: {field}={value!r} on {orc['_id']} by {me.get('orcid')}")
+    return render_warning("Saved.", 'success')
+
+
+def _save_authorizations(orc, me):
+    ''' Replace the authorization list
+
+        $set is right here, unlike the name lists: nothing else writes this
+        field, and the checkboxes are a complete statement of what is held.
+        Keyword arguments:
+          orc: orcid collection document
+          me: the signed-in administrator
+        Returns:
+          Rendered note
+    '''
+    chosen = {t for t in request.form.getlist('auth')
+              if t in (CVTERM.get('authorization') or {})}
+    # An admin removing their own admin could leave nobody able to grant it back,
+    # and the only way out would be a hand-written database update.
+    if str(orc['_id']) == str(me.get('_id')) and 'admin' in authorizations(me) \
+       and 'admin' not in chosen:
+        return render_warning("You cannot remove your own Administrator "
+                              "authorization. Ask another administrator.", 'warning')
+    try:
+        DB['dis'].orcid.update_one(
+            {"_id": orc['_id']},
+            {"$set": {"authorization": sorted(chosen),
+                      "authorization_updated": datetime.now(),
+                      "authorization_updated_by": me.get('orcid')}})
+    except Exception as err:
+        print(f"Could not save authorizations: {err}")
+        return render_warning("Could not save the authorizations.", 'error')
+    print(f"Authorizations for {orc['_id']} set to {sorted(chosen)} by {me.get('orcid')}")
+    return render_warning("Saved.", 'success')
+
+
+def _name_rows(orc, field, label):
+    ''' One editable name list: the entries, each with a remove control
+
+        given and family are LISTS of variants, not single names - they are what
+        name_search_payload matches DOIs against, so an entry removed here drops
+        works from /mypapers, /orcidui and /userui, and a loose one added pulls
+        in somebody else's.
+        Keyword arguments:
+          orc: orcid collection document
+          field: 'given' or 'family'
+          label: heading to show
+        Returns:
+          HTML string
+    '''
+    values = sorted(v for v in (orc.get(field) or []) if v)
+    html = f"<h5 style='margin-top:18px'>{escape(label)}</h5>"
+    if not values:
+        html += "<div style='color:#888'>None.</div>"
+    for value in values:
+        # One form per entry: forms cannot nest, and a single form with a
+        # per-row submit would need the row identity in the button name.
+        html += "<form method='POST' style='display:inline-block; margin:0 8px 6px 0'>" \
+                + "<input type='hidden' name='action' value='remove'>" \
+                + f"<input type='hidden' name='field' value='{escape(field)}'>" \
+                + f"<input type='hidden' name='value' value='{escape(value)}'>" \
+                + f"<span class='badge badge-secondary' style='font-size:0.95em'>{escape(value)}" \
+                + "&nbsp;<button type='submit' class='btn btn-sm' style='padding:0 4px; " \
+                + "background:transparent; border:none; color:#f8d7da'" \
+                + f" title='Remove {escape(value)}'>&times;</button></span></form>"
+    html += "<form method='POST' style='margin-top:6px'>" \
+            + "<input type='hidden' name='action' value='add'>" \
+            + f"<input type='hidden' name='field' value='{escape(field)}'>" \
+            + "<div class='flexcontainer'><div class='flexitem'>" \
+            + f"<input type='text' class='form-control' name='value' placeholder='add a {escape(label.lower())}'>" \
+            + "</div><div class='flexitemauto'>" \
+            + "<button type='submit' class='btn btn-outline-primary btn-sm'>Add</button>" \
+            + "</div></div></form>"
+    return html
+
+
+@app.route('/person/<string:rid>', methods=['GET', 'POST'])
 @restricted('admin')
-def edit_authorization(rid):
-    ''' Edit one person's authorizations
+def edit_person(rid):
+    ''' Edit one roster record: name variants and authorizations
 
         Keyed by the orcid record's _id, not by ORCID iD: 1,398 of the 2,383
-        roster records have no iD, and they are as grantable as any other.
+        roster records have no iD, and their names are as editable as anyone's.
+
+        One page, several sections, each posting its own action, because the
+        fields do not write the same way: authorizations are $set (nothing else
+        writes that field), names are $addToSet/$pull (three sync programs write
+        those lists, and a whole-array write from a stale read would drop
+        whatever they added in between).
     '''
     try:
         orc = DB['dis'].orcid.find_one({"_id": bson.ObjectId(rid)})
@@ -7804,42 +7932,23 @@ def edit_authorization(rid):
     me = current_user() or {}
     eligible, why = may_be_authorized(orc)
     note = ""
-    if request.method == 'POST' and not eligible:
-        note = render_warning(f"This person cannot hold an authorization ({why}). "
-                              "An ORCID iD is required, and alumni are excluded.",
-                              'warning')
-    elif request.method == 'POST':
-        chosen = {t for t in request.form.getlist('auth')
-                  if t in (CVTERM.get('authorization') or {})}
-        # An admin removing their own admin could leave nobody able to grant it
-        # back, and the only way out would be a hand-written database update.
-        if str(orc['_id']) == str(me.get('_id')) and 'admin' in authorizations(me) \
-           and 'admin' not in chosen:
-            note = render_warning("You cannot remove your own Administrator "
-                                  "authorization. Ask another administrator.", 'warning')
+    if request.method == 'POST':
+        action = request.form.get('action', '')
+        if action in ('add', 'remove'):
+            note = _save_name(orc, me)
+        elif not eligible:
+            note = render_warning(f"This person cannot hold an authorization ({why}). "
+                                  "An ORCID iD is required, and alumni are excluded.",
+                                  'warning')
         else:
-            try:
-                DB['dis'].orcid.update_one(
-                    {"_id": orc['_id']},
-                    {"$set": {"authorization": sorted(chosen),
-                              "authorization_updated": datetime.now(),
-                              "authorization_updated_by": me.get('orcid')}})
-            except Exception as err:
-                return render_template('error.html', urlroot=request.url_root,
-                                       title=render_warning("Could not save"),
-                                       message=error_message(err))
-            print(f"Authorizations for {orc['_id']} set to {sorted(chosen)} "
-                  f"by {me.get('orcid')}")
-            orc = DB['dis'].orcid.find_one({"_id": orc['_id']}) or orc
-            note = render_warning("Saved.", 'success')
+            note = _save_authorizations(orc, me)
+        orc = DB['dis'].orcid.find_one({"_id": orc['_id']}) or orc
+        eligible, why = may_be_authorized(orc)
     current = set(orc.get('authorization') or [])
     boxes = ""
     for name, display, definition in _authorization_terms():
         checked = " checked" if name in current else ""
-        # Built disabled rather than produced and then string-replaced: the
-        # replacement searched for double quotes while these are written with
-        # single ones, so it silently never fired and an ineligible person's
-        # boxes rendered live.
+        # Built disabled rather than produced and then string-replaced.
         locked = "" if eligible else " disabled"
         boxes += "<div style='margin-bottom:10px'>" \
                  + f"<label><input type='checkbox' name='auth' value='{escape(name)}'" \
@@ -7849,6 +7958,20 @@ def edit_authorization(rid):
                      + f"{escape(definition)}</div>"
         boxes += "</div>"
     html = note + f"<h4>{_person_label(orc)}</h4>"
+
+    # ----- names -----
+    html += "<h4 style='margin-top:24px'>Name variants</h4>" \
+            + "<div style='font-size:0.85em; color:#a8c4e0; max-width:620px'>" \
+            + "These are what DOIs are matched against by name, so removing one " \
+            + "can drop works from this person's pages and adding a loose one can " \
+            + "pull in somebody else's. The nightly sync adds variants of its own; " \
+            + "entries are added and removed individually so a save here cannot " \
+            + "discard them.</div>"
+    html += _name_rows(orc, 'given', 'Given names')
+    html += _name_rows(orc, 'family', 'Family names')
+
+    # ----- authorizations -----
+    html += "<h4 style='margin-top:28px'>Authorizations</h4>"
     if not eligible:
         html += render_warning(f"This person cannot hold an authorization ({why}). "
                                "An ORCID iD is required, and alumni are excluded.",
@@ -7858,25 +7981,23 @@ def edit_authorization(rid):
                                "granted here does nothing until one is issued with "
                                "manage_restricted_users.py.", 'warning')
     if eligible:
-        html += f"<form method='POST' action='/authorization/{orc['_id']}'>" \
+        html += "<form method='POST'>" \
+                + "<input type='hidden' name='action' value='auth'>" \
                 + boxes \
-                + "<button type='submit' class='btn btn-primary'>Save</button>&nbsp;" \
-                + "<a class='btn btn-outline-secondary' href='/authorizations'>Back</a>" \
+                + "<button type='submit' class='btn btn-primary'>Save</button>" \
                 + "</form>"
     else:
-        # Show what is stored, but offer no way to change it: the POST would be
-        # refused anyway, and a form that cannot succeed is a trap.
-        html += (boxes if current else "<div style='color:#888'>No authorizations.</div>") \
-                + "<br><a class='btn btn-outline-secondary' href='/authorizations'>Back</a>"
+        html += (boxes if current else "<div style='color:#888'>No authorizations.</div>")
     if orc.get('authorization_updated'):
         html += f"<div style='font-size:0.85em; color:#888; margin-top:14px'>Last changed " \
                 + f"{escape(str(orc['authorization_updated'])[:19])}"
         if orc.get('authorization_updated_by'):
             html += f" by {escape(str(orc['authorization_updated_by']))}"
         html += "</div>"
+    html += "<br><a class='btn btn-outline-secondary' href='/authorizations'>Back</a>"
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
-                                         title="Edit authorizations", html=html,
+                                         title="Edit person", html=html,
                                          navbar=generate_navbar('')))
 
 
