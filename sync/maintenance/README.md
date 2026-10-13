@@ -1,6 +1,6 @@
 # dis-utilities:sync/maintenance
 
-## Periodic maintenance of the orcid collection
+## Periodic maintenance of the dis database
 
 These programs correct and enrich data that is already in the `dis` database.
 They are not part of the nightly synchronization: nothing upstream changes
@@ -8,6 +8,8 @@ because of them, and skipping a run costs nothing. Run them when the data
 needs it, either by hand or on a long interval.
 
 Each one proposes changes and writes nothing without `--write`.
+
+### The orcid collection
 
 | Name                       | Description                                                       |
 | -------------------------- | ----------------------------------------------------------------- |
@@ -18,6 +20,37 @@ Each one proposes changes and writes nothing without `--write`.
 
 Run `add_orcid_name_variants.py` first to bring in the variants ORCID knows
 about, then `fix_middle_names.py` to permute what is there.
+
+### The dois collection
+
+| Name                        | Description                                                  |
+| --------------------------- | ------------------------------------------------------------ |
+| backfill_openalex_impact.py | Populate `jrc_openalex_impact` on articles and preprints      |
+
+`backfill_openalex_impact.py` is a one-shot catch-up, not a recurring job.
+`sync_citations.py` collects the same field as a side effect of its OpenAlex
+lookup and writes it whenever it writes the other citation fields - including
+on the paths where it skips pagination - so newly ingested DOIs are covered
+without running this again.
+
+It exists because backfilling *through* the sync is prohibitive: a
+`sync_citations` pass spends roughly 33 seconds per DOI paginating
+ScholeXplorer for citing DOIs, and this field comes from neither ScholeXplorer
+nor the pagination. One OpenAlex work lookup takes about 0.7 seconds.
+
+A re-run is almost always wasted. The DOIs it leaves without the field are not
+failures: they are works OpenAlex holds but has never *ranked*, mostly
+preprints and lightly-cited papers, and it will keep returning nothing for
+them. Re-run only to retry genuine lookup errors, or with `--all` to
+re-baseline existing values - unlike a citation count, a percentile can
+legitimately fall, so it is deliberately kept out of the high-water-mark logic.
+
+Delete it once the corpus is covered.
+
+Unlike the programs above it imports from `sync/bin`, via a `sys.path` line at
+the top. That is on purpose: the OpenAlex contact address, API key handling and
+backoff are shared with the nightly sync rather than copied, so the two cannot
+drift.
 
 ### Why both spellings of a middle initial
 

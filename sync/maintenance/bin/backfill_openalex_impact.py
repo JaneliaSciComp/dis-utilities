@@ -22,7 +22,9 @@
     given, so an interrupted run is restarted by running it again.
 
     Delete this program once the corpus is covered. The nightly sync keeps the
-    field current from then on.
+    field current from then on - it writes jrc_openalex_impact whenever it
+    writes the other citation fields, including on the paths where it skips
+    pagination, so newly ingested DOIs are covered without running this again.
 """
 
 __version__ = '1.0.0'
@@ -30,6 +32,7 @@ __version__ = '1.0.0'
 import argparse
 from operator import attrgetter
 import os
+from pathlib import Path
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -37,8 +40,17 @@ from pymongo import UpdateOne
 from tqdm import tqdm
 
 import jrc_common.jrc_common as JRC
-# The nightly sync's helpers: identical auth, identical retry/backoff.
-from sync_citations import OPENALEX_WORK, get_with_retry, with_openalex_auth
+
+# sync_citations lives in sync/bin, and this program lives here because it is
+# maintenance rather than synchronization (see ../README.md). Python puts only
+# this script's own directory on the path, so point it at the sibling.
+#
+# The import is deliberate: the OpenAlex contact address, the API key handling
+# and the backoff - including the Retry-After cap added after OpenAlex's daily
+# budget returned a seven-hour retry and hung a sync - are shared rather than
+# copied, so they cannot drift from the nightly run.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'bin'))
+from sync_citations import OPENALEX_WORK, get_with_retry, with_openalex_auth  # noqa: E402  pylint: disable=wrong-import-position
 
 # Database
 DB = {}
