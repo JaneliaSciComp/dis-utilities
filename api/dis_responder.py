@@ -57,7 +57,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.102.2"
+__version__ = "120.103.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -921,10 +921,39 @@ def profile():
     html += person_platform_logos(person)
     if record.get('last_login'):
         html += f"<tr><td>Last sign-in:</td><td>{escape(str(record['last_login'])[:19])}</td></tr>"
-    # Authorizations are not built yet; say so rather than implying none exist.
-    html += ("<tr><td>Authorizations:</td><td><span style='color:#888'>Everyone can see "
-             "almost every page. Named authorizations - for cost data, for administration "
-             "- are not in place yet.</span></td></tr>")
+    # What is GRANTED, not what authorizations() expands to: an administrator
+    # holds every term, and listing them all would read as four separate grants
+    # rather than one. The implication is stated instead.
+    # person, not record: person is the orcid document (where authorizations
+    # live), record is the user_auth row (password, last_login).
+    granted = sorted(a for a in (person.get('authorization') or []) if a)
+    eligible, why = may_be_authorized(person)
+    if not granted:
+        auth_html = "<span style='color:#888'>None. Most pages need only a " \
+                    "sign-in; a few need a named authorization, which an " \
+                    "administrator can grant.</span>"
+    else:
+        terms = CVTERM.get('authorization') or {}
+        shown = []
+        for name in granted:
+            display = (terms.get(name) or {}).get('display', name)
+            definition = (terms.get(name) or {}).get('definition', '')
+            item = f"<b>{escape(str(display))}</b>"
+            if definition:
+                item += f" <span style='color:#888'>&mdash; {escape(str(definition))}</span>"
+            shown.append(item)
+        auth_html = "<br>".join(shown)
+        if 'admin' in granted:
+            auth_html += "<br><span style='color:#888'>Administrator carries every " \
+                         "authorization, including any added later.</span>"
+        # A grant only takes effect while the holder keeps an ORCID iD and is not
+        # alumni. A departed contingent worker can still sign in and reach this
+        # page, so they would otherwise see a list that does nothing.
+        if not eligible:
+            auth_html += "<br>" + render_warning(f"Not in effect ({why}).", 'warning')
+    if 'admin' in authorizations(person):
+        auth_html += "<br><a href='/authorizations'>Manage authorizations</a>"
+    html += f"<tr><td>Authorizations:</td><td>{auth_html}</td></tr>"
     html += "</table><br>"
     # The API token is step 7 of docs/AUTHENTICATION_PLAN.md. Named here because
     # this is where people will come looking for it.
@@ -15626,7 +15655,7 @@ def dois_author(year='All'):
 
 @app.route('/dois_top_author/<string:year>')
 @app.route('/dois_top_author')
-@restricted
+@restricted('admin')
 def dois_top_author(year='All'):
     ''' Show top first and last authors
     '''

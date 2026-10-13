@@ -259,3 +259,23 @@ def test_the_403_message_is_plain_text():
     msg = block.split('This page needs')[1].split('), 403)')[0]
     assert '&quot;' not in msg, 'entities are shown literally in an escaped sink'
     assert 'escape(' not in msg, 'message= is already escaped by the template'
+
+
+def test_the_profile_reads_authorizations_off_the_orcid_record():
+    ''' /profile holds two documents: person (the orcid record, where
+        authorizations live) and record (the user_auth row, which carries the
+        password and last_login). Reading the wrong one shows "None" to
+        everybody, and looks right.
+    '''
+    block = SOURCE.split('def profile()')[1].split('\ndef ')[0]
+    auth = block.split('granted = sorted')[1].split('<tr><td>Authorizations')[0]
+    assert 'record.get(' not in auth, 'authorizations live on person, not record'
+    assert "person.get('authorization')" in auth
+
+
+def test_the_profile_shows_what_was_granted_not_what_it_expands_to():
+    ''' An administrator holds every term. Listing them all would read as four
+        separate grants rather than one, so the implication is stated instead.
+    '''
+    block = SOURCE.split('def profile()')[1].split('\ndef ')[0]
+    assert 'Administrator carries every' in block
