@@ -68,7 +68,7 @@ from dis_state import CVTERM, PROJECT
 # on the image. feat -> minor, everything else -> patch, in the same commit as
 # the change. Forgetting is survivable: ocbuild warns that the tag already
 # exists in the ImageStream rather than silently overwriting it.
-__version__ = "120.109.1"
+__version__ = "120.109.2"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -23645,7 +23645,8 @@ def _cv_term_rows(cv, editing):
         if name == editing:
             fmt = "".join(f"<option{' selected' if f == row.get('format') else ''}>"
                           f"{escape(f)}</option>" for f in formats)
-            form = (f"<form method='POST'><input type='hidden' name='action' value='save_term'>"
+            form = (f"<form method='POST' action='/cv/{escape(cv)}'>"
+                    f"<input type='hidden' name='action' value='save_term'>"
                     f"<input type='hidden' name='cv' value='{escape(cv)}'>"
                     f"<input type='hidden' name='name' value='{escape(name)}'>")
             rows.append([
@@ -23726,7 +23727,11 @@ def cvs(cv=None):
         if current.get('definition'):
             html += f"<div style='color:#a8c4e0'>{escape(current['definition'])}</div>"
         try:
-            trows = _cv_term_rows(cv, request.args.get('edit'))
+            # Not honoured on a POST: every form here posts to the current URL,
+            # which still carries ?edit=<name>, so a saved row came straight back
+            # as a form and a delete elsewhere on the page reopened the editor.
+            editing = request.args.get('edit') if request.method == 'GET' else None
+            trows = _cv_term_rows(cv, editing)
         except Exception as err:
             return render_template('error.html', urlroot=request.url_root,
                                    title=render_warning("Could not get cvterms"),

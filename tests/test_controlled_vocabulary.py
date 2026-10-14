@@ -149,3 +149,17 @@ def test_every_change_records_who_and_when():
     assert '"updated": datetime.now()' in block
     assert '"updated_by": me.get(\'orcid\')' in block
     assert block.count('**stamp') >= 3, 'add_cv, add_term and save_term all stamp'
+
+
+def test_a_post_leaves_edit_mode():
+    ''' Every form on the page posts to the current URL, which still carries
+        ?edit=<name>. Honouring it on a POST put a just-saved row back into the
+        editor, and reopened it after deleting an unrelated term.
+    '''
+    block = _block('def cvs(cv=None)', 'endpoint_access()')
+    assert "request.args.get('edit') if request.method == 'GET' else None" in block
+
+
+def test_the_edit_form_posts_to_the_clean_url():
+    block = _block('def _cv_term_rows', '\n@app.route')
+    assert "action='/cv/{escape(cv)}'" in block
