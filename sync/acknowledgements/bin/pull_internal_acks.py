@@ -140,7 +140,7 @@ import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
 import jrc_email.jrc_email as JE
 
-__version__ = '1.9.0'
+__version__ = '1.9.1'
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation,no-member
 
@@ -761,10 +761,27 @@ def generate_email(internal, error):
         found += ('<div style="color:#5b6b7c;font-size:13px;">'
                   'No new acknowledgements were found.</div>')
     body = JE.body_row(found)
-    if error:
-        err_entries = [(e['doi'], f"{e['source']}: {e['error']}") for e in error]
-        body += JE.body_row(JE.section_header(f"&#9888; Errors ({len(error):,})")
+    # Two kinds of record live in `error` since 1.9.0 and they read differently:
+    # a fault needs its message, a settled no-full-text answer needs the service
+    # that refused and why. Keying on 'error' alone raised KeyError on the
+    # second kind.
+    faults = [e for e in error if e.get('outcome') != 'no_fulltext']
+    absent = [e for e in error if e.get('outcome') == 'no_fulltext']
+    if faults:
+        err_entries = [(e['doi'], f"{e['source']}: {e.get('error', '(no detail)')}")
+                       for e in faults]
+        body += JE.body_row(JE.section_header(f"&#9888; Errors ({len(faults):,})")
                             + JE.doi_card("Errors", err_entries, 'bad', second_header='Detail'))
+    if absent:
+        # 'warn', not 'bad': nothing failed. The full text is not available to
+        # us, which for an author manuscript or subscription article is the
+        # permanent and correct answer.
+        abs_entries = [(e['doi'],
+                        f"{e.get('code', 'unavailable')} from "
+                        f"{e.get('service') or e['source']}") for e in absent]
+        body += JE.body_row(
+            JE.section_header(f"No full text available ({len(absent):,})")
+            + JE.doi_card("No full text", abs_entries, 'warn', second_header='Detail'))
     msg = JE.render(os.path.basename(__file__), __version__, run_data,
                     mode_label, mode_tone, kpis, body)
     email = DIS['developer']
