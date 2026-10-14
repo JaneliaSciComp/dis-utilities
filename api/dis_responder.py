@@ -68,7 +68,7 @@ from dis_state import CVTERM, PROJECT
 # on the image. feat -> minor, everything else -> patch, in the same commit as
 # the change. Forgetting is survivable: ocbuild warns that the tag already
 # exists in the ImageStream rather than silently overwriting it.
-__version__ = "120.109.0"
+__version__ = "120.109.1"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -23707,6 +23707,19 @@ def cvs(cv=None):
         sel = " selected" if row['name'] == cv else ""
         html += f"<option value='{escape(row['name'])}'{sel}>{escape(row['display'])}</option>"
     html += "</select></form><br>"
+    # Directly under the selector: it belongs with "which vocabulary", not at
+    # the foot of a page whose middle is all about the terms of one of them.
+    html += "<h4>Add a controlled vocabulary</h4>" \
+            + "<form method='POST'><input type='hidden' name='action' value='add_cv'>" \
+            + "<div class='flexcontainer'>" \
+            + "<div class='flexitem'><input class='form-control' name='cv' " \
+            + "placeholder='name (lower_case)' required></div>" \
+            + "<div class='flexitem'><input class='form-control' name='display' " \
+            + "placeholder='display name'></div>" \
+            + "<div class='flexitem'><input class='form-control' name='definition' " \
+            + "placeholder='definition'></div>" \
+            + "<div class='flexitemauto'><button type='submit' class='btn btn-primary'>" \
+            + "Add</button></div></div></form><br>"
     if cv:
         current = next((row for row in cvlist if row['name'] == cv), {})
         html += f"<h4>{escape(current.get('display', cv))}</h4>"
@@ -23751,17 +23764,6 @@ def cvs(cv=None):
                     + f"<input type='hidden' name='cv' value='{escape(cv)}'>" \
                     + "<button type='submit' class='btn btn-outline-danger btn-sm'>" \
                     + f"Delete the empty {escape(cv)} vocabulary</button></form>"
-    html += "<h4 style='margin-top:28px'>Add a vocabulary</h4>" \
-            + "<form method='POST'><input type='hidden' name='action' value='add_cv'>" \
-            + "<div class='flexcontainer'>" \
-            + "<div class='flexitem'><input class='form-control' name='cv' " \
-            + "placeholder='name (lower_case)' required></div>" \
-            + "<div class='flexitem'><input class='form-control' name='display' " \
-            + "placeholder='display name'></div>" \
-            + "<div class='flexitem'><input class='form-control' name='definition' " \
-            + "placeholder='definition'></div>" \
-            + "<div class='flexitemauto'><button type='submit' class='btn btn-primary'>" \
-            + "Add</button></div></div></form>"
     endpoint_access()
     return make_response(render_template('cv.html', urlroot=request.url_root,
                                          title="Controlled vocabularies", html=html,
