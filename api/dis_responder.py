@@ -57,7 +57,18 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.107.1"
+# THE DEPLOY TAG. "ocbuild dis-utilities <version>" tags the OpenShift
+# ImageStream with this value, so it identifies the running image, not this
+# file: bump it for ANYTHING that ships in api/ - dis_html.py, dis_config.py,
+# dis_plots.py, dis_state.py, templates/, static/, and config.cfg, which is
+# gitignored but goes into the build context all the same.
+#
+# No other module here carries a __version__ on purpose. There is one
+# deployable artifact, so a second number could only ever disagree with the one
+# on the image. feat -> minor, everything else -> patch, in the same commit as
+# the change. Forgetting is survivable: ocbuild warns that the tag already
+# exists in the ImageStream rather than silently overwriting it.
+__version__ = "120.108.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
