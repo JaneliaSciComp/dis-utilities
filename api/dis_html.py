@@ -799,7 +799,7 @@ def add_subjects(row, html=None):
         Returns:
           HTML with subjects added, or the bare subject string in compact mode
     '''
-    heading, text = "", ""
+    heading, text, note = "", "", ""
     if row and row.get('jrc_obtained_from') == 'DataCite' and row.get('subjects'):
         heading = "DataCite subjects"
         text = ', '.join(sub['subject'] for sub in row['subjects'])
@@ -818,10 +818,17 @@ def add_subjects(row, html=None):
         if subjects:
             heading = "MeSH subjects"
             text = ', '.join(subjects)
+            # Emitted with its own section rather than at the foot of the tab,
+            # or it reads as a caption for whatever section came last - which,
+            # since the OpenAlex topic was added below, it was.
+            if any(not mesh.get('major_topic') for mesh in row['jrc_mesh']):
+                note = "<br><i class='fa-solid fa-circle-info'></i> Subjects in " \
+                       + "<span style='color: #88a'>gray-blue</span> are considered " \
+                       + "minor in MeSH"
     if html is None:
         return text
     if text:
-        html += f"<h4>{heading}</h4>{text}"
+        html += f"<h4>{heading}</h4>{text}{note}"
     # Additive, not an elif: a record may carry a registrar vocabulary AND an
     # OpenAlex topic, and 1,464 Crossref DOIs have a topic with no MeSH at all -
     # an empty tab until now.

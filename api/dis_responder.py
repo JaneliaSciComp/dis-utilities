@@ -57,7 +57,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.106.1"
+__version__ = "120.106.2"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -8552,13 +8552,10 @@ def doi_tabs(doi, row, rowext, data, authors):
     ahtml = "&nbsp;"
     if row:
         try:
+            # The MeSH caveat now travels with the MeSH section inside
+            # add_subjects, so it sits above the OpenAlex topic rather than
+            # under it.
             ahtml = add_subjects(row, ahtml)
-            # Keyed on the actual condition, not on "a span appeared anywhere":
-            # the OpenAlex topic also renders spans, and the old test would have
-            # claimed a minor MeSH term on records that have no MeSH at all.
-            if any(not mesh.get('major_topic') for mesh in (row.get('jrc_mesh') or [])):
-                ahtml += "<br><i class='fa-solid fa-circle-info'></i> Subjects in " \
-                         + "<span style='color: #88a'>gray-blue</span> are considered minor in MeSH"
             impact = row.get('jrc_openalex_impact') or {}
             score = impact.get('topic_score')
             if isinstance(score, (int, float)) and score < TOPIC_MIN_CONFIDENCE:
