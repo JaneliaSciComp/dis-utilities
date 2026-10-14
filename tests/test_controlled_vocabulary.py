@@ -222,3 +222,28 @@ def test_format_keeps_its_default():
     '''
     block = _block('def _save_cv_change', '\ndef _cv_term_rows')
     assert block.count("strip() or 'string'") == 2
+
+
+def test_both_admin_pages_are_in_the_menu():
+    ''' /authorizations was reachable only from /profile, so an admin who had
+        not visited their own profile had no way to find the page that grants
+        access - while /cv, which needs that access, was listed.
+
+        Neither needs special casing: the navbar hides a gated target from
+        anyone who cannot open it, keyed off the @restricted decorator.
+    '''
+    nav = (ROOT / 'api' / 'dis_html.py').read_text(encoding='utf-8')
+    block = nav[nav.index('"System"'):]
+    block = block[:block.index('}')]
+    for label, target in (('Controlled vocabularies', 'cv'),
+                          ('Authorizations', 'authorizations')):
+        assert f'"{label}": "{target}"' in block, label
+
+
+def test_the_menu_targets_match_their_route_rules():
+    ''' A NAV value is matched against the route rule with the leading slash
+        stripped, so a typo would leave the entry visible to everyone.
+    '''
+    import re
+    for target in ('cv', 'authorizations'):
+        assert re.search(r"@app\.route\('/" + target + r"'[,)]", SOURCE), target

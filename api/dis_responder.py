@@ -68,7 +68,7 @@ from dis_state import CVTERM, PROJECT
 # on the image. feat -> minor, everything else -> patch, in the same commit as
 # the change. Forgetting is survivable: ocbuild warns that the tag already
 # exists in the ImageStream rather than silently overwriting it.
-__version__ = "120.110.0"
+__version__ = "120.110.1"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
