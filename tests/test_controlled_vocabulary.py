@@ -233,11 +233,19 @@ def test_both_admin_pages_are_in_the_menu():
         anyone who cannot open it, keyed off the @restricted decorator.
     '''
     nav = (ROOT / 'api' / 'dis_html.py').read_text(encoding='utf-8')
-    block = nav[nav.index('"System"'):]
-    block = block[:block.index('}')]
+    # Not sliced to the "System" block: it contains a nested submenu, so the
+    # first closing brace is that submenu's rather than System's.
     for label, target in (('Controlled vocabularies', 'cv'),
                           ('Authorizations', 'authorizations')):
-        assert f'"{label}": "{target}"' in block, label
+        assert f'"{label}": "{target}"' in nav, label
+    # ...and they are adjacent, which is the point of adding it here. Measured
+    # by what lies between them rather than by a character count, so a comment
+    # does not read as a gap.
+    start = nav.index('"Controlled vocabularies": "cv",') + len('"Controlled vocabularies": "cv",')
+    between = nav[start:nav.index('"Authorizations": "authorizations"')]
+    for line in between.split('\n'):
+        assert not line.strip() or line.strip().startswith('#'), \
+            f'another menu entry sits between them: {line.strip()[:60]}'
 
 
 def test_the_menu_targets_match_their_route_rules():
