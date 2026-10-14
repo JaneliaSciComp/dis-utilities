@@ -68,7 +68,7 @@ from dis_state import CVTERM, PROJECT
 # on the image. feat -> minor, everything else -> patch, in the same commit as
 # the change. Forgetting is survivable: ocbuild warns that the tag already
 # exists in the ImageStream rather than silently overwriting it.
-__version__ = "120.109.2"
+__version__ = "120.109.3"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -23556,6 +23556,11 @@ def _save_cv_change(me):
         Returns:
           Rendered note
     """
+    # Failures return early, successes fall through to the end - so this flag,
+    # set just before that return, says precisely whether anything was written.
+    # cvs() needs to know: a REFUSED create used to navigate the reader to the
+    # vocabulary they had failed to create, which reads as success.
+    g.cv_change_ok = False
     form = request.form
     action = form.get('action', '')
     cv = (form.get('cv') or '').strip()
@@ -23625,6 +23630,7 @@ def _save_cv_change(me):
         return render_warning("Could not save that change.", 'error')
     print(f"CV {action}: cv={cv!r} name={name!r} by {me.get('orcid')}")
     refresh_cvterm()
+    g.cv_change_ok = True
     return note
 
 
@@ -23690,9 +23696,18 @@ def cvs(cv=None):
     note = ""
     if request.method == 'POST':
         note = _save_cv_change(current_user() or {})
-        cv = (request.form.get('cv') or cv) or None
-        if request.form.get('action') == 'del_cv':
+        action = request.form.get('action')
+        if action == 'del_cv':
             cv = None
+        elif action == 'add_cv':
+            # Follow a creation only when it happened. The posted "cv" here is
+            # the name being CREATED, not the one being viewed, so following it
+            # unconditionally landed a refused create on the existing
+            # vocabulary - indistinguishable from having worked.
+            if getattr(g, 'cv_change_ok', False):
+                cv = request.form.get('cv')
+        else:
+            cv = (request.form.get('cv') or cv) or None
     try:
         cvlist = list(DB['dis'].cv.find({}).sort("display", 1))
     except Exception as err:

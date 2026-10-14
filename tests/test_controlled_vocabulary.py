@@ -163,3 +163,21 @@ def test_a_post_leaves_edit_mode():
 def test_the_edit_form_posts_to_the_clean_url():
     block = _block('def _cv_term_rows', '\n@app.route')
     assert "action='/cv/{escape(cv)}'" in block
+
+
+def test_a_refused_create_does_not_navigate_to_the_existing_vocabulary():
+    ''' The posted "cv" on an add_cv is the name being CREATED, not the one
+        being viewed. Following it unconditionally landed a refused create on
+        the vocabulary that already existed, which reads as success even though
+        the warning was right there.
+    '''
+    block = _block('def cvs(cv=None)', 'endpoint_access()')
+    assert "elif action == 'add_cv':" in block
+    assert "if getattr(g, 'cv_change_ok', False):" in block
+
+
+def test_the_handler_reports_whether_anything_was_written():
+    save = _block('def _save_cv_change', '\ndef _cv_term_rows')
+    assert 'g.cv_change_ok = False' in save
+    assert 'g.cv_change_ok = True' in save
+    assert save.index('g.cv_change_ok = False') < save.index('g.cv_change_ok = True')
