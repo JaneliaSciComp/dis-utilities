@@ -140,7 +140,7 @@ import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
 import jrc_email.jrc_email as JE
 
-__version__ = '1.9.1'
+__version__ = '1.10.0'
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation,no-member
 
@@ -893,7 +893,17 @@ def processing():
     if no_ack_dois:
         with open('no_ack_marked.json', 'w', encoding='utf-8') as fileout:
             json.dump(no_ack_dois, fileout, indent=4)
-    if internal or COUNT['no_ack_marked']:
+    # Send when something happened worth reading: an ack was found, a DOI was
+    # marked, or something actually FAILED. A run whose only outcome is
+    # "no full text available" is a quiet no-op and stays silent - that is the
+    # routine answer for author manuscripts and subscription articles, and
+    # mailing it nightly would train the reader to ignore the report.
+    #
+    # Faults were previously unreportable on their own: a run that found nothing
+    # and errored on everything sent no email at all, which is how a 528-error
+    # run passed unnoticed.
+    faults = [e for e in error if e.get('outcome') != 'no_fulltext']
+    if internal or COUNT['no_ack_marked'] or faults:
         generate_email(internal, error)
 
 # -----------------------------------------------------------------------------
