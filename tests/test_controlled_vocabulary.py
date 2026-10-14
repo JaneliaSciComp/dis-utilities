@@ -181,3 +181,44 @@ def test_the_handler_reports_whether_anything_was_written():
     assert 'g.cv_change_ok = False' in save
     assert 'g.cv_change_ok = True' in save
     assert save.index('g.cv_change_ok = False') < save.index('g.cv_change_ok = True')
+
+
+# --- display name ----------------------------------------------------------
+
+def test_a_display_name_is_required_and_never_defaults_to_the_name():
+    ''' Defaulting to the name is right for a licence ("CC BY" is both) and
+        wrong for the vocabulary that exists to give fields readable names - a
+        blank would have rendered jrc_dataset_supplement_updated as a label.
+        The form cannot tell which case it is in, so it asks.
+    '''
+    block = _block('def _save_cv_change', '\ndef _cv_term_rows')
+    assert 'A display name is required.' in block
+    assert "action in ('add_cv', 'add_term', 'save_term')" in block
+    assert 'strip() or cv' not in block, 'add_cv must not fall back to the cv name'
+    assert 'strip() or name' not in block, 'terms must not fall back to the term name'
+
+
+def test_editing_cannot_silently_wipe_an_existing_display():
+    ''' Different failure from the add case: on edit, clearing the box used to
+        reset the display to the raw name rather than failing.
+    '''
+    block = _block("elif action == 'save_term':", "elif action == 'del_term':")
+    assert '"display": display,' in block
+
+
+def test_all_three_display_inputs_are_required():
+    ''' The two add forms and the inline edit input. '''
+    import re
+    flat = re.sub(r'"\s*\\?\s*\n\s*\+\s*(f?)"', '', SOURCE)
+    inputs = re.findall(r"<input[^>]*name='display'[^>]*>", flat)
+    assert len(inputs) == 3, f'expected 3 display inputs, found {len(inputs)}'
+    for tag in inputs:
+        assert 'required' in tag, tag[:80]
+
+
+def test_format_keeps_its_default():
+    ''' Unlike display, format is a select with no empty option, so it cannot
+        arrive blank from the form - the default only guards a forged POST.
+    '''
+    block = _block('def _save_cv_change', '\ndef _cv_term_rows')
+    assert block.count("strip() or 'string'") == 2

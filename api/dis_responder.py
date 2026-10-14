@@ -68,7 +68,7 @@ from dis_state import CVTERM, PROJECT
 # on the image. feat -> minor, everything else -> patch, in the same commit as
 # the change. Forgetting is survivable: ocbuild warns that the tag already
 # exists in the ImageStream rather than silently overwriting it.
-__version__ = "120.109.3"
+__version__ = "120.110.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -23567,6 +23567,13 @@ def _save_cv_change(me):
     name = (form.get('name') or '').strip()
     stamp = {"updated": datetime.now(), "updated_by": me.get('orcid')}
     try:
+        display = (form.get('display') or '').strip()
+        # No fallback to the name. It is right for a licence ("CC BY" is both),
+        # and wrong for the vocabulary that exists to give fields readable names
+        # - a blank would have rendered jrc_dataset_supplement_updated as a
+        # label. The form cannot tell which case it is in, so it asks.
+        if action in ('add_cv', 'add_term', 'save_term') and not display:
+            return render_warning("A display name is required.", 'warning')
         if action == 'add_cv':
             if not CV_NAME_RE.match(cv):
                 return render_warning("A CV name must be lower-case, start with a "
@@ -23575,7 +23582,7 @@ def _save_cv_change(me):
             if DB['dis'].cv.find_one({"name": cv}):
                 return render_warning(f"A CV named {cv} already exists.", 'warning')
             DB['dis'].cv.insert_one({"name": cv,
-                                     "display": form.get('display', '').strip() or cv,
+                                     "display": display,
                                      "definition": form.get('definition', '').strip(),
                                      **stamp})
             note = render_warning(f"Added the {cv} vocabulary.", 'success')
@@ -23592,7 +23599,7 @@ def _save_cv_change(me):
             if DB['dis'].cvterm.find_one({"cv": cv, "name": name}):
                 return render_warning(f"{cv} already has a term named {name}.", 'warning')
             DB['dis'].cvterm.insert_one({"cv": cv, "name": name,
-                                         "display": form.get('display', '').strip() or name,
+                                         "display": display,
                                          "definition": form.get('definition', '').strip(),
                                          "format": form.get('format', '').strip() or 'string',
                                          **stamp})
@@ -23604,7 +23611,7 @@ def _save_cv_change(me):
             # migrate, remove the old.
             res = DB['dis'].cvterm.update_one(
                 {"cv": cv, "name": name},
-                {"$set": {"display": form.get('display', '').strip() or name,
+                {"$set": {"display": display,
                           "definition": form.get('definition', '').strip(),
                           "format": form.get('format', '').strip() or 'string',
                           **stamp}})
@@ -23658,7 +23665,7 @@ def _cv_term_rows(cv, editing):
             rows.append([
                 safe(f"<b>{escape(name)}</b>{form}"),
                 safe(f"<input class='form-control form-control-sm' name='display' "
-                     f"value='{escape(row.get('display', ''))}'>"),
+                     f"value='{escape(row.get('display', ''))}' required>"),
                 safe(f"<input class='form-control form-control-sm' name='definition' "
                      f"value='{escape(row.get('definition', ''))}'>"),
                 safe(f"<select class='form-control form-control-sm' name='format'>{fmt}</select>"),
@@ -23731,7 +23738,7 @@ def cvs(cv=None):
             + "<div class='flexitem'><input class='form-control' name='cv' " \
             + "placeholder='name (lower_case)' required></div>" \
             + "<div class='flexitem'><input class='form-control' name='display' " \
-            + "placeholder='display name'></div>" \
+            + "placeholder='display name' required></div>" \
             + "<div class='flexitem'><input class='form-control' name='definition' " \
             + "placeholder='definition'></div>" \
             + "<div class='flexitemauto'><button type='submit' class='btn btn-primary'>" \
@@ -23770,7 +23777,7 @@ def cvs(cv=None):
                 + "<div class='flexitem'><input class='form-control' name='name' " \
                 + "placeholder='name' required></div>" \
                 + "<div class='flexitem'><input class='form-control' name='display' " \
-                + "placeholder='display name'></div>" \
+                + "placeholder='display name' required></div>" \
                 + "<div class='flexitem'><input class='form-control' name='definition' " \
                 + "placeholder='definition'></div>" \
                 + f"<div class='flexitemauto'><select class='form-control' name='format'>{fmt}" \
