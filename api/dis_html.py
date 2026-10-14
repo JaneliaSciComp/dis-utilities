@@ -733,14 +733,20 @@ def get_license(lic):
     return f"{lic} ({CVTERM['license'][lic]['definition']})"
 
 
-# Below this, OpenAlex's own confidence in a topic assignment is low enough that
-# the label is worth reading with suspicion. 14% of this corpus falls here -
-# mostly interdisciplinary work that no single topic describes well.
+# Below this, OpenAlex's own confidence in a topic assignment is low enough to
+# flag. 14% of this corpus falls here - mostly interdisciplinary work that no
+# single topic describes well.
 TOPIC_MIN_CONFIDENCE = 0.6
+# The app's warning amber, used elsewhere for the same purpose. Deliberately NOT
+# the #88a this page uses for a minor MeSH term: an indexer calling a term
+# secondary and a classifier being unsure are different statements, and one
+# colour for both would say they are the same.
+LOW_CONFIDENCE_COLOR = '#f0ad4e'
 
 
 def openalex_topic_html(row):
-    """ OpenAlex's topic for a work, with its subfield for context
+    """ OpenAlex's topic for a work, with its subfield and the classifier's
+        confidence
 
         A category, not a judgement - which is why it belongs beside MeSH and
         DataCite subjects while the field-weighted citation figure on the same
@@ -749,9 +755,13 @@ def openalex_topic_html(row):
         both derive from the subfield and are too broad to inform ("Life
         Sciences" covers nearly this whole corpus).
 
-        A weak assignment is greyed, the same way a minor MeSH term is, so the
-        page has one visual language for "take this with a pinch of salt". The
-        score is on the tooltip either way, for anyone who wants the number.
+        Confidence is shown as its own annotation and the topic is NEVER
+        greyed, deliberately. Greying it would borrow the treatment this page
+        gives a minor MeSH term, and the two mean different things: a minor
+        MeSH term is an indexer deciding the term is secondary to the paper,
+        while a low score is a classifier unsure what the paper is about. The
+        label is not less true, so it is not shown as lesser - the uncertainty
+        is attached to the figure it belongs to.
         Keyword arguments:
           row: row from dois collection
         Returns:
@@ -761,15 +771,17 @@ def openalex_topic_html(row):
     topic = impact.get('topic')
     if not topic:
         return ""
+    out = escape(topic)
+    if impact.get('subfield'):
+        out += f" <span style='color:#888'>in {escape(impact['subfield'])}</span>"
     score = impact.get('topic_score')
-    subfield = impact.get('subfield')
-    tip = f"OpenAlex confidence {score:.2f}" if isinstance(score, (int, float)) \
-          else "OpenAlex classification"
-    weak = isinstance(score, (int, float)) and score < TOPIC_MIN_CONFIDENCE
-    style = " style='color: #88a'" if weak else ""
-    out = f"<span{style} title='{escape(tip)}'>{escape(topic)}</span>"
-    if subfield:
-        out += f" <span style='color:#888'>in {escape(subfield)}</span>"
+    if isinstance(score, (int, float)):
+        if score < TOPIC_MIN_CONFIDENCE:
+            out += f" <span style='color:{LOW_CONFIDENCE_COLOR}' " \
+                   + "title='OpenAlex was unsure how to classify this work'>" \
+                   + f"&#9888; low confidence ({score:.2f})</span>"
+        else:
+            out += f" <span style='color:#888'>&middot; confidence {score:.2f}</span>"
     return out
 
 

@@ -57,7 +57,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.106.0"
+__version__ = "120.106.1"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -8562,10 +8562,11 @@ def doi_tabs(doi, row, rowext, data, authors):
             impact = row.get('jrc_openalex_impact') or {}
             score = impact.get('topic_score')
             if isinstance(score, (int, float)) and score < TOPIC_MIN_CONFIDENCE:
-                ahtml += "<br><i class='fa-solid fa-circle-info'></i> The OpenAlex topic " \
-                         + "is shown in <span style='color: #88a'>gray-blue</span> where " \
-                         + "its classifier was unsure &mdash; usually interdisciplinary " \
-                         + "work that no single topic describes well. Hover for the score."
+                ahtml += "<br><i class='fa-solid fa-circle-info'></i> OpenAlex scored its " \
+                         + "own classification of this work below " \
+                         + f"{TOPIC_MIN_CONFIDENCE:.1f} &mdash; usually interdisciplinary " \
+                         + "work that no single topic describes well. The topic is still " \
+                         + "the one OpenAlex assigned; only its confidence is in question."
         except Exception:
             pass
         if ahtml != "&nbsp;":
