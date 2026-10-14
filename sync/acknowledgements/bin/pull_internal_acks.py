@@ -128,6 +128,7 @@ from datetime import datetime, timedelta
 import json
 from operator import attrgetter
 import os
+import re
 import sys
 import time
 import requests
@@ -139,7 +140,7 @@ import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
 import jrc_email.jrc_email as JE
 
-__version__ = '1.8.1'
+__version__ = '1.10.0'
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation,no-member
 
@@ -165,6 +166,21 @@ NO_ACK_FIELD = 'jrc_no_acknowledgements'
 NO_ACK_THRESHOLD_DAYS = 180
 CHECKED_NO_ACK = set()
 FETCH_ERRORED = set()
+NO_FULLTEXT = set()
+# OAI-PMH condition codes that are settled answers, not transient faults:
+#   cannotDisseminateFormat  PMC holds the record but will not serve its full
+#                            text - author manuscripts and subscription content
+#                            outside the Open Access subset. Permanent.
+#   idDoesNotExist           PMC has no record under that identifier.
+# Both were being written to the error file and counted as fetch errors, which
+# re-attempted them on every run forever and buried any real failure among them.
+SETTLED_OAI_CODES = ('cannotDisseminateFormat', 'idDoesNotExist')
+# Sources for which PMC IS the primary lookup. A settled PMC answer for these is
+# genuinely the end of the road. For the others (eLife, Elsevier, arXiv ...) the
+# PMC call is only a backstop reached after the primary source came up empty, so
+# a settled answer here says nothing about whether the primary will work later -
+# it is recorded, but it does not retire the DOI.
+PMC_PRIMARY_SOURCES = ('pmc', 'europepmc')
 # Display order for the "source" label stored on each internal-DOI record
 # (add_elife_internal_acks etc.), used to group the run-summary email.
 SOURCE_LABELS = ('eLife', 'Elsevier', 'PMC', 'arXiv', 'bioRxiv', 'medRxiv', 'Europe PMC')
@@ -294,6 +310,51 @@ def record_ack(internal, rec):
         flush_acks(internal)
 
 
+def record_fetch_failure(error, doi, source, err, **extra):
+    ''' Record one failed fetch, distinguishing a settled answer from a fault
+
+        An OAI-PMH cannotDisseminateFormat is not an error - it is PMC saying it
+        will not serve that article's full text, which is permanent for author
+        manuscripts and subscription content. Counting it as a fetch error made
+        every run retry the same closed articles and hid real failures in the
+        total.
+
+        The service that actually answered is recorded too. The record used to
+        carry only the source the attempt STARTED from, so a PMC refusal reached
+        via the Elsevier backstop was filed under "elsevier" and sent a reader
+        looking at the wrong vendor.
+        Keyword arguments:
+          error: list of error records to append to
+          doi: DOI
+          source: source the attempt started from
+          err: the raised exception
+          extra: any additional fields for the record
+        Returns:
+          None
+    '''
+    text = str(err)
+    code = next((c for c in SETTLED_OAI_CODES if c in text), None)
+    service = None
+    match = re.search(r'<request[^>]*>([^<]+)</request>', text)
+    if match:
+        service = match.group(1).strip()
+    record = {"doi": doi, "source": source}
+    record.update(extra)
+    if code:
+        record.update({"outcome": "no_fulltext", "code": code, "service": service,
+                       "retired": source in PMC_PRIMARY_SOURCES})
+        NO_FULLTEXT.add(doi)
+        # Only retire the DOI where PMC was the primary lookup - see
+        # PMC_PRIMARY_SOURCES. Elsewhere it is left neither settled nor errored:
+        # it will be tried again, but it will not be reported as a failure.
+        if source in PMC_PRIMARY_SOURCES:
+            CHECKED_NO_ACK.add(doi)
+    else:
+        record.update({"outcome": "error", "service": service, "error": text})
+        FETCH_ERRORED.add(doi)
+    error.append(record)
+
+
 def add_elife_internal_acks(internal, error):
     ''' Add eLife acknowledgements to the internal DOIs
         Keyword arguments:
@@ -322,8 +383,7 @@ def add_elife_internal_acks(internal, error):
             acklist = [ack['text'] for ack in (edata or {}).get('acknowledgements', [])
                        if ack.get('text')]
         except Exception as err:
-            error.append({"doi": doi, "source": "elife", "error": str(err)})
-            FETCH_ERRORED.add(doi)
+            record_fetch_failure(error, doi, "elife", err)
             continue
         if acklist:
             COUNT['elife_add'] += 1
@@ -356,8 +416,7 @@ def add_elsevier_internal_acks(internal, error):
         try:
             acktext, _ = DL.get_acknowledgements(row['doi'])
         except Exception as err:
-            error.append({"doi": row['doi'], "source": "elsevier", "error": str(err)})
-            FETCH_ERRORED.add(row['doi'])
+            record_fetch_failure(error, row['doi'], "elsevier", err)
             continue
         if acktext:
             COUNT['elsevier_add'] += 1
@@ -392,9 +451,7 @@ def add_pmc_internal_acks(internal, error):
         try:
             ack, _ = DL.get_acknowledgements(row['doi'], pmcid=row['jrc_pmc'])
         except Exception as err:
-            error.append({"doi": row['doi'], "pmcid": row['jrc_pmc'],
-                          "source": "pmc", "error": str(err)})
-            FETCH_ERRORED.add(row['doi'])
+            record_fetch_failure(error, row['doi'], "pmc", err, pmcid=row['jrc_pmc'])
             continue
         if ack:
             COUNT['pmc_add'] += 1
@@ -430,8 +487,7 @@ def add_arxiv_internal_acks(internal, error):
         try:
             acktext, _ = DL.get_acknowledgements(row['doi'])
         except Exception as err:
-            error.append({"doi": row['doi'], "source": "arxiv", "error": str(err)})
-            FETCH_ERRORED.add(row['doi'])
+            record_fetch_failure(error, row['doi'], "arxiv", err)
             continue
         if acktext:
             COUNT['arxiv_add'] += 1
@@ -549,8 +605,7 @@ def add_biorxiv_internal_acks(internal, error):
         try:
             ack, label = _biorxiv_ack(row['doi'])
         except Exception as err:
-            error.append({"doi": row['doi'], "source": "biorxiv", "error": str(err)})
-            FETCH_ERRORED.add(row['doi'])
+            record_fetch_failure(error, row['doi'], "biorxiv", err)
             ack = None
             errored = True
         if ack:
@@ -657,8 +712,7 @@ def add_europepmc_internal_acks(internal, error):
         try:
             ack, pmcid = _europepmc_ack(row['doi'])
         except Exception as err:
-            error.append({"doi": row['doi'], "source": "europepmc", "error": str(err)})
-            FETCH_ERRORED.add(row['doi'])
+            record_fetch_failure(error, row['doi'], "europepmc", err)
             continue
         if ack:
             COUNT['europepmc_add'] += 1
@@ -707,10 +761,27 @@ def generate_email(internal, error):
         found += ('<div style="color:#5b6b7c;font-size:13px;">'
                   'No new acknowledgements were found.</div>')
     body = JE.body_row(found)
-    if error:
-        err_entries = [(e['doi'], f"{e['source']}: {e['error']}") for e in error]
-        body += JE.body_row(JE.section_header(f"&#9888; Errors ({len(error):,})")
+    # Two kinds of record live in `error` since 1.9.0 and they read differently:
+    # a fault needs its message, a settled no-full-text answer needs the service
+    # that refused and why. Keying on 'error' alone raised KeyError on the
+    # second kind.
+    faults = [e for e in error if e.get('outcome') != 'no_fulltext']
+    absent = [e for e in error if e.get('outcome') == 'no_fulltext']
+    if faults:
+        err_entries = [(e['doi'], f"{e['source']}: {e.get('error', '(no detail)')}")
+                       for e in faults]
+        body += JE.body_row(JE.section_header(f"&#9888; Errors ({len(faults):,})")
                             + JE.doi_card("Errors", err_entries, 'bad', second_header='Detail'))
+    if absent:
+        # 'warn', not 'bad': nothing failed. The full text is not available to
+        # us, which for an author manuscript or subscription article is the
+        # permanent and correct answer.
+        abs_entries = [(e['doi'],
+                        f"{e.get('code', 'unavailable')} from "
+                        f"{e.get('service') or e['source']}") for e in absent]
+        body += JE.body_row(
+            JE.section_header(f"No full text available ({len(absent):,})")
+            + JE.doi_card("No full text", abs_entries, 'warn', second_header='Detail'))
     msg = JE.render(os.path.basename(__file__), __version__, run_data,
                     mode_label, mode_tone, kpis, body)
     email = DIS['developer']
@@ -806,7 +877,11 @@ def processing():
         hint = ' (see no_ack_marked.json)' if COUNT['no_ack_marked'] else ''
         print(f"No-ack DOIs {verb}: {COUNT['no_ack_marked']:,}{hint}")
     if error:
-        print(f"Fetch errors:        {len(error):,} (e.g. throttled - see internal_ack_errors.json)")
+        faults = [e for e in error if e.get('outcome') != 'no_fulltext']
+        print(f"No full text available: {len(NO_FULLTEXT):,} (PMC holds the record but "
+              f"will not serve it - not a fault)")
+        print(f"Fetch errors:        {len(faults):,} (e.g. throttled - see "
+              "internal_ack_errors.json)")
     if COUNT['write_errors']:
         print(f"DOIs failed to update: {COUNT['write_errors']:,}")
     if internal:
@@ -818,7 +893,17 @@ def processing():
     if no_ack_dois:
         with open('no_ack_marked.json', 'w', encoding='utf-8') as fileout:
             json.dump(no_ack_dois, fileout, indent=4)
-    if internal or COUNT['no_ack_marked']:
+    # Send when something happened worth reading: an ack was found, a DOI was
+    # marked, or something actually FAILED. A run whose only outcome is
+    # "no full text available" is a quiet no-op and stays silent - that is the
+    # routine answer for author manuscripts and subscription articles, and
+    # mailing it nightly would train the reader to ignore the report.
+    #
+    # Faults were previously unreportable on their own: a run that found nothing
+    # and errored on everything sent no email at all, which is how a 528-error
+    # run passed unnoticed.
+    faults = [e for e in error if e.get('outcome') != 'no_fulltext']
+    if internal or COUNT['no_ack_marked'] or faults:
         generate_email(internal, error)
 
 # -----------------------------------------------------------------------------
