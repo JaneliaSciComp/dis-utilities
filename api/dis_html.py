@@ -733,39 +733,118 @@ def get_license(lic):
     return f"{lic} ({CVTERM['license'][lic]['definition']})"
 
 
+# Below this, OpenAlex's own confidence in a topic assignment is low enough to
+# flag. 14% of this corpus falls here - mostly interdisciplinary work that no
+# single topic describes well.
+TOPIC_MIN_CONFIDENCE = 0.6
+# The app's warning amber, used elsewhere for the same purpose. Deliberately NOT
+# the #88a this page uses for a minor MeSH term: an indexer calling a term
+# secondary and a classifier being unsure are different statements, and one
+# colour for both would say they are the same.
+LOW_CONFIDENCE_COLOR = '#f0ad4e'
+
+
+def openalex_topic_html(row):
+    """ OpenAlex's topic for a work, with its subfield and the classifier's
+        confidence
+
+        A category, not a judgement - which is why it belongs beside MeSH and
+        DataCite subjects while the field-weighted citation figure on the same
+        record does not. Topic is the NARROWEST of OpenAlex's four levels
+        (domain > field > subfield > topic); field and domain are omitted as
+        both derive from the subfield and are too broad to inform ("Life
+        Sciences" covers nearly this whole corpus).
+
+        Both classification levels render in normal text; only the annotation
+        about them is muted. The topic is NEVER greyed, deliberately. Greying it would borrow the treatment this page
+        gives a minor MeSH term, and the two mean different things: a minor
+        MeSH term is an indexer deciding the term is secondary to the paper,
+        while a low score is a classifier unsure what the paper is about. The
+        label is not less true, so it is not shown as lesser - the uncertainty
+        is attached to the figure it belongs to.
+        Keyword arguments:
+          row: row from dois collection
+        Returns:
+          HTML string, or '' when the work has no topic
+    """
+    impact = row.get('jrc_openalex_impact') or {}
+    topic = impact.get('topic')
+    if not topic:
+        return ""
+    # Both levels render normally: a subfield is not a lesser classification
+    # than a topic - it is the one FWCI normalizes against. Only the annotation
+    # about them is muted.
+    out = escape(topic)
+    if impact.get('subfield'):
+        out += f" in {escape(impact['subfield'])}"
+    score = impact.get('topic_score')
+    if isinstance(score, (int, float)):
+        # A percentage, because the score is "the classifier's calibrated
+        # probability that the topic is the work's main one" - calibrated, so
+        # 82% means what it says. Worded as "the main topic" rather than
+        # "confidence", because a work can legitimately be about several things
+        # and a low score often means exactly that, not that the label is wrong.
+        pct = f"{score * 100:.0f}%"
+        if score < TOPIC_MIN_CONFIDENCE:
+            out += f" <span style='color:{LOW_CONFIDENCE_COLOR}' " \
+                   + "title='OpenAlex&#39;s calibrated probability that this is the " \
+                   + "work&#39;s main topic'>" \
+                   + f"&#9888; only {pct} likely the main topic</span>"
+        else:
+            out += f" <span style='color:#888' title='OpenAlex&#39;s calibrated " \
+                   + "probability that this is the work&#39;s main topic'>" \
+                   + f"&middot; {pct} likely the main topic</span>"
+    return out
+
+
 def add_subjects(row, html=None):
     ''' Add subjects to the HTML
+
+        Two modes. With html, this builds the Subjects tab and appends every
+        vocabulary the record has. Without it, it returns a single string for
+        the matched-subjects column on /dois_subject - which searches DataCite
+        subjects and MeSH, so an OpenAlex topic there would be a term the
+        reader did not search for.
         Keyword arguments:
           row: row from dois collection
           html: HTML to add subjects to
         Returns:
-          HTML with subjects added
+          HTML with subjects added, or the bare subject string in compact mode
     '''
-    if row['jrc_obtained_from'] == 'DataCite':
-    # Subjects (DataCite categories)
-        if row and row['jrc_obtained_from'] == 'DataCite' and 'subjects' in row \
-           and row['subjects']:
-            if html:
-                html += "<h4>DataCite subjects</h4>" \
-                        + f"{', '.join(sub['subject'] for sub in row['subjects'])}"
-            else:
-                return f"{', '.join(sub['subject'] for sub in row['subjects'])}"
-    elif 'jrc_mesh' in row:
-        # MeSH subjects (Crossref)
+    heading, text, note = "", "", ""
+    if row and row.get('jrc_obtained_from') == 'DataCite' and row.get('subjects'):
+        heading = "DataCite subjects"
+        text = ', '.join(sub['subject'] for sub in row['subjects'])
+    elif row and 'jrc_mesh' in row:
         subjects = []
         for mesh in row['jrc_mesh']:
-            if 'descriptor_name' in mesh:
-                if 'major_topic' in mesh and mesh['major_topic']:
-                    subj = mesh['descriptor_name']
-                else:
-                    subj = f"<span style='color: #88a'>{mesh['descriptor_name']}</span>"
-                if 'key' in mesh and mesh['key']:
-                    subj = f"<a href='{NCBI_MESH}{mesh['key']}' " \
-                           + f"target='_blank'>{subj}</a>"
-                subjects.append(subj)
-        if subjects:
-            if html:
-                html += f"<h4>MeSH subjects</h4>{', '.join(subjects)}"
+            if 'descriptor_name' not in mesh:
+                continue
+            if mesh.get('major_topic'):
+                subj = mesh['descriptor_name']
             else:
-                return f"{', '.join(subjects)}"
+                subj = f"<span style='color: #88a'>{mesh['descriptor_name']}</span>"
+            if mesh.get('key'):
+                subj = f"<a href='{NCBI_MESH}{mesh['key']}' target='_blank'>{subj}</a>"
+            subjects.append(subj)
+        if subjects:
+            heading = "MeSH subjects"
+            text = ', '.join(subjects)
+            # Emitted with its own section rather than at the foot of the tab,
+            # or it reads as a caption for whatever section came last - which,
+            # since the OpenAlex topic was added below, it was.
+            if any(not mesh.get('major_topic') for mesh in row['jrc_mesh']):
+                note = "<br><i class='fa-solid fa-circle-info'></i> Subjects in " \
+                       + "<span style='color: #88a'>gray-blue</span> are considered " \
+                       + "minor in MeSH"
+    if html is None:
+        return text
+    if text:
+        html += f"<h4>{heading}</h4>{text}{note}"
+    # Additive, not an elif: a record may carry a registrar vocabulary AND an
+    # OpenAlex topic, and 1,464 Crossref DOIs have a topic with no MeSH at all -
+    # an empty tab until now.
+    topic = openalex_topic_html(row) if row else ""
+    if topic:
+        html += f"<h4>OpenAlex topic</h4>{topic}"
     return html

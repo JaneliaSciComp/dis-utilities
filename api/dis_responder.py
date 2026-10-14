@@ -43,7 +43,7 @@ from packaging.version import Version
 import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
 import dis_plots as DP
-from dis_html import (DOWNLOAD_ICON, NAV, add_jrc_fields, add_subjects, cell,
+from dis_html import (TOPIC_MIN_CONFIDENCE, DOWNLOAD_ICON, NAV, add_jrc_fields, add_subjects, cell,
                       create_downloadable, dloop, doi_link, fcell, filter_frame,
                       generate_navbar as _generate_navbar, get_license,
                       oa_status_rank, registrar_switch, render_table, render_warning,
@@ -57,7 +57,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.105.0"
+__version__ = "120.107.1"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -8552,10 +8552,24 @@ def doi_tabs(doi, row, rowext, data, authors):
     ahtml = "&nbsp;"
     if row:
         try:
+            # The MeSH caveat now travels with the MeSH section inside
+            # add_subjects, so it sits above the OpenAlex topic rather than
+            # under it.
             ahtml = add_subjects(row, ahtml)
-            if 'span' in ahtml:
-                ahtml += "<br><i class='fa-solid fa-circle-info'></i> Subjects in " \
-                         + "<span style='color: #88a'>gray-blue</span> are considered minor in MeSH"
+            impact = row.get('jrc_openalex_impact') or {}
+            score = impact.get('topic_score')
+            if isinstance(score, (int, float)) and score < TOPIC_MIN_CONFIDENCE:
+                ahtml += "<br><i class='fa-solid fa-circle-info'></i> The percentage is " \
+                         + "OpenAlex's calibrated probability that this is the work's " \
+                         + "<i>main</i> topic. Below " \
+                         + f"{TOPIC_MIN_CONFIDENCE * 100:.0f}% it is usually " \
+                         + "interdisciplinary work that no single topic describes well " \
+                         + "&mdash; the topic is still the one OpenAlex assigned, and may " \
+                         + "well apply; it is simply not clearly the primary one. The " \
+                         + "figure is about the <i>topic</i>; the subfield is whichever " \
+                         + "one that topic belongs to, so it usually inherits the same " \
+                         + "doubt &mdash; though not always, since a close runner-up " \
+                         + "sometimes sits in the same subfield."
         except Exception:
             pass
         if ahtml != "&nbsp;":
