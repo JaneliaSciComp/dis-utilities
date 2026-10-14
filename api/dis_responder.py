@@ -68,7 +68,7 @@ from dis_state import CVTERM, PROJECT
 # on the image. feat -> minor, everything else -> patch, in the same commit as
 # the change. Forgetting is survivable: ocbuild warns that the tag already
 # exists in the ImageStream rather than silently overwriting it.
-__version__ = "120.108.0"
+__version__ = "120.109.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -185,6 +185,40 @@ def _load_config_ns(name):
     return json.loads(json.dumps(data), object_hook=lambda d: SimpleNamespace(**d))
 
 
+# How long a pod may serve a stale controlled vocabulary. CVTERM is a
+# process-local cache and this app runs with replicas: 2, so an edit made on one
+# pod is invisible to the other until it reloads. Before this existed, it was
+# invisible until a deploy - a term added to the authorization cv would not
+# appear as a checkbox, and admin-implies-everything would not know about it.
+# Writes refresh the editing pod immediately; this is how the sibling catches up.
+CVTERM_TTL = 60
+
+
+def refresh_cvterm(dis_db=None):
+    ''' Reload the controlled-vocabulary cache from the database
+
+        Built into a local and committed only once the read succeeds, so a
+        transient failure leaves the previous vocabulary in place rather than an
+        empty one. CLEARED before updating, unlike the original load: update()
+        alone never removes a key, so a deleted term would survive in memory.
+        The dict object itself is kept - dis_state hands the same object to
+        every importer, so rebinding it would leave them pointing at the old one.
+        Keyword arguments:
+          dis_db: database handle, defaulting to the established one
+        Returns:
+          None
+    '''
+    database = dis_db if dis_db is not None else DB.get('dis')
+    if database is None:
+        return
+    local = {}
+    for row in database['cvterm'].find({}):
+        local.setdefault(row['cv'], {})[row['name']] = row
+    CVTERM.clear()
+    CVTERM.update(local)
+    app.config['CVTERM_LOADED'] = time()
+
+
 @app.before_request
 def before_request():
     ''' Set transaction start time and increment counters.
@@ -228,6 +262,14 @@ def before_request():
         CVTERM.update(local_cvterm)
         PROJECT.update(local_project)
         DB['dis'] = dis_db
+        app.config['CVTERM_LOADED'] = time()
+    elif time() - app.config.get('CVTERM_LOADED', 0) > CVTERM_TTL:
+        # Lazy, and failure-tolerant: a hiccup here leaves the previous
+        # vocabulary serving rather than taking the app down over a cache.
+        try:
+            refresh_cvterm()
+        except Exception as err:
+            print(f"Could not refresh CVTERM: {err}")
     app.config["START_TIME"] = time()
     app.config["COUNTER"] += 1
     endpoint = request.endpoint if request.endpoint else "(Unknown)"
@@ -23450,54 +23492,276 @@ def stats_database():
                                          navbar=generate_navbar('System')))
 
 
-@app.route('/cv')
-@app.route('/cv/<string:cv>')
-def cvs(cv=None):
-    ''' Show CV information
-    '''
-    html = ""
+# Where a cv's terms are actually stored, so a deletion can be refused while
+# records still reference the term. (collection, field, how the value is held).
+#
+# "field_name" is the odd one: a jrc term's NAME is itself a field on a dois
+# document (jrc_inserted, jrc_license), not a value in one. Deleting such a term
+# does not corrupt data - it removes a display label - so those are warned about
+# rather than refused.
+#
+# A cv absent from this map cannot be counted. Those are warned about too: it is
+# better to say "I cannot tell" than to imply an unused term is safe to drop.
+CV_USAGE = {'authorization': ('orcid', 'authorization', 'value'),
+            'license':       ('dois', 'jrc_license', 'value'),
+            'oa_status':     ('dois', 'jrc_oa_status', 'value'),
+            'jrc':           ('dois', None, 'field_name')}
+
+
+def cvterm_usage(cv, name):
+    """ How many records reference a controlled-vocabulary term
+
+        Keyword arguments:
+          cv: controlled vocabulary name
+          name: term name
+        Returns:
+          (count, blocking) - count is None when the cv is not countable, and
+          blocking says whether a non-zero count should prevent deletion
+    """
+    probe = CV_USAGE.get(cv)
+    if not probe:
+        return None, False
+    collection, field, kind = probe
     try:
-        cnt = DB['dis'].cv.count_documents({})
-        rows = DB['dis'].cv.find({}).sort("display", 1)
+        if kind == 'field_name':
+            # The term names a field; its presence is what counts.
+            return DB['dis'][collection].count_documents({name: {"$exists": True}}), False
+        # Matches a scalar equal to the term and an array containing it, which
+        # is the same query in MongoDB.
+        return DB['dis'][collection].count_documents({field: name}), True
+    except Exception as err:
+        print(f"Could not count usage of {cv}/{name}: {err}")
+        return None, False
+
+
+CV_NAME_RE = re.compile(r'^[a-z][a-z0-9_]*$')
+
+
+def _cv_formats():
+    """ Format values already in use, for the add/edit pulldown """
+    try:
+        return sorted(DB['dis'].cvterm.distinct('format'))
+    except Exception:
+        return ['string']
+
+
+def _save_cv_change(me):
+    """ Apply one controlled-vocabulary edit
+
+        Every write refreshes CVTERM on this pod immediately. The sibling
+        replica catches up within CVTERM_TTL; without the refresh the editor
+        would not see their own change until a deploy.
+        Keyword arguments:
+          me: the signed-in administrator
+        Returns:
+          Rendered note
+    """
+    form = request.form
+    action = form.get('action', '')
+    cv = (form.get('cv') or '').strip()
+    name = (form.get('name') or '').strip()
+    stamp = {"updated": datetime.now(), "updated_by": me.get('orcid')}
+    try:
+        if action == 'add_cv':
+            if not CV_NAME_RE.match(cv):
+                return render_warning("A CV name must be lower-case, start with a "
+                                      "letter, and contain only letters, digits and "
+                                      "underscores.", 'warning')
+            if DB['dis'].cv.find_one({"name": cv}):
+                return render_warning(f"A CV named {cv} already exists.", 'warning')
+            DB['dis'].cv.insert_one({"name": cv,
+                                     "display": form.get('display', '').strip() or cv,
+                                     "definition": form.get('definition', '').strip(),
+                                     **stamp})
+            note = render_warning(f"Added the {cv} vocabulary.", 'success')
+        elif action == 'del_cv':
+            left = DB['dis'].cvterm.count_documents({"cv": cv})
+            if left:
+                return render_warning(f"{cv} still has {left:,} term(s). Remove them "
+                                      "first.", 'warning')
+            DB['dis'].cv.delete_one({"name": cv})
+            note = render_warning(f"Deleted the {cv} vocabulary.", 'success')
+        elif action == 'add_term':
+            if not name:
+                return render_warning("A term needs a name.", 'warning')
+            if DB['dis'].cvterm.find_one({"cv": cv, "name": name}):
+                return render_warning(f"{cv} already has a term named {name}.", 'warning')
+            DB['dis'].cvterm.insert_one({"cv": cv, "name": name,
+                                         "display": form.get('display', '').strip() or name,
+                                         "definition": form.get('definition', '').strip(),
+                                         "format": form.get('format', '').strip() or 'string',
+                                         **stamp})
+            note = render_warning(f"Added {name}.", 'success')
+        elif action == 'save_term':
+            # name is NOT editable: it is the lookup key - CVTERM['jrc']['jrc_inserted'],
+            # a stored jrc_license value, a granted authorization on an orcid record -
+            # so renaming would silently orphan every reference. Add the new term,
+            # migrate, remove the old.
+            res = DB['dis'].cvterm.update_one(
+                {"cv": cv, "name": name},
+                {"$set": {"display": form.get('display', '').strip() or name,
+                          "definition": form.get('definition', '').strip(),
+                          "format": form.get('format', '').strip() or 'string',
+                          **stamp}})
+            if not getattr(res, 'matched_count', 0):
+                return render_warning(f"No term {name} in {cv}.", 'warning')
+            note = render_warning(f"Saved {name}.", 'success')
+        elif action == 'del_term':
+            count, blocking = cvterm_usage(cv, name)
+            if blocking and count:
+                return render_warning(f"{name} is still used by {count:,} record(s). "
+                                      "Change those first, or the references would be "
+                                      "orphaned.", 'warning')
+            DB['dis'].cvterm.delete_one({"cv": cv, "name": name})
+            note = render_warning(f"Deleted {name}.", 'success')
+            if count:
+                note += render_warning(f"{count:,} record(s) referenced {name}; that is "
+                                       "a display label rather than stored data, so they "
+                                       "now show the raw value.", 'warning')
+        else:
+            return render_warning("Unknown action.", 'warning')
+    except Exception as err:
+        print(f"CV edit failed: {err}")
+        return render_warning("Could not save that change.", 'error')
+    print(f"CV {action}: cv={cv!r} name={name!r} by {me.get('orcid')}")
+    refresh_cvterm()
+    return note
+
+
+def _cv_term_rows(cv, editing):
+    """ The term table for one CV, with the row named by `editing` as a form """
+    formats = _cv_formats()
+    rows = []
+    for row in DB['dis'].cvterm.find({"cv": cv}).sort("name", 1):
+        name = row['name']
+        count, blocking = cvterm_usage(cv, name)
+        if count is None:
+            usage = "<span style='color:#888'>not counted</span>"
+        elif not count:
+            usage = "<span style='color:#888'>unused</span>"
+        else:
+            tone = '#f0ad4e' if blocking else '#888'
+            usage = f"<span style='color:{tone}'>{count:,}</span>"
+        if name == editing:
+            fmt = "".join(f"<option{' selected' if f == row.get('format') else ''}>"
+                          f"{escape(f)}</option>" for f in formats)
+            form = (f"<form method='POST'><input type='hidden' name='action' value='save_term'>"
+                    f"<input type='hidden' name='cv' value='{escape(cv)}'>"
+                    f"<input type='hidden' name='name' value='{escape(name)}'>")
+            rows.append([
+                safe(f"<b>{escape(name)}</b>{form}"),
+                safe(f"<input class='form-control form-control-sm' name='display' "
+                     f"value='{escape(row.get('display', ''))}'>"),
+                safe(f"<input class='form-control form-control-sm' name='definition' "
+                     f"value='{escape(row.get('definition', ''))}'>"),
+                safe(f"<select class='form-control form-control-sm' name='format'>{fmt}</select>"),
+                safe(usage),
+                safe("<button type='submit' class='btn btn-primary btn-sm'>Save</button>"
+                     f"&nbsp;<a href='/cv/{escape(cv)}'>cancel</a></form>")])
+            continue
+        del_form = ""
+        if not (blocking and count):
+            del_form = (f"<form method='POST' style='display:inline' "
+                        f"onsubmit=\"return confirm('Delete {escape(name)}?')\">"
+                        f"<input type='hidden' name='action' value='del_term'>"
+                        f"<input type='hidden' name='cv' value='{escape(cv)}'>"
+                        f"<input type='hidden' name='name' value='{escape(name)}'>"
+                        "<button type='submit' class='btn btn-outline-danger btn-sm'>"
+                        "Delete</button></form>")
+        rows.append([name, row.get('display', ''), row.get('definition', ''),
+                     row.get('format', ''), safe(usage),
+                     safe(f"<a class='btn btn-outline-primary btn-sm' "
+                          f"href='/cv/{escape(cv)}?edit={escape(name)}'>Edit</a>&nbsp;"
+                          + del_form)])
+    return rows
+
+
+@app.route('/cv', methods=['GET', 'POST'])
+@app.route('/cv/<string:cv>', methods=['GET', 'POST'])
+@restricted('admin')
+def cvs(cv=None):
+    ''' Show and edit controlled vocabularies
+
+        Admin-only: these are the app's own plumbing - field display names,
+        licence labels, the authorization terms that gate these very pages -
+        and nothing here is of use to a reader.
+    '''
+    note = ""
+    if request.method == 'POST':
+        note = _save_cv_change(current_user() or {})
+        cv = (request.form.get('cv') or cv) or None
+        if request.form.get('action') == 'del_cv':
+            cv = None
+    try:
+        cvlist = list(DB['dis'].cv.find({}).sort("display", 1))
     except Exception as err:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get cvs"),
                                message=error_message(err))
-    if cnt:
-        html = "<form>Select a CV to view: <select id='cv' onchange='find_cv()'>" \
-               + "<option value=''>Select a CV</option>"
-        display = ""
-        for row in rows:
-            if row['name'] == cv or cnt == 1:
-                cv = row['name']
-                sel = "selected"
-                display = row['display']
-            else:
-                sel = ""
-            html += f"<option value=\'{row['name']}\' {sel}>{row['display']}</option>"
-    else:
-        cv = rows[0]['name']
-        display = rows[0]['display']
+    names = [row['name'] for row in cvlist]
+    if cv not in names:
+        cv = names[0] if len(names) == 1 else None
+    html = note + "<form>Select a CV to view: <select id='cv' onchange='find_cv()'>" \
+                + "<option value=''>Select a CV</option>"
+    for row in cvlist:
+        sel = " selected" if row['name'] == cv else ""
+        html += f"<option value='{escape(row['name'])}'{sel}>{escape(row['display'])}</option>"
     html += "</select></form><br>"
     if cv:
+        current = next((row for row in cvlist if row['name'] == cv), {})
+        html += f"<h4>{escape(current.get('display', cv))}</h4>"
+        if current.get('definition'):
+            html += f"<div style='color:#a8c4e0'>{escape(current['definition'])}</div>"
         try:
-            rows = DB['dis'].cv.find_one({"cv": cv})
-        except Exception as err:
-            return render_template('error.html', urlroot=request.url_root,
-                                   title=render_warning("Could not get cv"),
-                                   message=error_message(err))
-        html += f"<h4>{display}</h4>"
-        try:
-            rows = DB['dis'].cvterm.find({"cv": cv}).sort("name", 1)
+            trows = _cv_term_rows(cv, request.args.get('edit'))
         except Exception as err:
             return render_template('error.html', urlroot=request.url_root,
                                    title=render_warning("Could not get cvterms"),
                                    message=error_message(err))
-        trows = []
-        for row in rows:
-            trows.append([row['name'], row['display'], row['definition'], row['format']])
-        html += render_table(['Name', 'Display name', 'Definition', 'Format'], trows,
+        html += render_table(['Name', 'Display name', 'Definition', 'Format',
+                              'Used by', ''], trows,
                              table_id='cvterms', css='tablesorter standard-scroll')
+        html += "<div style='font-size:0.85em; color:#a8c4e0; max-width:720px'>" \
+                + "&quot;Used by&quot; counts records referencing the term. A term in " \
+                + "<span style='color:#f0ad4e'>amber</span> cannot be deleted until those " \
+                + "records are changed. For the <b>jrc</b> vocabulary the term is a field " \
+                + "name rather than a stored value, so deleting one removes a display " \
+                + "label and does not orphan data. A name is never editable: it is the " \
+                + "lookup key, so renaming would orphan every reference &mdash; add the " \
+                + "replacement, migrate, then remove the old one.</div>"
+        fmt = "".join(f"<option>{escape(f)}</option>" for f in _cv_formats())
+        html += f"<h4 style='margin-top:22px'>Add a term to {escape(cv)}</h4>" \
+                + "<form method='POST'><input type='hidden' name='action' value='add_term'>" \
+                + f"<input type='hidden' name='cv' value='{escape(cv)}'>" \
+                + "<div class='flexcontainer'>" \
+                + "<div class='flexitem'><input class='form-control' name='name' " \
+                + "placeholder='name' required></div>" \
+                + "<div class='flexitem'><input class='form-control' name='display' " \
+                + "placeholder='display name'></div>" \
+                + "<div class='flexitem'><input class='form-control' name='definition' " \
+                + "placeholder='definition'></div>" \
+                + f"<div class='flexitemauto'><select class='form-control' name='format'>{fmt}" \
+                + "</select></div>" \
+                + "<div class='flexitemauto'><button type='submit' class='btn btn-primary'>" \
+                + "Add</button></div></div></form>"
+        if not DB['dis'].cvterm.count_documents({"cv": cv}):
+            html += "<form method='POST' style='margin-top:14px' " \
+                    + f"onsubmit=\"return confirm('Delete the {escape(cv)} vocabulary?')\">" \
+                    + "<input type='hidden' name='action' value='del_cv'>" \
+                    + f"<input type='hidden' name='cv' value='{escape(cv)}'>" \
+                    + "<button type='submit' class='btn btn-outline-danger btn-sm'>" \
+                    + f"Delete the empty {escape(cv)} vocabulary</button></form>"
+    html += "<h4 style='margin-top:28px'>Add a vocabulary</h4>" \
+            + "<form method='POST'><input type='hidden' name='action' value='add_cv'>" \
+            + "<div class='flexcontainer'>" \
+            + "<div class='flexitem'><input class='form-control' name='cv' " \
+            + "placeholder='name (lower_case)' required></div>" \
+            + "<div class='flexitem'><input class='form-control' name='display' " \
+            + "placeholder='display name'></div>" \
+            + "<div class='flexitem'><input class='form-control' name='definition' " \
+            + "placeholder='definition'></div>" \
+            + "<div class='flexitemauto'><button type='submit' class='btn btn-primary'>" \
+            + "Add</button></div></div></form>"
     endpoint_access()
     return make_response(render_template('cv.html', urlroot=request.url_root,
                                          title="Controlled vocabularies", html=html,
