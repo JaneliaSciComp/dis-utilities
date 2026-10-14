@@ -43,7 +43,7 @@ from packaging.version import Version
 import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
 import dis_plots as DP
-from dis_html import (DOWNLOAD_ICON, NAV, add_jrc_fields, add_subjects, cell,
+from dis_html import (TOPIC_MIN_CONFIDENCE, DOWNLOAD_ICON, NAV, add_jrc_fields, add_subjects, cell,
                       create_downloadable, dloop, doi_link, fcell, filter_frame,
                       generate_navbar as _generate_navbar, get_license,
                       oa_status_rank, registrar_switch, render_table, render_warning,
@@ -57,7 +57,7 @@ from dis_state import CVTERM, PROJECT
 
 # pylint: disable=broad-exception-caught,broad-exception-raised,too-many-lines,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 
-__version__ = "120.105.0"
+__version__ = "120.106.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -8553,9 +8553,19 @@ def doi_tabs(doi, row, rowext, data, authors):
     if row:
         try:
             ahtml = add_subjects(row, ahtml)
-            if 'span' in ahtml:
+            # Keyed on the actual condition, not on "a span appeared anywhere":
+            # the OpenAlex topic also renders spans, and the old test would have
+            # claimed a minor MeSH term on records that have no MeSH at all.
+            if any(not mesh.get('major_topic') for mesh in (row.get('jrc_mesh') or [])):
                 ahtml += "<br><i class='fa-solid fa-circle-info'></i> Subjects in " \
                          + "<span style='color: #88a'>gray-blue</span> are considered minor in MeSH"
+            impact = row.get('jrc_openalex_impact') or {}
+            score = impact.get('topic_score')
+            if isinstance(score, (int, float)) and score < TOPIC_MIN_CONFIDENCE:
+                ahtml += "<br><i class='fa-solid fa-circle-info'></i> The OpenAlex topic " \
+                         + "is shown in <span style='color: #88a'>gray-blue</span> where " \
+                         + "its classifier was unsure &mdash; usually interdisciplinary " \
+                         + "work that no single topic describes well. Hover for the score."
         except Exception:
             pass
         if ahtml != "&nbsp;":

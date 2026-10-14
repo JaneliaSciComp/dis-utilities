@@ -733,39 +733,87 @@ def get_license(lic):
     return f"{lic} ({CVTERM['license'][lic]['definition']})"
 
 
+# Below this, OpenAlex's own confidence in a topic assignment is low enough that
+# the label is worth reading with suspicion. 14% of this corpus falls here -
+# mostly interdisciplinary work that no single topic describes well.
+TOPIC_MIN_CONFIDENCE = 0.6
+
+
+def openalex_topic_html(row):
+    """ OpenAlex's topic for a work, with its subfield for context
+
+        A category, not a judgement - which is why it belongs beside MeSH and
+        DataCite subjects while the field-weighted citation figure on the same
+        record does not. Topic is the NARROWEST of OpenAlex's four levels
+        (domain > field > subfield > topic); field and domain are omitted as
+        both derive from the subfield and are too broad to inform ("Life
+        Sciences" covers nearly this whole corpus).
+
+        A weak assignment is greyed, the same way a minor MeSH term is, so the
+        page has one visual language for "take this with a pinch of salt". The
+        score is on the tooltip either way, for anyone who wants the number.
+        Keyword arguments:
+          row: row from dois collection
+        Returns:
+          HTML string, or '' when the work has no topic
+    """
+    impact = row.get('jrc_openalex_impact') or {}
+    topic = impact.get('topic')
+    if not topic:
+        return ""
+    score = impact.get('topic_score')
+    subfield = impact.get('subfield')
+    tip = f"OpenAlex confidence {score:.2f}" if isinstance(score, (int, float)) \
+          else "OpenAlex classification"
+    weak = isinstance(score, (int, float)) and score < TOPIC_MIN_CONFIDENCE
+    style = " style='color: #88a'" if weak else ""
+    out = f"<span{style} title='{escape(tip)}'>{escape(topic)}</span>"
+    if subfield:
+        out += f" <span style='color:#888'>in {escape(subfield)}</span>"
+    return out
+
+
 def add_subjects(row, html=None):
     ''' Add subjects to the HTML
+
+        Two modes. With html, this builds the Subjects tab and appends every
+        vocabulary the record has. Without it, it returns a single string for
+        the matched-subjects column on /dois_subject - which searches DataCite
+        subjects and MeSH, so an OpenAlex topic there would be a term the
+        reader did not search for.
         Keyword arguments:
           row: row from dois collection
           html: HTML to add subjects to
         Returns:
-          HTML with subjects added
+          HTML with subjects added, or the bare subject string in compact mode
     '''
-    if row['jrc_obtained_from'] == 'DataCite':
-    # Subjects (DataCite categories)
-        if row and row['jrc_obtained_from'] == 'DataCite' and 'subjects' in row \
-           and row['subjects']:
-            if html:
-                html += "<h4>DataCite subjects</h4>" \
-                        + f"{', '.join(sub['subject'] for sub in row['subjects'])}"
-            else:
-                return f"{', '.join(sub['subject'] for sub in row['subjects'])}"
-    elif 'jrc_mesh' in row:
-        # MeSH subjects (Crossref)
+    heading, text = "", ""
+    if row and row.get('jrc_obtained_from') == 'DataCite' and row.get('subjects'):
+        heading = "DataCite subjects"
+        text = ', '.join(sub['subject'] for sub in row['subjects'])
+    elif row and 'jrc_mesh' in row:
         subjects = []
         for mesh in row['jrc_mesh']:
-            if 'descriptor_name' in mesh:
-                if 'major_topic' in mesh and mesh['major_topic']:
-                    subj = mesh['descriptor_name']
-                else:
-                    subj = f"<span style='color: #88a'>{mesh['descriptor_name']}</span>"
-                if 'key' in mesh and mesh['key']:
-                    subj = f"<a href='{NCBI_MESH}{mesh['key']}' " \
-                           + f"target='_blank'>{subj}</a>"
-                subjects.append(subj)
-        if subjects:
-            if html:
-                html += f"<h4>MeSH subjects</h4>{', '.join(subjects)}"
+            if 'descriptor_name' not in mesh:
+                continue
+            if mesh.get('major_topic'):
+                subj = mesh['descriptor_name']
             else:
-                return f"{', '.join(subjects)}"
+                subj = f"<span style='color: #88a'>{mesh['descriptor_name']}</span>"
+            if mesh.get('key'):
+                subj = f"<a href='{NCBI_MESH}{mesh['key']}' target='_blank'>{subj}</a>"
+            subjects.append(subj)
+        if subjects:
+            heading = "MeSH subjects"
+            text = ', '.join(subjects)
+    if html is None:
+        return text
+    if text:
+        html += f"<h4>{heading}</h4>{text}"
+    # Additive, not an elif: a record may carry a registrar vocabulary AND an
+    # OpenAlex topic, and 1,464 Crossref DOIs have a topic with no MeSH at all -
+    # an empty tab until now.
+    topic = openalex_topic_html(row) if row else ""
+    if topic:
+        html += f"<h4>OpenAlex topic</h4>{topic}"
     return html
