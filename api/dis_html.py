@@ -755,8 +755,8 @@ def openalex_topic_html(row):
         both derive from the subfield and are too broad to inform ("Life
         Sciences" covers nearly this whole corpus).
 
-        Confidence is shown as its own annotation and the topic is NEVER
-        greyed, deliberately. Greying it would borrow the treatment this page
+        Both classification levels render in normal text; only the annotation
+        about them is muted. The topic is NEVER greyed, deliberately. Greying it would borrow the treatment this page
         gives a minor MeSH term, and the two mean different things: a minor
         MeSH term is an indexer deciding the term is secondary to the paper,
         while a low score is a classifier unsure what the paper is about. The
@@ -771,17 +771,29 @@ def openalex_topic_html(row):
     topic = impact.get('topic')
     if not topic:
         return ""
+    # Both levels render normally: a subfield is not a lesser classification
+    # than a topic - it is the one FWCI normalizes against. Only the annotation
+    # about them is muted.
     out = escape(topic)
     if impact.get('subfield'):
-        out += f" <span style='color:#888'>in {escape(impact['subfield'])}</span>"
+        out += f" in {escape(impact['subfield'])}"
     score = impact.get('topic_score')
     if isinstance(score, (int, float)):
+        # A percentage, because the score is "the classifier's calibrated
+        # probability that the topic is the work's main one" - calibrated, so
+        # 82% means what it says. Worded as "the main topic" rather than
+        # "confidence", because a work can legitimately be about several things
+        # and a low score often means exactly that, not that the label is wrong.
+        pct = f"{score * 100:.0f}%"
         if score < TOPIC_MIN_CONFIDENCE:
             out += f" <span style='color:{LOW_CONFIDENCE_COLOR}' " \
-                   + "title='OpenAlex was unsure how to classify this work'>" \
-                   + f"&#9888; low confidence ({score:.2f})</span>"
+                   + "title='OpenAlex&#39;s calibrated probability that this is the " \
+                   + "work&#39;s main topic'>" \
+                   + f"&#9888; only {pct} likely the main topic</span>"
         else:
-            out += f" <span style='color:#888'>&middot; confidence {score:.2f}</span>"
+            out += f" <span style='color:#888' title='OpenAlex&#39;s calibrated " \
+                   + "probability that this is the work&#39;s main topic'>" \
+                   + f"&middot; {pct} likely the main topic</span>"
     return out
 
 
