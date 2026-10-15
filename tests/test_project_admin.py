@@ -21,6 +21,10 @@ def _block(start, end):
 
 HANDLER = _block('def project_edit()', "@app.route('/projects')")
 VIEW = _block('def show_projects(', '@app.route(')
+UNMAPPED = _block('def projects_unmapped()', "@app.route('/project_edit'")
+# Controls live on two pages now: the mapping table and the unmapped-author
+# work list.
+CONTROLS = VIEW + UNMAPPED
 
 
 # --- what it will and will not do ------------------------------------------
@@ -75,12 +79,13 @@ def test_every_handler_action_has_a_control():
     ''' An action with no control is dead code; a control with no action is a
         button that does nothing.
     '''
-    literal = set(re.findall(r"name='action' value='(\w+)'", VIEW))
+    literal = set(re.findall(r"name='action' value='(\w+)'", CONTROLS))
     dynamic = re.search(r"act, label = \('(\w+)', '\w+'\) if tag in retired \\\s*\n\s*"
-                        r"else \('(\w+)'", VIEW)
+                        r"else \('(\w+)'", CONTROLS)
     offered = literal | set(dynamic.groups() if dynamic else [])
     handled = set(re.findall(r"action == '(\w+)'", HANDLER))
     handled |= {'retire', 'restore'} if "action in ('retire', 'restore')" in HANDLER else set()
+    handled |= {'ignore'} if "action == 'ignore'" in HANDLER else set()
     assert handled <= offered, f'no control for: {handled - offered}'
     assert offered <= handled, f'no handler for: {offered - handled}'
 
@@ -142,3 +147,41 @@ def test_synonyms_go_one_per_line_when_the_controls_are_shown():
     '''
     assert 'joiner = "<br>" if may_edit else \', \'' in VIEW
     assert 'joiner.join(synonyms)' in VIEW
+
+
+# --- the unmapped-author report --------------------------------------------
+
+def test_unmapped_uses_each_registrar_s_own_organizational_marker():
+    ''' A first attempt filtered on "has a name, no given/family" and returned
+        306 candidates - overwhelmingly PEOPLE from software deposits, where a
+        DataCite creator is a single string. The registrars' own markers give
+        44, all genuinely organizations.
+    '''
+    block = _block('def unmapped_organizational_authors', '@app.route')
+    assert '"author.family": {"$exists": False}' in block, 'Crossref organizational form'
+    assert '"creators.nameType": "Organizational"' in block, 'DataCite explicit marker'
+
+
+def test_ignoring_writes_the_established_convention():
+    ''' All 23 existing ignore rows carry BOTH an empty project and doNotUse,
+        and they differ in effect: doNotUse alone drops the row from PROJECT, so
+        update_dois reports it undefined on every run, while an empty project is
+        present-and-silent.
+    '''
+    block = _block("elif action == 'ignore':", "elif action == 'move':")
+    assert '"project": ""' in block
+    assert '"doNotUse": True' in block
+
+
+def test_the_report_is_admin_only():
+    ''' Unlike /projects, a work list of things needing curation is of no use
+        to a reader.
+    '''
+    head = SOURCE[SOURCE.index("@app.route('/projects_unmapped')"):
+                  SOURCE.index('def projects_unmapped')]
+    assert "@restricted('admin')" in head
+
+
+def test_a_write_returns_to_the_page_it_came_from():
+    assert "form.get('origin') == 'unmapped'" in HANDLER
+    assert "name='origin' value='unmapped'" in UNMAPPED

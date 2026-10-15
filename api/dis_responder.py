@@ -68,7 +68,7 @@ from dis_state import CVTERM, PROJECT
 # on the image. feat -> minor, everything else -> patch, in the same commit as
 # the change. Forgetting is survivable: ocbuild warns that the tag already
 # exists in the ImageStream rather than silently overwriting it.
-__version__ = "120.111.1"
+__version__ = "120.112.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -1100,9 +1100,12 @@ def mymetrics():
     if tenure:
         ident += f"<tr><td>At Janelia:</td><td>{tenure}</td></tr>"
     ident += "<tr><td>Also see:</td><td><a href='/mypapers'>Publications credited to me</a>" \
-             " &middot; <a href='/dois/mytags'>DOIs from my affiliations</a></td></tr>"
+             " &middot; <a href='/dois/mytags'>DOIs from my affiliations</a>" \
+             " &middot; <a href='https://workspace.hhmi.org/app/dashboard'>Check my compliance</a>" \
+             "</td></tr>"
     ident += "</table>"
     html = ident + metrics_panel(rows)
+    html += "<br><h4>You can also visit <a href='https://workspace.hhmi.org/app/dashboard'>My Compliance Dashboard</a> (HHMI Workspace) to check your compliance with the HHMI policies.</h4>"
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="My publication metrics", html=html,
@@ -22664,6 +22667,110 @@ def dois_top(show="journal", num=10):
                                          navbar=generate_navbar('Tag/affiliation')))
 
 
+def unmapped_organizational_authors():
+    """ Organizational authors on our DOIs that project_map does not cover
+
+        Each registrar marks a corporate author its own way, and the markers
+        matter: a first attempt at this used "has a name, no given/family",
+        which returned 306 candidates - overwhelmingly PEOPLE from software
+        deposits, where a DataCite creator is a single string ("Tpietzsch",
+        "L. F. Abbott"). Using each registrar's own signal gives 44, all of
+        which really are organizations.
+
+          Crossref  an author object carrying "name" and no "family" IS the
+                    organizational form in their schema
+          DataCite  nameType == 'Organizational', stated explicitly
+        Keyword arguments:
+          None
+        Returns:
+          (crossref, datacite) - each a list of (name, doi count), commonest first
+    """
+    mapped = set()
+    for row in DB['dis'].project_map.find({}, {"name": 1, "project": 1}):
+        mapped.add(row['name'])
+        if row.get('project'):
+            mapped.add(row['project'])
+    out = []
+    for pipeline in (
+            [{"$match": {"jrc_obtained_from": "Crossref", "author.name": {"$exists": True}}},
+             {"$unwind": "$author"},
+             {"$match": {"author.name": {"$exists": True}, "author.family": {"$exists": False}}},
+             {"$group": {"_id": "$author.name", "count": {"$sum": 1}}}],
+            [{"$match": {"creators.nameType": "Organizational"}},
+             {"$unwind": "$creators"},
+             {"$match": {"creators.nameType": "Organizational",
+                         "creators.name": {"$exists": True}}},
+             {"$group": {"_id": "$creators.name", "count": {"$sum": 1}}}]):
+        rows = [(r['_id'].strip(), r['count']) for r in DB['dis'].dois.aggregate(pipeline)
+                if r.get('_id')]
+        out.append(sorted([r for r in rows if r[0] not in mapped],
+                          key=lambda r: (-r[1], r[0].lower())))
+    return out[0], out[1]
+
+
+@app.route('/projects_unmapped')
+@restricted('admin')
+def projects_unmapped():
+    ''' Organizational authors with no project_map entry
+
+        The other half of the "Project X is not defined" warning
+        update_dois.py emits on every run: this is where those names are
+        resolved, either onto a project or onto the ignore list.
+
+        Admin-only in full, unlike /projects: a work list of things needing
+        curation is of no use to a reader.
+    '''
+    try:
+        crossref, datacite = unmapped_organizational_authors()
+        known = sorted(p for p in DB['dis'].project_map.distinct('project') if p)
+    except Exception as err:
+        return render_template('error.html', urlroot=request.url_root,
+                               title=render_warning("Could not get unmapped authors"),
+                               message=error_message(err))
+    options = "".join(f"<option>{escape(k)}</option>" for k in known)
+    html = session.pop('project_note', '')
+    html += stat_cards([("Crossref", f"{len(crossref):,}"),
+                        ("DataCite", f"{len(datacite):,}")], div_id='unmapped-stats')
+    html += "<div style='font-size:0.85em; color:#a8c4e0; max-width:720px'>" \
+            + "Authors the registrar marked as an organization that project_map " \
+            + "does not cover. <b>Map</b> one to a project to have it tagged from " \
+            + "the next ingest; <b>ignore</b> it to record that it is known and " \
+            + "deliberately untagged, which also stops update_dois reporting it " \
+            + "as undefined on every run. Doing neither leaves the warning in " \
+            + "place, which is a fine answer while you decide.</div><br>"
+    for label, rows in (("Crossref", crossref), ("DataCite", datacite)):
+        html += f"<h4>{label}</h4>"
+        if not rows:
+            html += "<div style='color:#888'>Nothing unmapped.</div><br>"
+            continue
+        trows = []
+        for name, count in rows:
+            common = ("<form method='POST' action='/project_edit' style='display:inline'>"
+                      f"<input type='hidden' name='name' value='{escape(name)}'>"
+                      "<input type='hidden' name='origin' value='unmapped'>")
+            mapform = (common + "<input type='hidden' name='action' value='add'>"
+                       "<input name='project' list='projlist' size='16' "
+                       "placeholder='project'>"
+                       "<button type='submit' class='btn btn-outline-primary btn-sm' "
+                       "style='margin-left:4px'>Map</button></form>")
+            ignform = (common + "<input type='hidden' name='action' value='ignore'>"
+                       "<button type='submit' class='btn btn-outline-secondary btn-sm'>"
+                       "Ignore</button></form>")
+            trows.append([name, cell(f"{count:,}", sort=count),
+                          safe(mapform + "&nbsp;" + ignform)])
+        html += render_table(['Organizational author', 'DOIs', ''], trows,
+                             table_id=f'unmapped-{label.lower()}',
+                             css='tablesorter standard-scroll')
+    html += f"<datalist id='projlist'>{options}</datalist>" \
+            + "<br><a class='btn btn-outline-secondary' href='/projects'>" \
+            + "Project mapping</a>"
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="Unmapped organizational authors",
+                                         html=html,
+                                         navbar=generate_navbar('Tag/affiliation')))
+
+
 @app.route('/project_edit', methods=['POST'])
 @restricted('admin')
 def project_edit():
@@ -22697,6 +22804,20 @@ def project_edit():
                 DB['dis'].project_map.insert_one({"name": name, "project": project,
                                                   **stamp})
                 note = render_warning(f"Mapped {name} to {project}.", 'success')
+        elif action == 'ignore':
+            # The established convention for "known, deliberately not tagged":
+            # project '' AND doNotUse. All 23 existing such rows carry both, and
+            # they differ in effect - doNotUse alone drops the row from PROJECT,
+            # so update_dois goes back to logging "Project X is not defined"
+            # every run, while an empty project is present-and-silent.
+            if not name:
+                note = render_warning("No name given.", 'warning')
+            elif DB['dis'].project_map.find_one({"name": name}):
+                note = render_warning(f"{name} is already mapped.", 'warning')
+            else:
+                DB['dis'].project_map.insert_one({"name": name, "project": "",
+                                                  "doNotUse": True, **stamp})
+                note = render_warning(f"{name} will be ignored from now on.", 'success')
         elif action == 'move':
             if not project:
                 note = render_warning("Choose a project to move it to.", 'warning')
@@ -22730,6 +22851,8 @@ def project_edit():
     # Carried in the session rather than the URL: the note can contain the name
     # the admin typed, and a redirect is what stops a refresh re-posting it.
     session['project_note'] = str(note)
+    if form.get('origin') == 'unmapped':
+        return redirect(url_for('projects_unmapped'))
     return redirect(url_for('show_projects', option=form.get('option') or None))
 
 
@@ -22819,7 +22942,15 @@ def show_projects(option=None):
     html = render_table(['Project', 'Synonyms', 'Supervisory Organization'], trows,
                         table_id='projects', css='tablesorter standard-scroll')
     if may_edit:
-        options = "".join(f"<option>{escape(k)}</option>" for k in sorted(proj))
+        # From the collection, not from `proj`: that dict is the filtered view -
+        # it drops retired rows and rows where project == name - so building the
+        # list from it offered 11 of the 12 projects that exist and hid
+        # "Janelia Research Campus" entirely.
+        try:
+            known = sorted(p for p in DB['dis'].project_map.distinct('project') if p)
+        except Exception:
+            known = sorted(proj)
+        options = "".join(f"<option>{escape(k)}</option>" for k in known)
         html += "<h4 style='margin-top:22px'>Map a name to a project</h4>" \
                 + "<form method='POST' action='/project_edit'>" \
                 + "<input type='hidden' name='action' value='add'>" \
@@ -22828,17 +22959,22 @@ def show_projects(option=None):
                 + "<div class='flexitem'><input class='form-control' name='name' " \
                 + "placeholder='name as it appears on a record' required></div>" \
                 + "<div class='flexitemauto'><input class='form-control' name='project' " \
-                + f"list='projlist' placeholder='project' required></div>" \
+                + "list='projlist' placeholder='project (existing or new)' required>" \
+                + "</div>" \
                 + f"<datalist id='projlist'>{options}</datalist>" \
                 + "<div class='flexitemauto'><button type='submit' " \
                 + "class='btn btn-primary'>Add</button></div></div></form>" \
                 + "<div style='font-size:0.85em; color:#a8c4e0; max-width:720px'>" \
                 + "A <b>project</b> is the grouping; the names under it are the " \
-                + "synonyms a record may carry. Retiring a synonym leaves it in " \
+                + "synonyms a record may carry. A project exists only by having " \
+                + "names mapped to it, so typing one that is not in the list " \
+                + "creates it. Retiring a synonym leaves it in " \
                 + "place but drops it from matching, which is why nothing here " \
                 + "deletes. Projects are not renamed from this page: the project " \
                 + "name is also a DOI tag, so changing it would orphan tags this " \
-                + "page cannot retag.</div>"
+                + "page cannot retag.</div>" \
+                + "<br><a class='btn btn-outline-secondary' href='/projects_unmapped'>" \
+                + "Organizational authors with no mapping</a>"
     if not cnt:
         # Prepend, not replace: replacing discarded the add form below, so an
         # empty collection could never get its first mapping.
