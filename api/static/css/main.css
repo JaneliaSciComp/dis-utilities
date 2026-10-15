@@ -527,6 +527,15 @@ hr {border-color: var(--muted-border);
    color: black;
    background-color: darkorange;
 }
+/* An administrator-only control, not a fact about the person. Deliberately gray
+   while every other badge in that row is colored: the colored ones say something
+   about this record, and this one is a tool only some readers can see. Gray also
+   keeps it clear of the write/removal convention - it navigates, so it is neither
+   amber nor red. White on #5a6268 is 6.2:1. */
+.badge-admin {
+   color: white;
+   background-color: #5a6268;
+}
 .badge-alumni {
    color: black;
    background-color: orangered;

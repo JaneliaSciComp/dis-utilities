@@ -38,6 +38,7 @@ from apispec import APISpec
 from apispec.yaml_utils import load_yaml_from_docstring
 import pandas as pd
 from pymongo.collation import Collation, CollationStrength
+from pymongo.errors import DuplicateKeyError
 import requests
 from packaging.version import Version
 import jrc_common.jrc_common as JRC
@@ -68,7 +69,7 @@ from dis_state import CVTERM, PROJECT
 # on the image. feat -> minor, everything else -> patch, in the same commit as
 # the change. Forgetting is survivable: ocbuild warns that the tag already
 # exists in the ImageStream rather than silently overwriting it.
-__version__ = "120.112.0"
+__version__ = "120.116.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -378,6 +379,15 @@ FWCI_MIN_WORKS = 1000
 # Avatar diameters. The Janelia logo beside it in the header is 72px tall, so
 # the badge sits just under that - present without overtopping the logo.
 AVATAR_PX = 62
+# The app's established red - seven existing uses, all error and failure states -
+# used here as the FILL of a remove control rather than as its text. It was
+# #f8d7da, which is Bootstrap's alert BACKGROUND tint: as foreground on a grey
+# badge that reads pink, and carries no warning at all.
+REMOVE_COLOR = '#e74c3c'
+# Amber for a control that WRITES, matching Bootstrap's btn-warning on the
+# solid buttons. Inline controls use it as text: a solid button per synonym
+# would swamp a row carrying five of them, and the colour does the work.
+WRITE_COLOR = '#f0ad4e'
 AVATAR_PROFILE_PX = 120
 # Local development is plain HTTP, and a Secure cookie is not stored over plain
 # HTTP - the sign-in would appear to succeed and then bounce straight back to
@@ -396,10 +406,15 @@ app.secret_key = os.environ.get('DIS_SESSION_SECRET') or ''
 def may_sign_in(person):
     ''' Whether an orcid document is allowed to sign in
         DECIDED 2026-10-12: an alumnus keeps access if and only if they are a
-        contingent worker. Note alumni means departed - it is set with an
-        alumni_date when someone drops out of People, and cleared when they
-        return - so this admits departed contingent workers, while a former
-        employee who came back already has the flag cleared.
+        contingent worker.
+        Note alumni means departed. update_janelians_from_people sets it (with
+        an alumni_date) under --alumni when somebody drops out of People, but
+        NOTHING clears it: that program's query excludes alumni:True outright,
+        so a returning employee is never revisited. The only supported way to
+        clear the flag is an administrator unchecking the box on /person/<id>.
+        So a former employee who came back is locked out until somebody does
+        that by hand - which is a known cost of the rule above, not an
+        oversight in it.
         Keyword arguments:
           person: orcid collection document
         Returns:
@@ -2269,6 +2284,19 @@ def add_orcid_controls(orc, html):
     if 'userIdO365' in orc:
         olink = f"/peoplerec/{orc['userIdO365']}"
         html += f" {tiny_badge('info', 'Show People data', olink)}"
+    # Straight to the editor for this record, for an administrator who spots
+    # something wrong while reading the page. Gated on the authorization rather
+    # than on merely being signed in: /userui, /orcidui and /unvaluserui carry no
+    # @restricted, so an ungated link would dead-end every ordinary reader on the
+    # denied page and advertise a surface they cannot use.
+    # Keyed by _id, which is what /person takes and the only identifier every
+    # record has - most of the collection has no ORCID iD, and /userui will have
+    # been reached by an O365 name.
+    # Not amber: this navigates, it does not write. Amber is reserved for the
+    # controls on the page it leads to.
+    if orc.get('_id') and 'admin' in authorizations(current_user()):
+        elink = f"/person/{orc['_id']}"
+        html += f" {tiny_badge('admin', 'Edit this record', elink)}"
     return html
 
 
@@ -7812,7 +7840,7 @@ def show_authorizations():
             granted = safe(f"<s>{escape(granted)}</s> "
                            f"<span style='color:#888'>(not in effect: "
                            f"{escape(why)})</span>")
-        when = str(orc.get('authorization_updated') or '')[:19]
+        when = str(orc.get('updated') or '')[:19]
         rows_html.append([_person_label(orc), granted, when,
                           safe(f"<a href='/person/{orc['_id']}'>Edit</a>")])
     html = ""
@@ -7915,8 +7943,11 @@ def _save_name(orc, me):
             return render_warning(f"{value} is already on this record.", 'warning')
         operation = {"$addToSet": {field: value}}
         restored = False
-    operation["$set"] = {"names_updated": datetime.now(),
-                         "names_updated_by": me.get('orcid')}
+    # One audit pair for the whole record, not one per field. The collection had
+    # grown three - names_updated, authorization_updated and a generic updated -
+    # so a reader could not tell which of them was authoritative, and a record
+    # carried up to eight audit fields.
+    operation["$set"] = {"updated": datetime.now(), "updated_by": me.get('orcid')}
     try:
         DB['dis'].orcid.update_one({"_id": orc['_id']}, operation)
     except Exception as err:
@@ -7930,6 +7961,97 @@ def _save_name(orc, me):
                               "return unless it has also changed in People.",
                               'warning')
     return render_warning("Saved.", 'success')
+
+
+def _save_person_field(orc, me):
+    ''' Set alumni status, or add an ORCID iD where there is none
+
+        Both differ from the name and authorization edits: another writer owns
+        them. update_janelians_from_people sets alumni (with an alumni_date) for
+        anyone who has dropped out of the People system, and add_people_to_orcid
+        clears it when they return - so clearing it here is only durable if
+        People actually holds them. The page says so.
+        Keyword arguments:
+          orc: orcid collection document
+          me: the signed-in administrator
+        Returns:
+          Rendered note
+    '''
+    action = request.form.get('action', '')
+    stamp = {"updated": datetime.now(), "updated_by": me.get('orcid')}
+    if action == 'alumni':
+        wanted = request.form.get('alumni') == 'on'
+        # Marking somebody alumni revokes their sign-in (unless they are a
+        # contingent worker) AND every authorization, since may_be_authorized
+        # excludes alumni. An administrator doing that to themselves would lose
+        # the page they did it from - the same hole the self-demotion guard
+        # closes, reached by a different route.
+        if wanted and str(orc['_id']) == str(me.get('_id')):
+            return render_warning("You cannot mark yourself a former employee: it "
+                                  "would revoke your own access. Ask another "
+                                  "administrator.", 'warning')
+        if wanted:
+            change = {"$set": {"alumni": True,
+                               "alumni_date": datetime.now().strftime("%Y-%m-%d"),
+                               **stamp}}
+        else:
+            # alumni_date goes with it: left behind, it reads as a departure date
+            # for somebody who has not departed. But it is not recoverable once
+            # dropped - People has no record of them, which is why they were
+            # marked in the first place - so it moves aside rather than dying.
+            # Deliberately NOT restored automatically on a later re-mark. The
+            # only way to clear this flag is an administrator unchecking the box,
+            # so a prior date means somebody left, came back, and is now leaving
+            # again; their first departure is the wrong date for their second.
+            # It is shown on the page instead, for a human to judge.
+            keep = dict(stamp)
+            if orc.get('alumni_date'):
+                keep['alumni_date_prior'] = str(orc['alumni_date'])[:10]
+            change = {"$unset": {"alumni": "", "alumni_date": ""}, "$set": keep}
+        try:
+            DB['dis'].orcid.update_one({"_id": orc['_id']}, change)
+        except Exception as err:
+            print(f"Could not set alumni: {err}")
+            return render_warning("Could not save that change.", 'error')
+        print(f"Alumni set to {wanted} for {orc['_id']} by {me.get('orcid')}")
+        return render_warning("Marked as a former employee." if wanted else
+                              "No longer marked as a former employee.", 'success')
+    if action != 'orcid':
+        # Explicit, not a fall-through. Reaching the ORCID branch by exhausting
+        # the alumni one meant an unrecognised action was answered with "that is
+        # not a well-formed ORCID iD", and a third action added to the
+        # dispatcher's tuple would have been silently handled as an ORCID.
+        return render_warning("Unknown action.", 'warning')
+    oid = (request.form.get('orcid') or '').strip()
+    if orc.get('orcid'):
+        # Add-only, deliberately. The iD is what a session is keyed by and what
+        # apply_orcids.py fills in; changing or removing one here would detach a
+        # person from their own sign-in and from the works matched by it.
+        return render_warning("This record already has an ORCID iD. It cannot be "
+                              "changed or removed here.", 'warning')
+    if not ORCID_RE.match(oid):
+        return render_warning("That is not a well-formed ORCID iD "
+                              "(0000-0000-0000-0000).", 'warning')
+    clash = DB['dis'].orcid.find_one({"orcid": oid})
+    if clash:
+        # Two roster records on one iD is exactly the ambiguity current_user()
+        # refuses to resolve, so allowing it would manufacture a lockout.
+        return render_warning(f"{oid} is already on another roster record "
+                              f"({display_person_name(clash) or 'unnamed'}).",
+                              'warning')
+    try:
+        DB['dis'].orcid.update_one({"_id": orc['_id']},
+                                   {"$set": {"orcid": oid, **stamp}})
+    except DuplicateKeyError:
+        # The orcid_unique index (partial, $type string) is the real guarantee;
+        # the find_one above is only there to name the other person. This is the
+        # race between the two.
+        return render_warning(f"{oid} was just taken by another record.", 'warning')
+    except Exception as err:
+        print(f"Could not add ORCID: {err}")
+        return render_warning("Could not save that change.", 'error')
+    print(f"ORCID {oid} added to {orc['_id']} by {me.get('orcid')}")
+    return render_warning(f"Added {oid}.", 'success')
 
 
 def _save_authorizations(orc, me):
@@ -7955,8 +8077,8 @@ def _save_authorizations(orc, me):
         DB['dis'].orcid.update_one(
             {"_id": orc['_id']},
             {"$set": {"authorization": sorted(chosen),
-                      "authorization_updated": datetime.now(),
-                      "authorization_updated_by": me.get('orcid')}})
+                      "updated": datetime.now(),
+                      "updated_by": me.get('orcid')}})
     except Exception as err:
         print(f"Could not save authorizations: {err}")
         return render_warning("Could not save the authorizations.", 'error')
@@ -8002,8 +8124,10 @@ def _name_rows(orc, field, label, singular):
                 + f"<span class='badge {badge}' style='font-size:0.95em' " \
                 + f"title='{escape(tip)}'>{escape(value)}" \
                 + ("&nbsp;&#9733;" if first else "") \
-                + "&nbsp;<button type='submit' class='btn btn-sm' style='padding:0 4px; " \
-                + "background:transparent; border:none; color:#f8d7da'" \
+                + "&nbsp;<button type='submit' class='btn btn-sm' style='padding:0; " \
+                + "width:15px; height:15px; line-height:14px; border-radius:50%; " \
+                + f"background:{REMOVE_COLOR}; border:none; color:#fff; " \
+                + "font-size:11px; vertical-align:middle'" \
                 + f" title='{escape(tip)}'>&times;</button></span></form>"
     html += "<form method='POST' style='margin-top:6px'>" \
             + "<input type='hidden' name='action' value='add'>" \
@@ -8012,7 +8136,7 @@ def _name_rows(orc, field, label, singular):
             + "<input type='text' class='form-control' name='value' " \
             + f"placeholder='add a {escape(singular)}'>" \
             + "</div><div class='flexitemauto'>" \
-            + "<button type='submit' class='btn btn-outline-primary btn-sm'>Add</button>" \
+            + "<button type='submit' class='btn btn-outline-warning btn-sm'>Add</button>" \
             + "</div></div></form>"
     return html
 
@@ -8046,6 +8170,8 @@ def edit_person(rid):
         action = request.form.get('action', '')
         if action in ('add', 'remove'):
             note = _save_name(orc, me)
+        elif action in ('alumni', 'orcid'):
+            note = _save_person_field(orc, me)
         elif not eligible:
             note = render_warning(f"This person cannot hold an authorization ({why}). "
                                   "An ORCID iD is required, and alumni are excluded.",
@@ -8068,6 +8194,64 @@ def edit_person(rid):
                      + f"{escape(definition)}</div>"
         boxes += "</div>"
     html = note + f"<h4>{_person_label(orc)}</h4>"
+
+    # ----- status -----
+    html += "<h4 style='margin-top:20px'>Status</h4>"
+    checked = " checked" if orc.get('alumni') is True else ""
+    mine = str(orc['_id']) == str(me.get('_id'))
+    html += "<form method='POST'><input type='hidden' name='action' value='alumni'>" \
+            + "<label><input type='checkbox' name='alumni'" + checked \
+            + (" disabled" if mine else "") + "> Former employee" \
+            + ("</label>" if not mine else
+               "</label> <span style='color:#888'>&mdash; you cannot mark "
+               "yourself, it would revoke your own access</span>")
+    if orc.get('alumni_date'):
+        html += f" <span style='color:#888'>(since " \
+                + f"{escape(str(orc['alumni_date']))})</span>"
+    elif orc.get('alumni_date_prior'):
+        # Kept from a previous unmarking. Shown because re-ticking the box dates
+        # the departure today, which is wrong if this is the date that matters.
+        html += " <span style='color:#888'>(previously recorded as having left " \
+                + f"{escape(str(orc['alumni_date_prior']))})</span>"
+    if not mine:
+        html += "&nbsp;<button type='submit' class='btn btn-warning btn-sm'>Save</button>"
+    html += "</form>" \
+            + "<div style='font-size:0.85em; color:#a8c4e0; max-width:620px'>" \
+            + "The nightly People sync sets this for anyone who has dropped out " \
+            + "of the HHMI People system. Nothing clears it automatically - " \
+            + "unchecking it here is the only way - so somebody who has returned " \
+            + "stays locked out until you do. If they are still absent from " \
+            + "People the sync may mark them again, dated the day it runs. A " \
+            + "former employee cannot hold an authorization, and cannot sign in " \
+            + "unless they are a contingent worker.</div>"
+
+    # ----- ORCID iD -----
+    # Derived here, not borrowed: the login view has its own local of the same
+    # name, so referencing it from this function was a NameError waiting for
+    # the first record without an iD. Stripped of its anchors because the HTML
+    # pattern attribute is implicitly anchored.
+    html_pattern = ORCID_RE.pattern.strip('^$')
+    html += "<h4 style='margin-top:20px'>ORCID iD</h4>"
+    if orc.get('orcid'):
+        html += f"<a href='{ORCID}{escape(orc['orcid'])}' target='_blank'>" \
+                + f"{escape(orc['orcid'])}</a>" \
+                + "<div style='font-size:0.85em; color:#a8c4e0; max-width:620px'>" \
+                + "An iD is added once and not changed or removed here: it is " \
+                + "what a sign-in is keyed by and what matches this person's " \
+                + "deposited works.</div>"
+    else:
+        html += "<form method='POST'><input type='hidden' name='action' value='orcid'>" \
+                + "<div class='flexcontainer'><div class='flexitem'>" \
+                + f"<input type='text' class='form-control' name='orcid' " \
+                + f"pattern=\"{html_pattern}\" placeholder='0000-0000-0000-0000' " \
+                + "required></div><div class='flexitemauto'>" \
+                + "<button type='submit' class='btn btn-warning'>Add</button>" \
+                + "</div></div></form>" \
+                + "<div style='font-size:0.85em; color:#a8c4e0; max-width:620px'>" \
+                + "No iD on this record. Adding one is what makes the person " \
+                + "eligible to hold an authorization, and lets their deposited " \
+                + "works be matched by iD rather than by name alone. It can be " \
+                + "added once; it is not editable afterwards.</div>"
 
     # ----- names -----
     html += "<h4 style='margin-top:24px'>Name variants</h4>" \
@@ -8096,15 +8280,15 @@ def edit_person(rid):
         html += "<form method='POST'>" \
                 + "<input type='hidden' name='action' value='auth'>" \
                 + boxes \
-                + "<button type='submit' class='btn btn-primary'>Save</button>" \
+                + "<button type='submit' class='btn btn-warning'>Save</button>" \
                 + "</form>"
     else:
         html += (boxes if current else "<div style='color:#888'>No authorizations.</div>")
-    if orc.get('authorization_updated'):
+    if orc.get('updated'):
         html += f"<div style='font-size:0.85em; color:#888; margin-top:14px'>Last changed " \
-                + f"{escape(str(orc['authorization_updated'])[:19])}"
-        if orc.get('authorization_updated_by'):
-            html += f" by {escape(str(orc['authorization_updated_by']))}"
+                + f"{escape(str(orc['updated'])[:19])}"
+        if orc.get('updated_by'):
+            html += f" by {escape(str(orc['updated_by']))}"
         html += "</div>"
     html += "<br><a class='btn btn-outline-secondary' href='/authorizations'>Back</a>"
     endpoint_access()
@@ -19897,13 +20081,20 @@ def show_user_ui(eid, show='full'):
 def merge_roster_records(recs):
     ''' Fold roster records carrying one ORCID into a single person - but only when
         they really are one person.
-        Five ORCIDs in the orcid collection sit on more than one record, and they are
-        two different faults. 0000-0001-7858-944X is one person written twice, "Kai
-        Wang" (J0444, alumni) and "Kaiyu Wang" (52078); find_one picks whichever comes
-        first, so an ORCID-keyed page can show the shorter list - 8 works instead of 29.
-        But 0009-0000-2304-3124 carries Bryan Hooks, Daniel Feliciano AND Mayank Kabra,
-        three different people on one ORCID. Merging that would hand one of them the
-        other two's publications, credited, on a page built to be shown to the author.
+        HISTORICAL, and kept as a backstop. Five ORCIDs once sat on more than one
+        record, in two different faults. 0000-0001-7858-944X was one person written
+        twice, "Kai Wang" (J0444, alumni) and "Kaiyu Wang" (52078); find_one picks
+        whichever comes first, so an ORCID-keyed page could show the shorter list -
+        8 works instead of 29. But 0009-0000-2304-3124 carried Bryan Hooks, Daniel
+        Feliciano AND Mayank Kabra, three different people on one ORCID. Merging that
+        would hand one of them the other two's publications, credited, on a page built
+        to be shown to the author.
+        Those records were cleaned up, and the orcid_unique index (unique, partial on
+        {orcid: {$type: "string"}}) now refuses a second record carrying an iD already
+        held, so recs is a single element in practice and this folds nothing. Verified
+        2026-10-15: zero duplicated iDs in production. The code stays because the
+        index is the only thing preventing it - drop or rebuild that index and the
+        fault returns, silently, on a page shown to the author it would misattribute.
         The test is the family name: shared (allowing for case and a trailing space)
         means one person written twice, and the union is right; otherwise the roster is
         wrong in a way this page must not paper over, and the caller has to say so.
@@ -22751,7 +22942,7 @@ def projects_unmapped():
             mapform = (common + "<input type='hidden' name='action' value='add'>"
                        "<input name='project' list='projlist' size='16' "
                        "placeholder='project'>"
-                       "<button type='submit' class='btn btn-outline-primary btn-sm' "
+                       "<button type='submit' class='btn btn-outline-warning btn-sm' "
                        "style='margin-left:4px'>Map</button></form>")
             ignform = (common + "<input type='hidden' name='action' value='ignore'>"
                        "<button type='submit' class='btn btn-outline-secondary btn-sm'>"
@@ -22904,8 +23095,13 @@ def show_projects(option=None):
                          f"<input type='hidden' name='option' value='{escape(option or '')}'>"
                          "<input name='project' list='projlist' size='10' "
                          "placeholder='move to' style='font-size:0.8em'>"
+                         # A word, not an arrow. "&#8594;" is one thin glyph on a
+                         # transparent borderless button, sitting right after a
+                         # text input - it read as punctuation. retire and
+                         # restore beside it are words and are legible, so this
+                         # matches them.
                          "<button type='submit' class='btn btn-sm' style='padding:0 4px; "
-                         "background:transparent; border:none; color:#a8c4e0'>&#8594;"
+                         f"background:transparent; border:none; color:{WRITE_COLOR}'>move"
                          "</button></form>")
                 act, label = ('restore', 'restore') if tag in retired \
                              else ('retire', 'retire')
@@ -22915,7 +23111,7 @@ def show_projects(option=None):
                          f"<input type='hidden' name='name' value='{escape(tag)}'>"
                          f"<input type='hidden' name='option' value='{escape(option or '')}'>"
                          "<button type='submit' class='btn btn-sm' style='padding:0 4px; "
-                         f"background:transparent; border:none; color:#a8c4e0'>{label}"
+                         f"background:transparent; border:none; color:{WRITE_COLOR}'>{label}"
                          "</button></form>")
             synonyms.append(link)
         if key in suporgs:
@@ -22963,7 +23159,7 @@ def show_projects(option=None):
                 + "</div>" \
                 + f"<datalist id='projlist'>{options}</datalist>" \
                 + "<div class='flexitemauto'><button type='submit' " \
-                + "class='btn btn-primary'>Add</button></div></div></form>" \
+                + "class='btn btn-warning'>Add</button></div></div></form>" \
                 + "<div style='font-size:0.85em; color:#a8c4e0; max-width:720px'>" \
                 + "A <b>project</b> is the grouping; the names under it are the " \
                 + "synonyms a record may carry. A project exists only by having " \
@@ -23965,7 +24161,7 @@ def _cv_term_rows(cv, editing):
                      f"value='{escape(row.get('definition', ''))}'>"),
                 safe(f"<select class='form-control form-control-sm' name='format'>{fmt}</select>"),
                 safe(usage),
-                safe("<button type='submit' class='btn btn-primary btn-sm'>Save</button>"
+                safe("<button type='submit' class='btn btn-warning btn-sm'>Save</button>"
                      f"&nbsp;<a href='/cv/{escape(cv)}'>cancel</a></form>")])
             continue
         del_form = ""
@@ -24036,7 +24232,7 @@ def cvs(cv=None):
             + "placeholder='display name' required></div>" \
             + "<div class='flexitem'><input class='form-control' name='definition' " \
             + "placeholder='definition'></div>" \
-            + "<div class='flexitemauto'><button type='submit' class='btn btn-primary'>" \
+            + "<div class='flexitemauto'><button type='submit' class='btn btn-warning'>" \
             + "Add</button></div></div></form><br>"
     if cv:
         current = next((row for row in cvlist if row['name'] == cv), {})
@@ -24077,7 +24273,7 @@ def cvs(cv=None):
                 + "placeholder='definition'></div>" \
                 + f"<div class='flexitemauto'><select class='form-control' name='format'>{fmt}" \
                 + "</select></div>" \
-                + "<div class='flexitemauto'><button type='submit' class='btn btn-primary'>" \
+                + "<div class='flexitemauto'><button type='submit' class='btn btn-warning'>" \
                 + "Add</button></div></div></form>"
         if not DB['dis'].cvterm.count_documents({"cv": cv}):
             html += "<form method='POST' style='margin-top:14px' " \
