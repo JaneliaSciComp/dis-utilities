@@ -22,6 +22,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = (ROOT / 'api' / 'dis_responder.py').read_text(encoding='utf-8')
+HTML_SOURCE = (ROOT / 'api' / 'dis_html.py').read_text(encoding='utf-8')
 
 # The cv as it stands in the database; the helper reads whatever is there.
 CV = {'admin': {'display': 'Administrator', 'definition': 'Administrator (full access)'},
@@ -197,7 +198,7 @@ def test_an_admin_cannot_remove_their_own_admin():
 
 
 def test_a_grant_records_who_and_when():
-    for field in ('authorization_updated', 'authorization_updated_by'):
+    for field in ('updated', 'updated_by'):
         assert field in SOURCE, field
 
 
@@ -417,7 +418,7 @@ def test_no_name_write_ever_sets_the_whole_array():
     for action, value in (('add', 'Bob'), ('remove', 'Rob')):
         _, writes = save_name(PERSON, action, 'given', value)
         for operation in writes:
-            assert set(operation.get('$set', {})) <= {'names_updated', 'names_updated_by'}, \
+            assert set(operation.get('$set', {})) <= {'updated', 'updated_by'}, \
                 '$set may only carry the audit fields, never given/family'
 
 
@@ -435,5 +436,268 @@ def test_rejected_without_writing(action, field, value, why):
 
 def test_a_name_change_records_who_and_when():
     _, writes = save_name(PERSON, 'add', 'given', 'Bob')
-    assert writes[0]['$set']['names_updated_by'] == 'ADMIN'
-    assert 'names_updated' in writes[0]['$set']
+    assert writes[0]['$set']['updated_by'] == 'ADMIN'
+    assert 'updated' in writes[0]['$set']
+
+
+# --- alumni status and adding an ORCID iD ----------------------------------
+
+def _flat(text):
+    """ Join adjacent string-concatenation pieces.
+
+        Prose in this file is built by concatenation, so a phrase routinely
+        spans a literal boundary and a plain substring check misses it. Four
+        separate assertions have been written wrong this way.
+    """
+    return re.sub(r'"\s*\\?\s*\n\s*\+?\s*(f?)"', '', text)
+
+
+def _person_field():
+    return _flat(SOURCE[SOURCE.index('def _save_person_field'):
+                        SOURCE.index('def _save_authorizations')])
+
+
+def test_an_admin_cannot_mark_themselves_a_former_employee():
+    ''' Alumni revokes sign-in (unless contingent worker) AND every
+        authorization, so self-marking would lose the page it was done from -
+        the self-demotion hole reached by a different route.
+    '''
+    block = _person_field()
+    assert "if wanted and str(orc['_id']) == str(me.get('_id')):" in block
+    assert 'cannot mark yourself a former employee' in block
+
+
+def test_clearing_alumni_also_clears_the_date():
+    ''' Left behind, alumni_date reads as a departure date for somebody who has
+        not departed.
+    '''
+    block = _person_field()
+    assert '"$unset": {"alumni": "", "alumni_date": ""}' in block
+
+
+def test_clearing_alumni_preserves_the_date_rather_than_destroying_it():
+    ''' The departure date cannot be recomputed - People has no record of the
+        person, which is why they were marked alumni at all. Unchecking the box
+        must not be the end of it.
+    '''
+    block = _person_field()
+    assert "keep['alumni_date_prior'] = str(orc['alumni_date'])[:10]" in block
+    assert '"$set": keep' in block
+
+
+def test_prior_date_is_not_restored_automatically():
+    ''' Unchecking the box is the only way the flag clears, so a prior date means
+        somebody left, returned, and is leaving again - their first departure is
+        the wrong date for their second. Re-marking still dates today.
+    '''
+    block = _person_field()
+    setting = block.split('if wanted:')[1].split('        else:')[0]
+    assert '"alumni_date": datetime.now().strftime("%Y-%m-%d")' in setting
+    assert 'alumni_date_prior' not in setting
+
+
+def test_setting_alumni_records_a_date():
+    assert '"alumni_date": datetime.now().strftime("%Y-%m-%d")' in _person_field()
+
+
+def test_an_orcid_id_is_add_only():
+    ''' The iD is what a session is keyed by and what apply_orcids fills in, so
+        changing or removing one here would detach a person from their own
+        sign-in and from the works matched by it.
+    '''
+    block = _person_field()
+    assert "if orc.get('orcid'):" in block
+    assert 'cannot be changed or removed here' in block
+
+
+def test_an_added_orcid_is_validated_and_unique():
+    ''' Two roster records on one iD is exactly the ambiguity current_user()
+        refuses to resolve, so allowing it would manufacture a lockout.
+    '''
+    block = _person_field()
+    assert 'ORCID_RE.match(oid)' in block
+    assert 'find_one({"orcid": oid})' in block
+    assert 'already on another roster record' in block
+
+
+def test_the_orcid_pattern_is_derived_in_this_function():
+    ''' The login view has a local of the same name; referencing it from here
+        was a NameError waiting for the first record without an iD.
+    '''
+    block = SOURCE[SOURCE.index('def edit_person'):]
+    block = block[:block.index('\n@app.route')]
+    assert "html_pattern = ORCID_RE.pattern.strip('^$')" in block
+
+
+def test_the_page_says_the_people_sync_owns_alumni():
+    ''' Clearing it here lasts only if People holds them. '''
+    block = SOURCE[SOURCE.index('def edit_person'):]
+    block = block[:block.index('\n@app.route')]
+    assert 'People sync sets this' in block
+
+
+# --- _save_person_field, exercised rather than grepped ---------------------
+#
+# The assertions above this point match strings in the source, which is cheap
+# and brittle: four of them have been written wrong because a phrase spanned a
+# literal boundary, and none of them would catch a branch that falls through to
+# the wrong handler. These run the function.
+
+def _person_field_harness():
+    ''' _save_person_field with Flask and Mongo stubbed, plus the operations it
+        issued. find_one answers for one "taken" iD so the clash path is real.
+    '''
+    import datetime as _dt
+    writes = []
+    taken = '0000-0002-1825-0097'
+
+    class _Coll:
+        def update_one(self, _flt, operation):
+            writes.append(operation)
+
+        def find_one(self, query):
+            return ({'orcid': taken, 'given': ['Taken'], 'family': ['Person']}
+                    if query.get('orcid') == taken else None)
+
+    req = type('R', (), {'form': {}})()
+    ns = {'request': req, 'datetime': _dt.datetime,
+          'render_warning': lambda msg, kind='warning': (kind, msg),
+          'DB': {'dis': type('D', (), {'orcid': _Coll()})()},
+          'print': lambda *a, **k: None,
+          'ORCID_RE': re.compile(r'^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$'),
+          'display_person_name': lambda person: 'Taken Person'}
+    tree = ast.parse(SOURCE)
+    node = next(n for n in tree.body
+                if isinstance(n, ast.FunctionDef) and n.name == '_save_person_field')
+    exec(ast.get_source_segment(SOURCE, node), ns)    # pylint: disable=W0122
+
+    def call(orc, form, me=None):
+        writes.clear()
+        req.form = form
+        result = ns['_save_person_field'](orc, me or {'_id': 1, 'orcid': 'ADMIN'})
+        return result, [key for op in writes for key in op]
+    return call, taken
+
+
+save_field, TAKEN_ID = _person_field_harness()
+
+
+def test_marking_someone_else_alumni_writes_the_flag_and_a_date():
+    (kind, _), ops = save_field({'_id': 2}, {'action': 'alumni', 'alumni': 'on'})
+    assert kind == 'success'
+    assert ops == ['$set']
+
+
+def test_unmarking_alumni_unsets_both_fields():
+    (kind, _), ops = save_field({'_id': 2, 'alumni': True}, {'action': 'alumni'})
+    assert kind == 'success'
+    assert '$unset' in ops
+
+
+def test_marking_yourself_alumni_writes_nothing():
+    ''' It would revoke the access needed to undo it. '''
+    (kind, msg), ops = save_field({'_id': 1}, {'action': 'alumni', 'alumni': 'on'})
+    assert kind == 'warning'
+    assert ops == []
+    assert 'yourself' in msg
+
+
+def test_unmarking_yourself_is_allowed():
+    ''' Only the revoking direction is dangerous. '''
+    (kind, _), ops = save_field({'_id': 1, 'alumni': True}, {'action': 'alumni'})
+    assert kind == 'success'
+    assert '$unset' in ops
+
+
+def test_adding_an_orcid_to_a_record_without_one():
+    (kind, _), ops = save_field({'_id': 2},
+                                {'action': 'orcid', 'orcid': '0000-0001-2345-6789'})
+    assert kind == 'success'
+    assert ops == ['$set']
+
+
+@pytest.mark.parametrize('orc,form,why', [
+    ({'_id': 2, 'orcid': '0000-0003-3118-1636'},
+     {'action': 'orcid', 'orcid': '0000-0001-2345-6789'}, 'already has one'),
+    ({'_id': 2}, {'action': 'orcid', 'orcid': 'not-an-id'}, 'malformed'),
+    ({'_id': 2}, {'action': 'orcid', 'orcid': TAKEN_ID}, 'another record has it'),
+    ({'_id': 2}, {'action': 'orcid', 'orcid': ''}, 'empty'),
+])
+def test_an_orcid_is_refused_without_writing(orc, form, why):
+    (kind, _), ops = save_field(orc, form)
+    assert kind == 'warning', why
+    assert ops == [], why
+
+
+def test_an_unrecognised_action_is_refused_not_treated_as_an_orcid():
+    ''' The ORCID branch used to be reached by exhausting the alumni one, so an
+        unknown action answered "that is not a well-formed ORCID iD" - and a
+        third action added to the dispatcher would have been handled as an
+        ORCID add.
+    '''
+    (kind, msg), ops = save_field({'_id': 2}, {'action': 'something_else'})
+    assert kind == 'warning'
+    assert ops == []
+    assert msg == 'Unknown action.'
+
+
+# ---------------------------------------------------------------------------
+# The "Edit this record" control on the public person pages
+#
+# /userui, /orcidui and /unvaluserui carry no @restricted, so this badge is the
+# one admin-only thing on an otherwise public page. These run the real function
+# rather than matching its source: the record passed in has neither 'orcid' nor
+# 'userIdO365', so the two outbound-call branches above are skipped and only the
+# gate under test executes.
+# ---------------------------------------------------------------------------
+
+def _controls(user, held):
+    ''' add_orcid_controls with current_user/authorizations stubbed '''
+    ns = {}
+    # tiny_badge lives in dis_html, add_orcid_controls in dis_responder.
+    for src, name in ((HTML_SOURCE, 'tiny_badge'), (SOURCE, 'add_orcid_controls')):
+        node = next(n for n in ast.parse(src).body
+                    if isinstance(n, ast.FunctionDef) and n.name == name)
+        exec(ast.get_source_segment(src, node), ns)       # pylint: disable=W0122
+    ns['current_user'] = lambda: user
+    ns['authorizations'] = lambda person: held
+    return ns['add_orcid_controls']
+
+
+REC = {'_id': 'abc123', 'given': ['Ann'], 'family': ['Lee']}
+
+
+def test_admin_sees_the_edit_control():
+    html = _controls({'orcid': 'x'}, {'admin'})(REC, '')
+    assert 'Edit this record' in html
+    assert '/person/abc123' in html
+
+
+def test_signed_out_reader_does_not_see_the_edit_control():
+    ''' These pages are public. An ungated link would dead-end every ordinary
+        reader on the denied page and advertise a surface they cannot use.
+    '''
+    html = _controls(None, set())(REC, '')
+    assert 'Edit this record' not in html
+    assert '/person/' not in html
+
+
+def test_a_non_admin_authorization_does_not_unlock_the_edit_control():
+    ''' Holding some other term - datacite, say - is not administration. '''
+    html = _controls({'orcid': 'x'}, {'datacite'})(REC, '')
+    assert 'Edit this record' not in html
+
+
+def test_edit_control_is_not_styled_as_a_write():
+    ''' Amber means this click writes; this one only navigates to a page where
+        writing is possible. See WRITE_COLOR/REMOVE_COLOR.
+    '''
+    html = _controls({'orcid': 'x'}, {'admin'})(REC, '')
+    assert 'badge-admin' in html
+    assert '#f0ad4e' not in html and '#e74c3c' not in html
+
+
+def test_badge_admin_class_actually_exists():
+    ''' A badge class with no CSS renders as unstyled text, silently. '''
+    css = (ROOT / 'api' / 'static' / 'css' / 'main.css').read_text(encoding='utf-8')
+    assert '.badge-admin {' in css
