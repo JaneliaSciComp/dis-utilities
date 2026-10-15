@@ -133,3 +133,12 @@ def test_a_write_redirects_rather_than_re_rendering():
 def test_a_name_is_mapped_only_once():
     assert 'find_one({"name": name})' in HANDLER
     assert 'is already mapped' in HANDLER
+
+
+def test_synonyms_go_one_per_line_when_the_controls_are_shown():
+    ''' Each synonym gains a "move to" box and two buttons for an admin, so a
+        comma-joined list runs together. A reader with no controls keeps the
+        compact form.
+    '''
+    assert 'joiner = "<br>" if may_edit else \', \'' in VIEW
+    assert 'joiner.join(synonyms)' in VIEW

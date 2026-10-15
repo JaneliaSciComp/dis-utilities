@@ -68,7 +68,7 @@ from dis_state import CVTERM, PROJECT
 # on the image. feat -> minor, everything else -> patch, in the same commit as
 # the change. Forgetting is survivable: ocbuild warns that the tag already
 # exists in the ImageStream rather than silently overwriting it.
-__version__ = "120.111.0"
+__version__ = "120.111.1"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -22809,8 +22809,12 @@ def show_projects(option=None):
             color = 'red'
             unknown += 1
         status = f"<span style='color:{color}'>{status}</span>"
+        # One per line once the controls are on, or a "move to" box and two
+        # buttons per synonym run the column together into noise. A reader with
+        # no controls gets the compact comma list.
+        joiner = "<br>" if may_edit else ', '
         trows.append([safe(f"<a href='/tag/{escape(key)}'>{key}</a>"),
-                      safe(', '.join(synonyms)), safe(status)])
+                      safe(joiner.join(synonyms)), safe(status)])
         cnt += 1
     html = render_table(['Project', 'Synonyms', 'Supervisory Organization'], trows,
                         table_id='projects', css='tablesorter standard-scroll')
