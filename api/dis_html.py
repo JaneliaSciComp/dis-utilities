@@ -132,6 +132,12 @@ NAV = {"Home": "",
                                         "API rate limits": "ratelimit",
                                         "Data sources": "data_sources"},
                    "Controlled vocabularies": "cv",
+                   # Admin-only, like "cv" above. Both are hidden from anyone
+                   # who cannot open them by the navbar's own filter, so they
+                   # need no special casing here. Until now /authorizations was
+                   # reachable only from /profile, which meant the page that
+                   # grants access was the harder of the two to find.
+                   "Authorizations": "authorizations",
                    "DOI relationships": "doi_relationships",
                    "Endpoints": "stats_endpoints",
                    "Library versions": "system_versions",
