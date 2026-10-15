@@ -68,7 +68,7 @@ from dis_state import CVTERM, PROJECT
 # on the image. feat -> minor, everything else -> patch, in the same commit as
 # the change. Forgetting is survivable: ocbuild warns that the tag already
 # exists in the ImageStream rather than silently overwriting it.
-__version__ = "120.110.2"
+__version__ = "120.111.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -194,6 +194,34 @@ def _load_config_ns(name):
 CVTERM_TTL = 60
 
 
+def refresh_project(dis_db=None):
+    ''' Reload the project-name cache from the database
+
+        PROJECT is the twin of CVTERM and had the same defect: loaded once in
+        before_request and never reloaded, so an edit to project_map was
+        invisible on every pod until a deploy. Same TTL, same clear-before-
+        update, same build-into-a-local-first.
+
+        Retired entries (doNotUse) are left out, which is what makes the flag a
+        retirement rather than a label - so restoring one has to go through here
+        too, not only removing one.
+        Keyword arguments:
+          dis_db: database handle, defaulting to the established one
+        Returns:
+          None
+    '''
+    database = dis_db if dis_db is not None else DB.get('dis')
+    if database is None:
+        return
+    local = {}
+    for row in database.project_map.find({"doNotUse": {"$exists": False}}):
+        local[row['name']] = True
+        local[row['project']] = True
+    PROJECT.clear()
+    PROJECT.update(local)
+    app.config['CVTERM_LOADED'] = time()
+
+
 def refresh_cvterm(dis_db=None):
     ''' Reload the controlled-vocabulary cache from the database
 
@@ -268,8 +296,9 @@ def before_request():
         # vocabulary serving rather than taking the app down over a cache.
         try:
             refresh_cvterm()
+            refresh_project()
         except Exception as err:
-            print(f"Could not refresh CVTERM: {err}")
+            print(f"Could not refresh CVTERM/PROJECT: {err}")
     app.config["START_TIME"] = time()
     app.config["COUNTER"] += 1
     endpoint = request.endpoint if request.endpoint else "(Unknown)"
@@ -22635,6 +22664,75 @@ def dois_top(show="journal", num=10):
                                          navbar=generate_navbar('Tag/affiliation')))
 
 
+@app.route('/project_edit', methods=['POST'])
+@restricted('admin')
+def project_edit():
+    ''' Apply one project_map change
+
+        A separate, gated endpoint rather than a gated /projects: that page is a
+        useful read for anyone and stays public, so the write needs its own door
+        rather than per-section machinery inside a public view.
+
+        No rename and no delete. "project" is live data - it appears as
+        jrc_tag.name on 1,186 DOIs for CellMap alone - so renaming one here
+        would orphan tags this page cannot retag. doNotUse is the retirement
+        mechanism, already used by 23 of 49 rows, so a hard delete would be a
+        second way to do the same thing with none of the reversibility.
+    '''
+    me = current_user() or {}
+    form = request.form
+    action = form.get('action', '')
+    name = (form.get('name') or '').strip()
+    project = (form.get('project') or '').strip()
+    stamp = {"updated": datetime.now(), "updated_by": me.get('orcid')}
+    note = ""
+    try:
+        if action == 'add':
+            if not name or not project:
+                note = render_warning("A synonym needs both a name and a project.",
+                                      'warning')
+            elif DB['dis'].project_map.find_one({"name": name}):
+                note = render_warning(f"{name} is already mapped.", 'warning')
+            else:
+                DB['dis'].project_map.insert_one({"name": name, "project": project,
+                                                  **stamp})
+                note = render_warning(f"Mapped {name} to {project}.", 'success')
+        elif action == 'move':
+            if not project:
+                note = render_warning("Choose a project to move it to.", 'warning')
+            else:
+                res = DB['dis'].project_map.update_one({"name": name},
+                                                       {"$set": {"project": project,
+                                                                 **stamp}})
+                note = render_warning(f"Moved {name} to {project}.", 'success') \
+                    if getattr(res, 'matched_count', 0) else \
+                    render_warning(f"No mapping named {name}.", 'warning')
+        elif action in ('retire', 'restore'):
+            change = {"$set": {"doNotUse": True, **stamp}} if action == 'retire' \
+                     else {"$unset": {"doNotUse": ""}, "$set": stamp}
+            res = DB['dis'].project_map.update_one({"name": name}, change)
+            if getattr(res, 'matched_count', 0):
+                note = render_warning(f"{'Retired' if action == 'retire' else 'Restored'} "
+                                      f"{name}.", 'success')
+            else:
+                note = render_warning(f"No mapping named {name}.", 'warning')
+        else:
+            note = render_warning("Unknown action.", 'warning')
+    except Exception as err:
+        print(f"project_map edit failed: {err}")
+        note = render_warning("Could not save that change.", 'error')
+    else:
+        print(f"project_map {action}: name={name!r} project={project!r} "
+              f"by {me.get('orcid')}")
+        # PROJECT is read on every request to decide whether a name is a
+        # project, so a stale cache here misattributes authors.
+        refresh_project()
+    # Carried in the session rather than the URL: the note can contain the name
+    # the admin typed, and a redirect is what stops a refresh re-posting it.
+    session['project_note'] = str(note)
+    return redirect(url_for('show_projects', option=form.get('option') or None))
+
+
 @app.route('/projects')
 @app.route('/projects/<string:option>')
 def show_projects(option=None):
@@ -22648,14 +22746,21 @@ def show_projects(option=None):
                                                     + "orcid collection"),
                                message=error_message(err))
     proj = {}
+    retired = set()
     for row in rows:
-        if 'doNotUse' in row and not option:
-            continue
+        if 'doNotUse' in row:
+            retired.add(row['name'])
+            if not option:
+                continue
         if row['project'] == row['name']:
             continue
         if row['project'] not in proj:
             proj[row['project']] = []
         proj[row['project']].append(row['name'])
+    # Controls are rendered only for an administrator; the page itself stays
+    # public, because the mapping is a useful read for anyone. /project_edit
+    # enforces this independently - hiding a form protects nothing on its own.
+    may_edit = 'admin' in authorizations(current_user())
     trows = []
     cnt = 0
     active = 0
@@ -22665,7 +22770,31 @@ def show_projects(option=None):
     for key, val in sorted(proj.items()):
         synonyms = []
         for tag in sorted(val):
-            synonyms.append(f"<a href='/tag/{escape(tag)}'>{tag}</a>")
+            link = f"<a href='/tag/{escape(tag)}'>{tag}</a>"
+            if tag in retired:
+                link = f"<s>{link}</s>"
+            if may_edit:
+                link += (f"<form method='POST' action='/project_edit' "
+                         "style='display:inline; margin-left:4px'>"
+                         "<input type='hidden' name='action' value='move'>"
+                         f"<input type='hidden' name='name' value='{escape(tag)}'>"
+                         f"<input type='hidden' name='option' value='{escape(option or '')}'>"
+                         "<input name='project' list='projlist' size='10' "
+                         "placeholder='move to' style='font-size:0.8em'>"
+                         "<button type='submit' class='btn btn-sm' style='padding:0 4px; "
+                         "background:transparent; border:none; color:#a8c4e0'>&#8594;"
+                         "</button></form>")
+                act, label = ('restore', 'restore') if tag in retired \
+                             else ('retire', 'retire')
+                link += (f"<form method='POST' action='/project_edit' "
+                         "style='display:inline; margin-left:4px'>"
+                         f"<input type='hidden' name='action' value='{act}'>"
+                         f"<input type='hidden' name='name' value='{escape(tag)}'>"
+                         f"<input type='hidden' name='option' value='{escape(option or '')}'>"
+                         "<button type='submit' class='btn btn-sm' style='padding:0 4px; "
+                         f"background:transparent; border:none; color:#a8c4e0'>{label}"
+                         "</button></form>")
+            synonyms.append(link)
         if key in suporgs:
             if suporgs[key]['active']:
                 status = 'Active'
@@ -22685,8 +22814,31 @@ def show_projects(option=None):
         cnt += 1
     html = render_table(['Project', 'Synonyms', 'Supervisory Organization'], trows,
                         table_id='projects', css='tablesorter standard-scroll')
+    if may_edit:
+        options = "".join(f"<option>{escape(k)}</option>" for k in sorted(proj))
+        html += "<h4 style='margin-top:22px'>Map a name to a project</h4>" \
+                + "<form method='POST' action='/project_edit'>" \
+                + "<input type='hidden' name='action' value='add'>" \
+                + f"<input type='hidden' name='option' value='{escape(option or '')}'>" \
+                + "<div class='flexcontainer'>" \
+                + "<div class='flexitem'><input class='form-control' name='name' " \
+                + "placeholder='name as it appears on a record' required></div>" \
+                + "<div class='flexitemauto'><input class='form-control' name='project' " \
+                + f"list='projlist' placeholder='project' required></div>" \
+                + f"<datalist id='projlist'>{options}</datalist>" \
+                + "<div class='flexitemauto'><button type='submit' " \
+                + "class='btn btn-primary'>Add</button></div></div></form>" \
+                + "<div style='font-size:0.85em; color:#a8c4e0; max-width:720px'>" \
+                + "A <b>project</b> is the grouping; the names under it are the " \
+                + "synonyms a record may carry. Retiring a synonym leaves it in " \
+                + "place but drops it from matching, which is why nothing here " \
+                + "deletes. Projects are not renamed from this page: the project " \
+                + "name is also a DOI tag, so changing it would orphan tags this " \
+                + "page cannot retag.</div>"
     if not cnt:
-        html = "<p>No projects found</p>"
+        # Prepend, not replace: replacing discarded the add form below, so an
+        # empty collection could never get its first mapping.
+        html = "<p>No projects found</p>" + html
     else:
         card_items = [("Projects", f"{cnt:,}"),
                       ("Active", f"{active:,}"),
@@ -22695,6 +22847,9 @@ def show_projects(option=None):
             card_items.append(("Unknown", f"{unknown:,}"))
         cards = stat_cards(card_items, div_id='proj-stats')
         html = cards + html
+    note = session.pop('project_note', '')
+    if note:
+        html = note + html
     title = "Project mapping"
     if option == 'full':
         title += " (all)"
