@@ -10,7 +10,7 @@
     linked to orcid.org).
 '''
 
-__version__ = '2.2.0'
+__version__ = '2.4.0'
 
 import argparse
 import collections
@@ -302,6 +302,42 @@ def get_orcids_from_doi(oids, existing):
                 oids.append(oid)
 
 
+def usable_name(name):
+    """ A (given, family) pair to look the person up by, from an ORCID name block
+        ORCID carries three name fields, and insisting on given-names plus
+        family-name drops people whose record is perfectly public. 0000-0002-0429-5446
+        is the case that prompted this: given-names holds a Hangul form, family-name
+        is empty, and the publishing name - "Hyung-song Nam" - exists only in
+        credit-name, which ORCID defines as the name to use when publishing.
+        Only ever used to match an existing roster record by name, never to create
+        one, so a bad split costs a missed match rather than a wrong write.
+        Keyword arguments:
+          name: the "name" block from an ORCID person record, or None
+        Returns:
+          (given, family), either of which may be None
+    """
+    if not name:
+        return None, None
+    given = (name.get('given-names') or {}).get('value')
+    family = (name.get('family-name') or {}).get('value')
+    if given and family:
+        return given.strip(), family.strip()
+    credit = ((name.get('credit-name') or {}).get('value') or '').strip()
+    if not credit:
+        return None, None
+    # "Nam, Hyung-Song" - inverted, which ORCID allows and some depositors use.
+    if ',' in credit:
+        fam, _, giv = credit.partition(',')
+        return (giv.strip() or None), (fam.strip() or None)
+    # "Hyung-song Nam" - last whitespace-separated token is the family name.
+    # Wrong for a multi-word surname ("van der Berg"), which fails to match and
+    # is reported rather than written.
+    if ' ' in credit:
+        giv, _, fam = credit.rpartition(' ')
+        return (giv.strip() or None), (fam.strip() or None)
+    return None, None
+
+
 def process_orcid(oid):
     ''' Process an ORCID ID
         Keyword arguments:
@@ -316,14 +352,14 @@ def process_orcid(oid):
         COUNT['orcid_unavailable'] += 1
         return
     name = (orc.get('person') or {}).get('name')
-    if not name or not name.get('family-name') or not name.get('given-names'):
-        LOGGER.warning(f"ORCID {oid} has no name")
-        OUTPUT['name_error'].append(name)
-        return
-    family = (name['family-name'] or {}).get('value')
-    given = (name['given-names'] or {}).get('value')
-    if not (family and given):
-        OUTPUT['name_error'].append(name)
+    given, family = usable_name(name)
+    if not (given and family):
+        # Distinguish a withheld name from an incomplete one: the first is the
+        # person's choice and nothing here will ever fix it, the second is a
+        # candidate for a lookup elsewhere.
+        why = "name is private or unset" if not name else "no usable given/family pair"
+        LOGGER.warning(f"ORCID {oid} has no usable name ({why})")
+        OUTPUT['name_error'].append({"orcid": oid, "name": name})
         return
     check_orcid(oid, name, family, given)
 
@@ -357,6 +393,34 @@ def html_metric_rows(rows):
     return ('<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
             'style="border-collapse:collapse;font-size:13px;">'
             + "".join(trs) + '</table>')
+
+
+def name_error_rows():
+    """ The unusable-name list, shaped for html_added_table
+        Counted in the breakdown since the beginning, but never listed, so the
+        only way to see which ORCIDs they were was to scroll the run log. They
+        are worth seeing: an incomplete ORCID record is often a registration
+        the person can still finish, unlike a withheld one.
+        Keyword arguments:
+          None
+        Returns:
+          list of {name, orcid, problem} dicts
+    """
+    rows = []
+    for entry in OUTPUT['name_error']:
+        name = entry.get('name')
+        if not name:
+            # No name block at all - withheld, or never filled in. Nothing we
+            # do here will ever recover it.
+            rows.append({"name": "(withheld)", "orcid": entry['orcid'],
+                         "problem": "name is private or unset"})
+            continue
+        parts = [(name.get(field) or {}).get('value')
+                 for field in ('given-names', 'family-name', 'credit-name')]
+        shown = " / ".join(part for part in parts if part) or "(empty)"
+        rows.append({"name": shown, "orcid": entry['orcid'],
+                     "problem": "no usable given/family pair"})
+    return rows
 
 
 def html_added_table(added, extra=None, empty="No ORCIDs were added."):
@@ -442,6 +506,13 @@ def generate_email(dois, fname):
                        + html_metric_rows(breakdown_rows))
     body += JE.body_row(JE.section_header(f"&#9989; ORCIDs Added ({len(ADDED):,})")
                         + html_added_table(ADDED))
+    if OUTPUT['name_error']:
+        # Shown only when there are any: a standing empty section trains the
+        # reader to skip the part of the mail that matters when it is not empty.
+        body += JE.body_row(
+            JE.section_header(f"&#9888; Unusable ORCID names "
+                              f"({len(OUTPUT['name_error']):,})")
+            + html_added_table(name_error_rows(), extra=("Problem", "problem")))
     if COLLIDED:
         body += JE.body_row(
             JE.section_header(f"&#9888; ORCIDs not stored - already held "
