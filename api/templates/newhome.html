@@ -81,7 +81,7 @@ $(document).on('keypress', 'input', function(e) {
   // and project terms carry a datalist for typeahead, swapped onto the shared input
   // when selected (findby_changed).
   var FINDBY = {
-    name:    {route: '/doisui_name/', placeholder: '', prompt: 'a name'},
+    name:    {route: '/doisui_name/', placeholder: '', prompt: 'a last name'},
     title:   {route: '/titlesui/',    placeholder: '', prompt: 'a title'},
     ack:     {route: '/acksui/',      placeholder: '', prompt: 'acknowledgement text'},
     journal: {route: '/journal/', placeholder: 'Select a journal', prompt: 'a journal', list: 'list-journal'},
@@ -268,7 +268,7 @@ onload="tableInitialize();"
   <div class="nhbox">
     <div class="nhtitle">Find authors by name</div>
     <div class="nhctl">
-      <input type="text" class="form-control" id="name" placeholder="family name">
+      <input type="text" class="form-control" id="name" placeholder="given or family name">
       <button type="submit" id="nameb" class="btn btn-primary"
               onclick="find_names(); return false;" href="#">Look up</button>
     </div>
