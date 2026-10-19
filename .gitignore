@@ -1,0 +1,41 @@
+# Virtual environments
+venv*/
+
+# Python caches
+__pycache__/
+*.py[cod]
+*.pyo
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+
+# Claude AI files
+.claude/
+
+# macOS metadata
+.DS_Store
+
+# Directories
+claude/
+email_test/
+# Scratch under test/ is ignored, but test/name_match/ is real tracked content
+# (14 files). A bare `test/` hid it too, so a new fixture added there was
+# silently ignored while its neighbours sat in the repository.
+test/*
+!test/name_match/
+
+# Config and credentials - never commit these
+api/config.cfg
+# OpenShift export: holds the MongoDB URI, every external API key and the TLS
+# private keys in one directory. Untracked is not enough - a `git add -A` would
+# publish the lot to GitHub.
+api/dis-utilities-export/
+
+# Output files
+*.[ct]sv
+sync/bin/*.json
+sync/bin/citation_*.txt
+sync/acknowledgements/bin/*.json
+sync/acknowledgements/bin/venv
+utility/bin/*.json
+sync/maintenance/bin/venv
