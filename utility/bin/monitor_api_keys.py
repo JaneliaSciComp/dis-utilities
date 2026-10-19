@@ -14,25 +14,19 @@
                     is bad, so it never triggers an alert on its own
       MISSING       the environment variable is not set
 
-    JWT-format credentials (e.g. DIS_JWT) carry an embedded expiry, so instead
-    of a live probe they are decoded and their expiration date reported.
-
     Most provider API keys are opaque tokens with no published expiration date;
     a live probe is the only reliable way to notice they have stopped working.
     Each run consumes one request per service.
 
-    Exit status is non-zero when any key is AUTH-FAIL / MISSING or any JWT is
-    expired / expiring, so the script can drive a cron or Jenkins alert. With
+    Exit status is non-zero when any key is AUTH-FAIL / MISSING, so the script
+    can drive a cron or Jenkins alert. With
     --email an alert is also mailed to the DIS receivers.
 """
 
-__version__ = '1.0.0'
+__version__ = '1.1.0'
 
 import argparse
-import base64
 import concurrent.futures
-from datetime import datetime, timezone
-import json
 import logging
 import os
 import sys
@@ -98,10 +92,6 @@ PROBES = [
      'extra_headers': {'Content-Type': 'application/json'}},
 ]
 
-# JWT-format credentials: no live probe (DIS validates them by membership, not
-# signature/exp), but the embedded expiration date is decodable and worth
-# reporting so a renewal is not missed.
-JWT_CREDS = ['DIS_JWT']
 
 
 def terminate_program(msg=None):
@@ -207,61 +197,12 @@ def probe_service(probe):
     return rec
 
 
-def jwt_expiry(key):
-    ''' Decode a JWT's embedded expiry without verifying its signature.
-        Keyword arguments:
-          key: candidate token
-        Returns:
-          (expiry_iso_or_note, days_left_or_None); (None, None) if not a JWT
-    '''
-    parts = key.split('.')
-    if len(parts) != 3 or not parts[0].startswith('eyJ'):
-        return None, None
-    try:
-        payload = parts[1] + '=' * (-len(parts[1]) % 4)
-        data = json.loads(base64.urlsafe_b64decode(payload))
-    except Exception:
-        return None, None
-    if not data.get('exp'):
-        return 'no exp claim', None
-    expiry = datetime.fromtimestamp(data['exp'], tz=timezone.utc).date()
-    days = (expiry - datetime.now(tz=timezone.utc).date()).days
-    return expiry.isoformat(), days
 
 
-def check_jwts(creds):
-    ''' Decode JWT-format credentials and report their expiry.
-        Keyword arguments:
-          creds: environment-variable names of the JWT credentials to decode
-        Returns:
-          List of result dicts (env, state, detail)
-    '''
-    rows = []
-    for env in creds:
-        key = os.environ.get(env)
-        if not key:
-            rows.append({'env': env, 'state': 'MISSING',
-                         'detail': 'environment variable not set'})
-            continue
-        expiry, days = jwt_expiry(key)
-        if expiry is None:
-            rows.append({'env': env, 'state': 'DEGRADED',
-                         'detail': 'not a decodable JWT'})
-        elif days is None:
-            rows.append({'env': env, 'state': 'OK', 'detail': expiry})
-        else:
-            state = 'EXPIRED' if days < 0 else \
-                    ('EXPIRING' if days <= ARG.WARN_DAYS else 'OK')
-            rows.append({'env': env, 'state': state,
-                         'detail': f"expires {expiry} ({days}d)"})
-    return rows
-
-
-def render(results, jwt_rows):
-    ''' Print the probe and JWT tables to stdout.
+def render(results):
+    ''' Print the probe table to stdout.
         Keyword arguments:
           results: probe result dicts
-          jwt_rows: JWT result dicts
         Returns:
           None
     '''
@@ -270,19 +211,13 @@ def render(results, jwt_rows):
         print('-' * 78)
         for rec in results:
             print(f"{rec['service']:18} {rec['env']:24} {rec['state']:13} {rec['detail']}")
-    if jwt_rows:
-        print(f"\n{'JWT CREDENTIAL':18} {'ENV VAR':24} {'STATE':13} DETAIL")
-        print('-' * 78)
-        for rec in jwt_rows:
-            print(f"{'(decoded exp)':18} {rec['env']:24} {rec['state']:13} {rec['detail']}")
     print()
 
 
-def send_alert(results, jwt_rows, alerts):
+def send_alert(results, alerts):
     ''' Email an alert summary to the DIS receivers.
         Keyword arguments:
           results: probe result dicts
-          jwt_rows: JWT result dicts
           alerts: the actionable subset
         Returns:
           None
@@ -297,8 +232,6 @@ def send_alert(results, jwt_rows, alerts):
     lines += ["", "Full results:", ""]
     for rec in results:
         lines.append(f"  {rec['service']:18} {rec['state']:13} {rec['detail']}")
-    for rec in jwt_rows:
-        lines.append(f"  {rec['env']:18} {rec['state']:13} {rec['detail']}")
     try:
         JRC.send_email("\n".join(lines), DISCONFIG['sender'], receivers,
                        "DIS API key monitor: attention needed")
@@ -315,30 +248,26 @@ def processing():
           None
     '''
     probes = PROBES
-    jwt_creds = JWT_CREDS
     if ARG.SERVICE:
         term = ARG.SERVICE.lower()
         probes = [p for p in PROBES
                   if term in p['service'].lower() or term in p['env'].lower()]
-        jwt_creds = [c for c in JWT_CREDS if term in c.lower()]
-        if not probes and not jwt_creds:
+        if not probes:
             terminate_program(f"No probe matches '{ARG.SERVICE}'")
     results = []
     if probes:
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(probes)) as executor:
             results = list(executor.map(probe_service, probes))
         results.sort(key=lambda rec: rec['service'].lower())
-    jwt_rows = check_jwts(jwt_creds)
-    render(results, jwt_rows)
-    # Actionable items: a rejected/missing key, or an expired/expiring JWT.
-    # DEGRADED (a network/service hiccup) is reported but never alerts.
+    render(results)
+    # Actionable items: a rejected or missing key. DEGRADED (a network/service
+    # hiccup) is reported but never alerts.
     alerts = [r for r in results if r['state'] in ('AUTH-FAIL', 'MISSING')]
-    alerts += [r for r in jwt_rows if r['state'] in ('EXPIRED', 'EXPIRING', 'MISSING')]
     if alerts and ARG.EMAIL:
-        send_alert(results, jwt_rows, alerts)
+        send_alert(results, alerts)
     if alerts:
         terminate_program(f"{len(alerts)} key(s) need attention "
-                          + "(see AUTH-FAIL/MISSING/EXPIRED/EXPIRING above)")
+                          + "(see AUTH-FAIL/MISSING above)")
     LOGGER.info("All checked keys authenticated successfully")
     terminate_program()
 
@@ -348,8 +277,6 @@ if __name__ == '__main__':
         description="Liveness monitor for the DIS API keys")
     PARSER.add_argument('--service', dest='SERVICE', action='store', default='',
                         help='Only probe services whose name/env var matches this substring')
-    PARSER.add_argument('--warn-days', dest='WARN_DAYS', action='store', type=int,
-                        default=30, help='Flag a JWT as EXPIRING within this many days')
     PARSER.add_argument('--timeout', dest='TIMEOUT', action='store', type=int,
                         default=15, help='Per-probe HTTP timeout in seconds')
     PARSER.add_argument('--email', dest='EMAIL', action='store_true', default=False,
