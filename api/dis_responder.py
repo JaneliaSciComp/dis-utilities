@@ -69,7 +69,7 @@ from dis_state import CVTERM, PROJECT
 # on the image. feat -> minor, everything else -> patch, in the same commit as
 # the change. Forgetting is survivable: ocbuild warns that the tag already
 # exists in the ImageStream rather than silently overwriting it.
-__version__ = "120.117.0"
+__version__ = "120.119.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -2198,8 +2198,8 @@ def generate_works_table(rows, name=None, show="full", eid=None, orc=None):
     dois = []
     authors = {}
     for row in rows:
-        if show == "journal" and not journal_or_preprint(row):
-            continue
+        # No longer dropped here: the whole set goes to the table and the type
+        # filter hides rows in the page, so the toggle costs no round trip.
         dois.append(row['doi'])
         works.append(row)
         if name:
@@ -2238,7 +2238,8 @@ def generate_works_table(rows, name=None, show="full", eid=None, orc=None):
     extra_fn = (lambda row: [evidence_cell(match_evidence(row, orc), pid,
                                            row['doi'])]) if orc else None
     table, _, _ = standard_doi_table(works, mark_fn=mark_fn, download_name='works',
-                                     extra_headers=extra_headers, extra_fn=extra_fn)
+                                     extra_headers=extra_headers, extra_fn=extra_fn,
+                                     type_filter=show)
     if authors:
         table = f"<br>Authors found: {', '.join(sorted(authors.values()))}<br>" \
                 + f"This may include non-Janelia authors<br>{table}"
@@ -4053,7 +4054,7 @@ def jats_to_html(text):
 
 def standard_doi_table(rows, prefix=None, count_card=False, show_count=True,  # pylint: disable=too-many-arguments,too-many-positional-arguments
                        extra_headers=None, extra_fn=None, mark_fn=None, class_fn=None,
-                       download_name='standard'):
+                       download_name='standard', type_filter=None):
     ''' Create a standard table of DOIs
         Keyword arguments:
           rows: rows from dois collection
@@ -4078,6 +4079,15 @@ def standard_doi_table(rows, prefix=None, count_card=False, show_count=True,  # 
                     'ver' class the version filter uses. Lets a caller drive its own row
                     filter (dis.js cycle_filter/applyRowFilters) off the same table.
           download_name: base filename for the TSV download button (default 'standard')
+          type_filter: 'full' or 'journal' to replace the reloading journals/preprints
+                    toggle with the in-page cycling filter (Journal/preprint & Other ->
+                    Journal/preprint only -> Other only), the way standard_ack_table
+                    has it. The value is the INITIAL state only: 'journal' renders the
+                    table pre-filtered via data-initial-hide, so a /journal URL still
+                    bookmarks and reloads to the same view, after which the button
+                    works without a round trip. Callers passing this must stop
+                    filtering their own rows - the whole set has to reach the table or
+                    the button has nothing to show. None leaves the page as it was.
         Returns:
           html: HTML
           cnt: number of DOIs
@@ -4103,6 +4113,8 @@ def standard_doi_table(rows, prefix=None, count_card=False, show_count=True,  # 
         trows.append([row['published'], safe(mark + row['link']), row['journal'],
                       render_title_html(row['title'])] + extra)
         classes = ['ver'] if version else []
+        if type_filter:
+            classes.append('jp' if journal_or_preprint(row) else 'other')
         if class_fn:
             classes += [cls for cls in [class_fn(row)] if cls]
         row_classes.append(' '.join(classes))
@@ -4113,8 +4125,13 @@ def standard_doi_table(rows, prefix=None, count_card=False, show_count=True,  # 
         if extra:
             line += "\t" + "\t".join(re.sub(r'<[^>]+>', '', str(x)) for x in extra)
         fileoutput += line + "\n"
+    # Pre-filtered on load when the caller arrived at a /journal URL; tablesorter.js
+    # seeds the shared hide set from these, so the button's data-state below and what
+    # is actually on screen cannot disagree.
+    attrs = {"initial-hide": "other", "counter": "totalrows"} \
+            if type_filter == 'journal' else None
     html = render_table(header, trows, table_id='dois', css='tablesorter standard-scroll',
-                        row_classes=row_classes)
+                        row_classes=row_classes, data_attrs=attrs)
     if not show_count:
         counter = ''
     elif count_card:
@@ -4122,9 +4139,18 @@ def standard_doi_table(rows, prefix=None, count_card=False, show_count=True,  # 
                              div_id='dois-stats')
     else:
         counter = f"<p>Number of DOIs: <span id='totalrows'>{cnt:,}</span></p>"
-    cbutton = "<button id='verbtn' class=\"btn btn-outline-warning\" " \
-              + "onclick=\"toggler('dois', 'ver', 'totalrows');\">" \
-              + "Filter versioned DOIs</button>&nbsp;"
+    cbutton = ""
+    if type_filter:
+        state = "1" if type_filter == 'journal' else "0"
+        label = "Showing Journal/preprint only" if type_filter == 'journal' \
+                else "Showing Journal/preprint &amp; Other"
+        cbutton = f"<button class=\"btn btn-outline-success\" data-state=\"{state}\" " \
+                  + "onclick=\"cycle_filter(this, 'dois', 'jp', 'other', " \
+                  + "'Journal/preprint', 'Other', 'totalrows');\">" \
+                  + f"{label}</button>&nbsp;"
+    cbutton += "<button id='verbtn' class=\"btn btn-outline-warning\" " \
+               + "onclick=\"toggler('dois', 'ver', 'totalrows');\">" \
+               + "Filter versioned DOIs</button>&nbsp;"
     if prefix:
         html = counter + year_pulldown(prefix) + "&nbsp;"*5 \
                + cbutton + create_downloadable(download_name, header, fileoutput) + html
@@ -8405,7 +8431,9 @@ def dois_mytags(year='All', show='full'):
     # punctuation or spaces needs no escaping.
     # An affiliation's output carries datasets, software and posters alongside the
     # papers, so the same journals/preprints toggle /mypapers offers applies here.
-    works = [work for work in rows if show != 'journal' or journal_or_preprint(work)]
+    # Unfiltered on purpose: the type filter now hides rows in the page, so the
+    # whole set has to reach the table.
+    works = list(rows)
     tag_class = {name: f'tagidx-{idx}' for idx, name in enumerate(tags)}
     tag_counts = collections.Counter()
     row_tags = {}
@@ -8424,24 +8452,22 @@ def dois_mytags(year='All', show='full'):
     # credit_mark are shared with /mypapers and /userui so the three cannot
     # disagree about what counts as credit.
     my_eids = credit_eids(row)
-    # The journals/preprints toggle belongs beside the version filter, the way
-    # /mypapers has it: both change which rows the table shows. Rendered up with
-    # the year pulldown it was separated from its sibling by the affiliation
-    # line and the whole chip bar. standard_doi_table emits the version button
-    # itself, so the toggle is spliced in ahead of it - the person page splices
-    # the same control into the same output for the same reason.
+    # standard_doi_table emits the type filter beside the version filter; both
+    # change which rows the table shows, so they belong together rather than up
+    # with the year pulldown, separated from each other by the affiliation line
+    # and the whole chip bar.
     html, cnt, _ = standard_doi_table(
         works, count_card=True, download_name='my_affiliations',
         mark_fn=(lambda work: credit_mark(work, my_eids)) if my_eids else None,
-        class_fn=lambda work: ' '.join(tag_class[name] for name in row_tags[work['doi']]))
-    html = html.replace("<button id='verbtn'",
-                        journal_buttons(show, f"/dois/mytags/{year}") + "<button id='verbtn'", 1)
+        class_fn=lambda work: ' '.join(tag_class[name] for name in row_tags[work['doi']]),
+        type_filter=show)
     chipbar = ""
     if cnt and len(tags) > 1:
         chips = "".join(
             f"<span class='tag-chip' data-tagclass='{tag_class[name]}' "
             "onclick=\"filterByTag('dois', this, 'totalrows');\">"
-            f"{escape(name)} <span class='tag-chip-count'>{tag_counts[name]:,}</span>"
+            f"{escape(name)} <span class='tag-chip-count' "
+            f"data-filter-count='{tag_class[name]}'>{tag_counts[name]:,}</span>"
             "</span>"
             for name in sorted(tags, key=lambda n: (-tag_counts[n], n.lower())))
         chipbar = ("<p><b>Filter by affiliation:</b> " + chips
@@ -8457,12 +8483,12 @@ def dois_mytags(year='All', show='full'):
                 "by other people.</p>" + credit_mark_help(you=True))
         html = f"{ident}{htmlp}Affiliations: {taglinks}<br><br>{note}{chipbar}{html}"
     else:
-        # The toggle is spliced into the table above, which this path has none of.
-        # Repeated here on purpose: an empty list is exactly when somebody needs
-        # it, because "journals only" may be what emptied it, and without the
-        # button the only way back is editing the URL.
+        # No toggle here any more. It used to be repeated on this path because
+        # "journals only" could itself empty the list, and the button was the only
+        # way back without editing the URL. Filtering now happens in the page, so
+        # reaching this branch means there are no DOIs at all and no type filter
+        # would bring any back.
         html = ident + htmlp + f"Affiliations: {taglinks}<br><br>" \
-               + journal_buttons(show, f"/dois/mytags/{year}") \
                + render_warning("No DOIs were found for these affiliations.", 'warning')
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
@@ -20046,12 +20072,9 @@ def _render_person(orciddata, full_name, show, prefix, extra=''):
         Returns:
           Response
     '''
-    buttons = journal_buttons(show, prefix)
-    # The works table renders the count as "Number of DOIs: <span id='totalrows'>N</span>";
-    # splice the journal/preprint toggle in right after it.
-    count_re = r"(Number of DOIs: <span id='totalrows'>[\d,]+</span>)"
-    if re.search(count_re, orciddata):
-        orciddata = re.sub(count_re, lambda m: m.group(1) + buttons, orciddata, count=1)
+    # No splice here any more: standard_doi_table emits the type filter itself,
+    # beside the version filter, now that the toggle is in-page rather than a
+    # reload. prefix is still taken for the signature's other callers.
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=full_name, html=orciddata + extra,
@@ -20191,9 +20214,13 @@ def my_papers_body(orc, show, year='All'):
     for eid in eids or [None]:
         for row in get_dois_for_orcid(oid, {**orc, 'employeeId': eid} if eid else orc):
             seen.setdefault(row['doi'], row)
+    # Type is no longer filtered here - the in-page filter does it, and both stat
+    # cards below are filter-aware (id='totalrows' and data-filter-count='credited'
+    # are both recomputed by applyRowFilters), so they follow the table rather than
+    # describing a set the reader can no longer see. Year still filters server-side:
+    # it drives the pulldown, not a row class.
     rows = [row for row in seen.values()
-            if (show != 'journal' or journal_or_preprint(row))
-            and (year == 'All' or str(row.get('jrc_publishing_date') or '').startswith(year))]
+            if year == 'All' or str(row.get('jrc_publishing_date') or '').startswith(year)]
     rows.sort(key=DL.get_publishing_date, reverse=True)
     credited = sum(1 for row in rows if is_credited(row, eids))
     def mark_fn(row):
@@ -20261,13 +20288,13 @@ def my_papers_body(orc, show, year='All'):
                + "onclick=\"checkAllEvidence(this, 'dois');\">Check all</button>&nbsp;"
     table, _, _ = standard_doi_table(rows, mark_fn=mark_fn, class_fn=class_fn,
                                      show_count=False, download_name='my_papers',
+                                     type_filter=show,
                                      extra_headers=['In the deposit'],
                                      extra_fn=lambda row: [evidence_cell(match_evidence(row, orc),
                                                                          oid, row['doi'])])
     return ident + stat_cards(cards, div_id='mypapers-stats') + note \
            + year_pulldown(f"mypapers/{show}", query=True) + "<br><br>" \
-           + journal_buttons(show, "/mypapers",
-                             '' if year == 'All' else f"?year={year}") + cbutton + table
+           + cbutton + table
 
 
 @app.route('/author_evidence/<string:pid>/<path:doi>')
