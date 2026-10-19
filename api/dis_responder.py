@@ -69,7 +69,7 @@ from dis_state import CVTERM, PROJECT
 # on the image. feat -> minor, everything else -> patch, in the same commit as
 # the change. Forgetting is survivable: ocbuild warns that the tag already
 # exists in the ImageStream rather than silently overwriting it.
-__version__ = "120.116.1"
+__version__ = "120.117.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -9806,11 +9806,16 @@ def dois_provider_with_janelia(prov):
                                title=render_warning("Could not get DOIs by provider"),
                                message=error_message(err))
     trows = []
-    cnt = 0
+    row_classes = []
+    cnt = vercnt = 0
     oa_data = {}
     sheet = []
     sheet.append("Published\tDOI\tPublisher\tJournal\tTitle\tStatus")
     for row in rows:
+        version = DL.is_version(row)
+        row_classes.append('ver' if version else '')
+        if version:
+            vercnt += 1
         stat = row.get('jrc_oa_status', '')
         sheet.append(f"{row['jrc_publishing_date']}\t{row['doi']}\t{row['publisher']}\t" \
                      + f"{row['jrc_journal']}\t{DL.get_title(row)}\t{stat}")
@@ -9823,13 +9828,22 @@ def dois_provider_with_janelia(prov):
                       render_title_html(DL.get_title(row)), stat])
         cnt += 1
     html = render_table(['Published', 'DOI', 'Publisher', 'Journal', 'Title', 'Status'], trows,
-                        table_id='dois', css='tablesorter standard-scroll')
-    cardlist = [("DOIs", f"{cnt:,}")]
+                        table_id='dois', css='tablesorter standard-scroll',
+                        row_classes=row_classes)
+    # Only the DOIs card tracks the filter. The open-access cards beside it are a
+    # breakdown of every DOI found, not of the rows on screen, so they are left
+    # alone rather than quietly disagreeing with a total they never recomputed.
+    cardlist = [("DOIs", f"<span id='totalrows'>{cnt:,}</span>")]
     for key in sorted(oa_data, key=oa_status_rank):
         cardlist.append((key, f"{oa_data[key]:,}", DP.OA_COLORS.get(key, 'crimson')))
     cards = stat_cards(cardlist, div_id='provider-stats')
     sheet = create_downloadable(f"{prov}_dois", None, "\n".join(sheet))
-    html = cards + sheet + "<br><br>" + html
+    cbutton = ""
+    if vercnt:
+        cbutton = "<button id='verbtn' class=\"btn btn-outline-warning\" " \
+                  + "onclick=\"toggler('dois', 'ver', 'totalrows');\">" \
+                  + "Filter versioned DOIs</button>&nbsp;"
+    html = cards + cbutton + sheet + "<br><br>" + html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=f"DOIs by provider {prov} with " \
@@ -12019,6 +12033,7 @@ def show_insert(idate, source='Crossref'):
     trows = []
     row_classes = []
     fileoutput = ""
+    cnt = 0
     limit = weeks_ago(2)
     for row in rows:
         typ = subtype = ""
@@ -12053,13 +12068,26 @@ def show_insert(idate, source='Crossref'):
         frow = "\t".join([row['doi'], typ, row['jrc_publishing_date'],
                           str(row['jrc_inserted']), version, news, tags])
         fileoutput += f"{frow}\n"
+        cnt += 1
     html = render_table(['DOI', 'Type', 'Published', 'Publisher', 'Inserted',
                          'Is version of', 'Newsletter', 'Tags'], trows,
                         table_id='dois', css='tablesorter numbers-scroll',
                         row_classes=row_classes)
-    cbutton = "<button class=\"btn btn-outline-warning\" " \
-              + "onclick=\"$('.other').toggle();\">Filter for candidate DOIs</button>"
-    html = cbutton + f" &nbsp;{create_downloadable('jrc_inserted', None, fileoutput)}{html}"
+    # Goes through the shared hide-set like every other row filter in the app.
+    # It used to call $('.other').toggle() directly, which flips inline display and
+    # so cannot compose with applyRowFilters - any second filter added here would
+    # have fought it, each undoing the other's hiding. It also never updated a
+    # count, because the page had none; it has one now.
+    # No version filter here deliberately: a typical view covers about a week's
+    # insertions, and those are usually all-or-nothing figshare bursts, so the
+    # button would be absent or redundant far more often than useful.
+    cbutton = "<button id='candbtn' class=\"btn btn-outline-warning\" " \
+              + "onclick=\"toggleClass('dois', 'other', this, 'Show all DOIs', " \
+              + "'Filter for candidate DOIs', 'totalrows');\">" \
+              + "Filter for candidate DOIs</button>"
+    counter = f"<p>Number of DOIs: <span id='totalrows'>{cnt:,}</span></p>"
+    html = counter + cbutton \
+           + f" &nbsp;{create_downloadable('jrc_inserted', None, fileoutput)}{html}"
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=f"DOIs inserted from {source} on or after {idate}",
@@ -16510,12 +16538,18 @@ def show_organization(org_in, year=None, show="full"):
                                title=render_warning("Could not get DOIs"),
                                message=error_message(err))
     trows = []
+    # Parallel to trows: 'ver' marks a versioned DOI, which is the class the
+    # shared version filter hides. Same marking standard_doi_table applies - this
+    # page builds its own table and so has to do it itself.
+    rclasses = []
     dcnt = org_journal_cnt = 0
     content = ""
     for row in rows:
-        if DL.is_journal(row) and not DL.is_version(row):
+        version = DL.is_version(row)
+        if DL.is_journal(row) and not version:
             org_journal_cnt += 1
         dcnt += 1
+        rclasses.append('ver' if version else '')
         title = DL.get_title(row)
         if not title:
             title = ""
@@ -16547,21 +16581,33 @@ def show_organization(org_in, year=None, show="full"):
         #                       + f"{'white' if orgcount[org] else 'darkgray'}'>{org}: " \
         #                       + f"{orgcount[org]:,}</span>" for org in orgs]) + "</p>"
     html = render_table(['Published', 'DOI', 'Tags', 'Title'], trows,
-                        table_id='dois', css='tablesorter standard-scroll')
+                        table_id='dois', css='tablesorter standard-scroll',
+                        row_classes=rclasses)
     if not dcnt:
         html = year_pulldown(f"org_detail/{org_in}", selected=year) + subtitle \
                + render_warning(f"No DOIs were found for {org_in}.", 'warning') \
                + journal_buttons(show, f"/org_detail/{org_in}/{year}")
     else:
         header = ['Published', 'DOI', 'Tags', 'Title', 'Authors']
+        # Ahead of the resource-type toggle, the arrangement /dois/mytags and
+        # /mypapers use: both controls change which rows the table shows, so
+        # they belong together rather than at opposite ends of the row. The
+        # id and the toggler call match standard_doi_table's exactly, since the
+        # same shared handler drives both.
+        verbtn = "<button id='verbtn' class=\"btn btn-outline-warning\" " \
+                 + "onclick=\"toggler('dois', 'ver', 'totalrows');\">" \
+                 + "Filter versioned DOIs</button>"
         buttons = "<div class='flexrow'><div class='flexcol'>" \
-                  + journal_buttons(show, f"/org_detail/{org_in}/{year}") \
+                  + journal_buttons(show, f"/org_detail/{org_in}/{year}") + verbtn \
                   + f"</div><div class='flexcol'>{'&nbsp;'*5}</div><div class='flexcol'>" \
                   + create_downloadable(f"{org_in.replace(' ', '_')}_{year}", header, content) \
                   + "</div></div>"
+        # The count the filter updates has to be addressable; the Janelia-wide
+        # line below is not a count of these rows and so is left alone.
         html = year_pulldown(f"org_detail/{org_in}", selected=year) + subtitle \
                + f"{'Journal/preprint ' if show == 'journal' else ''}" \
-               + f"DOIs found for {org_in}: {dcnt:,} ({org_journal_cnt:,} " \
+               + f"DOIs found for {org_in}: <span id='totalrows'>{dcnt:,}</span> " \
+               + f"({org_journal_cnt:,} " \
                + "journal publications)<br>" \
                + f"{'Journal/preprint ' if show == 'journal' else ''}" \
                + f"DOIs found for Janelia Research Campus: {jrc_items:,} " \
