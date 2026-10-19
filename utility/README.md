@@ -7,7 +7,6 @@
 | add_newsletter.py          | Add, change, or remove a DOI's newsletter date                                      |
 | add_preprint.py            | Add a preprint relationship for a particular preprint-article pair                  |
 | assign_authors.py          | Add/remove JRC authors for a given DOI                                              |
-| create_api_key.pl          | Create a JWT token for a user                                                       |
 | delete_doi.py              | Delete one or more DOIs from the dois collection                                    |
 | edit_orcid.py              | Edit a record in the orcid collection                                               |
 | find_missing_orcids.py     | Find entries in the People system with groups (lab heads) but no ORCID              |

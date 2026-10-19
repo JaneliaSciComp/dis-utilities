@@ -6,6 +6,7 @@ import collections
 import copy
 from datetime import date, datetime, timedelta
 import hashlib
+import secrets
 from html import escape
 import inspect
 import itertools
@@ -69,7 +70,7 @@ from dis_state import CVTERM, PROJECT
 # on the image. feat -> minor, everything else -> patch, in the same commit as
 # the change. Forgetting is survivable: ocbuild warns that the tag already
 # exists in the ImageStream rather than silently overwriting it.
-__version__ = "120.119.1"
+__version__ = "120.120.3"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -441,6 +442,82 @@ def display_person_name(person):
     return f"{given} {family}".strip() or 'unnamed'
 
 
+# A token is 256 bits of randomness, so it is hashed with SHA-256 rather than
+# werkzeug's generate_password_hash. The slow hash is right for the sign-in
+# password - little entropy, worth the brute-force cost - and wrong here, where
+# there is nothing to brute-force and the cost would land on every authenticated
+# API request.
+API_TOKEN_FIELD = 'api_token'
+
+
+def token_digest(token):
+    ''' The stored form of an API token
+        Keyword arguments:
+          token: the token as the holder has it
+        Returns:
+          hex digest
+    '''
+    return hashlib.sha256(token.strip().encode()).hexdigest()
+
+
+def bearer_token():
+    ''' The Bearer token on this request, if any
+        Keyword arguments:
+          None
+        Returns:
+          token string, or None
+    '''
+    header = request.headers.get('Authorization', '')
+    match = re.match(r'Bearer\s+(\S+)$', header.strip())
+    return match.group(1) if match else None
+
+
+def api_token_user():
+    ''' The orcid document for the Bearer token on this request, or None
+
+        Resolved against a hash, so the database never holds anything usable.
+        Deliberately NOT given its own notion of who may call: it returns the
+        document and leaves may_sign_in to current_user, so a token cannot
+        outlive its owner's standing - mark them alumni and the next request
+        with that token resolves to nobody.
+
+        This looks up the orcid collection because a token belongs to a person.
+        A SERVICE ACCOUNT - a Jenkins job, say - does not, and must not be given
+        a record here: this collection is the author roster, and a dozen sync
+        programs (apply_orcids, pull_openalex, pull_biorxiv, email_authors and
+        the rest) read every document in it as a real Janelia author. A
+        synthetic record would be name-matched to publications, counted in
+        author totals and emailed. It would also fail may_be_authorized for
+        want of an ORCID iD, so it could be the current user and still hold no
+        authorization. When service accounts are needed, give them their own
+        collection and resolve it here, beside this lookup - one authorization
+        model, two sources of identity, nothing invented in the roster.
+        Nothing in this repository needs one today: the sync programs talk to
+        MongoDB directly, and pull_plos.py is the only API caller, unauthenticated.
+        Keyword arguments:
+          None
+        Returns:
+          orcid collection document, or None
+    '''
+    token = bearer_token()
+    if not token or not DB:
+        return None
+    try:
+        person = DB['dis'].orcid.find_one({f"{API_TOKEN_FIELD}.digest": token_digest(token)})
+    except Exception as err:
+        print(f"Could not look up API token: {err}")
+        return None
+    if person:
+        try:
+            DB['dis'].orcid.update_one({"_id": person['_id']},
+                                       {"$set": {f"{API_TOKEN_FIELD}.last_used": datetime.now()}})
+        except Exception as err:
+            # Never fail the request over the audit stamp - it is for deciding
+            # whether a token is still in use, not for serving it.
+            print(f"Could not stamp API token last_used: {err}")
+    return person
+
+
 def current_user():
     ''' The orcid document for the signed-in person, or None.
 
@@ -462,6 +539,14 @@ def current_user():
     g.dis_user = None
     g.dis_user_ambiguous = False
     orcid = session.get(RESTRICTED_SESSION_KEY)
+    if not orcid:
+        # No browser session: an API caller presenting a Bearer token resolves to
+        # the same document a signed-in reader would, so one authorization model
+        # serves both and @restricted('<term>') works identically for each.
+        person = api_token_user()
+        if may_sign_in(person):
+            g.dis_user = person
+        return g.dis_user
     if orcid and DB:
         try:
             # limit(2) rather than find_one: an iD shared by two roster records
@@ -731,8 +816,17 @@ def may_be_authorized(person):
         used, so a grant cannot outlive the thing that justified it: somebody
         who leaves keeps the stored list but stops passing any check.
 
-          - An ORCID iD. It is what a session is keyed by, so a record without
-            one can never be the signed-in person; a grant on it is inert.
+          - An ORCID iD. Originally because a session is keyed by one, so a
+            record without it could never be the signed-in person and a grant
+            on it was inert. That reasoning no longer holds on its own: an API
+            token resolves by digest, not by iD, so a record with a token and
+            no iD CAN be the current user. The rule stands anyway, now as a
+            deliberate one - an authorization is granted to a person, and the
+            iD is what identifies them. It is also the thing that would stop a
+            service account from holding an authorization, which is why a
+            service account does not belong in this collection: see the note on
+            api_token_user. The orcid collection is the author roster, read by
+            a dozen sync programs as the list of real people.
           - Not alumni. Note this is STRICTER than may_sign_in, which lets a
             departed contingent worker keep access: they may sign in, but they
             may not hold an authorization.
@@ -977,7 +1071,105 @@ your ORCID credentials rather than one assigned here.</p>"""
                                          navbar=generate_navbar('')))
 
 
-@app.route('/profile')
+def _issue_api_token(person):
+    """ Mint a token for a person, replacing any they already hold
+        Only the hash is stored, so the caller must show the return value to its
+        owner now or not at all. Replacing overwrites the digest, which is what
+        makes the old token stop working - there is deliberately one live token
+        per person, so there is never a list to audit.
+        Keyword arguments:
+          person: orcid document of the token's owner
+        Returns:
+          the new token, or None if it could not be stored
+    """
+    token = secrets.token_urlsafe(32)
+    stamp = {"digest": token_digest(token), "created": datetime.now(),
+             "last_used": None, "updated_by": person.get('orcid')}
+    try:
+        DB['dis'].orcid.update_one({"_id": person['_id']},
+                                   {"$set": {API_TOKEN_FIELD: stamp}})
+    except Exception as err:
+        print(f"Could not store API token for {person['_id']}: {err}")
+        return None
+    print(f"API token issued for {person['_id']} by {person.get('orcid')}")
+    return token
+
+
+def _revoke_api_token(orc, me):
+    """ Drop a person's API token
+        Keyword arguments:
+          orc: orcid document losing the token
+          me: orcid document of whoever is doing it (the owner, or an admin)
+        Returns:
+          True on success
+    """
+    try:
+        DB['dis'].orcid.update_one({"_id": orc['_id']},
+                                   {"$unset": {API_TOKEN_FIELD: ""},
+                                    "$set": {"updated": datetime.now(),
+                                             "updated_by": me.get('orcid')}})
+    except Exception as err:
+        print(f"Could not revoke API token for {orc['_id']}: {err}")
+        return False
+    print(f"API token revoked for {orc['_id']} by {me.get('orcid')}")
+    return True
+
+
+def _api_token_section(person, fresh=None):
+    ''' The API token block on /profile
+        Keyword arguments:
+          person: the signed-in orcid document
+          fresh: a newly minted token to show once, or None
+        Returns:
+          HTML
+    '''
+    held = person.get(API_TOKEN_FIELD) or {}
+    html = "<h4 style='margin-top:28px;'>API token</h4>"
+    if fresh:
+        # The only time the token is ever displayed. Nothing but its hash is
+        # stored, so a reader who does not copy it now has to generate another.
+        html += ("<div style='background:#2b3b2b; border:1px solid #89c242; "
+                 "border-radius:6px; padding:12px; max-width:640px'>"
+                 "<b>Copy this now - it will not be shown again.</b><br>"
+                 f"<code style='font-size:11pt; word-break:break-all'>{escape(fresh)}</code>"
+                 f" <button class='btn btn-outline-secondary btn-sm' "
+                 f"onclick=\"copyText('{escape(fresh)}')\">Copy</button></div>")
+    if held.get('digest'):
+        made = str(held.get('created') or '')[:19]
+        used = str(held.get('last_used') or '')[:19] or 'never'
+        html += (f"<p style='color:#a8c4e0'>Issued {escape(made)} &middot; "
+                 f"last used {escape(used)}</p>")
+        label, action = "Replace token", 'token_new'
+    else:
+        if not fresh:
+            html += ("<p style='color:#888'>No token issued. Generate one to call the "
+                     "REST API as yourself - it carries exactly the authorizations "
+                     "this page lists, no more.</p>")
+        label, action = "Generate token", 'token_new'
+    # One-time nonce. Generating cannot use Post/Redirect/Get like revoking does,
+    # because the token is displayed exactly once and surviving a redirect would
+    # mean parking the plaintext in the session cookie. So the form is instead
+    # made single-use: the POST consumes the nonce, and a browser refresh
+    # re-submits a stale one and is refused.
+    nonce = secrets.token_urlsafe(16)
+    session['dis_token_nonce'] = nonce
+    html += (f"<form method='POST' style='display:inline'>"
+             f"<input type='hidden' name='action' value='{action}'>"
+             f"<input type='hidden' name='nonce' value='{escape(nonce)}'>"
+             f"<button type='submit' class='btn btn-sm' "
+             f"style='background-color:{WRITE_COLOR}; color:#000'>{label}</button></form>")
+    if held.get('digest'):
+        html += (" <form method='POST' style='display:inline'>"
+                 "<input type='hidden' name='action' value='token_revoke'>"
+                 "<button type='submit' class='btn btn-sm' "
+                 f"style='background-color:{REMOVE_COLOR}; color:#fff'>Revoke</button></form>"
+                 "<br><span style='font-size:10pt; color:#888'>Replacing issues a new "
+                 "token and kills the old one. Revoking kills it without issuing "
+                 "another - use that if you only suspect a leak.</span>")
+    return html
+
+
+@app.route('/profile', methods=['GET', 'POST'])
 @restricted
 def profile():
     '''
@@ -992,6 +1184,43 @@ def profile():
         description: Not signed in, redirected to the sign-in form
     '''
     person = current_user()
+    # Token actions post back to this page. Handled before the record is read so
+    # the section below renders the state the POST just produced, not the one it
+    # replaced.
+    fresh = None
+    # Any message from a POST is carried INTO the page below rather than
+    # returned on its own: render_warning builds a fragment meant to be embedded
+    # in a template, so returning it from a view sends an unstyled snippet with
+    # no navbar and no way back.
+    note = ""
+    if request.method == 'POST':
+        action = request.form.get('action', '')
+        if action == 'token_new':
+            # Refreshing the page re-submits the POST. Unguarded, that silently
+            # issued a second token and invalidated the one just copied - the
+            # reader is left holding a string that no longer works, with nothing
+            # on screen saying so.
+            sent = request.form.get('nonce')
+            if not sent or sent != session.pop('dis_token_nonce', None):
+                note = render_warning("That form has already been used. Reload the "
+                                      "page if you meant to generate another token - "
+                                      "your existing token is unchanged.", 'warning')
+            else:
+                fresh = _issue_api_token(person)
+                if fresh is None:
+                    note = render_warning("Could not issue a token.", 'error')
+        elif action == 'token_revoke':
+            if not _revoke_api_token(person, person):
+                note = render_warning("Could not revoke that token.", 'error')
+            else:
+                # Post/Redirect/Get: nothing needs displaying, so a refresh is a
+                # plain GET rather than another revoke.
+                return redirect(url_for('profile'))
+        else:
+            note = render_warning("Unknown action.", 'warning')
+        # Re-read: _issue/_revoke wrote to the database, and `person` is the
+        # copy current_user memoized on g before that write.
+        person = DB['dis'].orcid.find_one({"_id": person['_id']}) or person
     record = _auth_record(person.get('orcid')) or {}
     orcid = person.get('orcid')
     html = (f"<div style='display:flex; align-items:center; gap:18px; margin-bottom:18px;'>"
@@ -1059,12 +1288,7 @@ def profile():
     html += "<tr><td style='vertical-align:top'>Authorizations:</td>" \
             + f"<td style='vertical-align:top'>{auth_html}</td></tr>"
     html += "</table><br>"
-    # The API token is step 7 of docs/AUTHENTICATION_PLAN.md. Named here because
-    # this is where people will come looking for it.
-    html += ("<h4 style='margin-top:28px;'>API token</h4>"
-             "<p style='color:#888'>Not issued yet. When the REST endpoints require "
-             "authentication, your token will be shown here, once, with a button to "
-             "replace it.</p>")
+    html += note + _api_token_section(person, fresh)
     # /mypapers and /mymetrics are deliberately NOT linked from here. Both work
     # and both are reachable by URL, but they are still experimental and this
     # page is the one every signed-in reader lands on, so linking them would
@@ -1363,9 +1587,13 @@ def initialize_result():
     if app.config["LAST_TRANSACTION"]:
         print(f"Seconds since last transaction: {time() - app.config['LAST_TRANSACTION']}")
     app.config["LAST_TRANSACTION"] = time()
-    if "Authorization" in request.headers:
-        token = re.sub(r'Bearer\s+', "", request.headers["Authorization"])
-        result['rest']['authorized'] = bool(token in app.config['KEYS'].values())
+    # Authorized now means "this request resolves to a person", whether by
+    # browser session or by API token, rather than "this string is one of four
+    # literals in config.cfg". Those four were never decoded, so the exp claims
+    # they carry were never enforced; they are retired with this change.
+    # Unauthenticated callers still get redacted data rather than a 401 - some
+    # endpoints may demand authentication later, which is a separate decision.
+    result['rest']['authorized'] = bool(current_user())
     return result
 
 
@@ -8167,6 +8395,13 @@ def edit_person(rid):
         action = request.form.get('action', '')
         if action in ('add', 'remove'):
             note = _save_name(orc, me)
+        elif action == 'token_revoke':
+            # An admin can kill a token but never mint one: a token is shown
+            # exactly once, to its owner, so issuing on somebody's behalf would
+            # mean handing it to them over some other channel.
+            note = (render_warning("API token revoked.", 'success')
+                    if _revoke_api_token(orc, me)
+                    else render_warning("Could not revoke that token.", 'error'))
         elif action in ('alumni', 'orcid'):
             note = _save_person_field(orc, me)
         elif not eligible:
@@ -8221,6 +8456,24 @@ def edit_person(rid):
             + "People the sync may mark them again, dated the day it runs. A " \
             + "former employee cannot hold an authorization, and cannot sign in " \
             + "unless they are a contingent worker.</div>"
+
+    # ----- API token -----
+    held = orc.get(API_TOKEN_FIELD) or {}
+    if held.get('digest'):
+        made = str(held.get('created') or '')[:19]
+        used = str(held.get('last_used') or '')[:19] or 'never'
+        html += ("<h4 style='margin-top:28px'>API token</h4>"
+                 f"<span style='color:#a8c4e0'>Issued {escape(made)} &middot; "
+                 f"last used {escape(used)}</span>&nbsp;"
+                 "<form method='POST' style='display:inline'>"
+                 "<input type='hidden' name='action' value='token_revoke'>"
+                 "<button type='submit' class='btn btn-sm' "
+                 f"style='background-color:{REMOVE_COLOR}; color:#fff'>Revoke</button></form>"
+                 "<div style='font-size:0.85em; color:#a8c4e0; max-width:620px'>"
+                 "Revoking stops API calls made with it immediately. Only they can "
+                 "issue a replacement, from their own profile page - a token is shown "
+                 "once, to its owner, and never stored in a readable form."
+                 "</div>")
 
     # ----- ORCID iD -----
     # Derived here, not borrowed: the login view has its own local of the same

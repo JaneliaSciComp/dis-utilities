@@ -17,7 +17,7 @@
     Deliberately NOT exported (read these from app.config instead): the runtime
     counters COUNTER, ENDPOINTS, START_TIME, LAST_TRANSACTION (mutated per
     request); the Flask/deployment flags DEBUG, RUN_MODE; the unused PROXY; and
-    the KEYS auth secrets. This module is for the static domain constants only.
+    the auth secrets. This module is for the static domain constants only.
 '''
 
 import os
@@ -27,10 +27,10 @@ CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.c
 
 # config.cfg names that are NOT static domain constants, so they are deliberately
 # not exported here. Runtime counters (mutated via app.config at request time),
-# Flask/deployment flags, the unused PROXY, and the KEYS auth secrets — read those
+# Flask/deployment flags and the unused PROXY — read those
 # from app.config instead.
 _EXCLUDED = {"COUNTER", "ENDPOINTS", "START_TIME", "LAST_TRANSACTION",
-             "DEBUG", "RUN_MODE", "PROXY", "KEYS"}
+             "DEBUG", "RUN_MODE", "PROXY"}
 
 
 def _load_constants(path):

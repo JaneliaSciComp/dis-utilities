@@ -2,7 +2,7 @@
     Add/remove JRC authors for a given DOI.
 """
 
-__version__ = '6.1.0'
+__version__ = '6.1.1'
 
 import argparse
 import collections
@@ -434,8 +434,6 @@ if __name__ == '__main__':
     ARG = PARSER.parse_args()
     LOGGER = JRC.setup_logging(ARG)
     LOGGER.info(f"Started run (version {__version__})")
-    if not os.environ.get("DIS_JWT", "").strip():
-        terminate_program("Missing token - set in DIS_JWT environment variable")
     REST = JRC.simplenamespace_to_dict(JRC.get_config("rest_services"))
     DIS = JRC.simplenamespace_to_dict(JRC.get_config("dis"))
     initialize_program()
