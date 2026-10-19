@@ -69,7 +69,7 @@ from dis_state import CVTERM, PROJECT
 # on the image. feat -> minor, everything else -> patch, in the same commit as
 # the change. Forgetting is survivable: ocbuild warns that the tag already
 # exists in the ImageStream rather than silently overwriting it.
-__version__ = "120.119.0"
+__version__ = "120.119.1"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -1104,9 +1104,7 @@ def mymetrics():
     try:
         rows = list(DB['dis'].dois.find({"jrc_author": {"$in": eids}}))
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get your publications"),
-                               message=error_message(err))
+        return render_error("Could not get your publications", err)
     ident = "<table class='borderless'>" \
             + f"<tr><td>Name:</td><td>{escape(display_person_name(person))}</td></tr>" \
             + f"<tr><td>ORCID:</td><td><a href='{ORCID}{escape(person['orcid'])}' " \
@@ -1281,6 +1279,22 @@ def tag_pulldown(prefix, year='All', selected=None):
             + "style='display:none;'>No matching tags</span>"
     html += "</div></div>"
     return html
+
+
+def render_error(title, err, severity='error'):
+    """ The standard "something failed" page
+        This shape appeared over two hundred times, four lines each, and only the
+        title ever differed - the template, the urlroot, the render_warning call
+        and error_message(err) were identical every time. Sites that say anything
+        else in the message still build their own render_template call.
+        Keyword arguments:
+          title: what failed, shown as the heading
+          err: the exception
+          severity: render_warning severity (default 'error')
+        Returns:
+          Rendered error page
+    """
+    return render_error(title, severity, err)
 
 
 def inspect_error(err, errtype):
@@ -1492,9 +1506,7 @@ def provider_heat_map():
     try:
         rows = DB['dis'].subscription.aggregate(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning(errmsg),
-                               message=error_message(err))
+        return render_error(errmsg, err)
     rows = list(rows)
     timed_out = [list(prov.values())[0] for prov in rows]
     pipeline = [
@@ -1649,10 +1661,7 @@ def get_leads_and_org_members(org):
     try:
         rows = DB['dis'].orcid.find(payload, {"employeeId": 1})
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get group leads " \
-                                                    + "from dois collection"),
-                               message=error_message(err))
+        return render_error("Could not get group leads " + "from dois collection", err)
     leads = []
     for row in rows:
         leads.append(row['employeeId'])
@@ -3591,10 +3600,7 @@ def get_first_last_authors(year, tag=None):
         try:
             rows = DB['dis'].dois.aggregate(payload)
         except Exception as err:
-            return render_template('error.html', urlroot=request.url_root,
-                                   title=render_warning("Could not get yearly metrics " \
-                                                        + "from dois collection"),
-                                   message=error_message(err))
+            return render_error("Could not get yearly metrics " + "from dois collection", err)
         for row in rows:
             typ = row['_id']['type'] if 'type' in row['_id'] else "DataCite"
             sub = row['_id']['subtype'] if 'subtype' in row['_id'] else ""
@@ -3689,9 +3695,7 @@ def get_source_data(year, tag=None):
     try:
         rows = DB['dis'].dois.aggregate(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get Crossref types from dois"),
-                               message=error_message(err))
+        return render_error("Could not get Crossref types from dois", err)
     data = {"Crossref": 0, "DataCite": 0}
     hdict = {}
     for row in rows:
@@ -3711,9 +3715,7 @@ def get_source_data(year, tag=None):
     try:
         rows = DB['dis'].dois.aggregate(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get DataCite types from dois"),
-                               message=error_message(err))
+        return render_error("Could not get DataCite types from dois", err)
     for row in rows:
         data['DataCite'] += row['count']
         hdict["_".join(['DataCite', row['_id'], ""])] = row['count']
@@ -6713,10 +6715,7 @@ def _build_ack_metrics(limit=10):
     try:
         rows = DB['dis'].dois.aggregate(pipeline)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get acknowledgement type " \
-                                                    + "data from dois"),
-                               message=error_message(err))
+        return render_error("Could not get acknowledgement type " + "data from dois", err)
     dois_type_data = {}
     for row in rows:
         label = row['_id'] if row['_id'] else 'Unknown'
@@ -6730,10 +6729,7 @@ def _build_ack_metrics(limit=10):
     try:
         rows = DB['dis'].external_dois.aggregate(pipeline_ext)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get acknowledgement type data" \
-                                                    + " from external_dois"),
-                               message=error_message(err))
+        return render_error("Could not get acknowledgement type data" + " from external_dois", err)
     ext_type_data = {}
     for row in rows:
         label = row['_id'] if row['_id'] else 'Unknown'
@@ -6751,9 +6747,7 @@ def _build_ack_metrics(limit=10):
         ])
         source_ack = {row['_id']: row['count'] for row in source_rows}
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get collection totals"),
-                               message=error_message(err))
+        return render_error("Could not get collection totals", err)
     # Top journals (internal and external DOIs separately)
     journal_pipeline = [
         {"$match": {**ack_filter, "jrc_journal": {"$exists": True}}},
@@ -6767,9 +6761,7 @@ def _build_ack_metrics(limit=10):
         ext_journals = [(row['_id'], row['count'])
                         for row in DB['dis'].external_dois.aggregate(journal_pipeline)]
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get top journal data"),
-                               message=error_message(err))
+        return render_error("Could not get top journal data", err)
     # Build HTML
     def summary_card(label, cnt, total):
         pct = cnt / total * 100 if total else 0
@@ -7099,19 +7091,14 @@ def show_acknowledgement_metrics(limit=10):
     try:
         orgs = DL.get_supervisory_orgs(DB['dis'].suporg)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get supervisory orgs"),
-                               message=error_message(err))
+        return render_error("Could not get supervisory orgs", err)
     regex_keys = set(DB['dis'].search_regex.distinct('key'))
     tags = {}
     for coll_name, doi_type_col in (('dois', 'Internal'), ('external_dois', 'External')):
         try:
             rows = DB['dis'][coll_name].aggregate(payload)
         except Exception as err:
-            return render_template('error.html', urlroot=request.url_root,
-                                   title=render_warning(f"Could not get acknowledgements from "
-                                                        f"{coll_name}"),
-                                   message=error_message(err))
+            return render_error(f"Could not get acknowledgements from " f"{coll_name}", err)
         for row in rows:
             tag = row['_id'].get('tag')
             entry = tags.setdefault(tag, {})
@@ -7185,9 +7172,7 @@ def show_acknowledgement_metrics(limit=10):
             ctag = DB['dis'][coll_name].count_documents(tagged_query)
             cov[label] = (ctag, ctot - ctag, ctot)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not compute acknowledgement coverage"),
-                               message=error_message(err))
+        return render_error("Could not compute acknowledgement coverage", err)
     def pct(num, den):
         return f"{num / den * 100:.1f}%" if den else "0.0%"
     cov_rows = [[label, f"{t:,} ({pct(t, tot)})", f"{u:,} ({pct(u, tot)})", f"{tot:,}"]
@@ -7213,9 +7198,7 @@ def show_acknowledgement_metrics(limit=10):
         gap_int = DB['dis'].dois.count_documents(gap_query)
         gap_ext = DB['dis'].external_dois.count_documents(gap_query)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not compute tagging gaps"),
-                               message=error_message(err))
+        return render_error("Could not compute tagging gaps", err)
     if gap_int or gap_ext:
         coverage_html += (
             "<div style='margin:10px 0 4px 0;padding:8px 12px;border-left:4px solid "
@@ -7292,9 +7275,7 @@ def show_tag_metrics(limit=15):
     try:
         orgs = DL.get_supervisory_orgs(DB['dis'].suporg)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get supervisory orgs"),
-                               message=error_message(err))
+        return render_error("Could not get supervisory orgs", err)
     # Coverage: tagged vs untagged DOIs, split by registrar (jrc_obtained_from)
     try:
         cov = {}
@@ -7321,9 +7302,7 @@ def show_tag_metrics(limit=15):
                 {"$size": {"$ifNull": ["$jrc_tag", []]}}, 0]}, 1, 0]}}},
             {"$group": {"_id": "$yr", "all": {"$sum": 1}, "tagged": {"$sum": "$tagged"}}}]))
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not compute tag metrics"),
-                               message=error_message(err))
+        return render_error("Could not compute tag metrics", err)
 
     def pct(num, den):
         return f"{num / den * 100:.1f}%" if den else "0.0%"
@@ -7510,9 +7489,7 @@ def show_tag_metrics(limit=15):
                 {"$group": {"_id": {"name": "$jrc_tag.name", "yr": yr,
                                     "src": "$jrc_obtained_from"}, "n": {"$sum": 1}}}]))
         except Exception as err:
-            return render_template('error.html', urlroot=request.url_root,
-                                   title=render_warning("Could not compute tag trends"),
-                                   message=error_message(err))
+            return render_error("Could not compute tag trends", err)
         per = {'Crossref': {}, 'DataCite': {}}
         yrset = {'Crossref': set(), 'DataCite': set()}
         for row in tyrows:
@@ -7577,9 +7554,7 @@ def show_tag_metrics(limit=15):
             for name_a, name_b in itertools.combinations(names, 2):
                 pairs[(name_a, name_b)] += 1
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not compute tag co-occurrence"),
-                               message=error_message(err))
+        return render_error("Could not compute tag co-occurrence", err)
     # Top co-tagged pairs table (each tag links to its page; count = shared DOIs).
     prows = []
     for (name_a, name_b), shared in pairs.most_common(limit):
@@ -7851,9 +7826,7 @@ def show_authorizations():
         rows = DB['dis'].orcid.find({"authorization": {"$exists": True, "$ne": []}})
         held = sorted(rows, key=lambda r: (display_person_name(r) or '').lower())
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not read authorizations"),
-                               message=error_message(err))
+        return render_error("Could not read authorizations", err)
     rows_html = []
     for orc in held:
         granted = ", ".join(sorted(orc.get('authorization') or []))
@@ -7894,9 +7867,7 @@ def show_authorizations():
             found = list(DB['dis'].orcid.find({"$or": [{"family": pat}, {"given": pat}]})
                          .limit(50))
         except Exception as err:
-            return render_template('error.html', urlroot=request.url_root,
-                                   title=render_warning("Could not search the roster"),
-                                   message=error_message(err))
+            return render_error("Could not search the roster", err)
         if found:
             frows = []
             for o in sorted(found, key=lambda r: (display_person_name(r) or '').lower()):
@@ -8381,9 +8352,7 @@ def dois_mytags(year='All', show='full'):
         coll = DB['dis'].dois
         rows = coll.find(payload).collation({"locale": "en"}).sort("jrc_publishing_date", -1)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not find DOIs for my affiliations"),
-                               message=error_message(err))
+        return render_error("Could not find DOIs for my affiliations", err)
     # Who this is, in the same shape /mypapers uses: name, ORCID, and when they were
     # here. The page is headed "my affiliations" and otherwise never says whose. No
     # employee ID - it is sensitive, and this page is no harder to reach than any other.
@@ -9283,9 +9252,7 @@ def show_doi_by_name_ui(family, given=None):
         coll = DB['dis'].dois
         rows = coll.find(payload).collation({"locale": "en"}).sort("jrc_publishing_date", -1)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get DOIs from dois collection"),
-                               message=error_message(err))
+        return render_error("Could not get DOIs from dois collection", err)
     html, _ = generate_works_table(rows, family)
     if not html:
         return render_template('warning.html', urlroot=request.url_root,
@@ -9323,9 +9290,7 @@ def show_doi_by_type_ui(src, typ, sub, year):
         coll = DB['dis'].dois
         rows = coll.find(payload).collation({"locale": "en"}).sort("jrc_publishing_date", -1)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get DOIs from dois collection"),
-                               message=error_message(err))
+        return render_error("Could not get DOIs from dois collection", err)
     prefix = f"doisui_type/{src}/{typ}/{sub}"
     html, cnt, oacnt = standard_doi_table(rows, prefix=prefix, count_card=True)
     desc = f"{src} {typ}"
@@ -9366,9 +9331,7 @@ def show_doi_by_title_ui(title):
     try:
         rows = DB['dis'].dois.aggregate(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get DOIs from dois collection"),
-                               message=error_message(err))
+        return render_error("Could not get DOIs from dois collection", err)
     union = []
     for row in rows:
         if isinstance(row['title'], str):
@@ -9378,9 +9341,7 @@ def show_doi_by_title_ui(title):
     try:
         rows = DB['dis'].dois.find(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get DOIs from dois collection"),
-                               message=error_message(err))
+        return render_error("Could not get DOIs from dois collection", err)
     for row in rows:
         union.append(row)
     # show_count=False: the count is shown in the card below (with id 'totalrows',
@@ -9450,9 +9411,7 @@ def show_dois_metrics(year='All'):
         by_src = {s: coll.count_documents({**yr, "jrc_obtained_from": s})
                   for s in ('Crossref', 'DataCite')}
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not count DOIs"),
-                               message=error_message(err))
+        return render_error("Could not count DOIs", err)
     header = (f"<h5 style='margin:14px 0 6px 0;'>Overview</h5>"
               + stat_cards([("DOIs", f"{total:,}"),
                             ("Crossref", f"{by_src['Crossref']:,}"),
@@ -9464,9 +9423,7 @@ def show_dois_metrics(year='All'):
     try:
         sdata, hdict = get_source_data(year, tag)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get source data"),
-                               message=error_message(err))
+        return render_error("Could not get source data", err)
     srows, stotal = [], 0
     for key, val in sorted(hdict.items(), key=itemgetter(1), reverse=True):
         src, typ, sub = key.split('_')
@@ -9490,9 +9447,7 @@ def show_dois_metrics(year='All'):
     try:
         lm = {(row['_id'] or 'None'): row['count'] for row in coll.aggregate(lm_payload)}
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get load methods"),
-                               message=error_message(err))
+        return render_error("Could not get load methods", err)
     s2, d2 = DP.pie_chart(lm, f"DOIs by load method", "source", width=450,
                           colors=DP.get_colors_by_count(len(lm) or 1))
     charts += s1 + s2
@@ -9520,9 +9475,7 @@ def show_dois_metrics(year='All'):
             tdata[lab] = tdata.get(lab, 0) + row['count']
         proto = coll.count_documents({**yr, "jrc_journal": "protocols.io"})
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get type data"),
-                               message=error_message(err))
+        return render_error("Could not get type data", err)
     if proto and 'Preprint' in tdata:
         tdata['Preprint'] -= proto
         tdata['Protocols'] = proto
@@ -9552,9 +9505,7 @@ def show_dois_metrics(year='All'):
             if row['_id'].get('src') in entry:
                 entry[row['_id']['src']] += row['n']
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get DOIs by year"),
-                               message=error_message(err))
+        return render_error("Could not get DOIs by year", err)
     byyear_body = "<div>No dated DOIs.</div>"
     years = sorted(ymap)
     if years:
@@ -9616,9 +9567,7 @@ def show_dois_metrics(year='All'):
                 name += " (Crossref)"
             cov[name] = (num / den) if den else 0  # fraction; axis formats it as a %
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not compute coverage"),
-                               message=error_message(err))
+        return render_error("Could not compute coverage", err)
     cov_table = render_table(['Metadata field', 'Scope', 'DOIs', '% of scope'], crows,
                              table_id='doicov', css='tablesorter numberlast-scroll')
     cs, cd = DP.hbar_chart(cov, f"Metadata coverage (% of applicable DOIs)",
@@ -9695,9 +9644,7 @@ def dois_license_report(source, lic=None, year='All'):
     try:
         rows = DB['dis'].dois.aggregate(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get license data from dois"),
-                               message=error_message(err))
+        return render_error("Could not get license data from dois", err)
     html, _, _ = standard_doi_table(rows, count_card=True)
     title = f"{source} DOIs for license {lic}"
     if year != 'All':
@@ -9723,9 +9670,7 @@ def dois_license(year='All'):
     try:
         total = DB['dis'].dois.count_documents(ypayload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get total number of DOIs"),
-                               message=error_message(err))
+        return render_error("Could not get total number of DOIs", err)
     payload = [{"$group": {"_id": {"source": "$jrc_obtained_from", "license": "$jrc_license"},
                            "count": {"$sum": 1}}},
                {"$sort": {"license": 1}}]
@@ -9734,9 +9679,7 @@ def dois_license(year='All'):
     try:
         rows = DB['dis'].dois.aggregate(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get license data from dois"),
-                               message=error_message(err))
+        return render_error("Could not get license data from dois", err)
     html = year_pulldown('dois_license', suffix=year_suffix) \
            + "&nbsp;&nbsp;&nbsp;" + tag_pulldown('dois_license', year, tag)
     trows = []
@@ -9819,18 +9762,14 @@ def dois_provider_with_janelia(prov):
             journals.append(row['title'])
             publishers.append(row['publisher'])
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get publishers by provider"),
-                               message=error_message(err))
+        return render_error("Could not get publishers by provider", err)
     payload = {"$or": [{"publisher": {"$in": publishers}},
                        {"jrc_journal": {"$in": journals}}],
                "jrc_first_author": {"$exists": True}}
     try:
         rows = DB['dis'].dois.find(payload).sort("jrc_publishing_date", -1)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get DOIs by provider"),
-                               message=error_message(err))
+        return render_error("Could not get DOIs by provider", err)
     trows = []
     row_classes = []
     cnt = vercnt = 0
@@ -9896,10 +9835,7 @@ def dois_report(year=None):
     try:
         rows = coll.aggregate(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get yearly metrics " \
-                                                    + "from dois collection"),
-                               message=error_message(err))
+        return render_error("Could not get yearly metrics " + "from dois collection", err)
     typed = counts_by_type(rows)
     first, last, anyauth = get_first_last_authors(year)
     stat = {}
@@ -9913,10 +9849,7 @@ def dois_report(year=None):
     try:
         rows = coll.aggregate(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get journal metrics " \
-                                                    + "from dois collection"),
-                               message=error_message(err))
+        return render_error("Could not get journal metrics " + "from dois collection", err)
     cnt = 0
     for row in rows:
         if row['_id']:
@@ -9960,9 +9893,7 @@ def dois_report(year=None):
         sheet.append(f"figshare (unversioned) articles\t{cnt}")
         rows = coll.aggregate(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get journal figshare metrics"),
-                               message=error_message(err))
+        return render_error("Could not get journal figshare metrics", err)
     if cnt:
         cnt = 0
         for row in rows:
@@ -9976,9 +9907,7 @@ def dois_report(year=None):
         ocoll = DB['dis'].orcid
         rows = ocoll.find({})
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get orcid collection entries"),
-                               message=error_message(err))
+        return render_error("Could not get orcid collection entries", err)
     for row in rows:
         if row.get('employeeId') and row.get('orcid'):
             orcs[row['employeeId']] = True
@@ -9989,9 +9918,7 @@ def dois_report(year=None):
     try:
         rows = coll.aggregate(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get jrc_author"),
-                               message=error_message(err))
+        return render_error("Could not get jrc_author", err)
     cnt = orc = 0
     for row in rows:
         cnt += 1
@@ -10019,10 +9946,7 @@ def dois_report(year=None):
     try:
         rows = coll.find({"jrc_publishing_date": {"$regex": "^"+ year}})
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get frc_author metrics " \
-                                                    + "from dois collection"),
-                               message=error_message(err))
+        return render_error("Could not get frc_author metrics " + "from dois collection", err)
     total = cnt = middle = 0
     for row in rows:
         total += 1
@@ -10070,10 +9994,7 @@ def dois_report(year=None):
     try:
         rows = coll.aggregate(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get frc_author metrics " \
-                                                    + "from dois collection"),
-                               message=error_message(err))
+        return render_error("Could not get frc_author metrics " + "from dois collection", err)
     cnt = total = 0
     for row in rows:
         if 'type' not in row or row['type'] not in ('journal-article', 'posted-content'):
@@ -10128,10 +10049,7 @@ def dois_yearly(year=None):
     try:
         rows = coll.aggregate(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get yearly metrics " \
-                                                    + "from dois collection"),
-                               message=error_message(err))
+        return render_error("Could not get yearly metrics " + "from dois collection", err)
     typed = counts_by_type(rows)
     first, last, anyauth = get_first_last_authors(year, tag)
     # Pre-seed every type at 0 so a year with no data (e.g. a future year) still has
@@ -10146,10 +10064,7 @@ def dois_yearly(year=None):
     try:
         rows = coll.aggregate(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get journal metrics " \
-                                                    + "from dois collection"),
-                               message=error_message(err))
+        return render_error("Could not get journal metrics " + "from dois collection", err)
     cnt = 0
     for row in rows:
         if row['_id']:
@@ -10185,9 +10100,7 @@ def dois_yearly(year=None):
         ocoll = DB['dis'].orcid
         rows = ocoll.find({})
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get orcid collection entries"),
-                               message=error_message(err))
+        return render_error("Could not get orcid collection entries", err)
     for row in rows:
         if row.get('employeeId') and row.get('orcid'):
             orcs[row['employeeId']] = True
@@ -10198,9 +10111,7 @@ def dois_yearly(year=None):
     try:
         rows = coll.aggregate(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get jrc_author"),
-                               message=error_message(err))
+        return render_error("Could not get jrc_author", err)
     cnt = orc = 0
     for row in rows:
         cnt += 1
@@ -10236,9 +10147,7 @@ def dois_yearly(year=None):
                            render_title_html(DL.get_title(crow)),
                            cell(f"{num:,}", sort=num)])
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get top cited DOIs"),
-                               message=error_message(err))
+        return render_error("Could not get top cited DOIs", err)
     topcited = render_table(['DOI', 'Title', 'Citations'], tcrows, table_id='topcited',
                             css='tablesorter numberlast') if tcrows else \
                "<p style='font-size: 14pt;'>No cited journal articles or preprints.</p>"
@@ -10297,9 +10206,7 @@ def dois_time(period, year=None):
     try:
         rows = DB['dis'].dois.aggregate(pipeline)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get counts from dois collection"),
-                               message=error_message(err))
+        return render_error("Could not get counts from dois collection", err)
     counter = collections.defaultdict(lambda: 0, {})
     trows = []
     nav = {}
@@ -10388,9 +10295,7 @@ def show_grouped_dois(field, unwind=None):
     try:
         rows = DB['dis'].dois.aggregate(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get DOIs from dois collection"),
-                               message=error_message(err))
+        return render_error("Could not get DOIs from dois collection", err)
     trows = []
     total = cnt = 0
     data = {}
@@ -10613,9 +10518,7 @@ def show_uncredited_authors():
     try:
         by_orcid, by_name = _orcid_lookups()
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not read the orcid collection"),
-                               message=error_message(err))
+        return render_error("Could not read the orcid collection", err)
     # Only DOIs with a Janelia affiliation string can qualify, so let Mongo do
     # that cut rather than walking the whole collection.
     query = {"$or": [{"author.affiliation.name": {"$regex": "Janelia", "$options": "i"}},
@@ -10626,9 +10529,7 @@ def show_uncredited_authors():
                                            "jrc_obtained_from": 1}) \
                              .sort([("jrc_publishing_date", -1)])
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get DOIs"),
-                               message=error_message(err))
+        return render_error("Could not get DOIs", err)
     trows = []
     rclasses = []
     fileoutput = ""
@@ -10753,9 +10654,7 @@ def show_authorship_mismatch():
                          {"doi": {"$in": [g['doi'] for g in gaps]}},
                          {"_id": 0, "doi": 1, "jrc_publishing_date": 1})}
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get DOIs"),
-                               message=error_message(err))
+        return render_error("Could not get DOIs", err)
     trows = []
     rclasses = []
     fileoutput = ""
@@ -11082,9 +10981,7 @@ def show_figshare_users():
         accounts = _figshare_accounts()
         by_email, by_orcid, by_name, roster = _roster_index()
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not list figshare users"),
-                               message=error_message(err))
+        return render_error("Could not list figshare users", err)
     keys = list(by_name)
     rows = []
     for acct in accounts:
@@ -11225,9 +11122,7 @@ def show_protocolsio_users():
         authors = _protocolsio_authors()
         _, by_orcid, by_name, roster = _roster_index()
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not list protocols.io users"),
-                               message=error_message(err))
+        return render_error("Could not list protocols.io users", err)
     keys = list(by_name)
     rows = []
     for name, entry in authors.items():
@@ -11428,9 +11323,7 @@ def _depositor_report(platform, prefix, route, depositor_label):
         authors = _datacite_depositors(prefix)
         _, by_orcid, by_name, roster = _roster_index()
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning(f"Could not list {platform} users"),
-                               message=error_message(err))
+        return render_error(f"Could not list {platform} users", err)
     keys = list(by_name)
     rows = []
     for name, entry in authors.items():
@@ -11572,9 +11465,7 @@ def show_dryad_dois(year='All'):
     try:
         rows = list(DB['dis'].dois.find(payload))
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get Dryad DOIs"),
-                               message=error_message(err))
+        return render_error("Could not get Dryad DOIs", err)
     # No explicit selected: the request-aware shadow reads the year out of the
     # path and renders 'All' as "(all years)", which is what every sibling
     # page shows. Passing selected=year put a bare "All" on the button.
@@ -11698,9 +11589,7 @@ def show_orcid_mismatch():
                              'score': score_of(deposited, entry['display']),
                              'title': DL.get_title(rec) or ''})
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not compare ORCIDs to names"),
-                               message=error_message(err))
+        return render_error("Could not compare ORCIDs to names", err)
     rows.sort(key=lambda r: (r['score'], r['doi']))
     html = ("<p>An author entry carries an ORCID that belongs to somebody else on the "
             "roster, so the credit lands on the wrong Janelian. This is the publisher's "
@@ -11760,9 +11649,7 @@ def show_name_mismatch():
     try:
         rows = DL.name_mismatches(DB['dis'].dois, DB['dis'].orcid)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not compare author names"),
-                               message=error_message(err))
+        return render_error("Could not compare author names", err)
     trows = []
     rclasses = []
     fileoutput = ""
@@ -11988,9 +11875,7 @@ def show_newsletter(ndate, source='Crossref'):
                                    {'_id': 0}).sort([("jrc_newsletter", -1),
                                                      ("jrc_publishing_date", -1)])
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get DOIs"),
-                               message=error_message(err))
+        return render_error("Could not get DOIs", err)
     trows = []
     fileoutput = ""
     for row in rows:
@@ -12049,9 +11934,7 @@ def show_insert(idate, source='Crossref'):
                                    {'_id': 0}).sort([("jrc_inserted", -1),
                                                      ("jrc_publishing_date", -1)])
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get DOIs"),
-                               message=error_message(err))
+        return render_error("Could not get DOIs", err)
     if not rows:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("DOIs not found"),
@@ -12177,9 +12060,7 @@ def show_doiui_custom(year='All'):
     try:
         rows = list(DB['dis'].dois.find(payload))
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get DOIs"),
-                               message=error_message(err))
+        return render_error("Could not get DOIs", err)
     if not rows:
         # Valid query, no matches: inline warning on the custom page (keeps the page
         # title) instead of a full error page. Escape the user-supplied field/value -
@@ -12346,9 +12227,7 @@ def show_doi_subject(subject, partial=None):
     try:
         rows = list(DB['dis'].dois.find(payload))
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get DOI subjects"),
-                               message=error_message(err))
+        return render_error("Could not get DOI subjects", err)
     title = f"DOIs with partial subject {subject}" if partial else f"DOIs for subject {subject}"
     if not rows:
         html = render_warning(f"No DOIs found for subject {subject}.", 'warning')
@@ -12386,9 +12265,7 @@ def dois_recent(source='Crossref', limit=10):
     try:
         rows = DB['dis'].dois.aggregate(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get recent DOIs"),
-                               message=error_message(err))
+        return render_error("Could not get recent DOIs", err)
     html = source_limit_pulldown('dois_recent', source, limit) + "<br>"
     html2, _, _ = standard_doi_table(rows)
     html += html2
@@ -12521,9 +12398,7 @@ def crossref_subject(subject=None, year='All'):
         else:
             rows = DB['dis'].dois.aggregate(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get DOI subjects"),
-                               message=error_message(err))
+        return render_error("Could not get DOI subjects", err)
     if subject:
         html, cnt, _ = standard_doi_table(rows, prefix=f"crossref_subject/{subject}",
                                           show_count=False)
@@ -12613,9 +12488,7 @@ def datacite_subject(subject=None, year='All'):
         else:
             rows = DB['dis'].dois.aggregate(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get DOI subjects"),
-                               message=error_message(err))
+        return render_error("Could not get DOI subjects", err)
     if subject:
         html, cnt, _ = standard_doi_table(rows, prefix=f"datacite_subject/{subject}",
                                           show_count=False)
@@ -12690,9 +12563,7 @@ def datacite_scheme(scheme, year='All'):
     try:
         rows = DB['dis'].dois.find(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get DOI subjects"),
-                               message=error_message(err))
+        return render_error("Could not get DOI subjects", err)
     html, cnt, _ = standard_doi_table(rows, prefix=f"datacite_scheme/{scheme}",
                                       show_count=False)
     if not cnt:
@@ -12745,9 +12616,7 @@ def datacite_dois():
     try:
         rows = coll.aggregate(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get data DOIs"),
-                               message=error_message(err))
+        return render_error("Could not get data DOIs", err)
     types = {}
     dois = {}
     # Which publishers contribute each type. The protocols.io rows are unioned in from
@@ -12890,9 +12759,7 @@ def datacite_doisd(dtype=None, pub=None, subtype=None, year='All'):
     try:
         rows = coll.find(payload).sort("jrc_publishing_date", -1)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get data DOIs"),
-                               message=error_message(err))
+        return render_error("Could not get data DOIs", err)
     # Year links use the named form, so they never carry an empty path segment
     prefix = f"datacite_dois/{dtype}/{subtype or NO_SUBTYPE}/{pub}" if subtype is not None \
              else f"datacite_dois/{dtype}/{pub}"
@@ -12952,9 +12819,7 @@ def citation_list(source='datacite'):
     try:
         rows = coll.find(payload).sort("jrc_citation_count", -1)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get data DOIs"),
-                               message=error_message(err))
+        return render_error("Could not get data DOIs", err)
     trows = []
     row_classes = []
     fileoutput = ""
@@ -13036,9 +12901,7 @@ def datacite_downloads():
     try:
         rows = coll.find(payload).sort("downloadCount", -1)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get data DOIs"),
-                               message=error_message(err))
+        return render_error("Could not get data DOIs", err)
     trows = []
     total = 0
     cnt = 0
@@ -13112,10 +12975,7 @@ def citation_metrics(source='datacite'):
              {"$group": {"_id": {"$substrBytes": ["$jrc_publishing_date", 0, 4]},
                          "dois": {"$sum": 1}}}])}
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get citation sources " \
-                                                    + "from dois collection"),
-                               message=error_message(err))
+        return render_error("Could not get citation sources " + "from dois collection", err)
     # Checked vs cited. Before zeros were stored these were the same set, so one
     # name served both and "% DOIs cited" was right by accident; now a checked DOI
     # with no citations is a real, recorded finding and the two must not be confused.
@@ -13902,10 +13762,7 @@ def source_metrics(year='All'):  # pylint: disable=too-many-locals
                              "vpd": uviews / udois if udois else 0,
                              "dpd": udowns / udois if udois else 0}
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get source metrics " \
-                                                    + "from dois collection"),
-                               message=error_message(err))
+        return render_error("Could not get source metrics " + "from dois collection", err)
     # Combined column (pooled, not per-source sums - see pooled_* above)
     pooled_nonver = [c for c, _ in pooled_nonver_works]
     pooled_cited = [c for c in pooled_counts if c > 0]
@@ -14317,9 +14174,7 @@ def figshare_metrics(year='All'):  # pylint: disable=too-many-locals,too-many-br
     try:
         docs = list(coll.find(match, proj))
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get figshare DOIs"),
-                               message=error_message(err))
+        return render_error("Could not get figshare DOIs", err)
     total = len(docs)
     usage = {'Views': 0, 'Downloads': 0, 'Shares': 0}
     usage_dois = nonver = cited_dois = cite_total = 0
@@ -14606,9 +14461,7 @@ def figshare_groups(year='All'):  # pylint: disable=too-many-locals,too-many-bra
     try:
         docs = list(coll.find(match, proj))
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get figshare DOIs"),
-                               message=error_message(err))
+        return render_error("Could not get figshare DOIs", err)
     records = []
     for row in docs:
         fcounts = row.get('jrc_figshare_counts') or {}
@@ -14869,9 +14722,7 @@ def zenodo_groups(year='All'):  # pylint: disable=too-many-locals,too-many-branc
     try:
         docs = list(coll.find(zenodo_match(year), proj))
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get Zenodo DOIs"),
-                               message=error_message(err))
+        return render_error("Could not get Zenodo DOIs", err)
     records = []
     for row in docs:
         zc = row.get('jrc_zenodo_counts') or {}
@@ -15040,9 +14891,7 @@ def zenodo_stats(year='All'):  # pylint: disable=too-many-locals,too-many-branch
     try:
         docs = list(coll.find(zenodo_match(year), proj))
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get Zenodo DOIs"),
-                               message=error_message(err))
+        return render_error("Could not get Zenodo DOIs", err)
     total = len(docs)
     usage = {'Views': 0, 'Downloads': 0}
     uniq = {'Unique views': 0, 'Unique downloads': 0}
@@ -15293,9 +15142,7 @@ def protocolsio_stats(year='All'):  # pylint: disable=too-many-locals,too-many-b
     try:
         docs = list(coll.find(protocolsio_match(year), proj))
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get protocols.io DOIs"),
-                               message=error_message(err))
+        return render_error("Could not get protocols.io DOIs", err)
     total = len(docs)
     usage = {'Views': 0, 'Exports': 0, 'Runs': 0, 'Bookmarks': 0, 'Comments': 0,
              'Forks (public)': 0, 'Forks (private)': 0}
@@ -15468,9 +15315,7 @@ def protocolsio_dois(year='All'):  # pylint: disable=too-many-locals,too-many-br
     try:
         docs = list(coll.find(protocolsio_match(year), proj))
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get protocols.io DOIs"),
-                               message=error_message(err))
+        return render_error("Could not get protocols.io DOIs", err)
     records = []
     for row in docs:
         pc = row.get('jrc_protocolsio_counts') or {}
@@ -15738,9 +15583,7 @@ def elife_stats(year='All'):  # pylint: disable=too-many-locals,too-many-branche
     try:
         docs = list(coll.find(elife_match(year), proj))
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get eLife DOIs"),
-                               message=error_message(err))
+        return render_error("Could not get eLife DOIs", err)
     total = len(docs)
     usage = {'Views': 0, 'Downloads': 0}
     usage_dois = cited_dois = cite_total = 0
@@ -15917,9 +15760,7 @@ def elife_dois(year='All'):  # pylint: disable=too-many-locals,too-many-branches
     try:
         docs = list(coll.find(elife_match(year), proj))
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get eLife DOIs"),
-                               message=error_message(err))
+        return render_error("Could not get eLife DOIs", err)
     records = []
     for row in docs:
         ec = row.get('jrc_elife_counts') or {}
@@ -16102,10 +15943,7 @@ def dois_author(year='All'):
             cnt = DB['dis'].dois.count_documents(payload)
             source[src] = cnt
         except Exception as err:
-            return render_template('error.html', urlroot=request.url_root,
-                                   title=render_warning("Could not get authorship " \
-                                                        + "from dois collection"),
-                                   message=error_message(err))
+            return render_error("Could not get authorship " + "from dois collection", err)
     html = stat_cards(
         [("All authors", f"{source['Crossref-all'] + source['DataCite-all']:,}"),
          ("Any Janelia author", f"{source['Crossref-jrc'] + source['DataCite-jrc']:,}"),
@@ -16195,10 +16033,7 @@ def doiui_firstlast(year='All', which=None):
     try:
         rows = DB['dis'].orcid.find(payload, {"employeeId": 1})
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get group leads " \
-                                                    + "from dois collection"),
-                               message=error_message(err))
+        return render_error("Could not get group leads " + "from dois collection", err)
     leads = []
     for row in rows:
         leads.append(row['employeeId'])
@@ -16213,10 +16048,7 @@ def doiui_firstlast(year='All', which=None):
         else:
             cnt['first'] = DB['dis'].dois.count_documents(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get first authors " \
-                                                    + "from dois collection"),
-                               message=error_message(err))
+        return render_error("Could not get first authors " + "from dois collection", err)
     # Get last authors
     payload = {"jrc_last_id": {"$in": leads}}
     if year != 'All':
@@ -16228,10 +16060,7 @@ def doiui_firstlast(year='All', which=None):
         else:
             cnt['last'] = DB['dis'].dois.count_documents(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get last authors " \
-                                                    + "from dois collection"),
-                               message=error_message(err))
+        return render_error("Could not get last authors " + "from dois collection", err)
     if which:
         html, _, _ = standard_doi_table(display_rows)
         title = f"DOIs with lab head {which} author"
@@ -16247,10 +16076,7 @@ def doiui_firstlast(year='All', which=None):
     try:
         cnt['total'] = DB['dis'].dois.count_documents(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get last authors " \
-                                                    + "from dois collection"),
-                               message=error_message(err))
+        return render_error("Could not get last authors " + "from dois collection", err)
     frows = [["Lab head first author",
               cell(safe(f"<a href='/doiui_firstlast/{escape(str(year))}/first'>{cnt['first']:,}</a>"),
                    sort=cnt['first'])],
@@ -16308,10 +16134,8 @@ def dois_invalid_auth():
         rows = DB['dis'].dois.find(payload, {"doi": 1, "author": 1,
                                              "creators": 1, "jrc_author": 1}).sort([("doi", 1)])
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get DOIs with invalid authors " \
-                                                    + "from dois collection"),
-                               message=error_message(err))
+        return render_error("Could not get DOIs with invalid authors " \
+                            + "from dois collection", err)
     title = "DOIs with invalid authors"
     fam = "<span style='color: red;'>Family:</span> "
     giv = "<span style='color: red;'>Given:</span> "
@@ -16370,10 +16194,8 @@ def dois_no_janelia(year='All'):
         if cnt:
             rows = DB['dis'].dois.find(payload).sort([("jrc_publishing_date", -1)])
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not dois with no Janelia authors " \
-                                                    + "from dois collection"),
-                               message=error_message(err))
+        return render_error("Could not dois with no Janelia authors " \
+                            + "from dois collection", err)
     intro = "These are journal articles/preprints with no Janelia authors<br>"
     title = "DOIs without Janelia authors"
     if year != 'All':
@@ -16448,10 +16270,7 @@ def dois_coauthors():
                 row = DL.single_orcid_lookup(oid, DB['dis'].orcid, lookup_by=lookup)
             orc.append(row)
         except Exception as err:
-            return render_template('error.html', urlroot=request.url_root,
-                                   title=render_warning("Could not get ORCID data for " \
-                                                        + oid),
-                                   message=error_message(err))
+            return render_error("Could not get ORCID data for " + oid, err)
         if not row:
             return render_template('error.html', urlroot=request.url_root,
                                    title=render_warning("ORCID record not found for " \
@@ -16463,9 +16282,7 @@ def dois_coauthors():
     try:
         rows = DB['dis'].dois.aggregate(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get works by co-authors"),
-                               message=error_message(err))
+        return render_error("Could not get works by co-authors", err)
     html, cnt, _ = standard_doi_table(rows, count_card=True)
     title = f"Works co-authored by {orc[0]['given'][0]} {orc[0]['family'][0]} " \
             + f"and {orc[1]['given'][0]} {orc[1]['family'][0]}"
@@ -16491,9 +16308,7 @@ def show_org_authors(org_in):
     try:
         row = DB['dis'].org_group.find_one({"group": org_in})
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get organization groups"),
-                               message=error_message(err))
+        return render_error("Could not get organization groups", err)
     if row:
         orgs = row['members']
     else:
@@ -16502,9 +16317,7 @@ def show_org_authors(org_in):
     try:
         rows = DB['dis'].orcid.find(payload).collation({"locale": "en"}).sort("family", 1)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get authors from orcid collection"),
-                               message=error_message(err))
+        return render_error("Could not get authors from orcid collection", err)
     table, cnt = generate_user_table(rows, download=org_in.replace(' ', '_'))
     html = f"<p>Number of authors: <span id='totalrowsa'>{cnt:,}</span></p>" + table
     endpoint_access()
@@ -16528,9 +16341,7 @@ def show_organization(org_in, year=None, show="full"):
     try:
         row = DB['dis'].org_group.find_one({"group": org_in})
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get organization groups"),
-                               message=error_message(err))
+        return render_error("Could not get organization groups", err)
     orgcount = {}
     subtitle = ""
     if row:
@@ -16560,9 +16371,7 @@ def show_organization(org_in, year=None, show="full"):
         jrc_items = DB['dis'].dois.count_documents(jrc_payload)
         jrc_journal_items = DB['dis'].dois.count_documents(jrc_journal_payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get DOIs"),
-                               message=error_message(err))
+        return render_error("Could not get DOIs", err)
     trows = []
     # Parallel to trows: 'ver' marks a versioned DOI, which is the class the
     # shared version filter hides. Same marking standard_doi_table applies - this
@@ -16670,10 +16479,7 @@ def org_summary(org='Shared Resources',year='All', which=None):
             if DL.is_journal(row) and not DL.is_version(row):
                 finds['firstsr'].append(row)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get first authors " \
-                                                    + "from dois collection"),
-                               message=error_message(err))
+        return render_error("Could not get first authors " + "from dois collection", err)
     # Get last authors
     payload = {"jrc_last_id": {"$in": leads}}
     if year != 'All':
@@ -16689,10 +16495,7 @@ def org_summary(org='Shared Resources',year='All', which=None):
             if DL.is_journal(row) and not DL.is_version(row):
                 finds['lastsr'].append(row)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get last authors " \
-                                                    + "from dois collection"),
-                               message=error_message(err))
+        return render_error("Could not get last authors " + "from dois collection", err)
     if which:
         if org == 'all':
             display_rows = finds['first'] if which == 'first' else finds['last']
@@ -16806,10 +16609,7 @@ def dois_preprint(year='All'):
             cnt = DB['dis'].dois.count_documents(payload)
             source[src] = cnt
         except Exception as err:
-            return render_template('error.html', urlroot=request.url_root,
-                                   title=render_warning("Could not get source counts " \
-                                                        + "from dois collection"),
-                                   message=error_message(err))
+            return render_error("Could not get source counts " + "from dois collection", err)
     match = {"jrc_preprint": {"$exists": True}}
     if year != 'All':
         match['jrc_publishing_date'] = {"$regex": "^"+ year}
@@ -16818,10 +16618,7 @@ def dois_preprint(year='All'):
     try:
         rows = DB['dis'].dois.aggregate(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get preprint counts " \
-                                                    + "from dois collection"),
-                               message=error_message(err))
+        return render_error("Could not get preprint counts " + "from dois collection", err)
     data, preprint = compute_preprint_data(rows)
     no_relation = get_no_relation()
     trows = [
@@ -16839,9 +16636,7 @@ def dois_preprint(year='All'):
     try:
         chartscript, chartdiv = DP.preprint_pie_charts(data, year, DB['dis'].dois)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not generate preprint pie charts"),
-                               message=error_message(err))
+        return render_error("Could not generate preprint pie charts", err)
     title = "DOI preprint status"
     if year != 'All':
         title += f" ({year})"
@@ -16865,10 +16660,7 @@ def dois_preprint_year():
     try:
         rows = DB['dis'].dois.aggregate(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get preprint year counts " \
-                                                    + "from dois collection"),
-                               message=error_message(err))
+        return render_error("Could not get preprint year counts " + "from dois collection", err)
     stat = get_preprint_stats(rows)
     data = {'years': [], 'Journal article': [], 'Preprint': []}
     for key, val in stat.items():
@@ -16881,9 +16673,7 @@ def dois_preprint_year():
     try:
         rows = DB['dis'].dois.find(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get arXiv DOIs"),
-                               message=error_message(err))
+        return render_error("Could not get arXiv DOIs", err)
     for row in rows:
         year = row['jrc_publishing_date'][:4]
         data['Preprint'][data['years'].index(year)] += 1
@@ -16928,9 +16718,7 @@ def preprint_with_pub(year=None):
     try:
         rows = coll.find(payload).sort([("jrc_publishing_date", -1)])
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get preprint data from dois"),
-                               message=error_message(err))
+        return render_error("Could not get preprint data from dois", err)
     day_count = []
     day_pub = {}
     fileoutput = ""
@@ -17027,9 +16815,7 @@ def show_preprint_relation(relation_type, year=None):
     try:
         rows = DB['dis'].dois.find(payload).sort([("jrc_publishing_date", -1)])
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get preprint data from dois"),
-                               message=error_message(err))
+        return render_error("Could not get preprint data from dois", err)
     fileoutput = ""
     header = ['Published', 'DOI', 'Title', 'Journal']
     trows = []
@@ -17090,9 +16876,7 @@ def show_supplement_relation(relation_type, year=None):
     try:
         rows = list(DB['dis'].dois.find(payload).sort([("jrc_publishing_date", -1)]))
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get supplement data from dois"),
-                               message=error_message(err))
+        return render_error("Could not get supplement data from dois", err)
     # Titles for the far end of each relation, resolved in one query. The
     # projection carries the upper-case DOI key because DL.get_title() decides
     # Crossref vs DataCite on its presence - omitting it returns "No title" for
@@ -17106,9 +16890,7 @@ def show_supplement_relation(relation_type, year=None):
                                            {"doi": 1, "DOI": 1, "titles": 1, "title": 1}):
                 titles[rec['doi']] = DL.get_title(rec)
         except Exception as err:
-            return render_template('error.html', urlroot=request.url_root,
-                                   title=render_warning("Could not get related titles"),
-                                   message=error_message(err))
+            return render_error("Could not get related titles", err)
     fileoutput = ""
     header = ['Published', 'DOI', 'Title', cfg['other'], f"{cfg['other']} title", 'Source']
     trows = []
@@ -17157,9 +16939,7 @@ def dois_companion(year='All'):
     try:
         rows = list(DB['dis'].dois.find(payload).sort([("jrc_publishing_date", -1)]))
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get companion data from dois"),
-                               message=error_message(err))
+        return render_error("Could not get companion data from dois", err)
     want = {ent['doi'] for row in rows for ent in row.get('jrc_companion', []) if ent.get('doi')}
     titles = {}
     if want:
@@ -17168,9 +16948,7 @@ def dois_companion(year='All'):
                                            {"doi": 1, "DOI": 1, "titles": 1, "title": 1}):
                 titles[rec['doi']] = DL.get_title(rec)
         except Exception as err:
-            return render_template('error.html', urlroot=request.url_root,
-                                   title=render_warning("Could not get companion titles"),
-                                   message=error_message(err))
+            return render_error("Could not get companion titles", err)
     fileoutput = ""
     header = ['Published', 'DOI', 'Title', 'Journal', 'Companion', 'Companion title',
               'Kind', 'Title score', 'Author overlap']
@@ -17260,9 +17038,7 @@ def relations(year='All'):
         pairs.append(("All three", count({k['field']: {"$exists": True}
                                           for k in RELATION_KINDS})))
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get relation counts from dois"),
-                               message=error_message(err))
+        return render_error("Could not get relation counts from dois", err)
 
     def pct(num):
         return f"{100 * num / total:.1f}%" if total else "0.0%"
@@ -17319,9 +17095,7 @@ def relations(year='All'):
             for k in RELATION_KINDS:
                 series[k['label']].append(per[k['label']])
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not build the yearly breakdown"),
-                               message=error_message(err))
+        return render_error("Could not build the yearly breakdown", err)
     chartscript = chartdiv = ""
     if years:
         data = {"years": years}
@@ -17728,9 +17502,7 @@ def relation_integrity():
     try:
         find = _integrity_scan()
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not audit DOI relations"),
-                               message=error_message(err))
+        return render_error("Could not audit DOI relations", err)
     # Findings grouped by the response they need, most severe first. Severity is
     # "how wrong is the database", not "how many rows": a relation we record
     # incorrectly misleads a reader, while one we have not loaded merely omits.
@@ -17959,9 +17731,7 @@ def preprint_lag():
     try:
         pairs = _lag_pairs()
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not measure preprint lag"),
-                               message=error_message(err))
+        return render_error("Could not measure preprint lag", err)
     if not pairs:
         return make_response(render_template('general.html', urlroot=request.url_root,
                                              title="Preprint to publication",
@@ -18198,9 +17968,7 @@ def dois_related(year=None):
                       **{c['field']: 1 for c in RELATION_COLUMNS}}
         ).sort([("jrc_publishing_date", -1)]))
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get relations from dois"),
-                               message=error_message(err))
+        return render_error("Could not get relations from dois", err)
     # Titles for the far end of every relation, in one query, so a reader can
     # hover a DOI instead of opening it. The upper-case DOI key has to be
     # projected or DL.get_title() sends Crossref records down the DataCite branch.
@@ -18215,9 +17983,7 @@ def dois_related(year=None):
                                            {"doi": 1, "DOI": 1, "titles": 1, "title": 1}):
                 titles[rec['doi'].lower()] = DL.get_title(rec)
         except Exception as err:
-            return render_template('error.html', urlroot=request.url_root,
-                                   title=render_warning("Could not get related titles"),
-                                   message=error_message(err))
+            return render_error("Could not get related titles", err)
     header = ['Published', 'DOI', 'Title', 'Journal', 'Source'] + [c['label'] for c in columns]
     trows, fileoutput, shown_relations = [], "", 0
     for row in rows:
@@ -18371,10 +18137,7 @@ def dois_publisher(year='All'):
     try:
         rows = DB['dis'].dois.aggregate(payload, collation=INSENSITIVE)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get publishers " \
-                                                    + "from dois collection"),
-                               message=error_message(err))
+        return render_error("Could not get publishers " + "from dois collection", err)
     trows = []
     pubs = {}
     for row in rows:
@@ -18454,9 +18217,7 @@ def show_dois_heatmap(groupby, source='Crossref', top=10):
         try:
             rows = DB['dis'].subscription.aggregate(pipeline)
         except Exception as err:
-            return render_template('error.html', urlroot=request.url_root,
-                                   title=render_warning(errmsg),
-                                   message=error_message(err))
+            return render_error(errmsg, err)
         for row in rows:
             pubcount[row['_id']['publisher']] = {'count': row['count'],
                                                  'provider': row['_id']['provider']}
@@ -18464,9 +18225,7 @@ def show_dois_heatmap(groupby, source='Crossref', top=10):
         try:
             rows = DB['dis'].subscription.find({"apc": {"$exists": True}}, {"title": 1})
         except Exception as err:
-            return render_template('error.html', urlroot=request.url_root,
-                                   title=render_warning(errmsg),
-                                   message=error_message(err))
+            return render_error(errmsg, err)
         for row in rows:
             pubcount[row['title']] = row['_id']
     mongo_field = field_map[groupby]['mongo']
@@ -18485,9 +18244,7 @@ def show_dois_heatmap(groupby, source='Crossref', top=10):
     try:
         rows = DB['dis'].dois.aggregate(pipeline)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning(errmsg),
-                               message=error_message(err))
+        return render_error(errmsg, err)
     raw = [{'year': r['_id']['year'], groupby: r['_id'][groupby],
             'count': r['count']} for r in rows]
     if not raw:
@@ -18570,10 +18327,7 @@ def show_open_access():
         resp = requests.get(f"{OPENALEX}institutions", params=params, timeout=5)
         payload = resp.json()
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get institution information " \
-                                                    + "from OpenAlex"),
-                               message=error_message(err))
+        return render_error("Could not get institution information " + "from OpenAlex", err)
     if 'results' not in payload:
         # Budget-exhausted/error responses carry no 'results' key; show OpenAlex's
         # own error text rather than a generic exception message.
@@ -18588,10 +18342,7 @@ def show_open_access():
     try:
         internal = get_oa_year_counts()
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning('Could not get Open access data from ' \
-                                                    + 'dois collection'),
-                               message=error_message(err))
+        return render_error('Could not get Open access data from ' + 'dois collection', err)
     adj = {}
     for row in internal:
         yr = str(row['_id']['year'])
@@ -18669,9 +18420,7 @@ def show_open_access_details(year='All'):
     try:
         rows = DB['dis'].dois.aggregate(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning('Could not get Open access data'),
-                               message=error_message(err))
+        return render_error('Could not get Open access data', err)
     total = total_oa = 0
     trows = []
     data = {}
@@ -18724,18 +18473,14 @@ def show_journals_dois(year=None):
     try:
         rows = DB['dis'].subscription.find({"type": {"$in": ["Journal", "Repository"]}})
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning(errmsg),
-                               message=error_message(err))
+        return render_error(errmsg, err)
     subscribed = {}
     for row in rows:
         subscribed[row['title']] = row
     try:
         journal = get_top_journals(year, maxpub=True, tag=tag)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning(errmsg),
-                               message=error_message(err))
+        return render_error(errmsg, err)
     if not journal:
         # Empty result for a valid year: keep the year pulldown so another year can be
         # chosen, and show the standard inline warning instead of a full error page.
@@ -18845,9 +18590,7 @@ def top_entities(entity_type, year='All', source='crossref', top=10):
             raw = get_top_publishers(year, fsource, maxpub=True)
             entities = {k: v['count'] for k, v in raw.items()}
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning(f"Could not get {entity_type} data from dois"),
-                               message=error_message(err))
+        return render_error(f"Could not get {entity_type} data from dois", err)
     if not entities:
         # Empty result for a valid filter: keep the year pulldown (carrying the
         # source/top for publishers) and show the standard inline warning.
@@ -18912,9 +18655,7 @@ def dois_nojournal():
     try:
         rows = DB['dis'].dois.find(payload).sort([("doi", 1)])
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get journal data from dois"),
-                               message=error_message(err))
+        return render_error("Could not get journal data from dois", err)
     trows = []
     cnt = 0
     for row in rows:
@@ -18950,9 +18691,7 @@ def show_journal_ui(jname, year='All'):
             payload['jrc_tag.name'] = tag
         rows = DB['dis'].dois.find(payload).sort("jrc_publishing_date", -1)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get DOIs for journal"),
-                               message=error_message(err))
+        return render_error("Could not get DOIs for journal", err)
     # show_count=False: the count is shown in the card below (with id 'totalrows',
     # which the "Filter versioned DOIs" toggler updates)
     html, cnt, _ = standard_doi_table(rows, show_count=False)
@@ -18961,9 +18700,7 @@ def show_journal_ui(jname, year='All'):
     try:
         rows = DB['dis'].dois.aggregate(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get status counts for journal"),
-                               message=error_message(err))
+        return render_error("Could not get status counts for journal", err)
     total = 0
     data = {}
     for row in rows:
@@ -19006,9 +18743,7 @@ def journals_referenced(year='All'):
     try:
         rows = DB['dis'].dois.aggregate(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get DOIs"),
-                               message=error_message(err))
+        return render_error("Could not get DOIs", err)
     journals = refs = 0
     fileoutput = ""
     for row in rows:
@@ -19039,9 +18774,7 @@ def show_subscription_summary():
         for row in rows:
             provider[row['publisher']] = row['provider']
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning(errmsg),
-                               message=error_message(err))
+        return render_error(errmsg, err)
     try:
         cnt = DB['dis'].subscription.count_documents({})
         oacnt = DB['dis'].subscription.count_documents({"access": "Free to read"})
@@ -19050,9 +18783,7 @@ def show_subscription_summary():
         typs = DB['dis'].subscription.aggregate([{"$group": {"_id": "$type", "count": {"$sum": 1}}},
                                                  {"$sort": {"_id": 1}}])
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning(errmsg),
-                               message=error_message(err))
+        return render_error(errmsg, err)
     # Most recent subscription cost (across all providers)
     cost_year = cost_total = None
     try:
@@ -19069,9 +18800,7 @@ def show_subscription_summary():
             cost_year = cost_rows[0]['_id']
             cost_total = cost_rows[0]['total']
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning(errmsg),
-                               message=error_message(err))
+        return render_error(errmsg, err)
     # APC stats: count of titles, min/max/avg across all APC values
     apc_stats = None
     try:
@@ -19093,9 +18822,7 @@ def show_subscription_summary():
         if apc_rows:
             apc_stats = apc_rows[0]
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning(errmsg),
-                               message=error_message(err))
+        return render_error(errmsg, err)
     # Stat cards
     cards = [("Providers", f"{pcount:,}"),
              ("Publishers", f"{len(pubcnt):,}"),
@@ -19122,9 +18849,7 @@ def show_subscription_summary():
     try:
         rows = DB['dis'].subscription.aggregate(payload, collation=INSENSITIVE)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning(errmsg),
-                               message=error_message(err))
+        return render_error(errmsg, err)
     transform = {}
     for row in rows:
         if row['_id']['publisher'] not in transform:
@@ -19171,9 +18896,7 @@ def show_subscription_summary_by_provider(prov):
                    {"$sort": {"_id": 1}}]
         typs = DB['dis'].subscription.aggregate(payload, collation=INSENSITIVE)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning(errmsg),
-                               message=error_message(err))
+        return render_error(errmsg, err)
     types = {}
     for row in typs:
         types[row['_id']] = int(row['count'])
@@ -19185,9 +18908,7 @@ def show_subscription_summary_by_provider(prov):
     try:
         rows = DB['dis'].subscription.aggregate(payload, collation=INSENSITIVE)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning(errmsg),
-                               message=error_message(err))
+        return render_error(errmsg, err)
     transform = {}
     cnt = 0
     for row in rows:
@@ -19205,9 +18926,7 @@ def show_subscription_summary_by_provider(prov):
         oa_cnt = DB['dis'].subscription.count_documents({"provider": prov,
                                                          "access": "Free to read"})
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning(errmsg),
-                               message=error_message(err))
+        return render_error(errmsg, err)
     # Most recent subscription cost
     cost_year = cost_total = None
     try:
@@ -19224,9 +18943,7 @@ def show_subscription_summary_by_provider(prov):
             cost_year = cost_rows[0]['_id']
             cost_total = cost_rows[0]['total']
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning(errmsg),
-                               message=error_message(err))
+        return render_error(errmsg, err)
     # APC stats: count of titles, min/max/avg across all APC values
     apc_stats = None
     try:
@@ -19248,9 +18965,7 @@ def show_subscription_summary_by_provider(prov):
         if apc_rows:
             apc_stats = apc_rows[0]
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning(errmsg),
-                               message=error_message(err))
+        return render_error(errmsg, err)
     # Stat cards
     cards = [("Titles", f"{cnt:,}"),
              ("Publishers", f"{len(transform):,}")]
@@ -19323,9 +19038,7 @@ def show_subscription_year(year=None):
         rows = DB['dis'].subscription.find({f"cost.{year}": {"$exists": True}}) \
                                       .collation({"locale": "en"}).sort(sortorder)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning(errmsg),
-                               message=error_message(err))
+        return render_error(errmsg, err)
     html = "<br>" + year_pulldown("subscription/year", all_years=False, start_year=2011)
     trows = []
     data = {}
@@ -19384,17 +19097,13 @@ def show_subscription_missingcost(year=None):
     try:
         active_providers = {row['_id'] for row in DB['dis'].subscription.aggregate(pipeline)}
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning(errmsg),
-                               message=error_message(err))
+        return render_error(errmsg, err)
     # Providers that have at least one cost entry for the selected year
     try:
         covered = set(DB['dis'].subscription.distinct(
             "provider", {f"cost.{year}": {"$exists": True}}))
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning(errmsg),
-                               message=error_message(err))
+        return render_error(errmsg, err)
     missing = sorted(active_providers - covered, key=str.lower)
     html = "<br>" + year_pulldown("subscription/missingcost", all_years=False, start_year=2011)
     html += "<br><br>"
@@ -19446,9 +19155,7 @@ def show_subscription_costs(provider=None):
         try:
             provrows = list(DB['dis'].subscription.aggregate(pipeline))
         except Exception as err:
-            return render_template('error.html', urlroot=request.url_root,
-                                   title=render_warning(errmsg),
-                                   message=error_message(err))
+            return render_error(errmsg, err)
         prov_year = collections.defaultdict(dict)
         for row in provrows:
             prov_year[row['_id']['provider']][row['_id']['year']] = row
@@ -19456,9 +19163,7 @@ def show_subscription_costs(provider=None):
     try:
         rows = DB['dis'].subscription.aggregate(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning(errmsg),
-                               message=error_message(err))
+        return render_error(errmsg, err)
     data = {'Year': [], 'Cost': [], 'Count': []}
     last_cost = 0
     perc = {}
@@ -19535,9 +19240,7 @@ def show_subscription_costs(provider=None):
         else:
             chartscript2, chartdiv2 = provider_heat_map()
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning(errmsg),
-                               message=error_message(err))
+        return render_error(errmsg, err)
     if chartscript2 is not None:
         chartscript += chartscript2
         chartdiv += chartdiv2
@@ -19550,9 +19253,7 @@ def show_subscription_costs(provider=None):
             ).collation({"locale": "en"}).sort("title", 1)
             title_rows = list(titles)
         except Exception as err:
-            return render_template('error.html', urlroot=request.url_root,
-                                   title=render_warning(errmsg),
-                                   message=error_message(err))
+            return render_error(errmsg, err)
         if title_rows:
             html += f"<br><h4>Titles ({len(title_rows):,})</h4><ul>"
             for row in title_rows:
@@ -19576,9 +19277,7 @@ def show_subscriptions(jtype):
     try:
         rows = DB['dis'].subscription.find({"type": jtype})
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning(errmsg),
-                               message=error_message(err))
+        return render_error(errmsg, err)
     if not rows:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning(errmsg),
@@ -19625,9 +19324,7 @@ def show_subscriptionlist(sub, field='publisher', stype=None):
         srt = [("type", 1), ("title", 1)]
         rows = DB['dis'].subscription.find(payload).collation({"locale": "en"}).sort(srt)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning(errmsg),
-                               message=error_message(err))
+        return render_error(errmsg, err)
     if not cnt:
         return render_template('warning.html', urlroot=request.url_root,
                                title=render_warning(errmsg),
@@ -19644,9 +19341,7 @@ def show_subscriptionlist(sub, field='publisher', stype=None):
             for row in pubs:
                 pubcount[row['_id']] = row['count']
         except Exception as err:
-            return render_template('error.html', urlroot=request.url_root,
-                                   title=render_warning(errmsg),
-                                   message=error_message(err))
+            return render_error(errmsg, err)
     header = ([] if stype else ['Type']) \
              + ['Title', 'Publisher', 'Provider', 'Title ID', 'Access', 'APC']
     if field == 'publisher':
@@ -19756,9 +19451,7 @@ def process_charges(ptype):
     try:
         rows = DB['dis'].subscription.aggregate(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning(errmsg),
-                               message=error_message(err))
+        return render_error(errmsg, err)
     try:
         row = list(rows)[0]
     except Exception:
@@ -19795,8 +19488,7 @@ def show_subscription_providers():
         rows = DB['dis'].subscription.aggregate(payload, collation=INSENSITIVE)
         pubcnt = len(DB['dis'].subscription.distinct("publisher"))
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning(errmsg), message=error_message(err))
+        return render_error(errmsg, err)
     trows = []
     for row in rows:
         cnt += 1
@@ -19839,9 +19531,7 @@ def show_subscription_providers():
     try:
         rows = DB['dis'].subscription.aggregate(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning(errmsg),
-                               message=error_message(err))
+        return render_error(errmsg, err)
     try:
         row = list(rows)[0]
         ctx_style = "font-size:0.7em; font-weight:normal; color:#a8c4e0;"
@@ -19880,9 +19570,7 @@ def show_subscription_apcs(provider=None, publisher=None):
         rows = list(DB['dis'].subscription.find(query).collation(
             {"locale": "en"}).sort(sortorder))
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning(errmsg),
-                               message=error_message(err))
+        return render_error(errmsg, err)
     if not rows:
         return render_template('warning.html', urlroot=request.url_root,
                                title=render_warning(errmsg),
@@ -19956,9 +19644,7 @@ def show_subscription(sid):
     try:
         row = DB['dis'].subscription.find_one({"_id": bson.ObjectId(sid)})
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning(errmsg),
-                               message=error_message(err))
+        return render_error(errmsg, err)
     if not row:
         return render_template('warning.html', urlroot=request.url_root,
                                title=render_warning(errmsg),
@@ -20091,9 +19777,7 @@ def show_oid_ui(oid, show='full'):
     try:
         data = JRC.call_orcid(oid)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not retrieve ORCID ID"),
-                               message=error_message(err))
+        return render_error("Could not retrieve ORCID ID", err)
     if 'person' not in data:
         if 'user-message' not in data:
             data['user-message'] = f"Could not find {oid} in orcid collection"
@@ -20366,9 +20050,7 @@ def show_my_papers(show='full'):
     try:
         recs = list(DB['dis'].orcid.find({"orcid": oid}))
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not search the orcid collection"),
-                               message=error_message(err))
+        return render_error("Could not search the orcid collection", err)
     if not recs:
         return render_template('warning.html', urlroot=request.url_root,
                                title=render_warning(f"Could not find ORCID {oid}", 'warning'),
@@ -20433,9 +20115,7 @@ def show_names_ui(name):
                                     message=f"Could not find any names matching {name}")
         rows = DB['dis'].orcid.find(payload).collation({"locale": "en"}).sort("family", 1)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not count names in dois collection"),
-                               message=error_message(err))
+        return render_error("Could not count names in dois collection", err)
     html, count = generate_user_table(rows)
     html = f"Search term: {name}<br><p>Number of authors: " \
            + f"<span id='totalrowsa'>{count:,}</span></p>" + html
@@ -20469,9 +20149,7 @@ def show_hires(startdate, stopdate):
         rows = DB['dis'].orcid.find({"hireDate": {"$gte" : startdate, "$lte" : stopdate}},
                                    {'_id': 0}).sort([("hireDate", -1), ("family", 1)])
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get employees"),
-                               message=error_message(err))
+        return render_error("Could not get employees", err)
     if not cnt:
         return render_template('warning.html', urlroot=request.url_root,
                                title=render_warning("Employees not found"),
@@ -20540,10 +20218,7 @@ def orcid_entry():
                             {"alumni": {"$exists": False}}]}
         cntf = DB['dis'].orcid.count_documents(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get affiliations " \
-                                                    + "from orcid collection"),
-                               message=error_message(err))
+        return render_error("Could not get affiliations " + "from orcid collection", err)
     total = cntj + cnta
     data = {}
     html = '<table id="types" class="tablesorter standard-scroll"><tbody>'
@@ -20618,10 +20293,8 @@ def orcid_duplicates():
         try:
             rowsobj = DB['dis'].orcid.aggregate(payload)
         except Exception as err:
-            return render_template('error.html', urlroot=request.url_root,
-                                   title=render_warning(f"Could not get duplicate {check}s " \
-                                                        + "from orcid collection"),
-                                   message=error_message(err))
+            return render_error(f"Could not get duplicate {check}s " \
+                                + "from orcid collection", err)
         rows = []
         for row in rowsobj:
             rows.append(row)
@@ -20632,10 +20305,7 @@ def orcid_duplicates():
                 try:
                     recs = DB['dis'].orcid.find({"employeeId": row['_id']})
                 except Exception as err:
-                    return render_template('error.html', urlroot=request.url_root,
-                                           title=render_warning("Could not get ORCID data for " \
-                                                                + row['_id']),
-                                           message=error_message(err))
+                    return render_error("Could not get ORCID data for " + row['_id'], err)
                 names = []
                 other = []
                 for rec in recs:
@@ -20666,19 +20336,13 @@ def author_duplicates():
     try:
         frows = DB['dis'].orcid.aggregate(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get family names from " \
-                                                    + "orcid collection"),
-                               message=error_message(err))
+        return render_error("Could not get family names from " + "orcid collection", err)
     given = {}
     for frow in frows:
         try:
             grows = DB['dis'].orcid.find({"family": frow['family'][0]})
         except Exception as err:
-            return render_template('error.html', urlroot=request.url_root,
-                                   title=render_warning("Could not get given names from " \
-                                                        + "orcid collection"),
-                                   message=error_message(err))
+            return render_error("Could not get given names from " + "orcid collection", err)
         for grow in grows:
             for giv in grow['given']:
                 name = f"{giv} {frow['family'][0]}"
@@ -20870,9 +20534,7 @@ def openalex_stats():
                             params=oa_params, timeout=10)
         inst = resp.json()
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get OpenAlex institution data"),
-                               message=error_message(err))
+        return render_error("Could not get OpenAlex institution data", err)
     if resp.status_code != 200 or 'works_count' not in inst:
         return render_template('error.html', urlroot=request.url_root,
                                title=render_warning("Could not get OpenAlex institution data"),
@@ -20984,9 +20646,7 @@ def pubmed_stats():
     try:
         total = _pubmed_count(PUBMED_AFFIL_TERM)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get PubMed data"),
-                               message=error_message(err))
+        return render_error("Could not get PubMed data", err)
     # PMC subset and reviews are non-fatal (shown as n/a on failure)
     try:
         pmc = _pubmed_count(f"{PUBMED_AFFIL_TERM} AND pubmed pmc[sb]")
@@ -21235,9 +20895,7 @@ def orcid_run_bulk_search():
     try:
         df = pd.read_excel(file)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not read file"),
-                               message=error_message(err))
+        return render_error("Could not read file", err)
     html = f"Read {len(df)} row{'' if len(df) == 1 else 's'}"
     family = given = ""
     for col in df.columns:
@@ -21262,10 +20920,8 @@ def orcid_run_bulk_search():
                                 {"given": {"$regex": row[given].strip(), "$options" : "i"}}]}
             orc = DB['dis'].orcid.find_one(payload)
         except Exception as err:
-            return render_template('error.html', urlroot=request.url_root,
-                                   title=render_warning("Could not find ORCID record for " \
-                                                        + f"{row[given]} {row[family]}"),
-                                   message=error_message(err))
+            return render_error("Could not find ORCID record for " \
+                                + f"{row[given]} {row[family]}", err)
         res = "<span style='color:red'>Not found</span>"
         if orc:
             res = f"<a href='/userui/{orc['orcid']}'>{orc['orcid']}</a>" if 'orcid' in orc \
@@ -21307,10 +20963,7 @@ def peoporgsle(full=None):
     try:
         rows = DB['dis'].orcid.find(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get org managers from " \
-                                                    + "orcid collection"),
-                               message=error_message(err))
+        return render_error("Could not get org managers from " + "orcid collection", err)
     for row in rows:
         if row.get('group'):
             manager[row['group']] = ' '.join([row['given'][0], row['family'][0]])
@@ -21324,29 +20977,21 @@ def peoporgsle(full=None):
     try:
         rows = DB['dis'].orcid.aggregate(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get affiliations from " \
-                                                    + "orcid collection"),
-                               message=error_message(err))
+        return render_error("Could not get affiliations from " + "orcid collection", err)
     aff = {}
     for row in rows:
         aff[row['_id']] = row['count']
     try:
         orgs = DL.get_supervisory_orgs()
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get supervisory orgs"),
-                               message=error_message(err))
+        return render_error("Could not get supervisory orgs", err)
     payload = [{"$unwind": "$jrc_tag"},
                {"$project": {"_id": 0, "jrc_tag.name": 1}},
                {"$group": {"_id": "$jrc_tag.name", "count": {"$sum": 1}}}]
     try:
         rows = DB['dis'].dois.aggregate(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get affiliations from " \
-                                                    + "orcid collection"),
-                               message=error_message(err))
+        return render_error("Could not get affiliations from " + "orcid collection", err)
     tag = {}
     for row in rows:
         if isinstance(row['_id'], dict):
@@ -21397,9 +21042,7 @@ def people(name=None):
     try:
         response = JRC.call_people_by_name(name)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning(f"Could not get People data for {name}"),
-                               message=error_message(err))
+        return render_error(f"Could not get People data for {name}", err)
     if not response:
         return make_response(render_template('people.html', urlroot=request.url_root,
                                              title="Search People system",
@@ -21562,9 +21205,7 @@ def peoplerec(eid):
         rec = JRC.call_people_by_id(eid)
     except Exception as err:
         if expected == 'html':
-            return render_template('error.html', urlroot=request.url_root,
-                                   title=render_warning(f"Could not get People data for {eid}"),
-                                   message=error_message(err))
+            return render_error(f"Could not get People data for {eid}", err)
         raise InvalidUsage(str(err), 500) from err
     if not rec:
         if expected == 'html':
@@ -21605,9 +21246,7 @@ def ror(rorid=None):
     try:
         resp = requests.get(f"{ROR}{rorid}", timeout=5).json()
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning(f"Could not get ROR data for {rorid}"),
-                               message=error_message(err))
+        return render_error(f"Could not get ROR data for {rorid}", err)
     if not resp or 'errors' in resp:
         msg = '<br>'.join(resp['errors']) if 'errors' in resp else "No ROR ID found"
         return make_response(render_template('ror.html', urlroot=request.url_root,
@@ -21758,9 +21397,7 @@ def funders(year='All'):
                 rolled[fid] += 1
         names = {d['id']: d.get('name') for d in DB['dis'].funder.find({}, {"id": 1, "name": 1})}
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not summarize funders"),
-                               message=error_message(err))
+        return render_error("Could not summarize funders", err)
     pct = f"{100.0 * have / total:.1f}%" if total else "0%"
     html = year_pulldown('funders', all_years=True, selected=year)
     html += stat_cards([("DOIs with funders", f"{have:,}"),
@@ -21832,9 +21469,7 @@ def funder(fid):
         rows = list(DB['dis'].dois.find({"jrc_funder_ids": fid}))
         direct = DB['dis'].dois.count_documents({"jrc_funder.id": fid})
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning(f"Could not get DOIs for funder {fid}"),
-                               message=error_message(err))
+        return render_error(f"Could not get DOIs for funder {fid}", err)
     name = (cached or {}).get('name') or f"Funder {fid}"
     header = f"<h4>{escape(name)}</h4>" \
              f"<p>Crossref Funder Registry " \
@@ -22032,9 +21667,7 @@ def show_awards():
     try:
         index, filler = _award_index(fid)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not group DOIs by award"),
-                               message=error_message(err))
+        return render_error("Could not group DOIs by award", err)
     if not index:
         return make_response(render_template('general.html', urlroot=request.url_root,
                                              title="Awards",
@@ -22149,9 +21782,7 @@ def show_award(fid, key):
     try:
         index, _ = _award_index(fid)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get DOIs for this award"),
-                               message=error_message(err))
+        return render_error("Could not get DOIs for this award", err)
     entry = index.get((fid, unquote(key).upper()))
     if not entry:
         return render_template('error.html', urlroot=request.url_root,
@@ -22177,9 +21808,7 @@ def show_award(fid, key):
     try:
         rows = list(DB['dis'].dois.find({"doi": {"$in": sorted(entry['dois'])}}))
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get DOIs for this award"),
-                               message=error_message(err))
+        return render_error("Could not get DOIs for this award", err)
     table, _, _ = standard_doi_table(rows, download_name='award_dois')
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
@@ -22587,18 +22216,14 @@ def dois_lab():
     try:
         orgs = DL.get_supervisory_orgs(DB['dis'].suporg)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get supervisory orgs"),
-                               message=error_message(err))
+        return render_error("Could not get supervisory orgs", err)
     payload = {"jrc_tag.name": {"$regex": " Lab"},
                "$or": [{"type": "journal-article"}, {"subtype": "preprint"},
                        {"types.resourceTypeGeneral": "Preprint"}]}
     try:
         rows = DB['dis'].dois.find(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get lab DOIs from dois collection"),
-                               message=error_message(err))
+        return render_error("Could not get lab DOIs from dois collection", err)
     pre = "Reported below are journal articles/preprints for all current labs. " \
           + "DOIs in <span style='color: lime;'>green</span> are for multiple labs.<br>"
     header = ['Lab', 'Published', 'DOI', 'Type', 'Title']
@@ -22649,9 +22274,7 @@ def dois_janelia_affiliations(aff):
     try:
         rows = list(DB['dis'].dois.find(payload))
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get DOIs for Janelia affiliations"),
-                               message=error_message(err))
+        return render_error("Could not get DOIs for Janelia affiliations", err)
     title = f"DOIs with authors affiliated with {aff}"
     if not rows:
         html = render_warning(f"No DOIs found with authors affiliated with {aff}.", 'warning')
@@ -22684,10 +22307,7 @@ def janelia_affiliations():
     try:
         rows = DB['dis'].dois.aggregate(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get affiliations " \
-                                                    + "from dois collection"),
-                               message=error_message(err))
+        return render_error("Could not get affiliations " + "from dois collection", err)
     affiliations = {}
     for row in rows:
         affiliations[row['_id']] = row['count']
@@ -22700,10 +22320,7 @@ def janelia_affiliations():
     try:
         rows = DB['dis'].dois.aggregate(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get affiliations " \
-                                                    + "from dois collection"),
-                               message=error_message(err))
+        return render_error("Could not get affiliations " + "from dois collection", err)
     for row in rows:
         if row['_id'] not in affiliations:
             affiliations[row['_id']] = row['count']
@@ -22769,9 +22386,7 @@ def orcid_affiliations():
         orgs = DL.get_supervisory_orgs(DB['dis'].suporg)
     except Exception as err:
         if expected == 'html':
-            return render_template('error.html', urlroot=request.url_root,
-                                   title=render_warning("Could not get supervisory orgs"),
-                                   message=error_message(err))
+            return render_error("Could not get supervisory orgs", err)
         raise InvalidUsage(str(err), 500) from err
     try:
         # locale "en" collation sorts affiliations case-insensitively (dictionary
@@ -22779,10 +22394,7 @@ def orcid_affiliations():
         rows = DB['dis'].orcid.aggregate(payload, collation={"locale": "en"})
     except Exception as err:
         if expected == 'html':
-            return render_template('error.html', urlroot=request.url_root,
-                                   title=render_warning("Could not get affiliations " \
-                                                        + "from orcid collection"),
-                                   message=error_message(err))
+            return render_error("Could not get affiliations " + "from orcid collection", err)
         raise InvalidUsage(str(err), 500) from err
     if expected == 'json':
         result = initialize_result()
@@ -22812,10 +22424,7 @@ def orcid_affiliations():
         total_orcid = DB['dis'].orcid.count_documents({"affiliations": {"$ne": None},
                                                        "orcid": {"$ne": None}})
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get author counts " \
-                                                    + "from orcid collection"),
-                               message=error_message(err))
+        return render_error("Could not get author counts " + "from orcid collection", err)
     trows = []
     row_classes = []
     count = 0
@@ -22886,9 +22495,7 @@ def dois_top(show="journal", num=10):
     try:
         rows = DB['dis'].dois.aggregate(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get tags from dois collection"),
-                               message=error_message(err))
+        return render_error("Could not get tags from dois collection", err)
     html = ""
     ytags = {}
     tags = {}
@@ -22988,9 +22595,7 @@ def projects_unmapped():
         crossref, datacite = unmapped_organizational_authors()
         known = sorted(p for p in DB['dis'].project_map.distinct('project') if p)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get unmapped authors"),
-                               message=error_message(err))
+        return render_error("Could not get unmapped authors", err)
     options = "".join(f"<option>{escape(k)}</option>" for k in known)
     html = session.pop('project_note', '')
     html += stat_cards([("Crossref", f"{len(crossref):,}"),
@@ -23128,10 +22733,7 @@ def show_projects(option=None):
     try:
         rows = DB['dis'].project_map.find({"project": {"$nin": ["$name"]}})
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get projects from " \
-                                                    + "orcid collection"),
-                               message=error_message(err))
+        return render_error("Could not get projects from " + "orcid collection", err)
     proj = {}
     retired = set()
     for row in rows:
@@ -23321,10 +22923,7 @@ def orcid_affiliation(aff, year='All'):
             rows = DB['dis'].orcid.find(payload).collation({"locale": "en"}).sort("family", 1)
     except Exception as err:
         if expected == 'html':
-            return render_template('error.html', urlroot=request.url_root,
-                                   title=render_warning("Could not find affiliations " \
-                                                        + "in orcid collection"),
-                                   message=error_message(err))
+            return render_error("Could not find affiliations " + "in orcid collection", err)
         raise InvalidUsage(str(err), 500) from err
     if expected == 'json':
         result = initialize_result()
@@ -23383,10 +22982,7 @@ def orcid_affiliation(aff, year='All'):
     try:
         rows = DB['dis'].dois.find(payload).sort("jrc_publishing_date", -1)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not find tags " \
-                                                    + "in dois collection"),
-                               message=error_message(err))
+        return render_error("Could not find tags " + "in dois collection", err)
     htmlp += "<hr>" + year_pulldown(f"tag/{aff}")
     html, cnt, _ = standard_doi_table(rows, count_card=True)
     if cnt:
@@ -23418,10 +23014,7 @@ def tag_nohead(aff, year='All'):
     try:
         rows = DB['dis'].dois.find(payload).sort("jrc_publishing_date", -1)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not find tags " \
-                                                    + "in dois collection"),
-                               message=error_message(err))
+        return render_error("Could not find tags " + "in dois collection", err)
     html, cnt, oacnt = standard_doi_table(rows, prefix=f"tagnh/{aff}", count_card=True)
     chartscript, chartdiv = DP.wedge_chart({'shown': oacnt, 'total': cnt}) if oacnt else ['', '']
     if cnt:
@@ -23454,9 +23047,7 @@ def show_doi_by_ack_ui(ack):
     try:
         rows = DB['dis'].dois.find(payload).sort("jrc_publishing_date", -1)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get DOIs from dois collection"),
-                               message=error_message(err))
+        return render_error("Could not get DOIs from dois collection", err)
     internal = 0
     for row in rows:
         row['doi_type'] = 'internal'
@@ -23467,10 +23058,7 @@ def show_doi_by_ack_ui(ack):
     try:
         rows = DB['dis'].external_dois.find(payload).sort("jrc_publishing_date", -1)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get DOIs from external_dois " \
-                                                    + "collection"),
-                               message=error_message(err))
+        return render_error("Could not get DOIs from external_dois " + "collection", err)
     for row in rows:
         row['doi_type'] = 'external'
         union.append(row)
@@ -23697,9 +23285,7 @@ def show_acks_regex_search():
         for coll in ('dois', 'external_dois'):
             populated |= set(DB['dis'][coll].distinct("jrc_acknowledge.name"))
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not read search_regex"),
-                               message=error_message(err))
+        return render_error("Could not read search_regex", err)
     # Labs get their own pulldown. They are the bulk of the collection - 48 of 78 -
     # and every one reads "<Head> Lab", so mixed in they buried the thirty projects
     # and departments among a long alphabetical run of people's names.
@@ -23740,9 +23326,7 @@ def show_doi_by_ack_regex_ui(group):
     try:
         entry = DB['dis'].search_regex.find_one({"key": group})
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not read search_regex"),
-                               message=error_message(err))
+        return render_error("Could not read search_regex", err)
     if not entry or not entry.get('regex'):
         return render_template('warning.html', urlroot=request.url_root,
                                title=render_warning("No search regex", 'warning'),
@@ -23780,9 +23364,7 @@ def show_doi_by_ack_regex_ui(group):
             try:
                 rows = DB['dis'][coll].find(payload)
             except Exception as err:
-                return render_template('error.html', urlroot=request.url_root,
-                                       title=render_warning(f"Could not get DOIs from {coll}"),
-                                       message=error_message(err))
+                return render_error(f"Could not get DOIs from {coll}", err)
             for row in rows:
                 seen = found.get(row['doi'])
                 if seen:
@@ -23877,16 +23459,12 @@ def acks_no_janelia_refs():
     try:
         docs = list(ext_coll.find(match, proj))
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get external DOIs"),
-                               message=error_message(err))
+        return render_error("Could not get external DOIs", err)
     # Build set of all Janelia DOIs for fast membership testing
     try:
         janelia_dois = set(r['doi'] for r in doi_coll.find({}, {"_id": 0, "doi": 1}))
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get Janelia DOIs"),
-                               message=error_message(err))
+        return render_error("Could not get Janelia DOIs", err)
     rows = []
     fileoutput = ""
     for doc in docs:
@@ -23970,15 +23548,11 @@ def stats_database():
                                  "idx": ", ".join(indices)
                                 }
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get collection metrics"),
-                               message=error_message(err))
+        return render_error("Could not get collection metrics", err)
     try:
         dbstat = DB['dis'].command('dbStats')
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get database metrics"),
-                               message=error_message(err))
+        return render_error("Could not get database metrics", err)
     db_data = dbstat.get('dataSize', 0)
     db_storage = dbstat.get('storageSize', 0)
     db_index = dbstat.get('indexSize', 0)
@@ -24282,9 +23856,7 @@ def cvs(cv=None):
     try:
         cvlist = list(DB['dis'].cv.find({}).sort("display", 1))
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get cvs"),
-                               message=error_message(err))
+        return render_error("Could not get cvs", err)
     names = [row['name'] for row in cvlist]
     if cv not in names:
         cv = names[0] if len(names) == 1 else None
@@ -24319,9 +23891,7 @@ def cvs(cv=None):
             editing = request.args.get('edit') if request.method == 'GET' else None
             trows = _cv_term_rows(cv, editing)
         except Exception as err:
-            return render_template('error.html', urlroot=request.url_root,
-                                   title=render_warning("Could not get cvterms"),
-                                   message=error_message(err))
+            return render_error("Could not get cvterms", err)
         html += render_table(['Name', 'Display name', 'Definition', 'Format',
                               'Used by', ''], trows,
                              table_id='cvterms', css='tablesorter standard-scroll')
@@ -24373,9 +23943,7 @@ def doi_relationships():
     try:
         rows = DB['dis'].dois.aggregate(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get DOI relationships for Crossref"),
-                               message=error_message(err))
+        return render_error("Could not get DOI relationships for Crossref", err)
     html = "<div class='flexrow'><div class='flexcol'><h3>Crossref</h3>"
     trows = []
     for row in rows:
@@ -24390,9 +23958,7 @@ def doi_relationships():
     try:
         rows = DB['dis'].dois.aggregate(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get DOI relationships for DataCite"),
-                               message=error_message(err))
+        return render_error("Could not get DOI relationships for DataCite", err)
     html += "<div class='flexcol' style='margin-left: 25px'><h3>DataCite</h3>"
     trows = []
     for row in rows:
@@ -24415,9 +23981,7 @@ def stats_endpoints():
     try:
         rows = DB['dis'].api_endpoint_log.aggregate(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get endpoint metrics"),
-                               message=error_message(err))
+        return render_error("Could not get endpoint metrics", err)
     trows = []
     for row in rows:
         trows.append([row['_id'], row['count']])
@@ -24439,9 +24003,7 @@ def ignore(typ=None):
         rows = DB['dis'].to_ignore.distinct("type")
         cnt = len(rows)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get cvs"),
-                               message=error_message(err))
+        return render_error("Could not get cvs", err)
     if cnt:
         html = "<form>Select an ignore list to view: <select id='type' onchange='find_ignore()'>" \
                + "<option value=''>Select a list</option>"
@@ -24458,9 +24020,7 @@ def ignore(typ=None):
         try:
             irows = DB['dis'].to_ignore.find({"type": typ}).sort("key", 1)
         except Exception as err:
-            return render_template('error.html', urlroot=request.url_root,
-                                   title=render_warning("Could not get ignore list"),
-                                   message=error_message(err))
+            return render_error("Could not get ignore list", err)
         reason_present = False
         rows = []
         for row in irows:
@@ -24490,10 +24050,7 @@ def dois_pending():
         cnt = DB['dis'].dois_to_process.count_documents({})
         rows = DB['dis'].dois_to_process.find({})
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get DOIs " \
-                                                    + "from dois_to_process collection"),
-                               message=error_message(err))
+        return render_error("Could not get DOIs " + "from dois_to_process collection", err)
     if not cnt:
         return render_template('warning.html', urlroot=request.url_root,
                                title=render_warning("No DOIs found", 'info'),
@@ -24531,10 +24088,7 @@ def show_missing_oa():
         cnt = DB['dis'].dois.count_documents(payload[0]['$match'])
         rows = DB['dis'].dois.aggregate(payload)
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get DOIs " \
-                                                    + "missing Open Access status"),
-                               message=error_message(err))
+        return render_error("Could not get DOIs " + "missing Open Access status", err)
     if not cnt:
         return render_template('warning.html', urlroot=request.url_root,
                                title=render_warning("No DOIs found", 'info'),
@@ -24564,9 +24118,7 @@ def preprint_date_errors():
     try:
         rows = coll.find(payload).sort([("jrc_publishing_date", -1)])
     except Exception as err:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning("Could not get preprint data from dois"),
-                               message=error_message(err))
+        return render_error("Could not get preprint data from dois", err)
     flagged = []
     for row in rows:
         if len(row['jrc_preprint']) == 1:
@@ -24676,9 +24228,7 @@ def show_labs():
         rows = DB['dis'].orcid.find(payload, {'_id': 0}).sort("group", 1)
     except Exception as err:
         if expected == 'html':
-            return render_template('error.html', urlroot=request.url_root,
-                                   title=render_warning("Could not get groups from MongoDB"),
-                                   message=error_message(err))
+            return render_error("Could not get groups from MongoDB", err)
         raise InvalidUsage(str(err), 500) from err
     if expected == 'json':
         result['rest']['source'] = 'mongo'
