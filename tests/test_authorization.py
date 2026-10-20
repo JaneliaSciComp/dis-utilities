@@ -31,7 +31,7 @@ CV = {'admin': {'display': 'Administrator', 'definition': 'Administrator (full a
 
 def _extract(*names):
     tree = ast.parse(SOURCE)
-    ns = {'CVTERM': {'authorization': CV}}
+    ns = {'CVTERM': {'authorization': CV}, 'SERVICE_KIND': 'service'}
     for name in names:
         node = next(n for n in tree.body
                     if isinstance(n, ast.FunctionDef) and n.name == name)
@@ -39,7 +39,9 @@ def _extract(*names):
     return ns
 
 
-NS = _extract('may_be_authorized', 'authorizations')
+# is_service_account is pulled in because authorizations() now branches on it;
+# may_act too, which that branch calls. Neither runs for a person document.
+NS = _extract('may_be_authorized', 'is_service_account', 'may_act', 'authorizations')
 auths = NS['authorizations']
 may_be_authorized = NS['may_be_authorized']
 
@@ -206,7 +208,7 @@ def test_only_terms_in_the_cv_can_be_granted():
     ''' A posted checkbox name is filtered against the cv, so a crafted form
         cannot invent an authorization.
     '''
-    assert "if t in (CVTERM.get('authorization') or {})" in SOURCE
+    assert "if t in vocabulary" in SOURCE
 
 
 def test_people_are_keyed_by_record_id_not_orcid():
