@@ -174,3 +174,144 @@ def test_profile_never_returns_a_bare_warning_fragment():
     for line in block.splitlines():
         stripped = line.strip()
         assert not stripped.startswith('return render_warning'), stripped
+
+
+# ---------------------------------------------------------------------------
+# The OpenAPI spec has to say which operations read a token
+#
+# bearerAuth was declared but referenced by no operation, so Swagger UI's
+# Authorize button took a key, stored it, and sent no header at all. The request
+# arrived anonymous and came back unauthorized, which looked like a broken token
+# rather than a documentation gap.
+# ---------------------------------------------------------------------------
+
+def _operation_spec(func_name):
+    """ The YAML block of a view's docstring, as text.
+
+        Parsed by hand rather than with PyYAML: the test environment installs
+        pytest plus jrc_common and doi_common and nothing else, so importing
+        yaml here would either fail in CI or skip silently and test nothing.
+    """
+    fn = next(n for n in ast.walk(ast.parse(SOURCE))
+              if isinstance(n, ast.FunctionDef) and n.name == func_name)
+    doc = ast.get_docstring(fn) or ''
+    return doc.split('---', 1)[1] if '---' in doc else None
+
+
+def test_the_endpoint_that_reads_a_token_declares_it():
+    block = _operation_spec('get_doi_authors')
+    assert block is not None, "/doi/authors is documented and must stay so"
+    assert 'security:' in block and '- bearerAuth: []' in block, \
+        "Swagger only sends the Authorization header for an operation that " \
+        "declares the scheme"
+
+
+def test_optional_auth_is_expressed_as_an_alternative():
+    ''' The empty requirement is what makes it optional. Without it the operation
+        reads as requiring a token and Swagger marks it locked - which would be
+        wrong: it answers unauthenticated, just with less in it.
+    '''
+    block = _operation_spec('get_doi_authors')
+    sec = block[block.index('security:'):]
+    sec = sec[:sec.index('parameters:')]
+    assert '- {}' in sec, "optional auth needs an empty alternative"
+
+
+def _documented_views():
+    ''' (name, spec block, code, decorator names) for every documented view '''
+    out = []
+    for node in ast.walk(ast.parse(SOURCE)):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        doc = ast.get_docstring(node) or ''
+        if '---' not in doc:
+            continue
+        stmts = node.body[1:] if (node.body
+                                  and isinstance(node.body[0], ast.Expr)
+                                  and isinstance(node.body[0].value, ast.Constant)
+                                  ) else node.body
+        code = '\n'.join(ast.get_source_segment(SOURCE, st) or '' for st in stmts)
+        decs = []
+        for dec in node.decorator_list:
+            func = dec.func if isinstance(dec, ast.Call) else dec
+            decs.append(getattr(func, 'id', getattr(func, 'attr', '')))
+        out.append((node.name, doc.split('---', 1)[1], code, decs))
+    return out
+
+
+def test_every_documented_operation_declares_what_it_actually_does():
+    ''' Derived, not a hand-kept list. Three cases, and the spec must match:
+
+          - requires a token (@api_restricted): declares the scheme and NOT the
+            empty alternative, so the padlock reads as closed
+          - redacts (reads rest.authorized): declares the scheme AND the empty
+            alternative, because it answers without one
+          - neither: declares nothing, or a padlock implies that authenticating
+            would change something
+
+        A hardcoded list already missed one consumer (get_published_dois), then
+        missed the third case entirely when the migration endpoints stopped
+        redacting and started requiring.
+    '''
+    wrong = []
+    for name, block, code, decs in _documented_views():
+        requires = 'api_restricted' in decs
+        redacts = "result['rest']['authorized']" in code
+        declares = 'security:' in block
+        optional = '- {}' in block
+        if requires:
+            good = declares and not optional
+        elif redacts:
+            good = declares and optional
+        else:
+            good = not declares
+        if not good:
+            wrong.append((name, {'requires': requires, 'redacts': redacts,
+                                 'declares': declares, 'optional': optional}))
+    assert not wrong, f"spec disagrees with code: {wrong}"
+
+
+def _view(name):
+    return next(n for n in ast.walk(ast.parse(SOURCE))
+                if isinstance(n, ast.FunctionDef) and n.name == name)
+
+
+def test_the_migration_endpoints_require_an_authorization():
+    ''' They expose DO_NOT_DISPLAY fields and jrc_author, so they are the first
+        endpoints to demand a token rather than quietly returning less.
+    '''
+    for name in ('get_doi_migration', 'get_doi_migrations'):
+        node = _view(name)
+        calls = [d for d in node.decorator_list if isinstance(d, ast.Call)
+                 and getattr(d.func, 'id', '') == 'api_restricted']
+        assert calls, f"{name} must be gated"
+        assert [a.value for a in calls[0].args] == ['orcid'], name
+
+
+def test_a_gated_endpoint_no_longer_redacts():
+    ''' Once nobody without the authorization can reach the body, an
+        "if not authorized" branch there is dead code that reads as live.
+    '''
+    for name in ('get_doi_migration', 'get_doi_migrations'):
+        node = _view(name)
+        stmts = node.body[1:]
+        code = '\n'.join(ast.get_source_segment(SOURCE, st) or '' for st in stmts)
+        assert "if not result['rest']['authorized']" not in code, name
+
+
+def test_the_gate_distinguishes_401_from_403():
+    ''' 401 means fix your token; 403 means ask for access. A script cannot act
+        on the two the same way.
+    '''
+    block = ast.get_source_segment(SOURCE, _view('api_restricted'))
+    assert '401)' in block and '403)' in block
+    assert block.index('401)') < block.index('403)'), \
+        "identity is checked before authorization"
+
+
+def test_admin_always_admits():
+    ''' Consistent with @restricted and authorizations(): admin means everything,
+        so an administrator never needs the specific term listed.
+    '''
+    block = ast.get_source_segment(SOURCE, _view('api_restricted'))
+    assert "{'admin'} | set(terms)" in block

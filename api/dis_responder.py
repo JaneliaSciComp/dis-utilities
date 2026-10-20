@@ -70,7 +70,7 @@ from dis_state import CVTERM, PROJECT
 # on the image. feat -> minor, everything else -> patch, in the same commit as
 # the change. Forgetting is survivable: ocbuild warns that the tag already
 # exists in the ImageStream rather than silently overwriting it.
-__version__ = "120.123.0"
+__version__ = "120.124.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -981,6 +981,46 @@ def authorizations(person):
     if 'admin' in held:
         return held | set(CVTERM.get('authorization') or {})
     return held
+
+
+def api_restricted(*terms):
+    """ Require a token, and one of the named authorizations, on a JSON endpoint
+
+        The API counterpart to @restricted, which cannot be used here: that one
+        renders HTML and redirects a signed-out reader to a sign-in form, which
+        is useless to a script and unreadable to curl. This raises InvalidUsage
+        so the caller gets the same JSON error envelope as every other failure.
+
+        Identity is whatever current_user() resolves - a Bearer token in
+        practice, since a browser session would also work but nobody reaches a
+        JSON endpoint that way. Service accounts are accepted here, unlike on
+        @restricted pages: this is exactly what they are for.
+
+        401 when no identity resolved, 403 when one did but lacks the
+        authorization. The distinction matters to a script: 401 means fix your
+        token, 403 means ask for access.
+        Keyword arguments:
+          terms: authorization names, any one of which admits
+        Returns:
+          Decorator
+    """
+    def decorate(view):
+        @wraps(view)
+        def wrapper(*args, **kwargs):
+            person = current_user()
+            if not person:
+                raise InvalidUsage("This endpoint requires an API token. Generate "
+                                   "one from your profile page.", 401)
+            held = authorizations(person)
+            if not ({'admin'} | set(terms)) & held:
+                raise InvalidUsage("Your token does not carry the authorization "
+                                   f"this endpoint requires ({' or '.join(terms)}).",
+                                   403)
+            return view(*args, **kwargs)
+        wrapper.dis_api_restricted = True
+        wrapper.dis_api_terms = tuple(terms)
+        return wrapper
+    return decorate
 
 
 def restricted(arg=None):
@@ -5149,9 +5189,13 @@ def _register_openapi_components(spec):
     spec.components.security_scheme(
         "bearerAuth",
         {"type": "http", "scheme": "bearer",
-         "description": "Optional API key supplied as a Bearer token. When present and "
-                        "valid it sets rest.authorized to true; endpoints that only read "
-                        "data do not require it."})
+         "description": "A personal API token, issued to you from /profile, or a "
+                        "service-account token. Supplied as a Bearer token, it sets "
+                        "rest.authorized and unredacts the fields an authorized caller "
+                        "may see. Optional: every documented endpoint answers without "
+                        "one, returning less. Only operations that actually read the "
+                        "token declare this scheme, so an unlocked operation is one "
+                        "where authenticating would change nothing."})
     spec.components.schema("Rest", {
         "type": "object",
         "description": "Envelope of request metadata attached to every response.",
@@ -5668,6 +5712,9 @@ def get_doi_authors(doi):
     ---
     tags:
       - DOI
+    security:
+      - bearerAuth: []
+      - {}
     parameters:
       - in: path
         name: doi
@@ -5769,24 +5816,32 @@ def get_doi_janelians(doi):
 
 
 @app.route('/doi/migration/<path:doi>')
+@api_restricted('orcid')
 def get_doi_migration(doi):
     '''
     Return a DOI's migration record
-    Return migration information for a given DOI.
-    # Do not display
+    Return migration information for a given DOI. Requires an API token
+    carrying the "admin" or "orcid" authorization.
+    ---
     tags:
       - DOI
+    security:
+      - bearerAuth: []
     parameters:
       - in: path
         name: doi
         schema:
-          type: path
+          type: string
         required: true
         description: DOI
     responses:
-      200:
-        description: DOI data
-      500:
+      '200':
+        description: Migration record for the DOI
+      '401':
+        description: No API token supplied
+      '403':
+        description: Token lacks the admin or orcid authorization
+      '500':
         description: MongoDB error
     '''
     doi = doi.lstrip('/').rstrip('/').lower()
@@ -5803,10 +5858,9 @@ def get_doi_migration(doi):
         except Exception as err:
             raise InvalidUsage(str(err), 500) from err
         rec['doi'] = doi
-    if not result['rest']['authorized']:
-        for fld in DO_NOT_DISPLAY:
-            if fld in rec:
-                del rec[fld]
+    # No redaction branch: @api_restricted already refused anybody without the
+    # authorization, so every caller reaching this line may see every field. A
+    # leftover "if not authorized" here would be dead code that reads as live.
     result['data'] = rec
     result['rest']['source'] = 'mongo'
     result['rest']['row_count'] = len(result['data'])
@@ -5814,13 +5868,17 @@ def get_doi_migration(doi):
 
 
 @app.route('/doi/migrations/<string:idate>', methods=['GET'])
+@api_restricted('orcid')
 def get_doi_migrations(idate):
     '''
     Return migration records for DOIs inserted since a specified date
-    Return migration records for DOIs inserted since a specified date.
-    # Do not display
+    Return migration records for DOIs inserted since a specified date. Requires
+    an API token carrying the "admin" or "orcid" authorization.
+    ---
     tags:
       - DOI
+    security:
+      - bearerAuth: []
     parameters:
       - in: path
         name: idate
@@ -5829,9 +5887,13 @@ def get_doi_migrations(idate):
         required: true
         description: Earliest insertion date in ISO format (YYYY-MM-DD)
     responses:
-      200:
-        description: DOI data
-      500:
+      '200':
+        description: Migration records for DOIs inserted on or after the date
+      '401':
+        description: No API token supplied
+      '403':
+        description: Token lacks the admin or orcid authorization
+      '500':
         description: MongoDB error
     '''
     result = initialize_result()
@@ -5858,8 +5920,6 @@ def get_doi_migrations(idate):
             doi = row['doi']
             rec = get_migration_data(row)
             rec['doi'] = doi
-            #if not result['rest']['authorized'] and 'jrc_author' in rec: #PLUG
-            #    del rec['jrc_author']
             result['data'].append(rec)
         except Exception as err:
             raise InvalidUsage(str(err), 500) from err
@@ -5911,8 +5971,8 @@ def get_published_dois(start, end):
     for row in rows:
         try:
             rec = row
-            if not result['rest']['authorized'] and 'jrc_author' in rec:
-                del rec['jrc_author']
+            # jrc_author is no longer stripped: @api_restricted refused anybody
+            # without the authorization before this ran.
             result['data'].append(rec)
         except Exception as err:
             raise InvalidUsage(str(err), 500) from err
