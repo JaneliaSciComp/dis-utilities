@@ -138,6 +138,10 @@ NAV = {"Home": "",
                    # reachable only from /profile, which meant the page that
                    # grants access was the harder of the two to find.
                    "Authorizations": "authorizations",
+                   # Same admin-only treatment. Listed because a service account
+                   # is otherwise invisible: unlike a person's token, nobody
+                   # whose profile page would show it ever signs in.
+                   "Service accounts": "service_accounts",
                    "DOI relationships": "doi_relationships",
                    "Endpoints": "stats_endpoints",
                    "Library versions": "system_versions",

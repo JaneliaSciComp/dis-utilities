@@ -70,7 +70,7 @@ from dis_state import CVTERM, PROJECT
 # on the image. feat -> minor, everything else -> patch, in the same commit as
 # the change. Forgetting is survivable: ocbuild warns that the tag already
 # exists in the ImageStream rather than silently overwriting it.
-__version__ = "120.120.3"
+__version__ = "120.123.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -450,6 +450,82 @@ def display_person_name(person):
 API_TOKEN_FIELD = 'api_token'
 
 
+# Service accounts live in their own collection, never in orcid. That one is the
+# author roster: a dozen sync programs read every document in it as a real
+# Janelia author, so a synthetic record there would be name-matched to
+# publications, counted in author totals and emailed. See api_token_user.
+SERVICE_COLLECTION = 'service_account'
+SERVICE_KIND = 'service'
+
+
+SERVICE_FORBIDDEN = {'admin'}
+
+
+def service_terms():
+    """ The authorization terms a service account may be granted
+
+        Everything in the cv except "admin". An administrator is a person who
+        can grant access, edit the vocabulary and change other people's records
+        - none of which a Jenkins job does. "admin" also means EVERYTHING here:
+        authorizations() expands it to the whole cv, so a service account
+        holding it would silently acquire every term added from then on,
+        including ones invented long after anybody looked at this account.
+        Keyword arguments:
+          None
+        Returns:
+          Sorted list of grantable term names
+    """
+    return sorted(set(CVTERM.get('authorization') or {}) - SERVICE_FORBIDDEN)
+
+
+def is_service_account(doc):
+    ''' Whether a resolved identity is a service account rather than a person
+        Keyword arguments:
+          doc: document from current_user(), or None
+        Returns:
+          True if this is a service account
+    '''
+    return bool(doc) and doc.get('kind') == SERVICE_KIND
+
+
+def may_act(acct):
+    ''' Whether a service account may be used right now
+
+        A person's token needs no equivalent: may_sign_in is re-read on every
+        request, so leaving Janelia revokes it. A service account has no such
+        lifecycle and would otherwise be the first credential here that never
+        expires and never lapses. Three things keep it honest:
+          - enabled, so an admin can stop it without destroying the audit trail
+          - expires, an optional hard stop
+          - an owner who is still a person in good standing. That is the real
+            control: accounts outlive the people who set them up, and this is
+            what makes one lapse when its owner leaves.
+        Keyword arguments:
+          acct: service_account document
+        Returns:
+          (True, "") or (False, reason)
+    '''
+    if not acct:
+        return False, "no record"
+    if not acct.get('enabled'):
+        return False, "disabled"
+    expires = acct.get('expires')
+    if expires and expires < datetime.now():
+        return False, "expired"
+    owner = acct.get('owner')
+    if not owner:
+        return False, "no owner"
+    try:
+        person = DB['dis'].orcid.find_one({"orcid": owner})
+    except Exception as err:
+        print(f"Could not check service account owner {owner}: {err}")
+        return False, "owner could not be checked"
+    allowed, why = may_be_authorized(person)
+    if not allowed:
+        return False, f"owner {owner} {why}"
+    return True, ""
+
+
 def token_digest(token):
     ''' The stored form of an API token
         Keyword arguments:
@@ -502,19 +578,39 @@ def api_token_user():
     token = bearer_token()
     if not token or not DB:
         return None
+    digest = token_digest(token)
     try:
-        person = DB['dis'].orcid.find_one({f"{API_TOKEN_FIELD}.digest": token_digest(token)})
+        person = DB['dis'].orcid.find_one({f"{API_TOKEN_FIELD}.digest": digest})
     except Exception as err:
         print(f"Could not look up API token: {err}")
         return None
-    if person:
+    coll = 'orcid'
+    if not person:
+        # Not a person's token: try the service accounts. Looked up second
+        # because people are the common case and the collection is far larger
+        # than this one will ever be.
         try:
-            DB['dis'].orcid.update_one({"_id": person['_id']},
-                                       {"$set": {f"{API_TOKEN_FIELD}.last_used": datetime.now()}})
+            person = DB['dis'][SERVICE_COLLECTION].find_one(
+                {f"{API_TOKEN_FIELD}.digest": digest})
         except Exception as err:
-            # Never fail the request over the audit stamp - it is for deciding
-            # whether a token is still in use, not for serving it.
-            print(f"Could not stamp API token last_used: {err}")
+            print(f"Could not look up service account token: {err}")
+            return None
+        if not person:
+            return None
+        coll = SERVICE_COLLECTION
+        allowed, why = may_act(person)
+        if not allowed:
+            # Named in the log because a disabled or lapsed account otherwise
+            # looks exactly like a wrong token, and the two need different fixes.
+            print(f"Service account {person.get('name')} refused: {why}")
+            return None
+    try:
+        DB['dis'][coll].update_one({"_id": person['_id']},
+                                   {"$set": {f"{API_TOKEN_FIELD}.last_used": datetime.now()}})
+    except Exception as err:
+        # Never fail the request over the audit stamp - it is for deciding
+        # whether a token is still in use, not for serving it.
+        print(f"Could not stamp API token last_used: {err}")
     return person
 
 
@@ -544,7 +640,12 @@ def current_user():
         # the same document a signed-in reader would, so one authorization model
         # serves both and @restricted('<term>') works identically for each.
         person = api_token_user()
-        if may_sign_in(person):
+        # Eligibility differs by kind, and relying on may_sign_in for both only
+        # works by accident: a service account has no alumni flag and no
+        # workerType, so it passes that check without ever being considered by
+        # it. may_act vetted it inside api_token_user; say so rather than lean
+        # on a rule that was written about people.
+        if person and (is_service_account(person) or may_sign_in(person)):
             g.dis_user = person
         return g.dis_user
     if orcid and DB:
@@ -862,6 +963,18 @@ def authorizations(person):
         Returns:
           Set of authorization names (empty for a signed-out viewer)
     '''
+    if is_service_account(person):
+        # may_be_authorized asks for an ORCID iD, which a service account will
+        # never have; its eligibility is may_act. Checked again here rather than
+        # trusted from resolution, so a document reaching this function by any
+        # other route cannot carry a grant it is no longer entitled to.
+        if not may_act(person)[0]:
+            return set()
+        # The UI never offers "admin" and the save strips it, but a record
+        # written by hand would otherwise expand to the entire cv below. Dropped
+        # here so the rule holds wherever the document came from.
+        return {a for a in (person.get('authorization') or [])
+                if a and a not in SERVICE_FORBIDDEN}
     if not person or not may_be_authorized(person)[0]:
         return set()
     held = {a for a in (person.get('authorization') or []) if a}
@@ -902,6 +1015,20 @@ def restricted(arg=None):
             # than whenever they happen to close their browser. It is also what
             # records last_seen.
             person = current_user()
+            if is_service_account(person):
+                # Every @restricted route is an HTML page, and these pages are
+                # built for a person: they call display_person_name, avatar_html
+                # and person['given'][0] on a document that has none of those.
+                # A service account is for the JSON API; refuse it here rather
+                # than render a profile for something that is not a profile.
+                # If a JSON endpoint ever needs @restricted, this wants an
+                # opt-in argument rather than removing the check.
+                print(f"Service account {person.get('name')} refused HTML {request.path}")
+                return make_response(render_template(
+                    'error.html', urlroot=request.url_root,
+                    title=render_warning("Not available to a service account"),
+                    message="This is a web page for a signed-in person. A service "
+                            "account token works on the REST API only."), 403)
             if not person:
                 if getattr(g, 'dis_user_ambiguous', False):
                     # Do NOT clear the session or redirect: they would sign in
@@ -8044,6 +8171,434 @@ def _authorization_terms():
     return sorted(out, key=lambda t: t[1].lower())
 
 
+def _service_form(me):
+    """ The "create a service account" form
+        Keyword arguments:
+          me: the admin creating it, used as the default owner
+        Returns:
+          HTML
+    """
+    terms = service_terms()
+    boxes = "".join(
+        f"<label style='margin-right:14px'><input type='checkbox' name='term' "
+        f"value='{escape(t)}'> {escape((CVTERM['authorization'][t] or {}).get('display', t))}"
+        f"</label>" for t in terms)
+    return ("<h4 style='margin-top:28px'>Add a service account</h4>"
+            "<form method='POST' style='max-width:720px'>"
+            "<input type='hidden' name='action' value='create'>"
+            f"<input type='hidden' name='nonce' value='{escape(g.dis_sa_nonce)}'>"
+            "<table class='borderless'>"
+            "<tr><td>Name</td><td><input name='name' size='28' required "
+            "placeholder='jenkins-citations'></td></tr>"
+            "<tr><td>Purpose</td><td><input name='purpose' size='52' "
+            "placeholder='what runs under it, and why'></td></tr>"
+            "<tr><td>Owner</td><td><input name='owner' size='24' "
+            f"value='{escape(me.get('orcid') or '')}' required> "
+            "<span style='font-size:10pt;color:#a8c4e0'>ORCID iD of the person "
+            "accountable for it. The account stops working when they do.</span></td></tr>"
+            "<tr><td>Expires</td><td><input name='expires' type='date'> "
+            "<span style='font-size:10pt;color:#a8c4e0'>optional</span></td></tr>"
+            f"<tr><td>Authorizations</td><td>{boxes or 'none defined'}</td></tr>"
+            "</table>"
+            f"<button type='submit' class='btn btn-sm' "
+            f"style='background-color:{WRITE_COLOR}; color:#000'>Create</button>"
+            "<div style='font-size:0.85em; color:#a8c4e0; max-width:620px; margin-top:8px'>"
+            "The token is shown once, here, and stored only as a hash. A service "
+            "account works on the REST API only - it cannot sign in to a web page."
+            "</div></form>")
+
+
+def _expiry_or_error(raw):
+    """ Parse the expiry field from a form
+        The date input yields YYYY-MM-DD, but nothing stops a crafted POST (or a
+        browser without date support) sending anything at all, and strptime on
+        that is a 500 rather than a message.
+        Keyword arguments:
+          raw: the submitted value
+        Returns:
+          (datetime or None, error message or "")
+    """
+    raw = (raw or '').strip()
+    if not raw:
+        return None, ""
+    try:
+        return datetime.strptime(raw, "%Y-%m-%d"), ""
+    except ValueError:
+        return None, "The expiry must be a date (YYYY-MM-DD)."
+
+
+def _save_service_account(me):
+    """ Handle a POST from /service_accounts
+        Keyword arguments:
+          me: the admin making the change
+        Returns:
+          (note HTML, fresh token or "")
+    """
+    coll = DB['dis'][SERVICE_COLLECTION]
+    stamp = {"updated": datetime.now(), "updated_by": me.get('orcid')}
+    if request.form.get('action') == 'create':
+        name = (request.form.get('name') or '').strip()
+        owner = (request.form.get('owner') or '').strip()
+        if not name:
+            return render_warning("A name is required.", 'warning'), ""
+        if not ORCID_RE.match(owner):
+            return render_warning("The owner must be a well-formed ORCID iD.",
+                                  'warning'), ""
+        allowed, why = may_be_authorized(DB['dis'].orcid.find_one({"orcid": owner}))
+        if not allowed:
+            # Refused now rather than left to fail later: an account whose owner
+            # cannot hold an authorization is born unusable, and may_act would
+            # report it as a lapse rather than a mistake at creation.
+            return render_warning(f"That owner cannot hold an authorization ({why}).",
+                                  'warning'), ""
+        expires, bad = _expiry_or_error(request.form.get('expires'))
+        if bad:
+            return render_warning(bad, 'warning'), ""
+        token = secrets.token_urlsafe(32)
+        chosen = sorted(set(request.form.getlist('term')) & set(service_terms()))
+        doc = {"name": name, "kind": SERVICE_KIND, "owner": owner,
+               "purpose": (request.form.get('purpose') or '').strip(),
+               "enabled": True,
+               "authorization": chosen,
+               API_TOKEN_FIELD: {"digest": token_digest(token),
+                                 "created": datetime.now(), "last_used": None},
+               "expires": expires,
+               "created": datetime.now(), **stamp}
+        try:
+            coll.insert_one(doc)
+        except DuplicateKeyError:
+            return render_warning(f"A service account named {name} already "
+                                  "exists.", 'warning'), ""
+        except Exception as err:
+            print(f"Could not create service account {name}: {err}")
+            return render_warning("Could not create that account.", 'error'), ""
+        print(f"Service account {name} created by {me.get('orcid')}")
+        return render_warning(f"Created {name}.", 'success'), token
+    return render_warning("Unknown action.", 'warning'), ""
+
+
+def _service_rows(accounts):
+    ''' The service-account table
+        Keyword arguments:
+          accounts: service_account documents
+        Returns:
+          (header, rows) for render_table
+    '''
+    header = ['Account', 'Owner', 'Authorizations', 'Token last used', 'State', '']
+    rows = []
+    for acct in accounts:
+        tok = acct.get(API_TOKEN_FIELD) or {}
+        allowed, why = may_act(acct)
+        state = (f"<span style='color:#89c242'>active</span>" if allowed
+                 else f"<span style='color:{REMOVE_COLOR}'>{escape(why)}</span>")
+        owner = acct.get('owner') or ''
+        terms = ', '.join(sorted(acct.get('authorization') or [])) or '-'
+        used = str(tok.get('last_used') or '')[:19] or 'never'
+        # A link, not controls: the same shape /authorizations uses, where the
+        # list names who holds what and /person/<id> is where it is changed.
+        controls = f"<a href='/service_account/{escape(str(acct['_id']))}'>Edit</a>" 
+        rows.append([safe(f"<b>{escape(acct.get('name',''))}</b><br>"
+                          f"<span style='font-size:10pt;color:#a8c4e0'>"
+                          f"{escape(acct.get('purpose') or '')}</span>"),
+                     safe(f"<a href='/orcidui/{escape(owner)}'>{escape(owner)}</a>"
+                          if owner else '-'),
+                     terms, used, safe(state), safe(controls)])
+    return header, rows
+
+
+def js_string(message):
+    """ A message, safe to drop inside confirm("...") in an inline handler
+
+        The obvious f"confirm('{escape(text)}')" is wrong, and wrong in the
+        direction that hides itself. html.escape turns an apostrophe into
+        &#x27;, the browser decodes attribute entities BEFORE the JS parser
+        sees them, and the string literal terminates early: the handler throws,
+        and the form submits WITHOUT asking. The confirmation disappears exactly
+        when the text is awkward, which is when it is most wanted.
+
+        json.dumps emits a double-quoted, fully escaped JS literal; escaping that
+        for the attribute is safe because the attribute is double-quoted at the
+        HTML level and &quot; decodes harmlessly inside it.
+        Keyword arguments:
+          message: the text to show
+        Returns:
+          An escaped JS string literal, including its quotes
+    """
+    return escape(json.dumps(message))
+
+
+def _service_account_body(acct, fresh=""):
+    """ The body of /service_account/<id>
+        Keyword arguments:
+          acct: service_account document
+          fresh: a newly minted token to show once, or ""
+        Returns:
+          HTML
+    """
+    tok = acct.get(API_TOKEN_FIELD) or {}
+    allowed, why = may_act(acct)
+    nonce = f"<input type='hidden' name='nonce' value='{escape(g.dis_sa_nonce)}'>"
+    html = f"<h3>{escape(acct.get('name',''))}</h3>"
+    if fresh:
+        html += ("<div style='background:#2b3b2b; border:1px solid #89c242; "
+                 "border-radius:6px; padding:12px; max-width:720px'>"
+                 "<b>Copy this now - it will not be shown again.</b><br>"
+                 f"<code style='font-size:11pt; word-break:break-all'>{escape(fresh)}</code>"
+                 f" <button class='btn btn-outline-secondary btn-sm' "
+                 f"onclick=\"copyText('{escape(fresh)}')\">Copy</button></div><br>")
+    state = ("<span style='color:#89c242'>active</span>" if allowed
+             else f"<span style='color:{REMOVE_COLOR}'>{escape(why)}</span>")
+    html += ("<table class='borderless'>"
+             f"<tr><td>State:</td><td>{state}</td></tr>"
+             f"<tr><td>Token issued:</td><td>{escape(str(tok.get('created') or '')[:19])}"
+             "</td></tr>"
+             f"<tr><td>Token last used:</td><td>"
+             f"{escape(str(tok.get('last_used') or '')[:19] or 'never')}</td></tr>"
+             f"<tr><td>Last changed:</td><td>{escape(str(acct.get('updated') or '')[:19])}"
+             f" by {escape(str(acct.get('updated_by') or ''))}</td></tr>"
+             "</table>")
+
+    # ----- authorizations -----
+    held = set(acct.get('authorization') or [])
+    terms = service_terms()
+    boxes = "".join(
+        f"<label style='display:block'><input type='checkbox' name='term' "
+        f"value='{escape(t)}'{' checked' if t in held else ''}> "
+        f"{escape((CVTERM['authorization'][t] or {}).get('display', t))}"
+        f" <span style='color:#888'>"
+        f"{escape((CVTERM['authorization'][t] or {}).get('definition', ''))}</span></label>"
+        for t in terms)
+    html += ("<h4 style='margin-top:28px'>Authorizations</h4>"
+             "<form method='POST'><input type='hidden' name='action' value='terms'>"
+             + nonce + (boxes or "<i>No authorization terms are defined.</i>")
+             + f"<br><button type='submit' class='btn btn-sm' "
+               f"style='background-color:{WRITE_COLOR}; color:#000'>Save</button>"
+             "<div style='font-size:0.85em; color:#a8c4e0; max-width:620px'>"
+             "These are the same terms a person holds. An account that is disabled, "
+             "expired, or whose owner has left holds none of them, whatever is "
+             "ticked here.</div></form>")
+
+    # ----- details -----
+    expires = str(acct.get('expires') or '')[:10]
+    html += ("<h4 style='margin-top:28px'>Details</h4>"
+             "<form method='POST'><input type='hidden' name='action' value='details'>"
+             + nonce + "<table class='borderless'>"
+             "<tr><td>Owner</td><td><input name='owner' size='24' required "
+             f"value='{escape(acct.get('owner') or '')}'> "
+             "<span style='font-size:10pt;color:#a8c4e0'>the account stops working "
+             "when they do</span></td></tr>"
+             "<tr><td>Purpose</td><td><input name='purpose' size='52' "
+             f"value='{escape(acct.get('purpose') or '')}'></td></tr>"
+             "<tr><td>Expires</td><td><input name='expires' type='date' "
+             f"value='{escape(expires)}'> "
+             "<span style='font-size:10pt;color:#a8c4e0'>blank for none</span>"
+             "</td></tr></table>"
+             f"<button type='submit' class='btn btn-sm' "
+             f"style='background-color:{WRITE_COLOR}; color:#000'>Save</button></form>")
+
+    # ----- token and lifecycle -----
+    act = 'disable' if acct.get('enabled') else 'enable'
+    # Delete gets its own form so the confirm fires for it alone - onsubmit on a
+    # form carrying three buttons would ask before enabling or rotating too.
+    # Named in the prompt, because this page is reachable in several tabs at
+    # once and "Delete this?" does not say which.
+    html += ("<h4 style='margin-top:28px'>Token and lifecycle</h4>"
+             "<form method='POST' style='display:inline'>" + nonce
+             + f"<button name='action' value='{act}' class='btn btn-sm' "
+               f"style='background-color:{WRITE_COLOR}; color:#000'>{act.title()}</button>"
+             "</form>&nbsp;"
+             # Its own form for the same reason delete has one: enabling is
+             # harmless and must not inherit a prompt. Rotating is recoverable -
+             # the replacement is on screen - but the break is just as abrupt,
+             # so the wording is about the consequence rather than the risk.
+             "<form method='POST' style='display:inline' onsubmit=\"return confirm("
+             + js_string(f"Issue a new token for {acct.get('name', '')}?\n\n"
+                   "The current token stops working immediately. Anything using it "
+                   "stays broken until it is given the new one.")
+             + ")\">" + nonce
+             + "<button name='action' value='rotate' class='btn btn-sm' "
+               f"style='background-color:{WRITE_COLOR}; color:#000'>New token</button>"
+             "</form>&nbsp;"
+             "<form method='POST' style='display:inline' onsubmit=\"return confirm("
+             + js_string(f"Delete the service account {acct.get('name', '')}?\n\n"
+                   "This cannot be undone, and its token stops working immediately. "
+                   "Disable it instead if you only want to stop it for now.")
+             + ")\">" + nonce
+             + "<button name='action' value='delete' class='btn btn-sm' "
+               f"style='background-color:{REMOVE_COLOR}; color:#fff'>Delete</button>"
+             "</form>"
+             "<div style='font-size:0.85em; color:#a8c4e0; max-width:620px'>"
+             "Disabling is reversible and keeps the record, so a token that may have "
+             "been misused can still be investigated. Deleting does not."
+             "</div>"
+             "<p style='margin-top:24px'><a href='/service_accounts'>"
+             "&larr; All service accounts</a></p>")
+    return html
+
+
+def _save_service_edit(acct, me):
+    """ Handle a POST from /service_account/<id>
+        Keyword arguments:
+          acct: the service_account document being edited
+          me: the admin making the change
+        Returns:
+          (note HTML, fresh token or "")
+    """
+    coll = DB['dis'][SERVICE_COLLECTION]
+    action = request.form.get('action', '')
+    stamp = {"updated": datetime.now(), "updated_by": me.get('orcid')}
+    if action == 'terms':
+        # $set of the complete list, not add/remove: the checkboxes are a full
+        # statement of what this account holds, and nothing else writes the
+        # field. Unknown names are dropped rather than stored - the cv is the
+        # vocabulary, and a term that is not in it grants nothing anyway.
+        valid = set(service_terms())
+        if not valid:
+            # Without this, a cv that failed to load renders no checkboxes and
+            # Save writes an empty list - stripping every authorization the
+            # account held, silently, because the page had nothing to show.
+            return render_warning("The authorization vocabulary could not be read, "
+                                  "so nothing was changed. Try again shortly.",
+                                  'error'), ""
+        chosen = sorted(set(request.form.getlist('term')) & valid)
+        coll.update_one({"_id": acct['_id']},
+                        {"$set": {"authorization": chosen, **stamp}})
+        print(f"Service account {acct['name']} authorizations set to {chosen} "
+              f"by {me.get('orcid')}")
+        return render_warning(f"Authorizations saved: "
+                              f"{', '.join(chosen) or 'none'}.", 'success'), ""
+    if action == 'details':
+        owner = (request.form.get('owner') or '').strip()
+        if not ORCID_RE.match(owner):
+            return render_warning("The owner must be a well-formed ORCID iD.",
+                                  'warning'), ""
+        allowed, why = may_be_authorized(DB['dis'].orcid.find_one({"orcid": owner}))
+        if not allowed:
+            return render_warning(f"That owner cannot hold an authorization ({why}).",
+                                  'warning'), ""
+        expires, bad = _expiry_or_error(request.form.get('expires'))
+        if bad:
+            return render_warning(bad, 'warning'), ""
+        coll.update_one({"_id": acct['_id']},
+                        {"$set": {"owner": owner,
+                                  "purpose": (request.form.get('purpose') or '').strip(),
+                                  "expires": expires,
+                                  **stamp}})
+        print(f"Service account {acct['name']} details updated by {me.get('orcid')}")
+        return render_warning("Saved.", 'success'), ""
+    if action in ('enable', 'disable'):
+        coll.update_one({"_id": acct['_id']},
+                        {"$set": {"enabled": action == 'enable', **stamp}})
+        print(f"Service account {acct['name']} {action}d by {me.get('orcid')}")
+        return render_warning(f"{acct['name']} {action}d.", 'success'), ""
+    if action == 'rotate':
+        token = secrets.token_urlsafe(32)
+        coll.update_one({"_id": acct['_id']},
+                        {"$set": {f"{API_TOKEN_FIELD}.digest": token_digest(token),
+                                  f"{API_TOKEN_FIELD}.created": datetime.now(),
+                                  f"{API_TOKEN_FIELD}.last_used": None, **stamp}})
+        print(f"Service account {acct['name']} token rotated by {me.get('orcid')}")
+        return render_warning(f"New token for {acct['name']}. The old one stopped "
+                              "working.", 'success'), token
+    if action == 'delete':
+        coll.delete_one({"_id": acct['_id']})
+        print(f"Service account {acct['name']} deleted by {me.get('orcid')}")
+        return render_warning(f"Deleted {acct['name']}.", 'success'), ""
+    return render_warning("Unknown action.", 'warning'), ""
+
+
+@app.route('/service_account/<string:sid>', methods=['GET', 'POST'])
+@restricted('admin')
+def edit_service_account(sid):
+    ''' Edit one service account: authorizations, owner, expiry, token
+    '''
+    me = current_user()
+    coll = DB['dis'][SERVICE_COLLECTION]
+    try:
+        acct = coll.find_one({"_id": bson.ObjectId(sid)})
+    except Exception:
+        acct = None
+    if not acct:
+        return render_template('warning.html', urlroot=request.url_root,
+                               title=render_warning("No such service account",
+                                                    'warning'),
+                               message="That service account does not exist. It may "
+                                       "have been deleted.")
+    note = fresh = ""
+    deleted = False
+    if request.method == 'POST':
+        sent = request.form.get('nonce')
+        if not sent or sent != session.pop('dis_sa_nonce', None):
+            note = render_warning("That form has already been used. Reload the page "
+                                  "and try again - nothing was changed.", 'warning')
+        else:
+            deleted = request.form.get('action') == 'delete'
+            note, fresh = _save_service_edit(acct, me)
+            if deleted:
+                # Nothing left to render against. The name travels, not the
+                # rendered warning: the session is a cookie, and markup does not
+                # belong in one.
+                session['dis_sa_deleted'] = acct.get('name', '')
+                return redirect(url_for('service_accounts'))
+            acct = coll.find_one({"_id": acct['_id']}) or acct
+    g.dis_sa_nonce = secrets.token_urlsafe(16)
+    session['dis_sa_nonce'] = g.dis_sa_nonce
+    html = note + _service_account_body(acct, fresh)
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=f"Service account: {acct.get('name')}",
+                                         html=html, navbar=generate_navbar('System')))
+
+
+@app.route('/service_accounts', methods=['GET', 'POST'])
+@restricted('admin')
+def service_accounts():
+    ''' Service accounts: non-people that hold an API token
+
+        Deliberately not the orcid collection. That one is the author roster,
+        read by a dozen sync programs as the list of real Janelia authors, so a
+        synthetic record there would be name-matched to publications, counted in
+        author totals and emailed.
+    '''
+    me = current_user()
+    note = fresh = ""
+    gone = session.pop('dis_sa_deleted', None)
+    if gone:
+        note = render_warning(f"Deleted {gone}.", 'success')
+    # Same one-time nonce /profile uses: a token is shown once, so the page
+    # cannot redirect after showing one, and a refresh would otherwise re-post.
+    if request.method == 'POST':
+        sent = request.form.get('nonce')
+        if not sent or sent != session.pop('dis_sa_nonce', None):
+            note = render_warning("That form has already been used. Reload the page "
+                                  "and try again - nothing was changed.", 'warning')
+        else:
+            note, fresh = _save_service_account(me)
+    g.dis_sa_nonce = secrets.token_urlsafe(16)
+    session['dis_sa_nonce'] = g.dis_sa_nonce
+    try:
+        accounts = sorted(DB['dis'][SERVICE_COLLECTION].find({}),
+                          key=lambda a: (a.get('name') or '').lower())
+    except Exception as err:
+        return render_error("Could not read service accounts", err)
+    html = note
+    if fresh:
+        html += ("<div style='background:#2b3b2b; border:1px solid #89c242; "
+                 "border-radius:6px; padding:12px; max-width:720px'>"
+                 "<b>Copy this now - it will not be shown again.</b><br>"
+                 f"<code style='font-size:11pt; word-break:break-all'>{escape(fresh)}</code>"
+                 f" <button class='btn btn-outline-secondary btn-sm' "
+                 f"onclick=\"copyText('{escape(fresh)}')\">Copy</button></div><br>")
+    header, rows = _service_rows(accounts)
+    html += (render_table(header, rows, table_id='svc', css='tablesorter standard-scroll')
+             if rows else render_warning("No service accounts.", 'warning'))
+    html += _service_form(me)
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="Service accounts", html=html,
+                                         navbar=generate_navbar('System')))
+
+
 @app.route('/authorizations')
 @restricted('admin')
 def show_authorizations():
@@ -8290,8 +8845,15 @@ def _save_authorizations(orc, me):
         Returns:
           Rendered note
     '''
-    chosen = {t for t in request.form.getlist('auth')
-              if t in (CVTERM.get('authorization') or {})}
+    vocabulary = CVTERM.get('authorization') or {}
+    if not vocabulary:
+        # No checkboxes render when the cv is unread, so Save would write an
+        # empty list and strip everything this person held. The self-demotion
+        # guard below catches an admin editing themselves; it does nothing for
+        # an admin editing anybody else.
+        return render_warning("The authorization vocabulary could not be read, so "
+                              "nothing was changed. Try again shortly.", 'error')
+    chosen = {t for t in request.form.getlist('auth') if t in vocabulary}
     # An admin removing their own admin could leave nobody able to grant it back,
     # and the only way out would be a hand-written database update.
     if str(orc['_id']) == str(me.get('_id')) and 'admin' in authorizations(me) \
@@ -24067,7 +24629,7 @@ def _cv_term_rows(cv, editing):
         del_form = ""
         if not (blocking and count):
             del_form = (f"<form method='POST' style='display:inline' "
-                        f"onsubmit=\"return confirm('Delete {escape(name)}?')\">"
+                        f"onsubmit=\"return confirm({js_string(f'Delete {name}?')})\">"
                         f"<input type='hidden' name='action' value='del_term'>"
                         f"<input type='hidden' name='cv' value='{escape(cv)}'>"
                         f"<input type='hidden' name='name' value='{escape(name)}'>"
@@ -24173,7 +24735,8 @@ def cvs(cv=None):
                 + "Add</button></div></div></form>"
         if not DB['dis'].cvterm.count_documents({"cv": cv}):
             html += "<form method='POST' style='margin-top:14px' " \
-                    + f"onsubmit=\"return confirm('Delete the {escape(cv)} vocabulary?')\">" \
+                    + "onsubmit=\"return confirm(" \
+                    + js_string(f"Delete the {cv} vocabulary?") + ")\">" \
                     + "<input type='hidden' name='action' value='del_cv'>" \
                     + f"<input type='hidden' name='cv' value='{escape(cv)}'>" \
                     + "<button type='submit' class='btn btn-outline-danger btn-sm'>" \
