@@ -256,7 +256,10 @@ def test_every_documented_operation_declares_what_it_actually_does():
     wrong = []
     for name, block, code, decs in _documented_views():
         requires = 'api_restricted' in decs
-        redacts = "result['rest']['authorized']" in code
+        # Redaction moved from an inline rest.authorized check to the shared
+        # strip_identifiers helper; both count.
+        redacts = ("result['rest']['authorized']" in code
+                   or 'strip_identifiers' in code)
         declares = 'security:' in block
         optional = '- {}' in block
         if requires:
@@ -315,3 +318,58 @@ def test_admin_always_admits():
     '''
     block = ast.get_source_segment(SOURCE, _view('api_restricted'))
     assert "{'admin'} | set(terms)" in block
+
+
+# ---------------------------------------------------------------------------
+# Employee identifiers
+#
+# They travel under two names: employeeId on an author object, and jrc_author,
+# which is a bare list of employee IDs. A fix applied to one spelling, or to the
+# wrong function, leaves the other route open - which is exactly what happened:
+# a redaction was removed from get_published_dois while the comment left behind
+# claimed @api_restricted protected it, and that view has no decorator.
+# ---------------------------------------------------------------------------
+
+IDENTIFIER_ENDPOINTS = ('get_doi_api', 'get_published_dois', 'get_doi_authors')
+
+
+def test_every_identifier_endpoint_strips_by_name_not_by_luck():
+    ''' Asserted per function. The bug this replaces passed a count==1 check on
+        a code block that lived in a different view than intended.
+    '''
+    for name in IDENTIFIER_ENDPOINTS:
+        node = _view(name)
+        code = '\n'.join(ast.get_source_segment(SOURCE, st) or ''
+                         for st in node.body[1:])
+        assert 'strip_identifiers' in code, \
+            f"{name} must route its output through strip_identifiers"
+
+
+def test_the_gate_is_an_authorization_not_merely_a_token():
+    ''' Any valid token used to be enough. Roster identity needs the orcid
+        authorization, or admin.
+    '''
+    block = ast.get_source_segment(SOURCE, _view('may_see_identifiers'))
+    assert 'IDENTIFIER_TERMS & authorizations(current_user())' in block
+    assert "IDENTIFIER_TERMS = {'admin', 'orcid'}" in SOURCE
+
+
+def test_both_spellings_of_the_identifier_are_covered():
+    ''' jrc_author is a list of employee IDs. Gating employeeId alone leaves
+        11,736 DOIs handing them out under the other name.
+    '''
+    assert "IDENTIFIER_FIELDS = ('employeeId', 'jrc_author')" in SOURCE
+    block = ast.get_source_segment(SOURCE, _view('strip_identifiers'))
+    assert 'for field in IDENTIFIER_FIELDS' in block
+
+
+def test_no_endpoint_redacts_identifiers_by_hand_any_more():
+    ''' A second, divergent copy of the rule is how the two spellings drifted
+        apart in the first place.
+    '''
+    for node in ast.walk(ast.parse(SOURCE)):
+        if not isinstance(node, ast.FunctionDef) or node.name == 'strip_identifiers':
+            continue
+        code = ast.get_source_segment(SOURCE, node) or ''
+        assert "del auth['employeeId']" not in code, node.name
+        assert "del rec['jrc_author']" not in code, node.name
