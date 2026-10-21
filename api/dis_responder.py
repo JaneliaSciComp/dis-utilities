@@ -70,7 +70,7 @@ from dis_state import CVTERM, PROJECT
 # on the image. feat -> minor, everything else -> patch, in the same commit as
 # the change. Forgetting is survivable: ocbuild warns that the tag already
 # exists in the ImageStream rather than silently overwriting it.
-__version__ = "120.125.2"
+__version__ = "120.130.2"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -151,7 +151,26 @@ class CustomException(Exception):
 app = Flask(__name__, template_folder="templates")
 app.json_encoder = CustomJSONEncoder
 app.config.from_pyfile("config.cfg")
-CORS(app, supports_credentials=True)
+# CORS: an allowlist, not "every origin". This was CORS(app,
+# supports_credentials=True) with no origins argument, which tells a browser
+# that ANY site may make CREDENTIALED requests to every route here. That was
+# survivable while a session carried nothing; it stopped being survivable when
+# sign-in became real. A reader with a live session visiting a hostile page was
+# one fetch() away from that page acting as them - including POST /project_edit.
+#
+# Nothing in this application needs CORS at all: every fetch() in the templates
+# and in dis.js is a relative path, so same-origin. The allowlist exists for
+# anything outside the repository that may call the API from a browser, and the
+# default covers this site and local development. Adding an origin is an
+# environment change, not a rebuild.
+CORS_ORIGINS = [origin.strip() for origin in
+                os.environ.get('DIS_CORS_ORIGINS',
+                               'https://dis.int.janelia.org,'
+                               'https://dis-dev.int.janelia.org,'
+                               'http://127.0.0.1:5000,'
+                               'http://localhost:5000').split(',')
+                if origin.strip()]
+CORS(app, origins=CORS_ORIGINS, supports_credentials=True)
 app.config["STARTDT"] = datetime.now()
 app.config["LAST_TRANSACTION"] = time()
 
@@ -994,6 +1013,75 @@ IDENTIFIER_FIELDS = ('employeeId', 'jrc_author')
 IDENTIFIER_TERMS = {'admin', 'orcid'}
 
 
+# Audit events live in the processing collection, the same append-only shape
+# DOIs already use: {key, type, processes: [{action, timestamp, ...}]}. Reusing
+# it rather than inventing a collection means one thing to back up and one shape
+# to read. doi_common.add_doi_process is not reusable here - it is keyed by DOI
+# and takes the actor from the RUN, which for a web request is the server
+# process, not the person who clicked.
+AUDIT_PERSON = 'orcid'
+AUDIT_SERVICE = 'service_account'
+
+
+def _terms_phrase(terms):
+    """ A term list as something a person would read
+
+        sorted() of a list renders as "['author', 'orcid']" - quotes, brackets
+        and all - which is a Python repr leaking into a UI table.
+        Keyword arguments:
+          terms: iterable of authorization names
+        Returns:
+          "author, orcid", or "none"
+    """
+    return ', '.join(sorted(terms)) or 'none'
+
+
+def record_access_event(key, kind, action, actor, notes=''):
+    """ Append an auditable change to the processing collection
+
+        Kept forever and never updated in place: an audit trail that can be
+        edited is not one. updated_by on the record says who touched it last;
+        this says what they did and what it was before.
+        Keyword arguments:
+          key: the entity the event is about (a record _id, as a string)
+          kind: AUDIT_PERSON or AUDIT_SERVICE
+          action: short verb, e.g. 'authorization_set'
+          actor: ORCID iD of whoever made the change
+          notes: what changed, in words - before and after where it helps
+        Returns:
+          None
+    """
+    event = {"action": action, "actor": actor, "notes": notes,
+             "program": "dis_responder.py", "version": __version__,
+             "timestamp": datetime.now().isoformat()}
+    try:
+        DB['dis'].processing.update_one({"key": str(key), "type": kind},
+                                        {"$push": {"processes": event}},
+                                        upsert=True)
+    except Exception as err:
+        # Never fail the change itself over the audit write. A lost event is
+        # bad; a save that reports failure after succeeding is worse, and this
+        # runs after the write it describes.
+        print(f"Could not record access event for {key}: {err}")
+
+
+def access_events(key, kind=AUDIT_PERSON):
+    """ Events recorded against one entity, newest first
+        Keyword arguments:
+          key: the entity's record _id, as a string
+          kind: AUDIT_PERSON or AUDIT_SERVICE
+        Returns:
+          List of event dicts
+    """
+    try:
+        rec = DB['dis'].processing.find_one({"key": str(key), "type": kind})
+    except Exception as err:
+        print(f"Could not read access events for {key}: {err}")
+        return []
+    return sorted((rec or {}).get('processes') or [],
+                  key=lambda e: e.get('timestamp') or '', reverse=True)
+
+
 def may_see_identifiers():
     """ Whether this request may be shown employee identifiers
         Keyword arguments:
@@ -1024,6 +1112,30 @@ def strip_identifiers(record):
             for field in IDENTIFIER_FIELDS:
                 item.pop(field, None)
     return record
+
+
+def redacts(*terms, fields=''):
+    """ Mark an endpoint that returns LESS without an authorization
+
+        Records metadata and changes nothing. The withholding itself is done by
+        strip_identifiers inside the view; this exists so the fact is readable
+        from the route table rather than only from the body of the function.
+
+        Without it the restrictions report could describe what is refused
+        (@restricted, @api_restricted both stamp attributes) but not what is
+        quietly reduced - which is the harder thing to remember and the easier
+        thing to get wrong.
+        Keyword arguments:
+          terms: authorizations that unlock the full response
+          fields: human-readable list of what is withheld
+        Returns:
+          Decorator
+    """
+    def decorate(view):
+        view.dis_redacts_terms = tuple(terms)
+        view.dis_redacts_fields = fields
+        return view
+    return decorate
 
 
 def api_restricted(*terms):
@@ -1292,6 +1404,7 @@ def _issue_api_token(person):
         Returns:
           the new token, or None if it could not be stored
     """
+    had = bool((person.get(API_TOKEN_FIELD) or {}).get('digest'))
     token = secrets.token_urlsafe(32)
     stamp = {"digest": token_digest(token), "created": datetime.now(),
              "last_used": None, "updated_by": person.get('orcid')}
@@ -1302,6 +1415,10 @@ def _issue_api_token(person):
         print(f"Could not store API token for {person['_id']}: {err}")
         return None
     print(f"API token issued for {person['_id']} by {person.get('orcid')}")
+    record_access_event(person['_id'], AUDIT_PERSON, 'api_token_issued',
+                        person.get('orcid'),
+                        "replaced the previous token" if had else
+                        "first token for this person")
     return token
 
 
@@ -1322,6 +1439,10 @@ def _revoke_api_token(orc, me):
         print(f"Could not revoke API token for {orc['_id']}: {err}")
         return False
     print(f"API token revoked for {orc['_id']} by {me.get('orcid')}")
+    record_access_event(orc['_id'], AUDIT_PERSON, 'api_token_revoked',
+                        me.get('orcid'),
+                        "by the holder" if str(orc['_id']) == str(me.get('_id'))
+                        else "by an administrator")
     return True
 
 
@@ -5747,6 +5868,7 @@ def get_incoming_citations(source, doi):
 
 
 @app.route('/doi/authors/<path:doi>')
+@redacts('admin', 'orcid', fields='employeeId, jrc_author')
 def get_doi_authors(doi):
     '''
     Return a DOI's authors
@@ -5968,6 +6090,7 @@ def get_doi_migrations(idate):
 
 
 @app.route('/doi/published/<string:start>/<string:end>', methods=['GET'])
+@redacts('admin', 'orcid', fields='employeeId, jrc_author')
 def get_published_dois(start, end):
     '''
     Return DOI records for DOIs by date range
@@ -6019,6 +6142,7 @@ def get_published_dois(start, end):
 
 
 @app.route('/doi/<path:doi>')
+@redacts('admin', 'orcid', fields='employeeId, jrc_author')
 def get_doi_api(doi):
     '''
     Return a DOI
@@ -6608,14 +6732,19 @@ def show_types():
 
 
 @app.route('/doi/jrc_author/<path:doi>', methods=['OPTIONS', 'POST'])
+@api_restricted('author')
 def set_jrc_author(doi):
     '''
     Update Janelia authors for a given DOI
     Recompute the Janelia authors (their employee IDs) from the stored record and
-    write them to jrc_author. Returns the employee IDs written. Takes no request body.
+    write them to jrc_author. Returns the employee IDs written. Takes no request
+    body. Requires an API token carrying the "author" or "admin" authorization:
+    this is the only endpoint in the API that writes to the dois collection.
     ---
     tags:
       - DOI
+    security:
+      - bearerAuth: []
     parameters:
       - in: path
         name: doi
@@ -6626,6 +6755,10 @@ def set_jrc_author(doi):
     responses:
       '200':
         description: Employee IDs written to jrc_author (rest.rows_updated if modified)
+      '401':
+        description: No API token supplied
+      '403':
+        description: Token lacks the author or admin authorization
         content:
           application/json:
             schema:
@@ -8374,7 +8507,7 @@ def _save_service_account(me):
                "expires": expires,
                "created": datetime.now(), **stamp}
         try:
-            coll.insert_one(doc)
+            doc_id = coll.insert_one(doc).inserted_id
         except DuplicateKeyError:
             return render_warning(f"A service account named {name} already "
                                   "exists.", 'warning'), ""
@@ -8382,6 +8515,9 @@ def _save_service_account(me):
             print(f"Could not create service account {name}: {err}")
             return render_warning("Could not create that account.", 'error'), ""
         print(f"Service account {name} created by {me.get('orcid')}")
+        record_access_event(doc_id, AUDIT_SERVICE, 'created', me.get('orcid'),
+                            f"owner {owner}, authorizations "
+                            f"{_terms_phrase(chosen)}")
         return render_warning(f"Created {name}.", 'success'), token
     return render_warning("Unknown action.", 'warning'), ""
 
@@ -8434,6 +8570,45 @@ def js_string(message):
           An escaped JS string literal, including its quotes
     """
     return escape(json.dumps(message))
+
+
+def history_html(key, kind=AUDIT_PERSON):
+    """ The History section for one record
+
+        Shared by /person/<id> and /service_account/<id>: both record events the
+        same way, and the first version of this showed them only on the person
+        page - so every service-account change was written into a table nothing
+        displayed.
+        Keyword arguments:
+          key: the record's _id
+          kind: AUDIT_PERSON or AUDIT_SERVICE
+        Returns:
+          HTML
+    """
+    events = access_events(key, kind)
+    html = "<h4 style='margin-top:28px'>History</h4>"
+    if events:
+        rows = []
+        for ev in events:
+            who = ev.get('actor') or ''
+            actor = (f"<a href='/orcidui/{escape(who)}'>{escape(who)}</a>"
+                     if who else "<span style='color:#888'>unknown</span>")
+            # Not escape()d: render_table escapes every cell that is not
+            # wrapped in safe(), so pre-escaping here showed the reader
+            # &#x27; and &gt; instead of quotes and arrows.
+            rows.append([str(ev.get('timestamp') or '')[:19],
+                         str(ev.get('action') or '').replace('_', ' '),
+                         safe(actor), str(ev.get('notes') or '')])
+        html += render_table(['When', 'What', 'Who', 'Detail'], rows,
+                             table_id='history', css='tablesorter standard-scroll')
+    else:
+        html += ("<span style='color:#888'>Nothing recorded. Events are kept from "
+                 "the point this was added, so an older change leaves no trace "
+                 "here.</span>")
+    return html + ("<div style='font-size:0.85em; color:#a8c4e0; max-width:620px'>"
+                   "Append-only and never pruned. <b>Last changed</b> above says "
+                   "who touched this record last; this says what each of them "
+                   "did.</div>")
 
 
 def _service_account_body(acct, fresh=""):
@@ -8540,7 +8715,9 @@ def _service_account_body(acct, fresh=""):
              "Disabling is reversible and keeps the record, so a token that may have "
              "been misused can still be investigated. Deleting does not."
              "</div>"
-             "<p style='margin-top:24px'><a href='/service_accounts'>"
+             "</div>")
+    html += history_html(acct['_id'], AUDIT_SERVICE)
+    html += ("<p style='margin-top:24px'><a href='/service_accounts'>"
              "&larr; All service accounts</a></p>")
     return html
 
@@ -8574,6 +8751,10 @@ def _save_service_edit(acct, me):
                         {"$set": {"authorization": chosen, **stamp}})
         print(f"Service account {acct['name']} authorizations set to {chosen} "
               f"by {me.get('orcid')}")
+        record_access_event(acct['_id'], AUDIT_SERVICE, 'authorization_set',
+                            me.get('orcid'),
+                            f"{_terms_phrase(acct.get('authorization') or [])}"
+                            f" \u2192 {_terms_phrase(chosen)}")
         return render_warning(f"Authorizations saved: "
                               f"{', '.join(chosen) or 'none'}.", 'success'), ""
     if action == 'details':
@@ -8594,11 +8775,16 @@ def _save_service_edit(acct, me):
                                   "expires": expires,
                                   **stamp}})
         print(f"Service account {acct['name']} details updated by {me.get('orcid')}")
+        record_access_event(acct['_id'], AUDIT_SERVICE, 'details_updated',
+                            me.get('orcid'),
+                            f"owner {acct.get('owner')} \u2192 {owner}")
         return render_warning("Saved.", 'success'), ""
     if action in ('enable', 'disable'):
         coll.update_one({"_id": acct['_id']},
                         {"$set": {"enabled": action == 'enable', **stamp}})
         print(f"Service account {acct['name']} {action}d by {me.get('orcid')}")
+        record_access_event(acct['_id'], AUDIT_SERVICE, f"{action}d",
+                            me.get('orcid'), '')
         return render_warning(f"{acct['name']} {action}d.", 'success'), ""
     if action == 'rotate':
         token = secrets.token_urlsafe(32)
@@ -8607,11 +8793,17 @@ def _save_service_edit(acct, me):
                                   f"{API_TOKEN_FIELD}.created": datetime.now(),
                                   f"{API_TOKEN_FIELD}.last_used": None, **stamp}})
         print(f"Service account {acct['name']} token rotated by {me.get('orcid')}")
+        record_access_event(acct['_id'], AUDIT_SERVICE, 'api_token_issued',
+                            me.get('orcid'), 'the previous token stopped working')
         return render_warning(f"New token for {acct['name']}. The old one stopped "
                               "working.", 'success'), token
     if action == 'delete':
         coll.delete_one({"_id": acct['_id']})
         print(f"Service account {acct['name']} deleted by {me.get('orcid')}")
+        # Recorded even though the record is gone: the deletion is the event
+        # most worth being able to find later.
+        record_access_event(acct['_id'], AUDIT_SERVICE, 'deleted',
+                            me.get('orcid'), f"was named {acct['name']}")
         return render_warning(f"Deleted {acct['name']}.", 'success'), ""
     return render_warning("Unknown action.", 'warning'), ""
 
@@ -8847,6 +9039,151 @@ def _token_rows():
                      safe(held), safe(state)])
     return (['Holder', 'Issued', 'Last used', 'Authorizations', 'State'],
             rows, counts)
+
+
+def _restriction_inventory():
+    """ Every route, grouped by what it demands of the caller
+
+        Read from app.url_map at request time, not from a list somebody keeps
+        up to date. A route added tomorrow appears here without anyone
+        remembering to add it, and a decorator removed by accident disappears -
+        which is the only version of this report worth having.
+        Keyword arguments:
+          None
+        Returns:
+          dict of category -> list of row tuples, plus a totals dict
+    """
+    pages, apis, reduced, open_routes = [], [], [], 0
+    seen = set()
+    for rule in app.url_map.iter_rules():
+        view = app.view_functions.get(rule.endpoint)
+        if view is None or rule.endpoint == 'static':
+            continue
+        methods = sorted(m for m in (rule.methods or set())
+                         if m not in ('HEAD', 'OPTIONS'))
+        path = str(rule)
+        key = (rule.endpoint, path)
+        if key in seen:
+            continue
+        seen.add(key)
+        if getattr(view, 'dis_restricted', False):
+            term = getattr(view, 'dis_authorization', None)
+            pages.append((path, rule.endpoint, methods, term))
+        elif getattr(view, 'dis_api_restricted', False):
+            apis.append((path, rule.endpoint, methods,
+                         getattr(view, 'dis_api_terms', ())))
+        elif getattr(view, 'dis_redacts_terms', None):
+            reduced.append((path, rule.endpoint, methods,
+                            getattr(view, 'dis_redacts_terms', ()),
+                            getattr(view, 'dis_redacts_fields', '')))
+        else:
+            open_routes += 1
+    return {"pages": sorted(pages), "apis": sorted(apis),
+            "reduced": sorted(reduced),
+            "totals": {"open": open_routes,
+                       "gated": len(pages) + len(apis),
+                       "reduced": len(reduced),
+                       "all": len(seen)}}
+
+
+def _term_label(term):
+    """ A cvterm's display name, falling back to the bare term """
+    if not term:
+        return "<i>sign-in only</i>"
+    entry = (CVTERM.get('authorization') or {}).get(term) or {}
+    label = entry.get('display', term)
+    return f"<b>{escape(label)}</b>"
+
+
+@app.route('/restrictions')
+@restricted('admin')
+def show_restrictions():
+    ''' Which endpoints demand what, read from the live route table
+
+        Three ways an endpoint can care about who is asking, and they are not
+        interchangeable: a page REFUSES an unauthenticated reader (and an
+        authenticated one lacking the term), an API endpoint refuses with a JSON
+        401/403, and a redacting endpoint answers everybody but returns less. The third is the one that goes wrong quietly - nothing fails, the
+        response is simply thinner - so it is listed beside the other two rather
+        than left to be discovered in a function body.
+    '''
+    inv = _restriction_inventory()
+    tot = inv['totals']
+    html = stat_cards([
+        ("Routes", f"{tot['all']:,}"),
+        ("Pages requiring sign-in", f"{len(inv['pages']):,}"),
+        ("API endpoints requiring a token", f"{len(inv['apis']):,}"),
+        ("Endpoints that redact", f"{tot['reduced']:,}"),
+    ], div_id='restriction-stats')
+
+    rows, classes = [], []
+    for path, endpoint, methods, term in inv['pages']:
+        rows.append([path, safe(_term_label(term)), ', '.join(methods), endpoint])
+        # 'signinonly' is what the toggle hides, leaving the rows that demand a
+        # named authorization. Classed per row rather than filtered server-side
+        # so the answer is instant and the counts stay honest.
+        classes.append('termed' if term else 'signinonly')
+    termed = sum(1 for c in classes if c == 'termed')
+    toggle = ("<button class='btn btn-outline-success btn-sm' "
+              "onclick=\"toggleClass('uipages', 'signinonly', this, "
+              "'Show all pages', 'Authorization required only', 'uipagecount');\">"
+              "Authorization required only</button>&nbsp;"
+              f"<span style='color:#a8c4e0'>Showing <span id='uipagecount'>"
+              f"{len(rows):,}</span> of {len(rows):,} &middot; {termed:,} need a "
+              "named authorization, "
+              f"{len(rows) - termed:,} only a sign-in</span>")
+    html += ("<h4 style='margin-top:24px'>Pages that refuse an unauthenticated "
+             "user</h4>" + toggle
+             + (render_table(['Path', 'Requires', 'Methods', 'View'], rows,
+                             table_id='uipages', css='tablesorter standard-scroll',
+                             row_classes=classes)
+                if rows else render_warning("No restricted pages.", 'warning'))
+             + "<div style='font-size:0.85em; color:#a8c4e0; max-width:760px'>"
+             "A signed-out reader is redirected to the sign-in form. Where a "
+             "row names an authorization, a signed-in reader without it is "
+             "refused too, with a 403 naming what they need. "
+             "<b>Administrator</b> satisfies every row, here and below."
+             "</div>")
+
+    rows = [[path, safe(' or '.join(_term_label(t) for t in terms)),
+             ', '.join(methods), endpoint]
+            for path, endpoint, methods, terms in inv['apis']]
+    html += ("<h4 style='margin-top:28px'>API endpoints that require a token</h4>"
+             + (render_table(['Path', 'Requires', 'Methods', 'View'], rows,
+                             table_id='apis', css='tablesorter standard-scroll')
+                if rows else render_warning("No API endpoint requires a token.",
+                                            'warning'))
+             + "<div style='font-size:0.85em; color:#a8c4e0; max-width:760px'>"
+             "401 with no token, 403 with one that lacks the authorization - "
+             "as JSON, not as a redirect to a sign-in page a script cannot use."
+             "</div>")
+
+    rows = [[path, safe(' or '.join(_term_label(t) for t in terms)),
+             fields, ', '.join(methods), endpoint]
+            for path, endpoint, methods, terms, fields in inv['reduced']]
+    html += ("<h4 style='margin-top:28px'>Endpoints that answer everybody, "
+             "but return less</h4>"
+             + (render_table(['Path', 'Full response needs', 'Withheld otherwise',
+                              'Methods', 'View'], rows, table_id='reduced',
+                             css='tablesorter standard-scroll')
+                if rows else render_warning("No endpoint redacts.", 'warning'))
+             + "<div style='font-size:0.85em; color:#a8c4e0; max-width:760px'>"
+             "These never fail, so a missing authorization shows up as a thinner "
+             "response rather than an error. That is the failure mode worth "
+             "watching: a caller can be under-privileged for months and never "
+             "see a complaint."
+             "</div>")
+
+    html += ("<p style='margin-top:24px; color:#a8c4e0; max-width:760px'>"
+             f"The remaining <b>{tot['open']:,}</b> routes ask nothing of the "
+             "caller. Read from app.url_map when this page loads, so a route "
+             "added tomorrow appears here on its own and a decorator removed by "
+             "accident disappears.</p>"
+             "<p><a href='/access'>&larr; Access</a></p>")
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="Endpoint restrictions", html=html,
+                                         navbar=generate_navbar('System')))
 
 
 @app.route('/access')
@@ -9094,6 +9431,12 @@ def _save_person_field(orc, me):
             print(f"Could not set alumni: {err}")
             return render_warning("Could not save that change.", 'error')
         print(f"Alumni set to {wanted} for {orc['_id']} by {me.get('orcid')}")
+        record_access_event(orc['_id'], AUDIT_PERSON,
+                            'alumni_set' if wanted else 'alumni_cleared',
+                            me.get('orcid'),
+                            "marked a former employee" if wanted else
+                            "no longer a former employee; this also restores "
+                            "their ability to hold an authorization")
         return render_warning("Marked as a former employee." if wanted else
                               "No longer marked as a former employee.", 'success')
     if action != 'orcid':
@@ -9131,6 +9474,10 @@ def _save_person_field(orc, me):
         print(f"Could not add ORCID: {err}")
         return render_warning("Could not save that change.", 'error')
     print(f"ORCID {oid} added to {orc['_id']} by {me.get('orcid')}")
+    record_access_event(orc['_id'], AUDIT_PERSON, 'orcid_added',
+                        me.get('orcid'),
+                        f"{oid} - this record can now hold an authorization "
+                        "and sign in")
     return render_warning(f"Added {oid}.", 'success')
 
 
@@ -9170,6 +9517,12 @@ def _save_authorizations(orc, me):
         print(f"Could not save authorizations: {err}")
         return render_warning("Could not save the authorizations.", 'error')
     print(f"Authorizations for {orc['_id']} set to {sorted(chosen)} by {me.get('orcid')}")
+    # Before AND after: "who granted this" is answerable from the after alone,
+    # but "when did they lose it" is not.
+    record_access_event(orc['_id'], AUDIT_PERSON, 'authorization_set',
+                        me.get('orcid'),
+                        f"{_terms_phrase(orc.get('authorization') or [])}"
+                        f" \u2192 {_terms_phrase(chosen)}")
     return render_warning("Saved.", 'success')
 
 
@@ -9318,6 +9671,11 @@ def edit_person(rid):
             + "People the sync may mark them again, dated the day it runs. A " \
             + "former employee cannot hold an authorization, and cannot sign in " \
             + "unless they are a contingent worker.</div>"
+
+    # ----- history -----
+    # Last, because it is the section you scroll to when something looks wrong,
+    # not the one you read first.
+    html += history_html(orc['_id'], AUDIT_PERSON)
 
     # ----- API token -----
     held = orc.get(API_TOKEN_FIELD) or {}
