@@ -205,3 +205,45 @@ def test_no_routed_view_mutates_data_without_a_gate():
         if 'restricted' not in names and 'api_restricted' not in names:
             ungated.append(node.name)
     assert not ungated, f"routed views writing with no gate: {ungated}"
+
+
+# --- the Access control submenu --------------------------------------------
+
+def _nav():
+    tree = ast.parse(HTML_SOURCE)
+    node = next(n for n in tree.body if isinstance(n, ast.Assign)
+                and getattr(n.targets[0], 'id', '') == 'NAV')
+    return ast.literal_eval(node.value)
+
+
+def test_the_four_access_pages_are_one_submenu():
+    ''' They answer the same question from different sides. Loose in System
+        they were four of fourteen siblings with nothing saying so.
+    '''
+    group = _nav()['System']['Access control']
+    assert set(group.values()) == {'authorizations', 'service_accounts',
+                                   'access', 'restrictions'}
+
+
+def test_every_entry_in_the_submenu_is_a_real_admin_route():
+    ''' A NAV value that matches no route is shown to everyone and bounces
+        them, because the gating filter never finds it to hide it.
+    '''
+    for label, value in _nav()['System']['Access control'].items():
+        assert f"@app.route('/{value}'" in SOURCE, f"{label} -> /{value}"
+        block = SOURCE[SOURCE.index(f"@app.route('/{value}'"):]
+        assert "@restricted('admin')" in block[:200], label
+
+
+def test_an_emptied_submenu_disappears():
+    ''' Otherwise a non-admin sees an "Access control" heading that opens onto
+        nothing - worse than not showing it, because it advertises the surface.
+    '''
+    ns = {}
+    node = next(n for n in ast.parse(SOURCE).body
+                if isinstance(n, ast.FunctionDef) and n.name == '_visible_nav')
+    exec(ast.get_source_segment(SOURCE, node), ns)    # pylint: disable=W0122
+    nav = _nav()
+    hidden = set(nav['System']['Access control'].values())
+    assert 'Access control' not in ns['_visible_nav'](nav, hidden)['System']
+    assert 'Access control' in ns['_visible_nav'](nav, set())['System']
