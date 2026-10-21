@@ -70,7 +70,7 @@ from dis_state import CVTERM, PROJECT
 # on the image. feat -> minor, everything else -> patch, in the same commit as
 # the change. Forgetting is survivable: ocbuild warns that the tag already
 # exists in the ImageStream rather than silently overwriting it.
-__version__ = "120.124.0"
+__version__ = "120.124.1"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -981,6 +981,49 @@ def authorizations(person):
     if 'admin' in held:
         return held | set(CVTERM.get('authorization') or {})
     return held
+
+
+# Employee identifiers are personal data, and they appear under two names: the
+# employeeId field on an author object, and jrc_author, which is a bare LIST of
+# employee IDs - 11,736 DOIs carry one and every value resolves straight to a
+# named person in the orcid collection. Same data, different spelling, so both
+# are gated together rather than one endpoint at a time.
+IDENTIFIER_FIELDS = ('employeeId', 'jrc_author')
+# Holding any token is not enough. "orcid" is the authorization that covers
+# roster identity; "admin" covers everything, as everywhere else.
+IDENTIFIER_TERMS = {'admin', 'orcid'}
+
+
+def may_see_identifiers():
+    """ Whether this request may be shown employee identifiers
+        Keyword arguments:
+          None
+        Returns:
+          True if the caller holds admin or orcid
+    """
+    return bool(IDENTIFIER_TERMS & authorizations(current_user()))
+
+
+def strip_identifiers(record):
+    """ Remove employee identifiers unless the caller is entitled to them
+
+        Mutates and returns the record. Safe on anything: a registrar record
+        fetched live carries neither field, and an entitled caller gets it back
+        untouched. One helper rather than a check per endpoint, because the
+        per-endpoint version is how /doi/<doi> came to hand out what
+        /doi/migration withheld.
+        Keyword arguments:
+          record: a dict, or a list of dicts
+        Returns:
+          The record
+    """
+    if may_see_identifiers():
+        return record
+    for item in (record if isinstance(record, list) else [record]):
+        if isinstance(item, dict):
+            for field in IDENTIFIER_FIELDS:
+                item.pop(field, None)
+    return record
 
 
 def api_restricted(*terms):
@@ -5755,10 +5798,7 @@ def get_doi_authors(doi):
         orgs = DL.get_supervisory_orgs(DB['dis'].suporg)
     except Exception as err:
         raise InvalidUsage("Could not get supervisory orgs: " + str(err), 500) from err
-    if not result['rest']['authorized']:
-        for auth in authors:
-            if 'employeeId' in auth:
-                del auth['employeeId']
+    strip_identifiers(authors)
     if 'jrc_tag' in row:
         for atag in row['jrc_tag']:
             if atag['name'] not in tagname:
@@ -5971,9 +6011,7 @@ def get_published_dois(start, end):
     for row in rows:
         try:
             rec = row
-            # jrc_author is no longer stripped: @api_restricted refused anybody
-            # without the authorization before this ran.
-            result['data'].append(rec)
+            result['data'].append(strip_identifiers(rec))
         except Exception as err:
             raise InvalidUsage(str(err), 500) from err
     result['rest']['row_count'] = len(result['data'])
@@ -5986,9 +6024,14 @@ def get_doi_api(doi):
     Return a DOI
     Return the stored record for a DOI. If it is not in the dois collection it is
     fetched live from Crossref or DataCite (rest.source indicates which).
+    jrc_author (a list of employee IDs) is withheld unless the token carries the
+    admin or orcid authorization.
     ---
     tags:
       - DOI
+    security:
+      - bearerAuth: []
+      - {}
     parameters:
       - in: path
         name: doi
@@ -6019,13 +6062,19 @@ def get_doi_api(doi):
     if row:
         result['rest']['row_count'] = 1
         result['rest']['source'] = 'mongo'
-        result['data'] = row
+        # This returned the whole record untouched, so jrc_author - a list of
+        # employee IDs - was a route away from anybody, while /doi/migration one
+        # route over withheld it carefully.
+        result['data'] = strip_identifiers(row)
         return generate_response(result)
     try:
         result['rest']['source'], result['data'] = get_doi(doi)
     except Exception as err:
         raise InvalidUsage(str(err), 500) from err
     if result['data']:
+        # A registrar record carries neither field, but strip rather than rely
+        # on that staying true.
+        strip_identifiers(result['data'])
         result['rest']['row_count'] = 1
     return generate_response(result)
 
