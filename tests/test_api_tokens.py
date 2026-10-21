@@ -217,6 +217,23 @@ def test_optional_auth_is_expressed_as_an_alternative():
     assert '- {}' in sec, "optional auth needs an empty alternative"
 
 
+LINES = SOURCE.splitlines()
+
+
+def _code_of(node):
+    """ A function's body as text, without the docstring.
+
+        Line slicing, not ast.get_source_segment: that re-scans the whole
+        25,000-line file per call, and calling it per statement made two tests
+        here take 59 and 55 seconds - three quarters of the whole suite.
+    """
+    first = node.body[0]
+    start = first.lineno - 1
+    if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant):
+        start = first.end_lineno
+    return '\n'.join(LINES[start:node.end_lineno])
+
+
 def _documented_views():
     ''' (name, spec block, code, decorator names) for every documented view '''
     out = []
@@ -226,11 +243,7 @@ def _documented_views():
         doc = ast.get_docstring(node) or ''
         if '---' not in doc:
             continue
-        stmts = node.body[1:] if (node.body
-                                  and isinstance(node.body[0], ast.Expr)
-                                  and isinstance(node.body[0].value, ast.Constant)
-                                  ) else node.body
-        code = '\n'.join(ast.get_source_segment(SOURCE, st) or '' for st in stmts)
+        code = _code_of(node)
         decs = []
         for dec in node.decorator_list:
             func = dec.func if isinstance(dec, ast.Call) else dec
@@ -296,10 +309,7 @@ def test_a_gated_endpoint_no_longer_redacts():
         "if not authorized" branch there is dead code that reads as live.
     '''
     for name in ('get_doi_migration', 'get_doi_migrations'):
-        node = _view(name)
-        stmts = node.body[1:]
-        code = '\n'.join(ast.get_source_segment(SOURCE, st) or '' for st in stmts)
-        assert "if not result['rest']['authorized']" not in code, name
+        assert "if not result['rest']['authorized']" not in _code_of(_view(name)), name
 
 
 def test_the_gate_distinguishes_401_from_403():
@@ -338,10 +348,7 @@ def test_every_identifier_endpoint_strips_by_name_not_by_luck():
         a code block that lived in a different view than intended.
     '''
     for name in IDENTIFIER_ENDPOINTS:
-        node = _view(name)
-        code = '\n'.join(ast.get_source_segment(SOURCE, st) or ''
-                         for st in node.body[1:])
-        assert 'strip_identifiers' in code, \
+        assert 'strip_identifiers' in _code_of(_view(name)), \
             f"{name} must route its output through strip_identifiers"
 
 
@@ -370,6 +377,6 @@ def test_no_endpoint_redacts_identifiers_by_hand_any_more():
     for node in ast.walk(ast.parse(SOURCE)):
         if not isinstance(node, ast.FunctionDef) or node.name == 'strip_identifiers':
             continue
-        code = ast.get_source_segment(SOURCE, node) or ''
+        code = _code_of(node)
         assert "del auth['employeeId']" not in code, node.name
         assert "del rec['jrc_author']" not in code, node.name

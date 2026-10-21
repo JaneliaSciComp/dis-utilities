@@ -145,6 +145,8 @@ NAV = {"Home": "",
                    # Who can reach the application and when they last did.
                    # Admin-only, gated by the decorator like its neighbours.
                    "Access": "access",
+                   # Which endpoints demand what, read from the live route table.
+                   "Endpoint restrictions": "restrictions",
                    "DOI relationships": "doi_relationships",
                    "Endpoints": "stats_endpoints",
                    "Library versions": "system_versions",

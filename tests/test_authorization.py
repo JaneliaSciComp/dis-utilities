@@ -562,7 +562,11 @@ def _person_field_harness():
                     if query.get('orcid') == taken else None)
 
     req = type('R', (), {'form': {}})()
+    # record_access_event appends to the audit trail after the write it
+    # describes; these tests assert on the write, so it is a no-op here.
     ns = {'request': req, 'datetime': _dt.datetime,
+          'record_access_event': lambda *a, **k: None,
+          'AUDIT_PERSON': 'orcid',
           'render_warning': lambda msg, kind='warning': (kind, msg),
           'DB': {'dis': type('D', (), {'orcid': _Coll()})()},
           'print': lambda *a, **k: None,
