@@ -70,7 +70,7 @@ from dis_state import CVTERM, PROJECT
 # on the image. feat -> minor, everything else -> patch, in the same commit as
 # the change. Forgetting is survivable: ocbuild warns that the tag already
 # exists in the ImageStream rather than silently overwriting it.
-__version__ = "120.124.1"
+__version__ = "120.125.2"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -8705,6 +8705,197 @@ def service_accounts():
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title="Service accounts", html=html,
+                                         navbar=generate_navbar('System')))
+
+
+# A credential issued and never used is the one worth asking about, and a week
+# is long enough that "they have not got round to it" stops being the
+# explanation.
+STALE_TOKEN_DAYS = 7
+
+
+def _ago(when):
+    """ A timestamp as "3 hours ago", with the timestamp kept alongside
+
+        Relative alone is unreadable for anything old; absolute alone makes the
+        reader do arithmetic to answer "is anyone on right now".
+        Keyword arguments:
+          when: datetime, or None
+        Returns:
+          HTML, or a dash
+    """
+    if not when:
+        return "<span style='color:#888'>never</span>"
+    delta = datetime.now() - when
+    mins = delta.total_seconds() / 60
+    if mins < 2:
+        rel, color = "just now", '#89c242'
+    elif mins < 60:
+        rel, color = f"{int(mins)} min ago", '#89c242'
+    elif mins < 1440:
+        hrs = int(mins / 60)
+        rel, color = f"{hrs} hr{'s' if hrs != 1 else ''} ago", '#a8c4e0'
+    else:
+        rel, color = (f"{delta.days} day{'s' if delta.days != 1 else ''} ago",
+                      '#888')
+    return (f"<span style='color:{color}'>{escape(rel)}</span>"
+            f"<br><span style='font-size:9pt;color:#888'>"
+            f"{escape(str(when)[:19])}</span>")
+
+
+def _granted(doc):
+    """ The authorizations a record was actually GIVEN, as display HTML
+
+        Not authorizations(), which expands "admin" to the whole cv: that is the
+        right answer for deciding access and the wrong one for a table, where it
+        reads as three separate grants when one was made. /authorizations shows
+        the stored field for the same reason; these two pages describing the
+        same people differently is worse than either choice alone.
+        Keyword arguments:
+          doc: orcid or service_account document
+        Returns:
+          HTML
+    """
+    held = sorted(a for a in (doc or {}).get('authorization') or [] if a)
+    if not held:
+        return "<span style='color:#888'>-</span>"
+    shown = escape(', '.join(held))
+    if 'admin' in held:
+        shown += " <span style='font-size:9pt;color:#888'>(implies all)</span>"
+    return shown
+
+
+def _signin_rows():
+    """ Everyone who can sign in, and when they last did
+        Returns:
+          (header, rows, counts dict)
+    """
+    try:
+        auth = list(DB['dis'][AUTH_COLLECTION].find({}))
+    except Exception as err:
+        raise CustomException(err, "Could not read the sign-in records.") from err
+    counts = {"people": len(auth), "recent": 0, "never": 0}
+    cutoff = datetime.now() - timedelta(minutes=15)
+    rows = []
+    for rec in sorted(auth, key=lambda r: r.get('last_seen') or datetime.min,
+                      reverse=True):
+        orcid = rec.get('orcid') or ''
+        person = DB['dis'].orcid.find_one({"orcid": orcid}) if orcid else None
+        seen = rec.get('last_seen')
+        if seen and seen >= cutoff:
+            counts['recent'] += 1
+        if not rec.get('last_login'):
+            counts['never'] += 1
+        token = (person or {}).get(API_TOKEN_FIELD) or {}
+        name = display_person_name(person) if person else orcid
+        link = (f"<a href='/person/{person['_id']}'>{escape(name)}</a>"
+                if person else escape(name))
+        rows.append([safe(link), safe(_ago(seen)), safe(_ago(rec.get('last_login'))),
+                     safe(_granted(person)),
+                     safe("<span style='color:#89c242'>yes</span>"
+                          if token.get('digest') else
+                          "<span style='color:#888'>no</span>")])
+    return (['Person', 'Last seen', 'Last sign-in', 'Authorizations', 'API token'],
+            rows, counts)
+
+
+def _token_rows():
+    """ Every live API token, person and service account alike
+        Returns:
+          (header, rows, counts dict)
+    """
+    out = []
+    counts = {"tokens": 0, "unused": 0}
+    stale = datetime.now() - timedelta(days=STALE_TOKEN_DAYS)
+    try:
+        people = list(DB['dis'].orcid.find({f"{API_TOKEN_FIELD}.digest":
+                                            {"$exists": True}}))
+        services = list(DB['dis'][SERVICE_COLLECTION].find({}))
+    except Exception as err:
+        raise CustomException(err, "Could not read API tokens.") from err
+    for person in people:
+        tok = person[API_TOKEN_FIELD]
+        out.append(("person", display_person_name(person),
+                    f"/person/{person['_id']}", tok, _granted(person), True, ""))
+    for acct in services:
+        tok = acct.get(API_TOKEN_FIELD) or {}
+        if not tok.get('digest'):
+            continue
+        allowed, why = may_act(acct)
+        out.append(("service", acct.get('name', ''),
+                    f"/service_account/{acct['_id']}", tok,
+                    _granted(acct), allowed, why))
+    rows = []
+    for kind, name, href, tok, held, live, why in sorted(out, key=lambda r: r[1].lower()):
+        counts['tokens'] += 1
+        used = tok.get('last_used')
+        created = tok.get('created')
+        unused = not used and created and created < stale
+        if unused:
+            counts['unused'] += 1
+        state = ("<span style='color:#89c242'>active</span>" if live
+                 else f"<span style='color:{REMOVE_COLOR}'>{escape(why)}</span>")
+        if unused:
+            # Folded into State rather than given a column of its own: the flag
+            # is rare, so a dedicated column is empty almost always - and an
+            # empty column with no heading reads as a rendering fault.
+            state += (f"<br><span style='color:{REMOVE_COLOR};font-size:9pt'>"
+                      f"never used in {STALE_TOKEN_DAYS}+ days</span>")
+        badge = tiny_badge('info' if kind == 'person' else 'managed', kind)
+        rows.append([safe(f"<a href='{href}'>{escape(name)}</a> {badge}"),
+                     safe(_ago(created)), safe(_ago(used)),
+                     safe(held), safe(state)])
+    return (['Holder', 'Issued', 'Last used', 'Authorizations', 'State'],
+            rows, counts)
+
+
+@app.route('/access')
+@restricted('admin')
+def show_access():
+    ''' Who can reach this application, and when they last did
+
+        Deliberately NOT titled "logged in". Sessions are signed cookies with no
+        server-side store, so nothing records a sign-out and nothing can be
+        enumerated: a closed tab is indistinguishable from an open one. What is
+        recorded is last_seen, written on each authenticated request and
+        throttled to one write a minute. That is activity, not presence, and the
+        page says so rather than implying a liveness it cannot know.
+    '''
+    try:
+        shead, srows, scount = _signin_rows()
+        thead, trows, tcount = _token_rows()
+    except CustomException as err:
+        return render_error("Could not read access records", err)
+    html = stat_cards([
+        ("Sign-in accounts", f"{scount['people']:,}"),
+        ("Active in the last 15 min", f"{scount['recent']:,}"),
+        ("API tokens", f"{tcount['tokens']:,}"),
+        ("Tokens never used", f"{tcount['unused']:,}",
+         'crimson' if tcount['unused'] else None),
+    ], div_id='access-stats')
+    html += ("<h4 style='margin-top:24px'>People who can sign in</h4>"
+             + (render_table(shead, srows, table_id='signin',
+                             css='tablesorter standard-scroll')
+                if srows else render_warning("Nobody has signed in yet.", 'warning'))
+             + "<div style='font-size:0.85em; color:#a8c4e0; max-width:760px'>"
+             "<b>Last seen</b> is the last request this person made, not whether "
+             "they are here now. A session is a signed cookie: closing the tab "
+             "tells the server nothing, so there is no list of open sessions to "
+             "show. Someone active a minute ago may have gone; someone idle for "
+             "an hour may still have the page open.</div>")
+    html += ("<h4 style='margin-top:28px'>API tokens</h4>"
+             + (render_table(thead, trows, table_id='tokens',
+                             css='tablesorter standard-scroll')
+                if trows else render_warning("No API tokens have been issued.",
+                                             'warning'))
+             + "<div style='font-size:0.85em; color:#a8c4e0; max-width:760px'>"
+             f"A token issued more than {STALE_TOKEN_DAYS} days ago and never "
+             "used is flagged: it is either forgotten or was never needed, and "
+             "either way is a credential worth revoking. Revoke a person's from "
+             "their record, a service account's from its own page.</div>")
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title="Access", html=html,
                                          navbar=generate_navbar('System')))
 
 

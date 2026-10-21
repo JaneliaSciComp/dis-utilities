@@ -142,6 +142,9 @@ NAV = {"Home": "",
                    # is otherwise invisible: unlike a person's token, nobody
                    # whose profile page would show it ever signs in.
                    "Service accounts": "service_accounts",
+                   # Who can reach the application and when they last did.
+                   # Admin-only, gated by the decorator like its neighbours.
+                   "Access": "access",
                    "DOI relationships": "doi_relationships",
                    "Endpoints": "stats_endpoints",
                    "Library versions": "system_versions",
