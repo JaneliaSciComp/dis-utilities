@@ -132,21 +132,27 @@ NAV = {"Home": "",
                                         "API rate limits": "ratelimit",
                                         "Data sources": "data_sources"},
                    "Controlled vocabularies": "cv",
-                   # Admin-only, like "cv" above. Both are hidden from anyone
-                   # who cannot open them by the navbar's own filter, so they
-                   # need no special casing here. Until now /authorizations was
-                   # reachable only from /profile, which meant the page that
-                   # grants access was the harder of the two to find.
-                   "Authorizations": "authorizations",
-                   # Same admin-only treatment. Listed because a service account
-                   # is otherwise invisible: unlike a person's token, nobody
-                   # whose profile page would show it ever signs in.
-                   "Service accounts": "service_accounts",
-                   # Who can reach the application and when they last did.
-                   # Admin-only, gated by the decorator like its neighbours.
-                   "Access": "access",
-                   # Which endpoints demand what, read from the live route table.
-                   "Endpoint restrictions": "restrictions",
+                   # The four access pages as one submenu. They answer the same
+                   # question from different sides - who may do what, who has
+                   # done it lately, and what each endpoint demands - and loose
+                   # in System they were four of fourteen siblings with nothing
+                   # saying they belonged together.
+                   #
+                   # All four are admin-only. Nothing here says so: the navbar
+                   # filter reads the decorator on each route, and _visible_nav
+                   # drops a submenu whose children are all hidden, so a
+                   # non-admin sees no empty heading.
+                   "Access control": {
+                       # Who holds which authorization, and how to grant one.
+                       "Authorizations": "authorizations",
+                       # A service account is otherwise invisible: unlike a
+                       # person's token, nobody whose profile would show it
+                       # ever signs in.
+                       "Service accounts": "service_accounts",
+                       # Who can reach the application, and when they last did.
+                       "Access": "access",
+                       # What each endpoint demands, read from the route table.
+                       "Endpoint restrictions": "restrictions"},
                    "DOI relationships": "doi_relationships",
                    "Endpoints": "stats_endpoints",
                    "Library versions": "system_versions",
