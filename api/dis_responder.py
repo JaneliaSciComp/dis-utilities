@@ -70,7 +70,7 @@ from dis_state import CVTERM, PROJECT
 # on the image. feat -> minor, everything else -> patch, in the same commit as
 # the change. Forgetting is survivable: ocbuild warns that the tag already
 # exists in the ImageStream rather than silently overwriting it.
-__version__ = "120.131.0"
+__version__ = "120.132.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -1082,6 +1082,84 @@ def access_events(key, kind=AUDIT_PERSON):
                   key=lambda e: e.get('timestamp') or '', reverse=True)
 
 
+# A year selection is one of: "All", a four-digit year, or "<year>-present".
+# Spelled out rather than "2024-" because a bare trailing hyphen is easy to lose
+# in a URL and, worse, "^2024-" and "^2024+" are both VALID regexes that quietly
+# match a single year - a page would show one year's results under a button
+# claiming a range. "-present" matches nothing anywhere it is not understood.
+YEAR_SELECTION = re.compile(r'^(?:All|(\d{4})(-present)?)$')
+
+
+def parse_year(year):
+    """ A year selection, validated
+
+        Keyword arguments:
+          year: the value from a path segment or query string
+        Returns:
+          (kind, year) where kind is 'all', 'single' or 'from'; anything
+          unrecognised is treated as 'all' rather than trusted
+    """
+    match = YEAR_SELECTION.match(str(year or 'All'))
+    if not match or not match.group(1):
+        return 'all', None
+    return ('from' if match.group(2) else 'single'), match.group(1)
+
+
+def year_clause(year):
+    """ A Mongo fragment for jrc_publishing_date, or None for all years
+
+        jrc_publishing_date is an ISO string, so a lexicographic $gte is a date
+        comparison. The old form interpolated the path segment straight into a
+        regex, so /dois/mytags/.* matched everything; parse_year refuses
+        anything that is not a year.
+        Keyword arguments:
+          year: year selection
+        Returns:
+          dict fragment, or None
+    """
+    kind, value = parse_year(year)
+    if kind == 'all':
+        return None
+    if kind == 'from':
+        # No upper bound, deliberately. One DOI is currently dated tomorrow -
+        # early-online papers carry a future publishing date - and capping at
+        # today would mean "2026 to present" excluded a paper that "2026",
+        # the target immediately to its left in the menu, includes.
+        return {"$gte": value}
+    return {"$regex": f"^{value}"}
+
+
+def year_includes(year, published):
+    """ Whether one publishing date falls inside a year selection
+
+        The in-Python counterpart to year_clause, so a page that filters rows
+        itself cannot disagree with one that filters in the query.
+        Keyword arguments:
+          year: year selection
+          published: a jrc_publishing_date value
+        Returns:
+          True if it is in range
+    """
+    kind, value = parse_year(year)
+    if kind == 'all':
+        return True
+    text = str(published or '')
+    return text[:4] >= value if kind == 'from' else text.startswith(value)
+
+
+def year_label(year):
+    """ A year selection as a button label
+        Keyword arguments:
+          year: year selection
+        Returns:
+          Display text
+    """
+    kind, value = parse_year(year)
+    if kind == 'all':
+        return 'All'
+    return f"{value} to present" if kind == 'from' else value
+
+
 def may_see_identifiers():
     """ Whether this request may be shown employee identifiers
         Keyword arguments:
@@ -1745,7 +1823,7 @@ def error_message(err):
 
 
 def year_pulldown(prefix, all_years=True, suffix='', start_year=2006, query=False,
-                  selected=None):
+                  selected=None, to_present=False):
     ''' Request-aware wrapper around dis_html.year_pulldown. When the caller
         doesn't pass an explicit `selected`, derive the currently-active year
         from the request URL (the path segment after the prefix, or ?year= in
@@ -1755,7 +1833,8 @@ def year_pulldown(prefix, all_years=True, suffix='', start_year=2006, query=Fals
         coupling. Endpoints whose default isn't "All"/current-year (e.g. the
         preprint pages) pass `selected` explicitly.
         Keyword arguments:
-          prefix, all_years, suffix, start_year, query: as dis_html.year_pulldown
+          prefix, all_years, suffix, start_year, query, to_present: as
+                    dis_html.year_pulldown
           selected: explicit value to show (skips the request-based derivation)
         Returns:
           Pulldown HTML
@@ -1775,7 +1854,11 @@ def year_pulldown(prefix, all_years=True, suffix='', start_year=2006, query=Fals
                 yr = path[len(pfx) + 1:].split('/')[0] or None
         if not yr:
             yr = 'All' if all_years else str(datetime.now().year)
-        selected = yr
+        # Derived from the URL, so it arrives raw: "2024-present" is what the
+        # link carries and "2024 to present" is what a reader should see. Only
+        # here - an explicit `selected` is passed through untouched, and the
+        # callers that supply one have already labelled it.
+        selected = year_label(yr) if to_present else yr
     # Outside the derivation branch on purpose: a caller that knows its own
     # effective year wants to pass it as-is and still get the house label for
     # "All". Mapping only the derived value is what made every such caller
@@ -1783,7 +1866,8 @@ def year_pulldown(prefix, all_years=True, suffix='', start_year=2006, query=Fals
     # button that disagreed with their own heading.
     selected = "(all years)" if selected == 'All' else selected
     return _year_pulldown(prefix, all_years=all_years, suffix=suffix,
-                          start_year=start_year, query=query, selected=selected)
+                          start_year=start_year, query=query, selected=selected,
+                          to_present=to_present)
 
 
 def tag_pulldown(prefix, year='All', selected=None):
@@ -9819,8 +9903,12 @@ def dois_mytags(year='All', show='full'):
             if tag and tag not in tags:
                 tags.append(tag)
     payload = {"jrc_tag.name": {"$in": tags}}
-    if year != 'All':
-        payload['jrc_publishing_date'] = {"$regex": "^"+ year}
+    # Shared with /mypapers so the two cannot disagree, and validated: the old
+    # form interpolated the path segment into a regex, so /dois/mytags/.*
+    # matched every DOI.
+    clause = year_clause(year)
+    if clause:
+        payload['jrc_publishing_date'] = clause
     try:
         coll = DB['dis'].dois
         rows = coll.find(payload).collation({"locale": "en"}).sort("jrc_publishing_date", -1)
@@ -9845,10 +9933,11 @@ def dois_mytags(year='All', show='full'):
     ident += "<tr><td>Also see:</td><td><a href='/mypapers'>" \
              + "Publications credited to me</a></td></tr>"
     ident += "</table><br>"
-    htmlp = year_pulldown("dois/mytags", suffix=f"/{show}" if show != 'full' else '') + "<br>"
+    htmlp = year_pulldown("dois/mytags", suffix=f"/{show}" if show != 'full' else '',
+                          selected=year_label(year), to_present=True) + "<br>"
     title = "DOIs for my affiliations"
-    if year != 'All':
-        title += f" ({year})"
+    if parse_year(year)[0] != 'all':
+        title += f" ({year_label(year)})"
     if not tags:
         # Distinct from "no DOIs found": 367 of 980 people with an ORCID have no
         # group, affiliations or managed teams recorded, and for them the query can
@@ -21377,7 +21466,10 @@ def my_papers_body(orc, show, year='All'):
     # describing a set the reader can no longer see. Year still filters server-side:
     # it drives the pulldown, not a row class.
     rows = [row for row in seen.values()
-            if year == 'All' or str(row.get('jrc_publishing_date') or '').startswith(year)]
+            # year_includes, not startswith: the same rule /dois/mytags
+            # applies in its query, so a "2024-present" selection cannot mean
+            # one thing here and another there.
+            if year_includes(year, row.get('jrc_publishing_date'))]
     rows.sort(key=DL.get_publishing_date, reverse=True)
     credited = sum(1 for row in rows if is_credited(row, eids))
     def mark_fn(row):
@@ -21399,11 +21491,17 @@ def my_papers_body(orc, show, year='All'):
              + "<a href='/mymetrics'>My publication metrics</a></td></tr>"
     ident += "</table>"
     if not rows:
-        empty = ("We have no publications on file for you in that year."
-                 if year != 'All'
+        # "in that year" is wrong for a range, and a reader who picked
+        # "2020 to present" and is told nothing was found "in that year"
+        # reasonably wonders whether the range was honoured at all.
+        period = ('in that year' if parse_year(year)[0] == 'single'
+                  else 'in that period')
+        empty = (f"We have no publications on file for you {period}."
+                 if parse_year(year)[0] != 'all'
                  else "We have no publications on file for you yet. If that looks wrong, "
                       f"email the Library at {LIBRARY}.")
-        return ident + year_pulldown(f"mypapers/{show}", query=True) \
+        return ident + year_pulldown(f"mypapers/{show}", query=True,
+                                     selected=year_label(year), to_present=True) \
                + "<br><br>" + render_warning(empty, 'warning')
     cards = [("Publications", f"<span id='totalrows'>{len(rows):,}</span>"),
              ("Credited to you at Janelia",
@@ -21450,7 +21548,8 @@ def my_papers_body(orc, show, year='All'):
                                      extra_fn=lambda row: [evidence_cell(match_evidence(row, orc),
                                                                          oid, row['doi'])])
     return ident + stat_cards(cards, div_id='mypapers-stats') + note \
-           + year_pulldown(f"mypapers/{show}", query=True) + "<br><br>" \
+           + year_pulldown(f"mypapers/{show}", query=True,
+                           selected=year_label(year), to_present=True) + "<br><br>" \
            + cbutton + table
 
 
