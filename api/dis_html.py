@@ -623,7 +623,7 @@ def dloop(row, keys, sep="\t"):
 
 
 def year_pulldown(prefix, all_years=True, suffix = '', start_year=2006, query=False,
-                  selected=None):
+                  selected=None, to_present=False):
     ''' Generate a year pulldown
         Keyword arguments:
           prefix: navigation prefix
@@ -636,6 +636,14 @@ def year_pulldown(prefix, all_years=True, suffix = '', start_year=2006, query=Fa
           selected: if given, the currently-selected value is shown on a widened
                     button (the value in bright white), instead of the generic
                     "Select publishing year" label
+          to_present: if True, each year carries a second, narrower target
+                    linking to "<year>-present" as well as the year alone.
+                    OPT-IN, and deliberately so: the value reaches whatever the
+                    caller does with it, and a page that has not been taught to
+                    read "-present" would otherwise receive a selection it
+                    cannot honour. The year itself stays the wide, primary
+                    target, so a reader who ignores the second column gets
+                    exactly the behaviour they had before.
         Returns:
           Pulldown HTML
     '''
@@ -667,16 +675,29 @@ def year_pulldown(prefix, all_years=True, suffix = '', start_year=2006, query=Fa
     html = f"<div class='{wrapper_class}'><button type='button' class='{btn_class}'" \
            + f"{btn_style} data-toggle='dropdown' aria-haspopup='true' aria-expanded='false'>" \
            + f"{btn_label}</button><div class='dropdown-menu'>"
-    for year in years:
+    def _url(value):
         if query:
-            url = f"/{prefix}" if year == 'All' else f"/{prefix}?year={year}"
-        else:
-            url = f"/{prefix}/{year}{suffix}"
+            return f"/{prefix}" if value == 'All' else f"/{prefix}?year={value}"
+        return f"/{prefix}/{value}{suffix}"
+
+    if to_present:
+        # Column headings, so the second target is explained once rather than
+        # guessed at twenty times.
+        html += ("<div class='yearcols'><span class='yearcol-a'>that year only</span>"
+                 "<span class='yearcol-b'>that year to present</span></div>")
+    for year in years:
         # escape(): prefix/suffix are supplied by the caller and routinely carry
         # a path segment from the request (an org, a subject, a source), so this
         # href is attacker-reachable. The attribute is single-quoted and
         # html.escape() escapes ' as well as & < > ", which is what closes it.
-        html += f"<a class='dropdown-item' href='{escape(url)}'>{escape(str(year))}</a>"
+        if not to_present or year == 'All':
+            html += (f"<a class='dropdown-item' href='{escape(_url(year))}'>"
+                     f"{escape(str(year))}</a>")
+            continue
+        html += (f"<div class='yearrow'><a class='dropdown-item' "
+                 f"href='{escape(_url(year))}'>{escape(str(year))}</a>"
+                 f"<a class='yearlater' href='{escape(_url(str(year) + '-present'))}'>"
+                 "to present</a></div>")
     html += "</div></div>"
     return html
 
