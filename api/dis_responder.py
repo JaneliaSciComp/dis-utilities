@@ -70,7 +70,7 @@ from dis_state import CVTERM, PROJECT
 # on the image. feat -> minor, everything else -> patch, in the same commit as
 # the change. Forgetting is survivable: ocbuild warns that the tag already
 # exists in the ImageStream rather than silently overwriting it.
-__version__ = "120.132.0"
+__version__ = "120.133.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -21221,8 +21221,10 @@ def show_subscription(sid):
     color = 'yellowgreen' if row['access'] == 'Subscription' else 'lime'
     html = ''
     html += f"<table class='proplist'><tr><td>Publisher</td><td>{row['publisher']}</td></tr>" \
-            + f"<tr><td>Type</td><td>{row['type']}</td></tr>" \
-            + f"<tr><td>Access</td><td><span style='color: {color}'>{row['access']}</span>"
+            + f"<tr><td>Type</td><td>{row['type']}</td></tr>"
+    if row.get('journal_type'):
+        html += f"<tr><td>Journal type</td><td>{escape(str(row['journal_type']))}</td></tr>"
+    html += f"<tr><td>Access</td><td><span style='color: {color}'>{row['access']}</span>"
     if row.get('oa_status'):
         html += f"<tr><td>Open Access status</td><td><span class='oa_{row['oa_status']}'" \
                 + f"style='font-weight: bold;'>{row['oa_status'].capitalize()}</span>"
