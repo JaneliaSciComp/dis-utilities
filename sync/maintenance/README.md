@@ -53,6 +53,40 @@ necessity:
 
     ./venv/bin/python backfill_openalex_impact.py --all --write
 
+### The subscription collection
+
+| Name                      | Description                                                       |
+| ------------------------- | ----------------------------------------------------------------- |
+| airtable_journal_types.py | Set `journal_type` on subscription journals from the Airtable base |
+
+`airtable_journal_types.py` reads the Publications table, resolves each
+publication's publisher and journal, and checks that every Publisher/Journal
+pair has exactly one Journal Type (a pair with two is reported as an error and
+the program exits non-zero; publications with a blank type are ignored). It
+then sets `journal_type` (hybrid, open access, subscription, transformative,
+preprint server) on each `subscription` record of type `Journal` whose title
+matches an Airtable journal.
+
+Matching is on the title alone, ignoring case, accents and punctuation. The
+publisher is deliberately not compared: Airtable's "Wiley" is "John Wiley &
+Sons, Ltd" in `subscription`, and "Elsevier BV" is "Cell Press" or "Academic
+Press". A title Airtable lists under more than one type is skipped and
+reported. `journal_type` is the HHMI payment-policy category and is unrelated
+to `oa_status`, which `journals/bin/add_oa_status.py` sets by hand from an
+access label (gold, hybrid, ...).
+
+It reads `AIRTABLE_BASEID` and `AIRTABLE_TOKEN` (a personal access token with
+the `data.records:read` scope) from the environment. They are never printed or
+logged.
+
+    ./venv/bin/python airtable_journal_types.py          # show what would change
+    ./venv/bin/python airtable_journal_types.py --write
+
+It is idempotent. A journal that later disappears from Airtable keeps its
+last `journal_type`; nothing is ever removed. The Publications fetch is about
+41,000 records and takes two to three minutes (Airtable allows five requests
+per second).
+
 ### Why the cohort is stored
 
 An FWCI of 1.56 means nothing without knowing 1.56x *what*. OpenAlex normalizes
