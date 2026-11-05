@@ -109,7 +109,7 @@ from tqdm import tqdm
 import jrc_common.jrc_common as JRC
 import jrc_email.jrc_email as JE
 
-__version__ = '1.1.0'
+__version__ = '1.1.1'
 
 # pylint: disable=broad-exception-caught,logging-fstring-interpolation
 
@@ -215,6 +215,33 @@ def get_janelia_authors(auth):
     return raw, authors
 
 
+def fetch_batch(url, params, attempts=5):
+    """ Fetch and parse one efetch batch, retrying transient failures. NCBI sometimes
+        drops a chunked response mid-stream ("Response ended prematurely"), times
+        out, or returns a 429/5xx; these usually succeed on a retry.
+        Keyword arguments:
+          url: efetch URL
+          params: request parameters
+          attempts: maximum number of tries
+        Returns:
+          Parsed XML root element
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            response = requests.get(url, params=params, timeout=60)
+            if response.status_code == 429 or response.status_code >= 500:
+                raise requests.exceptions.RequestException(f"HTTP {response.status_code}")
+            response.raise_for_status()
+            return ET.fromstring(response.content)
+        except (requests.exceptions.RequestException, ET.ParseError) as err:
+            if attempt == attempts:
+                raise
+            delay = 2 ** attempt
+            LOGGER.warning(f"efetch retstart={params.get('retstart')} failed "
+                           f"(attempt {attempt}/{attempts}): {err}; retrying in {delay}s")
+            time.sleep(delay)
+
+
 def search_janelia_dois(
     max_results: Optional[int] = None,
     email: Optional[str] = None,
@@ -266,9 +293,7 @@ def search_janelia_dois(
                         "retmode": "xml"}
         if start > 0:
             time.sleep(0.1 if api_key else 0.34)  # 10/s with a key, ~3/s without
-        fetch_response = requests.get(f"{base_url}efetch.fcgi", params=fetch_params, timeout=30)
-        fetch_response.raise_for_status()
-        root = ET.fromstring(fetch_response.content)
+        root = fetch_batch(f"{base_url}efetch.fcgi", fetch_params)
         for article in root.findall(".//PubmedArticle"):
             pmid = article.findtext(".//PMID")
             # The DOI must come from PubmedData/ArticleIdList (not a DOI buried in a
