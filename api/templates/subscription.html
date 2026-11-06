@@ -34,11 +34,16 @@ $(document).on('keypress', 'input', function(e) {
     window.location = url;
   }
 </script>
+{% if chartscript %}
+<script src="https://cdn.bokeh.org/bokeh/release/bokeh-3.5.0.min.js"></script>
+{% endif %}
 {% endblock %}
 
 {% block content %}
 <h2>{{ title }}</h2>
 {{ html|safe }}
+{{ chartdiv|safe }}
+{{ chartscript|safe }}
 <br><br>
 <form>
 <h5>Find subscription:</h5>

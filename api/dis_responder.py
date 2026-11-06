@@ -70,7 +70,7 @@ from dis_state import CVTERM, PROJECT
 # on the image. feat -> minor, everything else -> patch, in the same commit as
 # the change. Forgetting is survivable: ocbuild warns that the tag already
 # exists in the ImageStream rather than silently overwriting it.
-__version__ = "120.134.0"
+__version__ = "120.135.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -20920,6 +20920,7 @@ def show_subscription_costs(provider=None):
             else f"Subscription costs (2011-{datetime.now().year})"
     return make_response(render_template('bokeh.html', urlroot=request.url_root,
                                          title=title, html=html,
+                                         chartscript=chartscript, chartdiv=chartdiv,
                                          navbar=generate_navbar('Subscriptions')))
 
 
@@ -20941,10 +20942,13 @@ def show_subscriptions(jtype):
     jlist = {}
     publist = {}
     provlist = {}
+    jtypes = collections.Counter()
     for row in rows:
         jlist[row['title']] = True
         publist[row['publisher']] = True
         provlist[row['provider']] = True
+        # journal_type (access model) is set from Airtable by airtable_journal_types.py
+        jtypes[row.get('journal_type') or ''] += 1
         jour = f"<a href='{row['urls'][0]}'>{row['title']}</a>" if row.get('urls') else row['title']
         jour = f"<a href='/subscription/{str(row['_id'])}'>{row['title']}</a>"
         trows.append([safe(jour), row['publisher'], row['provider']])
@@ -20952,9 +20956,27 @@ def show_subscriptions(jtype):
     html = render_table(['Title', 'Publisher', 'Provider'], trows,
                         table_id='journals', css='tablesorter standard-scroll')
     title = f"{jtype} subscriptions"
-    html = stat_cards([("Providers", f"{len(provlist):,}"),
-                       ("Publishers", f"{len(publist):,}"),
-                       ("Titles", f"{len(jlist):,}")], div_id='subtype-stats') \
+    cards = [("Providers", f"{len(provlist):,}"),
+             ("Publishers", f"{len(publist):,}"),
+             ("Titles", f"{len(jlist):,}")]
+    chartscript = chartdiv = ''
+    if jtype == 'Journal':
+        unclassified = jtypes.pop('', 0)
+        cards.append(("Unclassified access model", f"{unclassified:,}"))
+        if jtypes:
+            # Only the classified journals are charted: the unclassified ones are
+            # most of the collection and would swamp every access model
+            data = {}
+            nav = {}
+            for jval, count in jtypes.items():
+                label = jval.capitalize()
+                data[label] = count
+                nav[label] = f"/subscriptionlist/{quote(jval, safe='')}/journal_type/Journal"
+            chartscript, chartdiv = DP.hbar_chart(
+                data, f"Journal access model ({sum(data.values()):,} classified journals)",
+                value_label="Journals", width=520, height=260, value_format="0,0",
+                show_values=True, nav=nav, label_font_size="10pt", value_font_size="10pt")
+    html = stat_cards(cards, div_id='subtype-stats') \
            + create_downloadable(jtype, ['Title', 'Publisher', 'Provider'], fileoutput)
     titles = '<option>' + '</option><option>'.join(sorted(jlist.keys())) + '</option>'
     pubs = '<option>' + '</option><option>'.join(sorted(publist.keys())) + '</option>'
