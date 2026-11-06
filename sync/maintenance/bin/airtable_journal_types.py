@@ -26,19 +26,30 @@
     Without --write nothing is changed: the records that would be changed are
     listed, using read-only database credentials.
 
+    The changes are also written to a JSON file (by default
+    subscription_journal_type_changes.json in the current directory; see --out): a
+    list with one entry per MongoDB update, holding exactly what is sent to the
+    database - the collection, the filter and the update document - plus a "note"
+    (title, provider, and the journal_type it had) that is for the reader only.
+    _id values are in MongoDB extended JSON ({"$oid": ...}). The file is written with
+    or without --write (with --write it records what was changed). If nothing needs
+    changing, any file left by a previous run is removed so that it is never mistaken
+    for the current result.
+
     Credentials come from the environment and are never printed or logged:
       AIRTABLE_BASEID  ID of the base (appXXXXXXXXXXXXXX)
       AIRTABLE_TOKEN   personal access token (data.records:read scope)
 
     Usage:
-        python airtable_journal_types.py [--tsv] [--write] [--manifold dev|prod]
-                                         [--verbose] [--debug]
+        python airtable_journal_types.py [--tsv] [--write] [--out FILE]
+                                         [--manifold dev|prod] [--verbose] [--debug]
 """
 
-__version__ = '1.0.0'
+__version__ = '1.1.0'
 
 import argparse
 import collections
+import json
 from operator import attrgetter
 import os
 import re
@@ -46,6 +57,7 @@ import sys
 import time
 import unicodedata
 from urllib.parse import quote
+from bson import json_util
 from pymongo import UpdateOne
 import requests
 from tqdm import tqdm
@@ -64,6 +76,7 @@ MAX_TRIES = 5
 # Seconds to wait before retrying a server error or a dropped connection (doubles each try)
 RETRY_WAIT = 5
 NONE = "(none)"
+DEFAULT_OUT = "subscription_journal_type_changes.json"
 # Database
 DB = {}
 # Counters
@@ -318,6 +331,31 @@ def connect():
         terminate_program(err)
 
 
+def write_changes(changes):
+    ''' Write the MongoDB updates to a JSON file. When there are none, remove any
+        file left by an earlier run.
+        Keyword arguments:
+          changes: list of update dicts (collection, filter, update, note)
+        Returns:
+          None
+    '''
+    if not changes:
+        try:
+            os.remove(ARG.OUT)
+            LOGGER.info(f"Removed stale {ARG.OUT}")
+        except FileNotFoundError:
+            pass
+        except OSError as err:
+            LOGGER.warning(f"Could not remove stale {ARG.OUT}: {err}")
+        return
+    try:
+        with open(ARG.OUT, 'w', encoding='utf-8') as outstream:
+            outstream.write(json_util.dumps(changes, indent=2, ensure_ascii=False) + '\n')
+    except OSError as err:
+        terminate_program(f"Could not write {ARG.OUT}: {err}")
+    print(f"\nWrote {len(changes):,} update(s) to {ARG.OUT}")
+
+
 def update_subscriptions(pairs):
     ''' Add or update journal_type on matching subscription records
         Keyword arguments:
@@ -330,6 +368,7 @@ def update_subscriptions(pairs):
     for title in sorted(ambiguous):
         LOGGER.warning(f"Skipping '{title}': Airtable lists it under more than one type")
     ops = []
+    changes = []
     try:
         rows = list(DB['dis'].subscription.find({"type": "Journal"},
                                                 {"title": 1, "provider": 1, "journal_type": 1}))
@@ -356,7 +395,13 @@ def update_subscriptions(pairs):
         action = f"Updating (was '{existing}')" if existing else "Inserting"
         print(f"{'' if ARG.WRITE else 'Would be: '}{action} journal_type='{jtype}' for "
               f"{rec['title']} [{rec.get('provider')}]")
-        ops.append(UpdateOne({'_id': rec['_id']}, {'$set': {'journal_type': jtype}}))
+        filt, update = {'_id': rec['_id']}, {'$set': {'journal_type': jtype}}
+        ops.append(UpdateOne(filt, update))
+        changes.append({"collection": "subscription", "operation": "update_one",
+                        "filter": filt, "update": update,
+                        "note": {"title": rec['title'], "provider": rec.get('provider'),
+                                 "was": existing}})
+    write_changes(changes)
     if ARG.WRITE and ops:
         try:
             result = DB['dis'].subscription.bulk_write(ops, ordered=False)
@@ -408,6 +453,8 @@ if __name__ == "__main__":
     PARSER.add_argument('--write', dest='WRITE', action='store_true',
                         default=False, help='Flag, write journal_type to the subscription '
                         'collection (otherwise only show what would change)')
+    PARSER.add_argument('--out', dest='OUT', action='store', default=DEFAULT_OUT,
+                        help=f'JSON file for the MongoDB updates (default: {DEFAULT_OUT})')
     PARSER.add_argument('--manifold', dest='MANIFOLD', action='store',
                         default='prod', choices=['dev', 'prod'],
                         help='MongoDB manifold (dev, prod)')
