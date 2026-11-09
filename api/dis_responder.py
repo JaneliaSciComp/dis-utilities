@@ -70,7 +70,7 @@ from dis_state import CVTERM, PROJECT
 # on the image. feat -> minor, everything else -> patch, in the same commit as
 # the change. Forgetting is survivable: ocbuild warns that the tag already
 # exists in the ImageStream rather than silently overwriting it.
-__version__ = "120.133.0"
+__version__ = "120.135.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -5577,6 +5577,22 @@ def _register_openapi_components(spec):
             "rest": {"$ref": "#/components/schemas/Rest"},
             "organizations": {"type": "array", "items": {"type": "string"},
                               "description": "Organization (supervisory-org) names in the group"}}})
+    spec.components.schema("OrganizationDoi", {
+        "type": "object",
+        "properties": {
+            "doi": {"type": "string"},
+            "jrc_publishing_date": {"type": "string", "nullable": True},
+            "tags": {"type": "array", "items": {"type": "object", "additionalProperties": True},
+                     "description": "All jrc_tag entries on the DOI (name, code, type)"},
+            "type": {"type": "string", "nullable": True},
+            "subtype": {"type": "string", "nullable": True},
+            "jrc_fulltext_url": {"type": "string", "nullable": True}}})
+    spec.components.schema("OrganizationDoiList", {
+        "type": "object",
+        "properties": {
+            "rest": {"$ref": "#/components/schemas/Rest"},
+            "data": {"type": "array",
+                     "items": {"$ref": "#/components/schemas/OrganizationDoi"}}}})
     spec.components.schema("PubmedRecordResult", {
         "type": "object",
         "properties": {
@@ -7272,6 +7288,83 @@ def show_organizations(grp):
         data.append(member)
     result['organizations'] = data
     result['rest']['row_count'] = len(data)
+    return generate_response(result)
+
+
+@app.route('/organization/dois/<path:org>')
+def show_organization_dois(org):
+    '''
+    Return the publications for an organization
+    Return one summary row per DOI tagged with an organization: the DOI,
+    publishing date, tags, type, subtype and full-text URL. The name may be a
+    supervisory organization (such as "Scientific Computing Software") or an
+    organization group (such as "Project Teams"), in which case the DOIs tagged
+    with any member are returned, each once.
+    ---
+    tags:
+      - Organizations
+    parameters:
+      - in: path
+        name: org
+        required: true
+        schema:
+          type: string
+          example: Scientific Computing Software
+        description: Supervisory organization name or organization group name
+    responses:
+      '200':
+        description: One summary row per DOI, oldest first
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrganizationDoiList'
+      '404':
+        description: Neither an organization nor a group by that name
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
+      '500':
+        description: MongoDB error
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Error'
+    '''
+    org = org.strip('/')
+    result = initialize_result()
+    try:
+        group = DB['dis'].org_group.find_one({"group": org})
+        if group:
+            names = list(group['members'])
+        elif DB['dis'].suporg.find_one({"name": org}, {"_id": 1}):
+            names = [org]
+        else:
+            raise InvalidUsage(f"{org} is not an organization or organization group", 404)
+        rows = DB['dis'].dois.find(
+            {"jrc_tag.name": {"$in": names}},
+            {"_id": 0, "doi": 1, "jrc_publishing_date": 1, "jrc_tag": 1, "type": 1,
+             "subtype": 1, "types": 1, "jrc_obtained_from": 1, "jrc_fulltext_url": 1}
+        ).sort("jrc_publishing_date", 1)
+        data = []
+        for row in rows:
+            dtype = row.get('type')
+            # DataCite records carry the type under types.resourceTypeGeneral
+            if row.get('jrc_obtained_from') == 'DataCite':
+                dtype = (row.get('types') or {}).get('resourceTypeGeneral', dtype)
+            data.append({"doi": row['doi'],
+                         "jrc_publishing_date": row.get('jrc_publishing_date'),
+                         "tags": [t for t in row.get('jrc_tag') or [] if isinstance(t, dict)],
+                         "type": dtype,
+                         "subtype": row.get('subtype'),
+                         "jrc_fulltext_url": row.get('jrc_fulltext_url')})
+    except InvalidUsage:
+        raise
+    except Exception as err:
+        raise InvalidUsage(str(err), 500) from err
+    result['rest']['source'] = 'mongo'
+    result['rest']['row_count'] = len(data)
+    result['data'] = data
     return generate_response(result)
 
 # ******************************************************************************
@@ -20849,10 +20942,13 @@ def show_subscriptions(jtype):
     jlist = {}
     publist = {}
     provlist = {}
+    jtypes = collections.Counter()
     for row in rows:
         jlist[row['title']] = True
         publist[row['publisher']] = True
         provlist[row['provider']] = True
+        # journal_type (access model) is set from Airtable by airtable_journal_types.py
+        jtypes[row.get('journal_type') or ''] += 1
         jour = f"<a href='{row['urls'][0]}'>{row['title']}</a>" if row.get('urls') else row['title']
         jour = f"<a href='/subscription/{str(row['_id'])}'>{row['title']}</a>"
         trows.append([safe(jour), row['publisher'], row['provider']])
@@ -20860,9 +20956,27 @@ def show_subscriptions(jtype):
     html = render_table(['Title', 'Publisher', 'Provider'], trows,
                         table_id='journals', css='tablesorter standard-scroll')
     title = f"{jtype} subscriptions"
-    html = stat_cards([("Providers", f"{len(provlist):,}"),
-                       ("Publishers", f"{len(publist):,}"),
-                       ("Titles", f"{len(jlist):,}")], div_id='subtype-stats') \
+    cards = [("Providers", f"{len(provlist):,}"),
+             ("Publishers", f"{len(publist):,}"),
+             ("Titles", f"{len(jlist):,}")]
+    chartscript = chartdiv = ''
+    if jtype == 'Journal':
+        unclassified = jtypes.pop('', 0)
+        cards.append(("Unclassified access model", f"{unclassified:,}"))
+        if jtypes:
+            # Only the classified journals are charted: the unclassified ones are
+            # most of the collection and would swamp every access model
+            data = {}
+            nav = {}
+            for jval, count in jtypes.items():
+                label = jval.capitalize()
+                data[label] = count
+                nav[label] = f"/subscriptionlist/{quote(jval, safe='')}/journal_type/Journal"
+            chartscript, chartdiv = DP.hbar_chart(
+                data, f"Journal access model ({sum(data.values()):,} classified journals)",
+                value_label="Journals", width=520, height=260, value_format="0,0",
+                show_values=True, nav=nav, label_font_size="10pt", value_font_size="10pt")
+    html = stat_cards(cards, div_id='subtype-stats') \
            + create_downloadable(jtype, ['Title', 'Publisher', 'Provider'], fileoutput)
     titles = '<option>' + '</option><option>'.join(sorted(jlist.keys())) + '</option>'
     pubs = '<option>' + '</option><option>'.join(sorted(publist.keys())) + '</option>'
@@ -20870,6 +20984,7 @@ def show_subscriptions(jtype):
     return make_response(render_template('subscription.html', urlroot=request.url_root,
                                          title=title, titles=titles, pubs=pubs,
                                          html=html, sub=jtype,
+                                         chartscript=chartscript, chartdiv=chartdiv,
                                          navbar=generate_navbar('Subscriptions')))
 
 
