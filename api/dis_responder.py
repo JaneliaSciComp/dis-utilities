@@ -70,7 +70,7 @@ from dis_state import CVTERM, PROJECT
 # on the image. feat -> minor, everything else -> patch, in the same commit as
 # the change. Forgetting is survivable: ocbuild warns that the tag already
 # exists in the ImageStream rather than silently overwriting it.
-__version__ = "120.135.0"
+__version__ = "120.136.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -4312,6 +4312,18 @@ def get_preprint_stats(rows):
                     stat[row['_id']['year']][sub] = 0
             stat[row['_id']['year']]['journal'] += row['count']
     return stat
+
+
+# Resource-type labels shared by /dois_metrics and /external_dois_metrics: Crossref `type` and
+# DataCite `types.resourceTypeGeneral` values folded into one vocabulary, so the two pages
+# name a type the same way. A value with no entry is shown as it is stored.
+DOI_TYPE_LABELS = {"dataset": "Dataset", "journal-article": "JournalArticle",
+                   "posted-content": "Preprint", "book": "BookChapter",
+                   "book-chapter": "BookChapter", "proceedings-article": "ConferenceProceeding",
+                   "other": "Other", "ComputationalNotebook": "Software",
+                   "DataPaper": "JournalArticle", "Image": "Audiovisual",
+                   "component": "BiologicalComponent", "grant": "Grant",
+                   "peer-review": "PeerReview"}
 
 
 def get_source_data(year, tag=None):
@@ -11110,13 +11122,7 @@ def show_dois_metrics(year='All'):
                            f"overflow-x:auto;'>{src_table}</div>",
                            f"<div style='flex:0 0 auto;'>{d1}{d2}</div>")
     # ----- By type tab (resource-type mix; merges Crossref type + DataCite general) -----
-    type_merge = {"dataset": "Dataset", "journal-article": "JournalArticle",
-                  "posted-content": "Preprint", "book": "BookChapter",
-                  "book-chapter": "BookChapter", "proceedings-article": "ConferenceProceeding",
-                  "other": "Other", "ComputationalNotebook": "Software",
-                  "DataPaper": "JournalArticle", "Image": "Audiovisual",
-                  "component": "BiologicalComponent", "grant": "Grant",
-                  "peer-review": "PeerReview"}
+    type_merge = DOI_TYPE_LABELS
     tdata = {}
     try:
         for row in coll.aggregate([{"$match": {**yr, "jrc_obtained_from": "Crossref"}},
@@ -11253,7 +11259,8 @@ def show_dois_metrics(year='All'):
             + tab_pane('byyear', byyear_body, active_tab == 'byyear')
             + tab_pane('coverage', coverage_body, active_tab == 'coverage')
             + '</div>')
-    seealso = see_also([("Yearly report", "/dois_yearly"),
+    seealso = see_also([("External DOI metrics", "/external_dois_metrics"),
+                        ("Yearly report", "/dois_yearly"),
                         ("Publishers", "/dois_publisher"),
                         ("Licenses", "/dois_license"),
                         ("Citations", "/citation_metrics/crossref"),
@@ -11262,6 +11269,282 @@ def show_dois_metrics(year='All'):
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=f"DOI metrics{ysfx}", html=html, bokeh=True,
+                                         navbar=generate_navbar('DOIs')))
+
+
+def _external_type_label(stored):
+    ''' The label /external_dois_metrics counts a stored external type under (By type tab).
+        A missing, null or empty type is 'None'; a type with no entry keeps its own value.
+        Keyword arguments:
+          stored: type field value
+        Returns:
+          Label
+    '''
+    return DOI_TYPE_LABELS.get(stored or 'None', stored or 'None')
+
+
+def _external_year_bucket(stored):
+    ''' The By year stack a stored external type falls in: JournalArticle, Preprint or Other.
+        Built on _external_type_label so the two tabs agree on every record.
+        Keyword arguments:
+          stored: type field value
+        Returns:
+          Bucket name
+    '''
+    label = _external_type_label(stored)
+    return label if label in ('JournalArticle', 'Preprint') else 'Other'
+
+
+def _external_scope(year):
+    ''' Mongo match for the external_dois page scope.
+        Keyword arguments:
+          year: publishing year, or 'All'
+        Returns:
+          Match document
+    '''
+    return {"jrc_publishing_date": {"$regex": "^" + year}} if year != 'All' else {}
+
+
+@app.route('/external_dois_metrics/<string:year>')
+@app.route('/external_dois_metrics')
+def show_external_dois_metrics(year='All'):
+    ''' External DOI metrics - the counterpart of /dois_metrics for the external_dois
+        collection: papers by other authors whose acknowledgements mention Janelia.
+        These records are thinner than internal ones (no registrar, tags, authors,
+        citations or license), so the tabs differ: Sources (where the acknowledgement
+        text was found, and the top journals), By type (the same labels as
+        /dois_metrics), By year (all years) and Acknowledgements (tagging and
+        metadata completeness). A year pulldown scopes every tab but By year.
+        Keyword arguments:
+          year: publishing year to scope to, or 'All'
+        Returns:
+          Response
+    '''
+    if year != 'All' and not re.fullmatch(r"\d{4}", year):
+        raise InvalidUsage("year must be four digits or All", 400)
+    coll = DB['dis'].external_dois
+    yr = _external_scope(year)
+    ysfx = f" ({year})" if year != 'All' else ""
+    ysfx_q = f"?year={year}" if year != 'All' else ""
+    scope_stage = [{"$match": dict(yr)}] if yr else []
+
+    def pctof(num, den):
+        return f"{num / den * 100:.0f}%" if den else "0%"
+
+    def drill(kind, value, count):
+        link = f"/external_doisui/{kind}/{quote(str(value), safe='')}{ysfx_q}"
+        return safe(f"<a href='{link}'>{count:,}</a>")
+    try:
+        total = coll.count_documents(dict(yr))
+        tagged = coll.count_documents({**yr, "jrc_acknowledge.0": {"$exists": True}})
+        journals = len(coll.distinct("jrc_journal", dict(yr)))
+    except Exception as err:
+        return render_error("Could not count external DOIs", err)
+    header = ("<h5 style='margin:14px 0 6px 0;'>Overview</h5>"
+              + stat_cards([("External DOIs", f"{total:,}"),
+                            ("Journals", f"{journals:,}"),
+                            ("With acknowledgement tags", f"{tagged:,} ({pctof(tagged, total)})")],
+                           div_id='ext-doi-stats')
+              + year_pulldown('external_dois_metrics'))
+    charts = ""
+    # ----- Sources tab: where the acknowledgement text came from, then top journals -----
+    try:
+        src = {(row['_id'] or '(not recorded)'): row['count'] for row in coll.aggregate(
+            scope_stage + [{"$group": {"_id": "$jrc_ack_source", "count": {"$sum": 1}}},
+                           {"$sort": {"count": -1}}])}
+        jrows = list(coll.aggregate(
+            scope_stage + [{"$group": {"_id": "$jrc_journal", "count": {"$sum": 1}}},
+                           {"$sort": {"count": -1, "_id": 1}}, {"$limit": 15}]))
+    except Exception as err:
+        return render_error("Could not get external DOI sources", err)
+    sbody = "<div>No external DOIs.</div>"
+    if src:
+        srows = [[name, drill('source', name, cnt)] for name, cnt in src.items()]
+        stable = render_table(['Acknowledgement source', 'DOIs'], srows, table_id='extsrc',
+                              css='tablesorter numberlast-scroll',
+                              footer=[fcell('Total'), fcell(f"{sum(src.values()):,}")])
+        s1, d1 = DP.pie_chart(src, "External DOIs by acknowledgement source", "source", width=450,
+                              colors=DP.get_colors_by_count(len(src)))
+        charts += s1
+        jdata = {(row['_id'] or '(none)'): row['count'] for row in jrows}
+        jtable = render_table(['Journal', 'DOIs'],
+                              [[name, drill('journal', name, cnt)] for name, cnt in jdata.items()],
+                              table_id='extjournal', css='tablesorter numberlast-scroll')
+        sbody = ("<div style='color:#a8c4e0;font-size:0.82em;margin-bottom:8px;'>"
+                 "The acknowledgement source is where the text was read from, not who "
+                 "registered the DOI: an external record carries no registrar.</div>"
+                 + two_col(f"<div style='flex:1 1 440px;min-width:320px;'>{stable}</div>",
+                           f"<div style='flex:0 0 auto;'>{d1}</div>")
+                 + "<h5 style='margin:18px 0 6px 0;'>Top journals</h5>"
+                 + f"<div style='max-width:560px;'>{jtable}</div>")
+    # ----- By type tab: the same labels as /dois_metrics -----
+    tdata = {}
+    try:
+        for row in coll.aggregate(scope_stage
+                                  + [{"$group": {"_id": "$type", "count": {"$sum": 1}}}]):
+            lab = _external_type_label(row['_id'])
+            tdata[lab] = tdata.get(lab, 0) + row['count']
+    except Exception as err:
+        return render_error("Could not get external DOI types", err)
+    tybody = "<div>No typed DOIs.</div>"
+    if tdata:
+        ordered = dict(sorted(tdata.items(), key=itemgetter(1), reverse=True))
+        trows = [[lab, drill('type', lab, cnt)] for lab, cnt in ordered.items()]
+        ttable = render_table(['Type', 'DOIs'], trows, table_id='exttype',
+                              css='tablesorter numberlast-scroll',
+                              footer=[fcell('Total'), fcell(f"{sum(tdata.values()):,}")])
+        s2, d2 = DP.pie_chart(ordered, "External DOIs by type", "type", width=600, height=460,
+                              colors=DP.get_colors_by_count(len(tdata)))
+        charts += s2
+        tybody = two_col("<div class='tag-scrollbox' style='flex:1 1 440px;min-width:320px;'>"
+                         f"{ttable}</div>", f"<div style='flex:0 0 auto;'>{d2}</div>")
+    # ----- By year tab: all years, split journal articles / preprints / other -----
+    ymap = {}
+    try:
+        for row in coll.aggregate([
+                {"$match": {"jrc_publishing_date": {"$exists": True}}},
+                {"$group": {"_id": {"yr": {"$substr": ["$jrc_publishing_date", 0, 4]},
+                                    "type": "$type"}, "n": {"$sum": 1}}}]):
+            y = row['_id'].get('yr')
+            if not y:
+                continue
+            lab = _external_year_bucket(row['_id'].get('type'))
+            entry = ymap.setdefault(y, {'JournalArticle': 0, 'Preprint': 0, 'Other': 0})
+            entry[lab] += row['n']
+    except Exception as err:
+        return render_error("Could not get external DOIs by year", err)
+    ybody = "<div>No dated DOIs.</div>"
+    years = sorted(ymap)
+    if years:
+        cats = ['JournalArticle', 'Preprint', 'Other']
+        ydata = {"years": years, **{c: [ymap[y][c] for y in years] for c in cats}}
+        s3, d3 = DP.stacked_bar_chart(ydata, "External DOIs by publishing year (by type)",
+                                      xaxis="years", yaxis=cats, colors=DP.SOURCE3_PALETTE,
+                                      orient=pi / 4, width=1000, height=350)
+        charts += s3
+        ybody = ("<div style='color:#a8c4e0;font-size:0.82em;margin-bottom:8px;'>"
+                 "All years (not scoped by the year filter).</div>" + d3)
+    # ----- Acknowledgements tab: what these records carry -----
+    fields = [("Acknowledgement tags", "jrc_acknowledge", {"jrc_acknowledge.0": {"$exists": True}}),
+              ("Reference list", "reference", {"reference": {"$exists": True}}),
+              ("PMC ID", "jrc_pmc", {"jrc_pmc": {"$exists": True}})]
+    arows, cov = [], {}
+    try:
+        for label, field, query in fields:
+            num = coll.count_documents({**yr, **query})
+            arows.append([safe(f"<span class='field-tip' data-field='{escape(field)}'>"
+                               f"{escape(label)}</span>"),
+                          drill('tags', 'tagged', num) if field == 'jrc_acknowledge' else f"{num:,}",
+                          pctof(num, total)])
+            cov[label] = (num / total) if total else 0
+    except Exception as err:
+        return render_error("Could not compute external DOI coverage", err)
+    arows.insert(1, ["Without acknowledgement tags", drill('tags', 'untagged', total - tagged),
+                     pctof(total - tagged, total)])
+    atable = render_table(['Metadata field', 'DOIs', '% of external DOIs'], arows,
+                          table_id='extcov', css='tablesorter numberlast-scroll')
+    cs, cd = DP.hbar_chart(cov, "Metadata carried by external DOIs (% of DOIs)",
+                           value_label="Coverage", value_format="0%", show_pct=False,
+                           width=620, height=300)
+    charts += cs
+    abody = ("<div style='color:#a8c4e0;font-size:0.82em;margin-bottom:8px;'>"
+             "External DOIs are papers whose acknowledgements mention Janelia, so they carry "
+             "no Janelia authors, tags, citations or license fields. What can be measured is how "
+             "much of the acknowledgement work has been done. See "
+             "<a href='/acks_untagged'>untagged acknowledgements</a> for the review queue.</div>"
+             + two_col("<div style='flex:1 1 440px;min-width:360px;overflow-x:auto;'>"
+                       f"{atable}</div>", f"<div style='flex:0 0 auto;'>{cd}</div>"))
+    # ----- tabs -----
+    active_tab = request.args.get('tab')
+    if active_tab not in ('sources', 'bytype', 'byyear', 'acks'):
+        active_tab = 'sources'
+    tabs = ('<ul class="nav nav-tabs" role="tablist">'
+            + tab_button('sources', 'Sources', active_tab == 'sources')
+            + tab_button('bytype', 'By type', active_tab == 'bytype')
+            + tab_button('byyear', 'By year', active_tab == 'byyear')
+            + tab_button('acks', 'Acknowledgements', active_tab == 'acks')
+            + '</ul><div class="tab-content">'
+            + tab_pane('sources', sbody, active_tab == 'sources')
+            + tab_pane('bytype', tybody, active_tab == 'bytype')
+            + tab_pane('byyear', ybody, active_tab == 'byyear')
+            + tab_pane('acks', abody, active_tab == 'acks')
+            + '</div>')
+    seealso = see_also([("Internal DOI metrics", "/dois_metrics"),
+                        ("Acknowledgement metrics", "/acknowledgement_metrics"),
+                        ("Untagged acknowledgements", "/acks_untagged"),
+                        ("Acknowledgement coverage", "/acks_coverage")])
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=f"External DOI metrics{ysfx}",
+                                         html=header + tabs + seealso + charts, bokeh=True,
+                                         navbar=generate_navbar('DOIs')))
+
+
+def _external_query(kind, value, year):
+    ''' The external_dois match behind one drill-down count on /external_dois_metrics.
+        Keyword arguments:
+          kind: source, journal, type or tags
+          value: the value shown in the table
+          year: publishing year, or 'All'
+        Returns:
+          Match document, or None for an unknown kind
+    '''
+    # the page's $group folds missing, null and '' into one row, and {"$in": [None, ""]}
+    # matches exactly those three
+    empty = {"$in": [None, ""]}
+    query = _external_scope(year)
+    if kind == 'source':
+        query["jrc_ack_source"] = empty if value == '(not recorded)' else value
+    elif kind == 'journal':
+        query["jrc_journal"] = empty if value == '(none)' else value
+    elif kind == 'type':
+        # every stored type counted under this label, which includes a stored value that is
+        # already the label (one external record has type "Preprint") or has no label at all
+        raw = [key for key, label in DOI_TYPE_LABELS.items() if label == value]
+        if value not in raw:
+            raw.append(value)
+        query["type"] = empty if value == 'None' else {"$in": raw}
+    elif kind == 'tags':
+        query["jrc_acknowledge.0"] = {"$exists": value == 'tagged'}
+    else:
+        return None
+    return query
+
+
+@app.route('/external_doisui/<string:kind>/<path:value>')
+def show_external_dois_list(kind, value):
+    ''' List the external DOIs behind a count on /external_dois_metrics.
+        Keyword arguments:
+          kind: source, journal, type or tags
+          value: the table value that was clicked
+          ?year=: optional publishing year
+        Returns:
+          Response
+    '''
+    year = request.args.get('year') or 'All'
+    if year != 'All' and not re.fullmatch(r"\d{4}", year):
+        raise InvalidUsage("year must be four digits", 400)
+    query = _external_query(kind, value, year)
+    if query is None:
+        raise InvalidUsage(f"Unknown external DOI grouping {kind}", 400)
+    try:
+        rows = list(DB['dis'].external_dois.find(query).sort("jrc_publishing_date", -1))
+    except Exception as err:
+        return render_error("Could not get DOIs from external_dois collection", err)
+    for row in rows:
+        row['doi_type'] = 'external'
+        # standard_ack_table reads this field directly
+        row['jrc_acknowledgements'] = row.get('jrc_acknowledgements') or ''
+    if not rows:
+        return render_template('warning.html', urlroot=request.url_root,
+                               title=render_warning("No external DOIs", 'warning'),
+                               message=f"No external DOIs for {kind} {value}")
+    table, cnt, _ = standard_ack_table(rows, 'Janelia', show_count=False)
+    html = ack_stat_cards(cnt, 0, cnt) + table
+    title = f"External DOIs: {kind} = {value}" + (f" ({year})" if year != 'All' else "")
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=title, html=html,
                                          navbar=generate_navbar('DOIs')))
 
 
