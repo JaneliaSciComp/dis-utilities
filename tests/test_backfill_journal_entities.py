@@ -1,4 +1,5 @@
-''' backfill_journal_entities.py: removing HTML entities from stored jrc_journal.
+''' backfill_journal_entities.py: cleaning HTML entities and whitespace out of stored
+    jrc_journal.
 
     The functions are extracted with ast, because importing the script needs
     jrc_common and a database configuration.
@@ -23,8 +24,8 @@ def _load():
           'LOGGER': SimpleNamespace(error=lambda msg: None)}
     for node in ast.parse(SOURCE).body:
         targets = [t.id for t in getattr(node, 'targets', []) if isinstance(t, ast.Name)]
-        if getattr(node, 'name', None) in ('unescaped', 'backfill_collection') \
-           or targets == ['ENTITY']:
+        if getattr(node, 'name', None) in ('cleaned', 'backfill_collection') \
+           or targets == ['CANDIDATE']:
             exec(ast.get_source_segment(SOURCE, node), ns)    # pylint: disable=W0122
     return ns
 
@@ -55,14 +56,14 @@ class FakeCollection:
     ('A &amp;amp; B', 'A &amp; B'),                # one level only
 ])
 def test_entities_are_removed(stored, fixed):
-    assert _load()['unescaped'](stored) == fixed
+    assert _load()['cleaned'](stored) == fixed
 
 
 @pytest.mark.parametrize('stored', ['Genes & Development', 'R&D Journal', 'AT&T Technical',
                                     'Nature', '', None])
 def test_names_without_an_entity_are_left_alone(stored):
     ''' A bare ampersand ("R&D") is not an entity, though the query matches it. '''
-    assert _load()['unescaped'](stored) is None
+    assert _load()['cleaned'](stored) is None
 
 
 def _docs():
@@ -106,3 +107,41 @@ def test_a_rerun_changes_nothing():
     ns, docs = _load(), _docs()
     ns['backfill_collection'](FakeCollection(docs), 'dois', write=True)
     assert not ns['backfill_collection'](FakeCollection(docs), 'dois', write=True)
+
+
+@pytest.mark.parametrize('stored, fixed', [
+    ('ACS Central\nScience', 'ACS Central Science'),             # 10.1021/acscentsci.7b00247
+    ('Chemical & Biomedical\nImaging', 'Chemical & Biomedical Imaging'),  # 10.1021/cbmi.6c00054
+    ('Chemical &amp; Biomedical\nImaging', 'Chemical & Biomedical Imaging'),
+    ('  Cell\t Reports ', 'Cell Reports'),
+])
+def test_whitespace_is_collapsed(stored, fixed):
+    assert _load()['cleaned'](stored) == fixed
+
+
+@pytest.mark.parametrize('stored', ['ACS Central\nScience', '  Cell  Reports', 'Cell Reports ',
+                                    'Genes &amp; Dev', 'A &amp B', 'R&D Journal', 'Nature'])
+def test_the_query_finds_every_name_that_needs_cleaning(stored):
+    ''' The database query must not miss a value cleaned() would change. The pattern
+        uses only syntax that Python re and MongoDB's PCRE read the same way. '''
+    ns = _load()
+    if ns['cleaned'](stored) is not None:
+        assert re.search(ns['CANDIDATE'], stored)
+
+
+def test_a_line_break_is_fixed_on_write():
+    ns = _load()
+    docs = [{'_id': 1, 'doi': '10.1021/acscentsci.7b00247', 'jrc_journal': 'ACS Central\nScience'}]
+    changes = ns['backfill_collection'](FakeCollection(docs), 'dois', write=True)
+    assert changes[0]['status'] == 'fixed' and docs[0]['jrc_journal'] == 'ACS Central Science'
+
+
+def test_it_agrees_with_doi_common():
+    ''' The same cleaning as doi_common.clean_journal_name, when that is installed. '''
+    try:
+        from doi_common.doi_common import clean_journal_name   # pylint: disable=C0415
+    except Exception:                                          # pylint: disable=W0703
+        pytest.skip("doi_common with clean_journal_name is not installed")
+    for name in ('ACS Central\nScience', 'Genes &amp; Development', 'A &amp B', 'R&D',
+                 '  Cell\t Reports ', 'Nature', 'Chemical &amp; Biomedical\nImaging'):
+        assert (_load()['cleaned'](name) or name) == clean_journal_name(name)

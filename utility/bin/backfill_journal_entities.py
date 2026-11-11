@@ -1,14 +1,18 @@
 """ backfill_journal_entities.py
-    One-time: remove HTML entities from stored journal names, so "Genes &amp;
-    Development" reads "Genes & Development".
+    One-time: clean stored journal names the way doi_common.clean_journal_name now
+    cleans new ones - remove HTML entities, so "Genes &amp; Development" reads
+    "Genes & Development", and collapse whitespace, so "ACS Central\nScience" (a
+    line break ACS sent inside the name) reads "ACS Central Science".
 
     Crossref sends some container titles with the entity still in them, and
     doi_common.get_journal used to return them unchanged. update_dois.py (dois) and
     update_ack_records.py (external_dois) store its result as jrc_journal, so 79 dois
     and 31 external_dois records hold an entity. doi_common 73.17.0 unescapes the name;
-    this fixes what was already written.
+    this fixes what was already written. doi_common 73.17.1 also collapses
+    whitespace; 1.1.0 of this script does the same for the 2 dois records with a
+    line break in the name.
 
-    The stored value is unescaped rather than recomputed with get_journal. For dois
+    The stored value is cleaned rather than recomputed with get_journal. For dois
     the two give the same result (checked for all 79 records against prod); for
     external_dois it is the only option, because those records keep no
     container-title to recompute from.
@@ -21,11 +25,12 @@
     value that was read, so a re-run changes nothing and a later edit is safe. Every
     run writes a JSON report of each change.
 
-    Deploy the dis-sync image with doi_common 73.17.0 or later first: until then,
-    update_dois.py puts the entity back the next time it updates one of these DOIs.
+    Deploy the dis-sync image with doi_common 73.17.1 or later first: until then,
+    update_dois.py puts the entity or line break back the next time it updates one
+    of these DOIs.
 """
 
-__version__ = '1.0.0'
+__version__ = '1.1.0'
 
 import argparse
 import collections
@@ -42,8 +47,9 @@ import jrc_common.jrc_common as JRC
 DB = {}
 COUNT = collections.defaultdict(lambda: 0, {})
 COLLECTIONS = ('dois', 'external_dois')
-# Named, decimal and hex character references, as html.unescape understands them
-ENTITY = re.compile(r"&(?:[A-Za-z][A-Za-z0-9]*|#[0-9]+|#[xX][0-9A-Fa-f]+);")
+# Candidates for the database query: an ampersand, a whitespace character other than
+# a plain space, two spaces in a row, or space at either end. cleaned() decides.
+CANDIDATE = r"&|[^ \S]|\s{2}|^\s|\s$"
 EXAMPLES = 10
 
 
@@ -80,21 +86,24 @@ def initialize_program():
         terminate_program(err)
 
 
-def unescaped(value):
-    ''' The journal name with one level of HTML entities removed.
+def cleaned(value):
+    ''' The journal name with one level of HTML entities removed and whitespace
+        collapsed, the same as doi_common.clean_journal_name (a test checks the two
+        agree). Kept here so the script does not depend on the installed doi_common
+        being new enough.
         Keyword arguments:
           value: stored jrc_journal
         Returns:
-          Unescaped name, or None if there is nothing to change
+          Cleaned name, or None if there is nothing to change
     '''
-    if not isinstance(value, str) or not ENTITY.search(value):
+    if not isinstance(value, str):
         return None
-    fixed = html.unescape(value)
+    fixed = re.sub(r"\s+", " ", html.unescape(value)).strip()
     return fixed if fixed != value else None
 
 
 def backfill_collection(coll, name, write):
-    ''' Find and (with write) fix jrc_journal values that hold an entity.
+    ''' Find and (with write) fix jrc_journal values that need cleaning.
         Keyword arguments:
           coll: dois or external_dois collection
           name: collection name, for the report
@@ -103,13 +112,13 @@ def backfill_collection(coll, name, write):
           List of change dicts (collection, _id, doi, old, new, status)
     '''
     try:
-        rows = list(coll.find({"jrc_journal": {"$regex": "&"}},
+        rows = list(coll.find({"jrc_journal": {"$regex": CANDIDATE}},
                               {"doi": 1, "jrc_journal": 1}))
     except Exception as err:
         terminate_program(err)
     changes = []
     for row in rows:
-        new = unescaped(row.get('jrc_journal'))
+        new = cleaned(row.get('jrc_journal'))
         if new is None:
             continue
         change = {'collection': name, '_id': row['_id'], 'doi': row.get('doi'),
@@ -140,7 +149,7 @@ def processing():
     for name in COLLECTIONS:
         changes += backfill_collection(DB['dis'][name], name, ARG.WRITE)
     if not changes:
-        print("No journal names hold an HTML entity")
+        print("No journal names need cleaning")
         return
     journals = collections.Counter((chg['old'], chg['new']) for chg in changes)
     print(f"\nRecords: {len(changes):,}   distinct journals: {len(journals):,}")
@@ -162,7 +171,8 @@ def processing():
 
 if __name__ == '__main__':
     PARSER = argparse.ArgumentParser(
-        description="Remove HTML entities from jrc_journal in dois and external_dois")
+        description="Clean HTML entities and whitespace out of jrc_journal "
+                    + "in dois and external_dois")
     PARSER.add_argument('--manifold', dest='MANIFOLD', action='store',
                         default='prod', choices=['dev', 'prod'],
                         help='MongoDB manifold (dev, prod)')
