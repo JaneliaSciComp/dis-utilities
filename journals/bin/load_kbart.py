@@ -2,7 +2,7 @@
     This program will load publications from a KBART file
 '''
 
-__version__ = '7.0.0'
+__version__ = '7.1.0'
 
 import argparse
 import collections
@@ -33,6 +33,11 @@ IGNORE = ['Book Series Volume']
 TYPEMAP = {"Book Series": "Book series",
            "Book Series Volume": "Book series",
            "Handbook Series": "Book series"}
+# Encodings that UTF-8 text is commonly misread as. Mac Roman is the one seen so far:
+# 706 titles and publishers from Springer, ITHAKA, ACS and Wiley were stored as
+# "C‚ÄîH" for "C—H" and "Universit√§t" for "Universität".
+MISREAD_AS = ('mac_roman', 'cp1252')
+ENCODING_EXAMPLES = 5
 
 def terminate_program(msg=None):
     ''' Terminate the program gracefully
@@ -46,6 +51,62 @@ def terminate_program(msg=None):
             msg = f"An exception of type {type(msg).__name__} occurred. Arguments:\n{msg.args}"
         LOGGER.critical(msg)
     sys.exit(-1 if msg else 0)
+
+
+def repair_mojibake(text):
+    ''' The text as it was before its UTF-8 bytes were misread in another encoding.
+        Only a string that round-trips exactly is treated as damaged, so correctly
+        stored accents (é, ü, —) are left alone.
+        Keyword arguments:
+          text: cell value
+        Returns:
+          Repaired text, or None if the text does not look damaged
+    '''
+    if not isinstance(text, str) or text.isascii():
+        return None
+    for codec in MISREAD_AS:
+        try:
+            fixed = text.encode(codec).decode('utf-8')
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            continue
+        if fixed != text:
+            return fixed
+    return None
+
+
+def check_encoding(pdf, label):
+    ''' Find, report and (with --repair-encoding) fix damaged text in a data frame.
+        Keyword arguments:
+          pdf: data frame read from the input file
+          label: file description for messages
+        Returns:
+          Number of damaged cells found
+    '''
+    damaged = collections.defaultdict(list)
+    for column in pdf.columns:
+        for idx, value in pdf[column].items():
+            fixed = repair_mojibake(value)
+            if fixed is not None:
+                damaged[column].append((idx, value, fixed))
+    total = sum(len(cells) for cells in damaged.values())
+    if not total:
+        return 0
+    LOGGER.warning(f"{label}: {total:,} cells look like UTF-8 text misread as another "
+                   + "encoding (usually from saving the file in Excel on a Mac)")
+    for column, cells in damaged.items():
+        LOGGER.warning(f"  {column}: {len(cells):,}")
+        for _, value, fixed in cells[:ENCODING_EXAMPLES]:
+            LOGGER.warning(f"    {value!r} -> {fixed!r}")
+    if ARG.REPAIR_ENCODING:
+        for column, cells in damaged.items():
+            for idx, _, fixed in cells:
+                pdf.at[idx, column] = fixed
+        LOGGER.warning(f"{label}: repaired {total:,} cells")
+    elif ARG.WRITE:
+        terminate_program(f"{label} has damaged text; rerun with --repair-encoding to fix "
+                          + "it as it loads, or correct the file")
+    COUNT['encoding'] += total
+    return total
 
 
 def initialize_program():
@@ -336,9 +397,12 @@ def processing():
             pdf = pd.read_excel(ARG.KBART, header=0, dtype=str)
     else:
         pdf = pd.read_csv(ARG.KBART, header=0, sep="\t",  dtype=str)
+    check_encoding(pdf, "KBART file")
     if ARG.CORRELATE:
         correlate = pd.read_excel(ARG.CORRELATE, header=0, sheet_name='Libraries Site Licenses',
                                   dtype=str)
+        # Its titles must match the KBART titles exactly, so repair both or neither
+        check_encoding(correlate, "Correlation file")
         for _, row in correlate.iterrows():
             if pd.isna(row['Publication']):
                 continue
@@ -371,6 +435,9 @@ def processing():
     print(f"Correlated:       {COUNT['correlated']:,}")
     print(f"Records inserted: {COUNT['inserted']:,}")
     print(f"Records updated:  {COUNT['updated']:,}")
+    if COUNT['encoding']:
+        print(f"Damaged text:     {COUNT['encoding']:,} cells"
+              + (" (repaired)" if ARG.REPAIR_ENCODING else " (NOT repaired)"))
     for outfile in ['inserted', 'updated']:
         with open(f"kbart_{outfile}.json", 'w', encoding='utf-8') as outstream:
                 outstream.write(json.dumps(INSERTED if outfile == "inserted" else UPDATED,
@@ -394,6 +461,10 @@ if __name__ == '__main__':
     PARSER.add_argument('--type', dest='TYPE', action='store',
                         default='Journal', choices=['Journal', 'Book', 'Monograph'],
                         help='Resource type (Journal, Book, Monograph, etc.)')
+    PARSER.add_argument('--repair-encoding', dest='REPAIR_ENCODING', action='store_true',
+                        default=False,
+                        help='Repair UTF-8 text misread as Mac Roman/Windows-1252 '
+                             + '(otherwise --write stops when any is found)')
     PARSER.add_argument('--write', dest='WRITE', action='store_true',
                         default=False, help='Write to database/config system')
     PARSER.add_argument('--manifold', dest='MANIFOLD', action='store',
