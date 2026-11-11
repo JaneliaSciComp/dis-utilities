@@ -2,6 +2,8 @@
 
     The functions are extracted with ast (as is repair_mojibake from load_kbart.py),
     because importing either script needs jrc_common and a database configuration.
+    The suite runs without pymongo (CI installs only pytest, jrc_common and
+    doi_common), so ObjectId below stands in for bson's.
 '''
 
 import ast
@@ -10,8 +12,9 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import itertools
+
 import pytest
-from bson import ObjectId
 
 ROOT = Path(__file__).resolve().parents[1]
 BIN = ROOT / 'journals' / 'bin'
@@ -23,6 +26,24 @@ def _extract(path, names, ns):
         targets = [t.id for t in getattr(node, 'targets', []) if isinstance(t, ast.Name)]
         if getattr(node, 'name', None) in names or any(t in names for t in targets):
             exec(ast.get_source_segment(source, node), ns)    # pylint: disable=W0122
+
+
+class ObjectId:
+    ''' Stand-in for bson.ObjectId: the script only checks the type name, converts a
+        report's text id back with ObjectId(text), and compares ids. '''
+    _ids = itertools.count()
+
+    def __init__(self, text=None):
+        self.text = text if text is not None else f"{next(self._ids):024x}"
+
+    def __str__(self):
+        return self.text
+
+    def __eq__(self, other):
+        return isinstance(other, ObjectId) and other.text == self.text
+
+    def __hash__(self):
+        return hash(self.text)
 
 
 class Stop(Exception):

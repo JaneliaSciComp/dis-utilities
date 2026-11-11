@@ -1,7 +1,8 @@
 ''' load_kbart.py: finding and repairing UTF-8 text that was misread as another encoding.
 
     The functions are extracted with ast, because importing load_kbart needs inquirer,
-    jrc_common and a database configuration.
+    jrc_common and a database configuration. The suite runs without pandas (CI installs
+    only pytest, jrc_common and doi_common), so FakeFrame stands in for a DataFrame.
 '''
 
 import ast
@@ -9,7 +10,6 @@ import collections
 from pathlib import Path
 from types import SimpleNamespace
 
-import pandas as pd
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -34,6 +34,45 @@ DAMAGED = [
 CORRECT = ['Nature', 'Études photographiques', 'Zeitschrift für Naturforschung',
            'C—H Activation', 'Revista de Ciências Sociais', 'Æther', '√2 and π', '',
            None, float('nan')]
+
+
+class _Column:
+    ''' frame[column]: only items() is used. '''
+    def __init__(self, frame, name):
+        self.frame, self.name = frame, name
+
+    def items(self):
+        return enumerate(self.frame.data[self.name])
+
+
+class _At:
+    ''' frame.at[idx, column] = value '''
+    def __init__(self, frame):
+        self.frame = frame
+
+    def __setitem__(self, key, value):
+        idx, column = key
+        self.frame.data[column][idx] = value
+
+    def __getitem__(self, key):
+        idx, column = key
+        return self.frame.data[column][idx]
+
+
+class FakeFrame:
+    ''' The part of a pandas DataFrame that check_encoding uses. '''
+    def __init__(self, data):
+        self.data = {col: list(vals) for col, vals in data.items()}
+        self.columns = list(self.data)
+        self.at = _At(self)
+
+    def __getitem__(self, column):
+        if isinstance(column, str):
+            return _Column(self, column)
+        raise KeyError(column)
+
+    def column(self, name):
+        return self.data[name]
 
 
 class Stop(Exception):
@@ -71,9 +110,8 @@ def test_correct_text_is_left_alone(text):
 
 
 def _frame():
-    return pd.DataFrame({'publication_title': [DAMAGED[0][0], 'Nature', DAMAGED[5][0]],
-                         'publisher_name': ['Springer', DAMAGED[2][0], 'Springer']},
-                        dtype=str)
+    return FakeFrame({'publication_title': [DAMAGED[0][0], 'Nature', DAMAGED[5][0]],
+                      'publisher_name': ['Springer', DAMAGED[2][0], 'Springer']})
 
 
 def test_a_dry_run_reports_and_changes_nothing():
@@ -94,13 +132,13 @@ def test_repair_fixes_every_damaged_cell_and_nothing_else():
     ns = _load(repair=True, write=True)
     pdf = _frame()
     assert ns['check_encoding'](pdf, 'KBART file') == 3
-    assert list(pdf['publication_title']) == [DAMAGED[0][1], 'Nature', DAMAGED[5][1]]
-    assert list(pdf['publisher_name']) == ['Springer', DAMAGED[2][1], 'Springer']
+    assert pdf.column('publication_title') == [DAMAGED[0][1], 'Nature', DAMAGED[5][1]]
+    assert pdf.column('publisher_name') == ['Springer', DAMAGED[2][1], 'Springer']
 
 
 def test_a_clean_file_passes_even_with_write():
     ns = _load(write=True)
-    pdf = pd.DataFrame({'publication_title': CORRECT[:7]}, dtype=str)
+    pdf = FakeFrame({'publication_title': CORRECT[:7]})
     assert ns['check_encoding'](pdf, 'KBART file') == 0
 
 
