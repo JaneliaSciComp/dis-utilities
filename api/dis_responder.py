@@ -70,7 +70,7 @@ from dis_state import CVTERM, PROJECT
 # on the image. feat -> minor, everything else -> patch, in the same commit as
 # the change. Forgetting is survivable: ocbuild warns that the tag already
 # exists in the ImageStream rather than silently overwriting it.
-__version__ = "120.136.0"
+__version__ = "120.137.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -21207,42 +21207,123 @@ def show_subscription_costs(provider=None):
                                          navbar=generate_navbar('Subscriptions')))
 
 
+def _latest_apc(apc):
+    ''' The most recent APC from a subscription record's apc field ({year: amount}).
+        Keyword arguments:
+          apc: apc field value
+        Returns:
+          (year, amount), or (None, None) when there is none
+    '''
+    if not isinstance(apc, dict) or not apc:
+        return None, None
+    year = max(apc)
+    try:
+        return year, float(apc[year])
+    except (TypeError, ValueError):
+        return None, None
+
+
+def _janelia_journal_use(subs, published):
+    ''' Match subscribed journals to the journals Janelia publishes in.
+        Names are compared case-insensitively. When several jrc_journal spellings fold
+        to one title, their papers are added together and the most-used spelling is
+        kept for the /journal link.
+        Keyword arguments:
+          subs: subscription rows (title, access, journal_type, apc, _id)
+          published: {jrc_journal: paper count} from the dois collection
+        Returns:
+          List of dicts (sub, journal, papers), most papers first
+    '''
+    by_title = {}
+    for row in subs:
+        by_title.setdefault(row['title'].lower(), row)
+    use = {}
+    for name, cnt in published.items():
+        if not name or name.lower() not in by_title:
+            continue
+        entry = use.setdefault(name.lower(), {'sub': by_title[name.lower()], 'journal': name,
+                                              'best': cnt, 'papers': 0})
+        entry['papers'] += cnt
+        if cnt > entry['best']:
+            entry['journal'], entry['best'] = name, cnt
+    return sorted(({'sub': e['sub'], 'journal': e['journal'], 'papers': e['papers']}
+                   for e in use.values()),
+                  key=lambda e: (-e['papers'], e['sub']['title'].lower()))
+
+
+def _row_filter(table_id, placeholder, total):
+    ''' A free-text filter box and "Showing N of M" counter for the table below it
+        (dis.js filterByText, which matches any cell and ignores case).
+        Keyword arguments:
+          table_id: id of the table to filter
+          placeholder: input placeholder text
+          total: number of rows in the table
+        Returns:
+          HTML
+    '''
+    return ("<div style='margin-bottom: 12px;'>"
+            f"<input type='text' id='{table_id}_filter' class='form-control' "
+            "style='display: inline-block; width: 320px; margin-right: 12px;' "
+            f"placeholder='{escape(placeholder)}' "
+            f"oninput=\"filterByText('{table_id}', this, '{table_id}_count')\">"
+            f"<span style='color: #6c757d;'>Showing <span id='{table_id}_count'>{total:,}</span>"
+            f" of {total:,}</span></div>")
+
+
 @app.route('/subscriptions/type/<string:jtype>')
 def show_subscriptions(jtype):
-    ''' Show journals, books, etc. in a table
+    ''' Subscriptions of one type (Journal, Book, ...): stat cards, the access split and,
+        for journals, the access-model chart and the journals Janelia publishes in.
+        Keyword arguments:
+          jtype: subscription type
+        Returns:
+          Response
     '''
     errmsg = "Could not get data from subscription collection"
     try:
-        rows = DB['dis'].subscription.find({"type": jtype})
+        rows = list(DB['dis'].subscription.find({"type": jtype}).collation({"locale": "en"})
+                    .sort("title", 1))
     except Exception as err:
         return render_error(errmsg, err)
     if not rows:
-        return render_template('error.html', urlroot=request.url_root,
-                               title=render_warning(errmsg),
-                               message='No journals were found')
+        return render_template('warning.html', urlroot=request.url_root,
+                               title=render_warning("No subscriptions found", 'warning'),
+                               message=f"No subscriptions of type {jtype} were found")
     trows = []
     fileoutput = ""
     jlist = {}
     publist = {}
     provlist = {}
     jtypes = collections.Counter()
+    access = collections.Counter()
     for row in rows:
         jlist[row['title']] = True
         publist[row['publisher']] = True
         provlist[row['provider']] = True
+        access[row.get('access') or 'Unknown'] += 1
         # journal_type (access model) is set from Airtable by airtable_journal_types.py
         jtypes[row.get('journal_type') or ''] += 1
-        jour = f"<a href='{row['urls'][0]}'>{row['title']}</a>" if row.get('urls') else row['title']
-        jour = f"<a href='/subscription/{str(row['_id'])}'>{row['title']}</a>"
-        trows.append([safe(jour), row['publisher'], row['provider']])
+        jour = f"<a href='/subscription/{row['_id']}'>{escape(row['title'])}</a>"
+        publ = (f"<a href='/subscriptionlist/{quote(row['publisher'], safe='')}/publisher/"
+                f"{quote(jtype, safe='')}'>{escape(row['publisher'])}</a>")
+        trows.append([safe(jour), safe(publ), row['provider']])
         fileoutput += f"{row['title']}\t{row['publisher']}\t{row['provider']}\n"
-    html = render_table(['Title', 'Publisher', 'Provider'], trows,
-                        table_id='journals', css='tablesorter standard-scroll')
-    title = f"{jtype} subscriptions"
-    cards = [("Providers", f"{len(provlist):,}"),
+    all_table = (_row_filter('journals', 'Filter by title, publisher or provider…', len(trows))
+                 + render_table(['Title', 'Publisher', 'Provider'], trows,
+                                table_id='journals', css='tablesorter standard-scroll'))
+    cards = [("Titles", f"{len(jlist):,}"),
              ("Publishers", f"{len(publist):,}"),
-             ("Titles", f"{len(jlist):,}")]
-    chartscript = chartdiv = ''
+             ("Providers", f"{len(provlist):,}")]
+    cards += [(name, f"{cnt:,} ({cnt / len(rows) * 100:.0f}%)")
+              for name, cnt in sorted(access.items(), key=itemgetter(1), reverse=True)]
+    stype = quote(jtype, safe='')
+    anav = {name: f"/subscriptionlist/{quote(name, safe='')}/access/{stype}" for name in access}
+    chartscript, adiv = DP.hbar_chart(
+        dict(access), f"Access ({len(rows):,} subscriptions)", value_label="Subscriptions", width=420,
+        height=200, value_format="0,0", show_values=True, nav=anav,
+        label_font_size="10pt", value_font_size="10pt")
+    chartdiv = adiv
+    tabs = ""
     if jtype == 'Journal':
         unclassified = jtypes.pop('', 0)
         cards.append(("Unclassified access model", f"{unclassified:,}"))
@@ -21255,19 +21336,65 @@ def show_subscriptions(jtype):
                 label = jval.capitalize()
                 data[label] = count
                 nav[label] = f"/subscriptionlist/{quote(jval, safe='')}/journal_type/Journal"
-            chartscript, chartdiv = DP.hbar_chart(
+            mscript, mdiv = DP.hbar_chart(
                 data, f"Journal access model ({sum(data.values()):,} classified journals)",
                 value_label="Journals", width=520, height=260, value_format="0,0",
                 show_values=True, nav=nav, label_font_size="10pt", value_font_size="10pt")
-    html = stat_cards(cards, div_id='subtype-stats') \
-           + create_downloadable(jtype, ['Title', 'Publisher', 'Provider'], fileoutput)
-    titles = '<option>' + '</option><option>'.join(sorted(jlist.keys())) + '</option>'
-    pubs = '<option>' + '</option><option>'.join(sorted(publist.keys())) + '</option>'
+            chartscript += mscript
+            chartdiv = two_col(f"<div>{adiv}</div>", f"<div>{mdiv}</div>")
+        # Where Janelia publishes: subscribed journals with papers in the dois collection
+        try:
+            published = {row['_id']: row['count'] for row in DB['dis'].dois.aggregate([
+                {"$match": {"jrc_journal": {"$exists": True}}},
+                {"$group": {"_id": "$jrc_journal", "count": {"$sum": 1}}}])}
+        except Exception as err:
+            return render_error("Could not get Janelia publications by journal", err)
+        use = _janelia_journal_use(rows, published)
+        classified = sum(1 for ent in use if ent['sub'].get('journal_type'))
+        papers = sum(ent['papers'] for ent in use)
+        cards.append(("Journals Janelia publishes in", f"{len(use):,} ({papers:,} papers)"))
+        if use:
+            cards.append(("Access model known (those journals)",
+                          f"{classified:,} of {len(use):,} ({classified / len(use) * 100:.0f}%)"))
+        urows = []
+        for ent in use:
+            sub = ent['sub']
+            ayear, amount = _latest_apc(sub.get('apc'))
+            urows.append([
+                safe(f"<a href='/subscription/{sub['_id']}'>{escape(sub['title'])}</a>"),
+                cell(safe(f"<a href='/journal/{quote(ent['journal'], safe='')}'>"
+                          f"{ent['papers']:,}</a>"), sort=ent['papers']),
+                sub.get('access') or '',
+                (sub.get('journal_type') or '').capitalize() or 'Unclassified',
+                cell(f"${amount:,.0f} ({ayear})", sort=amount) if amount is not None
+                else cell('', sort=-1)])
+        utable = ("<div style='color:#a8c4e0;font-size:0.82em;margin:8px 0;'>"
+                  "Subscribed journals with Janelia papers in the DOI collection, matched by "
+                  "journal name (ignoring case), so a journal recorded under a different name "
+                  "is missed. Publishing in a journal is not the same as reading it.</div>"
+                  # it matches any cell, so "hybrid" or "Subscription" narrows by
+                  # access model or access too
+                  + _row_filter('janelia_journals', 'Filter by journal, access or access model…',
+                                len(urows))
+                  + render_table(['Journal', 'Janelia papers', 'Access', 'Access model',
+                                  'Latest APC'], urows, table_id='janelia_journals',
+                                 css='tablesorter numbers-scroll'))
+        tabs = ('<ul class="nav nav-tabs" role="tablist">'
+                + tab_button('janelia', f"Where Janelia publishes ({len(use):,})", True)
+                + tab_button('alltitles', f"All subscriptions ({len(rows):,})", False)
+                + '</ul><div class="tab-content">'
+                + tab_pane('janelia', utable, True)
+                + tab_pane('alltitles', all_table, False)
+                + '</div>')
+    else:
+        tabs = all_table
+    html = (stat_cards(cards, div_id='subtype-stats')
+            + create_downloadable(jtype, ['Title', 'Publisher', 'Provider'], fileoutput)
+            + chartdiv + "<br>" + tabs)
     endpoint_access()
     return make_response(render_template('subscription.html', urlroot=request.url_root,
-                                         title=title, titles=titles, pubs=pubs,
-                                         html=html, sub=jtype,
-                                         chartscript=chartscript, chartdiv=chartdiv,
+                                         title=f"{jtype} subscriptions", html=html,
+                                         chartscript=chartscript, chartdiv='',
                                          navbar=generate_navbar('Subscriptions')))
 
 
