@@ -70,7 +70,7 @@ from dis_state import CVTERM, PROJECT
 # on the image. feat -> minor, everything else -> patch, in the same commit as
 # the change. Forgetting is survivable: ocbuild warns that the tag already
 # exists in the ImageStream rather than silently overwriting it.
-__version__ = "120.137.0"
+__version__ = "120.138.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -11295,6 +11295,17 @@ def _external_year_bucket(stored):
     return label if label in ('JournalArticle', 'Preprint') else 'Other'
 
 
+def _name_any_case(name):
+    ''' A match for a name in any letter case, for links whose count adds together
+        spellings that differ only in case ("PLoS ONE" and "PLOS ONE").
+        Keyword arguments:
+          name: name to match
+        Returns:
+          MongoDB $regex match document
+    '''
+    return {"$regex": f"^{re.escape(name)}$", "$options": "i"}
+
+
 def _external_scope(year):
     ''' Mongo match for the external_dois page scope.
         Keyword arguments:
@@ -11480,12 +11491,14 @@ def show_external_dois_metrics(year='All'):
                                          navbar=generate_navbar('DOIs')))
 
 
-def _external_query(kind, value, year):
+def _external_query(kind, value, year, any_case=False):
     ''' The external_dois match behind one drill-down count on /external_dois_metrics.
         Keyword arguments:
           kind: source, journal, type or tags
           value: the value shown in the table
           year: publishing year, or 'All'
+          any_case: match a journal name in any letter case (?any_case=1, used by
+                    /subscriptions/type/Journal, whose counts add case variants together)
         Returns:
           Match document, or None for an unknown kind
     '''
@@ -11496,7 +11509,8 @@ def _external_query(kind, value, year):
     if kind == 'source':
         query["jrc_ack_source"] = empty if value == '(not recorded)' else value
     elif kind == 'journal':
-        query["jrc_journal"] = empty if value == '(none)' else value
+        query["jrc_journal"] = empty if value == '(none)' else \
+                               _name_any_case(value) if any_case else value
     elif kind == 'type':
         # every stored type counted under this label, which includes a stored value that is
         # already the label (one external record has type "Preprint") or has no label at all
@@ -11524,7 +11538,7 @@ def show_external_dois_list(kind, value):
     year = request.args.get('year') or 'All'
     if year != 'All' and not re.fullmatch(r"\d{4}", year):
         raise InvalidUsage("year must be four digits", 400)
-    query = _external_query(kind, value, year)
+    query = _external_query(kind, value, year, any_case=bool(request.args.get('any_case')))
     if query is None:
         raise InvalidUsage(f"Unknown external DOI grouping {kind}", 400)
     try:
@@ -20620,9 +20634,10 @@ def show_journal_ui(jname, year='All'):
     '''
     tag = request.args.get('tag') or None
     try:
-        payload = {"$or": [{"container-title": jname},
-                           {"institution.name": jname}]}
-        payload = {"jrc_journal": jname}
+        # ?any_case=1 matches the name in any letter case, for a count that adds case
+        # variants together (/subscriptions/type/Journal); other links match exactly
+        payload = {"jrc_journal": _name_any_case(jname) if request.args.get('any_case')
+                                  else jname}
         if year != 'All':
             payload['jrc_publishing_date'] = {"$regex": "^"+ year}
         if tag:
@@ -21223,41 +21238,69 @@ def _latest_apc(apc):
         return None, None
 
 
-def _janelia_journal_use(subs, published):
-    ''' Match subscribed journals to the journals Janelia publishes in.
-        Names are compared case-insensitively. When several jrc_journal spellings fold
-        to one title, their papers are added together and the most-used spelling is
-        kept for the /journal link.
+def _janelia_journal_use(subs, published, acknowledged=None):
+    ''' Match subscribed journals to the journals Janelia publishes in, and to the
+        journals of papers by others that acknowledge Janelia.
+        Names are compared case-insensitively. When several spellings fold to one
+        title, their papers are added together and the most-used spelling is kept for
+        the link (/journal for Janelia papers, /external_doisui for acknowledgements).
         Keyword arguments:
           subs: subscription rows (title, access, journal_type, apc, _id)
           published: {jrc_journal: paper count} from the dois collection
+          acknowledged: {jrc_journal: paper count} from the external_dois collection
         Returns:
-          List of dicts (sub, journal, papers), most papers first
+          List of dicts (sub, journal, papers, ack_journal, acks), most papers first,
+          then most acknowledgements; a journal is listed if either count is nonzero
     '''
     by_title = {}
     for row in subs:
         by_title.setdefault(row['title'].lower(), row)
     use = {}
-    for name, cnt in published.items():
-        if not name or name.lower() not in by_title:
-            continue
-        entry = use.setdefault(name.lower(), {'sub': by_title[name.lower()], 'journal': name,
-                                              'best': cnt, 'papers': 0})
-        entry['papers'] += cnt
-        if cnt > entry['best']:
-            entry['journal'], entry['best'] = name, cnt
-    return sorted(({'sub': e['sub'], 'journal': e['journal'], 'papers': e['papers']}
-                   for e in use.values()),
-                  key=lambda e: (-e['papers'], e['sub']['title'].lower()))
+    for source, counts in (('papers', published), ('acks', acknowledged or {})):
+        name_key = 'journal' if source == 'papers' else 'ack_journal'
+        best_key = f"best_{source}"
+        for name, cnt in counts.items():
+            if not name or name.lower() not in by_title:
+                continue
+            entry = use.setdefault(name.lower(), {'sub': by_title[name.lower()],
+                                                  'journal': None, 'papers': 0, 'best_papers': 0,
+                                                  'ack_journal': None, 'acks': 0, 'best_acks': 0})
+            entry[source] += cnt
+            if cnt > entry[best_key]:
+                entry[name_key], entry[best_key] = name, cnt
+    return sorted(({key: ent[key] for key in ('sub', 'journal', 'papers', 'ack_journal', 'acks')}
+                   for ent in use.values()),
+                  key=lambda e: (-e['papers'], -e['acks'], e['sub']['title'].lower()))
 
 
-def _row_filter(table_id, placeholder, total):
+def _apc_summary(subs):
+    ''' Median and range of each journal's APC for the most recent year that has any.
+        A journal's own latest APC is used, so a journal last priced in an earlier year
+        is left out rather than mixed in.
+        Keyword arguments:
+          subs: subscription rows
+        Returns:
+          (year, count, median, low, high), or None when no journal has an APC
+    '''
+    latest = [_latest_apc(row.get('apc')) for row in subs]
+    latest = [(year, amount) for year, amount in latest if amount is not None]
+    if not latest:
+        return None
+    year = max(yr for yr, _ in latest)
+    amounts = sorted(amount for yr, amount in latest if yr == year)
+    mid = len(amounts) // 2
+    median = amounts[mid] if len(amounts) % 2 else (amounts[mid - 1] + amounts[mid]) / 2
+    return year, len(amounts), median, amounts[0], amounts[-1]
+
+
+def _row_filter(table_id, placeholder, total, extra=''):
     ''' A free-text filter box and "Showing N of M" counter for the table below it
         (dis.js filterByText, which matches any cell and ignores case).
         Keyword arguments:
           table_id: id of the table to filter
           placeholder: input placeholder text
           total: number of rows in the table
+          extra: optional HTML (e.g. toggle buttons) placed after the box
         Returns:
           HTML
     '''
@@ -21266,14 +21309,33 @@ def _row_filter(table_id, placeholder, total):
             "style='display: inline-block; width: 320px; margin-right: 12px;' "
             f"placeholder='{escape(placeholder)}' "
             f"oninput=\"filterByText('{table_id}', this, '{table_id}_count')\">"
-            f"<span style='color: #6c757d;'>Showing <span id='{table_id}_count'>{total:,}</span>"
+            + extra
+            + f"<span style='color: #6c757d;'>Showing <span id='{table_id}_count'>{total:,}</span>"
             f" of {total:,}</span></div>")
+
+
+def _row_toggle(table_id, cls, count, noun):
+    ''' A button that hides and shows the rows of one class (dis.js toggleClass), and
+        composes with the text filter and the counter.
+        Keyword arguments:
+          table_id: id of the table
+          cls: row class to hide
+          count: number of rows with that class
+          noun: what the rows are, for the label ("journals without an APC")
+        Returns:
+          HTML
+    '''
+    shown, hidden = f"Hide {noun} ({count:,})", f"Show {noun} ({count:,})"
+    return (f"<button class='btn btn-info btn-sm' style='margin-right: 12px;' "
+            f"onclick=\"toggleClass('{table_id}', '{cls}', this, '{escape(hidden)}', "
+            f"'{escape(shown)}', '{table_id}_count')\">{escape(shown)}</button>")
 
 
 @app.route('/subscriptions/type/<string:jtype>')
 def show_subscriptions(jtype):
     ''' Subscriptions of one type (Journal, Book, ...): stat cards, the access split and,
-        for journals, the access-model chart and the journals Janelia publishes in.
+        for journals, the access model, the APC summary and the journals Janelia publishes
+        in or is acknowledged in.
         Keyword arguments:
           jtype: subscription type
         Returns:
@@ -21289,34 +21351,47 @@ def show_subscriptions(jtype):
         return render_template('warning.html', urlroot=request.url_root,
                                title=render_warning("No subscriptions found", 'warning'),
                                message=f"No subscriptions of type {jtype} were found")
+    stype = quote(jtype, safe='')
     trows = []
+    tclasses = []
     fileoutput = ""
     jlist = {}
     publist = {}
-    provlist = {}
+    providers = {}
     jtypes = collections.Counter()
     access = collections.Counter()
+    # last_issue is the KBART date of the last issue available online: our coverage of
+    # the title ends there, which is not always the journal ceasing
+    ended = sum(1 for row in rows if row.get('last_issue'))
     for row in rows:
         jlist[row['title']] = True
         publist[row['publisher']] = True
-        provlist[row['provider']] = True
+        providers[row['provider']] = True
         access[row.get('access') or 'Unknown'] += 1
         # journal_type (access model) is set from Airtable by airtable_journal_types.py
         jtypes[row.get('journal_type') or ''] += 1
         jour = f"<a href='/subscription/{row['_id']}'>{escape(row['title'])}</a>"
         publ = (f"<a href='/subscriptionlist/{quote(row['publisher'], safe='')}/publisher/"
-                f"{quote(jtype, safe='')}'>{escape(row['publisher'])}</a>")
-        trows.append([safe(jour), safe(publ), row['provider']])
+                f"{stype}'>{escape(row['publisher'])}</a>")
+        trow = [safe(jour), safe(publ), row['provider']]
+        if ended:
+            trow.append(row.get('last_issue') or '')
+        trows.append(trow)
+        tclasses.append('ended' if row.get('last_issue') else '')
         fileoutput += f"{row['title']}\t{row['publisher']}\t{row['provider']}\n"
-    all_table = (_row_filter('journals', 'Filter by title, publisher or provider…', len(trows))
-                 + render_table(['Title', 'Publisher', 'Provider'], trows,
-                                table_id='journals', css='tablesorter standard-scroll'))
+    theaders = ['Title', 'Publisher', 'Provider'] + (['Coverage ends'] if ended else [])
+    all_table = (_row_filter('journals', 'Filter by title, publisher or provider…', len(trows),
+                             _row_toggle('journals', 'ended', ended, 'ended coverage')
+                             if ended else '')
+                 + render_table(theaders, trows, table_id='journals',
+                                css='tablesorter standard-scroll', row_classes=tclasses))
     cards = [("Titles", f"{len(jlist):,}"),
              ("Publishers", f"{len(publist):,}"),
-             ("Providers", f"{len(provlist):,}")]
+             ("Providers", f"{len(providers):,}")]
     cards += [(name, f"{cnt:,} ({cnt / len(rows) * 100:.0f}%)")
               for name, cnt in sorted(access.items(), key=itemgetter(1), reverse=True)]
-    stype = quote(jtype, safe='')
+    if ended:
+        cards.append(("Coverage ended", f"{ended:,} ({ended / len(rows) * 100:.0f}%)"))
     anav = {name: f"/subscriptionlist/{quote(name, safe='')}/access/{stype}" for name in access}
     chartscript, adiv = DP.hbar_chart(
         dict(access), f"Access ({len(rows):,} subscriptions)", value_label="Subscriptions", width=420,
@@ -21327,6 +21402,11 @@ def show_subscriptions(jtype):
     if jtype == 'Journal':
         unclassified = jtypes.pop('', 0)
         cards.append(("Unclassified access model", f"{unclassified:,}"))
+        apc = _apc_summary(rows)
+        if apc:
+            ayear, acount, amedian, alow, ahigh = apc
+            cards.append((f"Median APC ({ayear}, {acount:,} journals)",
+                          f"${amedian:,.0f} (${alow:,.0f}–${ahigh:,.0f})"))
         if jtypes:
             # Only the classified journals are charted: the unclassified ones are
             # most of the collection and would swamp every access model
@@ -21342,45 +21422,69 @@ def show_subscriptions(jtype):
                 show_values=True, nav=nav, label_font_size="10pt", value_font_size="10pt")
             chartscript += mscript
             chartdiv = two_col(f"<div>{adiv}</div>", f"<div>{mdiv}</div>")
-        # Where Janelia publishes: subscribed journals with papers in the dois collection
+        # Janelia use: subscribed journals with Janelia papers (dois) or papers by others
+        # that acknowledge Janelia (external_dois)
+        counts = {}
         try:
-            published = {row['_id']: row['count'] for row in DB['dis'].dois.aggregate([
-                {"$match": {"jrc_journal": {"$exists": True}}},
-                {"$group": {"_id": "$jrc_journal", "count": {"$sum": 1}}}])}
+            for cname in ('dois', 'external_dois'):
+                counts[cname] = {row['_id']: row['count'] for row in DB['dis'][cname].aggregate([
+                    {"$match": {"jrc_journal": {"$exists": True}}},
+                    {"$group": {"_id": "$jrc_journal", "count": {"$sum": 1}}}])}
         except Exception as err:
             return render_error("Could not get Janelia publications by journal", err)
-        use = _janelia_journal_use(rows, published)
-        classified = sum(1 for ent in use if ent['sub'].get('journal_type'))
-        papers = sum(ent['papers'] for ent in use)
-        cards.append(("Journals Janelia publishes in", f"{len(use):,} ({papers:,} papers)"))
-        if use:
-            cards.append(("Access model known (those journals)",
-                          f"{classified:,} of {len(use):,} ({classified / len(use) * 100:.0f}%)"))
+        use = _janelia_journal_use(rows, counts['dois'], counts['external_dois'])
+        pub_use = [ent for ent in use if ent['papers']]
+        ack_use = [ent for ent in use if ent['acks']]
+        classified = sum(1 for ent in pub_use if ent['sub'].get('journal_type'))
+        cards.append(("Journals Janelia publishes in",
+                      f"{len(pub_use):,} ({sum(ent['papers'] for ent in pub_use):,} papers)"))
+        cards.append(("Journals with external papers acknowledging Janelia",
+                      f"{len(ack_use):,} ({sum(ent['acks'] for ent in ack_use):,} papers)"))
+        if pub_use:
+            cards.append(("Access model known (journals Janelia publishes in)",
+                          f"{classified:,} of {len(pub_use):,} "
+                          f"({classified / len(pub_use) * 100:.0f}%)"))
         urows = []
+        uclasses = []
         for ent in use:
             sub = ent['sub']
             ayear, amount = _latest_apc(sub.get('apc'))
+            # ?any_case=1: the counts add together spellings that differ only in case
+            papers = cell(safe(f"<a href='/journal/{quote(ent['journal'], safe='')}?any_case=1'>"
+                               f"{ent['papers']:,}</a>"), sort=ent['papers']) \
+                     if ent['papers'] else cell('', sort=0)
+            acks = cell(safe(f"<a href='/external_doisui/journal/"
+                             f"{quote(ent['ack_journal'], safe='')}?any_case=1'>"
+                             f"{ent['acks']:,}</a>"),
+                        sort=ent['acks']) if ent['acks'] else cell('', sort=0)
             urows.append([
                 safe(f"<a href='/subscription/{sub['_id']}'>{escape(sub['title'])}</a>"),
-                cell(safe(f"<a href='/journal/{quote(ent['journal'], safe='')}'>"
-                          f"{ent['papers']:,}</a>"), sort=ent['papers']),
+                papers, acks,
                 sub.get('access') or '',
                 (sub.get('journal_type') or '').capitalize() or 'Unclassified',
                 cell(f"${amount:,.0f} ({ayear})", sort=amount) if amount is not None
                 else cell('', sort=-1)])
+            uclasses.append('no-apc' if amount is None else '')
+        no_apc = uclasses.count('no-apc')
         utable = ("<div style='color:#a8c4e0;font-size:0.82em;margin:8px 0;'>"
-                  "Subscribed journals with Janelia papers in the DOI collection, matched by "
-                  "journal name (ignoring case), so a journal recorded under a different name "
-                  "is missed. Publishing in a journal is not the same as reading it.</div>"
+                  "Subscribed journals with Janelia papers in the DOI collection, or external "
+                  "papers (by other authors) whose acknowledgements mention Janelia; no paper is "
+                  "counted in both columns. Matched by journal name "
+                  "(ignoring case), so a journal recorded under a different name is missed. "
+                  "Publishing in a journal is not the same as reading it.</div>"
                   # it matches any cell, so "hybrid" or "Subscription" narrows by
                   # access model or access too
                   + _row_filter('janelia_journals', 'Filter by journal, access or access model…',
-                                len(urows))
-                  + render_table(['Journal', 'Janelia papers', 'Access', 'Access model',
-                                  'Latest APC'], urows, table_id='janelia_journals',
-                                 css='tablesorter numbers-scroll'))
+                                len(urows),
+                                _row_toggle('janelia_journals', 'no-apc', no_apc,
+                                            'journals without an APC') if no_apc else '')
+                  + render_table(['Journal', 'Janelia papers',
+                                  'External papers acknowledging Janelia',
+                                  'Access', 'Access model', 'Latest APC'], urows,
+                                 table_id='janelia_journals', css='tablesorter numbers-scroll',
+                                 row_classes=uclasses))
         tabs = ('<ul class="nav nav-tabs" role="tablist">'
-                + tab_button('janelia', f"Where Janelia publishes ({len(use):,})", True)
+                + tab_button('janelia', f"Janelia use ({len(use):,})", True)
                 + tab_button('alltitles', f"All subscriptions ({len(rows):,})", False)
                 + '</ul><div class="tab-content">'
                 + tab_pane('janelia', utable, True)

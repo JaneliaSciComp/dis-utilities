@@ -7,6 +7,7 @@
 '''
 
 import ast
+import re
 from pathlib import Path
 
 import pytest
@@ -17,11 +18,11 @@ TREE = ast.parse(SOURCE)
 
 
 def _namespace():
-    ns = {}
+    ns = {'re': re}
     for node in TREE.body:
         named = getattr(node, 'name', None)
         targets = [t.id for t in getattr(node, 'targets', []) if isinstance(t, ast.Name)]
-        if named in ('_external_scope', '_external_query', '_external_type_label',
+        if named in ('_external_scope', '_external_query', '_external_type_label', '_name_any_case',
                      '_external_year_bucket') or 'DOI_TYPE_LABELS' in targets:
             exec(ast.get_source_segment(SOURCE, node), ns)    # pylint: disable=W0122
     return ns
@@ -109,3 +110,22 @@ def test_a_record_without_acknowledgement_text_does_not_reach_the_table_bare():
     view = next(n for n in TREE.body if getattr(n, 'name', '') == 'show_external_dois_list')
     text = ast.get_source_segment(SOURCE, view)
     assert "row['jrc_acknowledgements'] = row.get('jrc_acknowledgements') or ''" in text
+
+
+def test_any_case_matches_a_journal_in_every_letter_case():
+    ''' /subscriptions/type/Journal adds "PLOS ONE" and "PLoS ONE" together. '''
+    match = QUERY('journal', 'PLOS ONE', 'All', any_case=True)['jrc_journal']
+    pat = re.compile(match['$regex'], re.I if match['$options'] == 'i' else 0)
+    assert pat.match('PLoS ONE') and pat.match('PLOS ONE') and pat.match('plos one')
+    assert not pat.match('PLOS ONE Reports') and not pat.match('The PLOS ONE')
+
+
+def test_any_case_escapes_the_name():
+    match = QUERY('journal', 'G3 Genes|Genomes|Genetics (Bethesda)', 'All', any_case=True)
+    pat = re.compile(match['jrc_journal']['$regex'], re.I)
+    assert pat.match('G3 Genes|Genomes|Genetics (Bethesda)') and not pat.match('G3 Genes')
+
+
+def test_without_any_case_the_match_stays_exact():
+    assert QUERY('journal', 'PLOS ONE', 'All')['jrc_journal'] == 'PLOS ONE'
+    assert QUERY('journal', '(none)', 'All', any_case=True)['jrc_journal'] == EMPTY
