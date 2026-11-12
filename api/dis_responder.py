@@ -70,7 +70,7 @@ from dis_state import CVTERM, PROJECT
 # on the image. feat -> minor, everything else -> patch, in the same commit as
 # the change. Forgetting is survivable: ocbuild warns that the tag already
 # exists in the ImageStream rather than silently overwriting it.
-__version__ = "120.138.0"
+__version__ = "120.138.1"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -10810,9 +10810,10 @@ def show_doi_ui(doi):
         auth = data['author'] if 'author' in data else data['creators']
         return render_template('error.html', urlroot=request.url_root,
                                 title=render_warning("Could not generate author list"),
-                                message=f"Could not generate author list for {doi}" \
-                                        + "<br><pre style='color: black;'>" \
-                                        + json.dumps(auth, indent=2, default=str) + "</pre>")
+                                message=safe(f"Could not generate author list for {escape(doi)}"
+                                             + "<br><pre style='color: black;'>"
+                                             + escape(json.dumps(auth, indent=2, default=str))
+                                             + "</pre>"))
     title = DL.get_title(data)
     if not title:
         return render_template('error.html', urlroot=request.url_root,
@@ -11602,7 +11603,8 @@ def dois_license_report(source, lic=None, year='All'):
     if year != 'All':
         title += f" for {year}"
     if tag:
-        title += f" &middot; {escape(tag)}"
+        # plain text: general.html escapes the title once, so no entity and no escape()
+        title += f" · {tag}"
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
                                          navbar=generate_navbar('DOIs')))
@@ -18121,7 +18123,9 @@ def dois_invalid_auth():
               + "onclick=\"toggler('invalid_auth', 'tagged', 'totalrows');\">" \
               + "Filter for DOIs with tagged authors</button>"
     html = cbutton + html
-    title += f" (<span id='totalrows'>{cnt:,}</span>)"
+    # The span is the counter the "Filter for DOIs with tagged authors" button updates,
+    # so it must render as HTML: mark the finished title safe (escaping the static text)
+    title = safe(f"{escape(title)} (<span id='totalrows'>{cnt:,}</span>)")
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
@@ -20669,7 +20673,8 @@ def show_journal_ui(jname, year='All'):
     if year != 'All':
         title += f" ({year})"
     if tag:
-        title += f" &middot; {escape(tag)}"
+        # plain text: general.html escapes the title once, so no entity and no escape()
+        title += f" · {tag}"
     html = stat_cards(cards, div_id='journal-stats') + html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
@@ -21519,8 +21524,8 @@ def show_subscriptionlist(sub, field='publisher', stype=None):
     if not cnt:
         return render_template('warning.html', urlroot=request.url_root,
                                title=render_warning(errmsg),
-                               message=f"No subscriptions were found for {sub}<br>" \
-                                       + f"<pre>{json.dumps(payload, indent=4)}</pre>")
+                               message=safe(f"No subscriptions were found for {escape(sub)}<br>"
+                                            f"<pre>{escape(json.dumps(payload, indent=4))}</pre>"))
     if cnt == 1:
         return redirect(f"/subscription/{rows[0]['_id']}")
     pubcount = {}
@@ -22269,10 +22274,10 @@ def show_my_papers(show='full'):
         return render_template('warning.html', urlroot=request.url_root,
                                title=render_warning(f"More than one person is on ORCID {oid}",
                                                     'warning'),
-                               message=f"Our records put these people on that ORCID:<ul>{who}"
+                               message=safe(f"Our records put these people on that ORCID:<ul>{who}"
                                        + "</ul>That is a mistake on our side, and we cannot "
                                        + "tell which one of them asked for this page. Please "
-                                       + f"email the Library at {LIBRARY} so we can fix it.")
+                                       + f"email the Library at {escape(LIBRARY)} so we can fix it."))
     full_name = " ".join([orc['given'][0], orc['family'][0]])
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
@@ -23423,13 +23428,14 @@ def peoplerec(eid):
         result['rest']['source'] = 'people'
         result['data'] = rec
         return generate_response(result)
-    title = f"{rec['nameFirstPreferred']} {rec['nameLastPreferred']}"
+    title = escape(f"{rec['nameFirstPreferred']} {rec['nameLastPreferred']}")
     for field in ['employeeId', 'managerId']: # Remove employeeId
         if field in rec:
             del rec[field]
     if 'photoURL' in rec:
-        title += f"&nbsp;<img src='{rec['photoURL']}' width=100 height=100 " \
-                 + f"alt='Photo of {rec['nameFirstPreferred']}'>"
+        title += f"&nbsp;<img src='{escape(rec['photoURL'])}' width=100 height=100 " \
+                 + f"alt='Photo of {escape(rec['nameFirstPreferred'])}'>"
+    title = safe(title)      # the name is escaped above; the photo must render
     html = _people_record_html(rec)
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
@@ -25275,7 +25281,8 @@ def show_doi_by_ack_ui(ack):
                                title=render_warning("Could not find DOIs", 'warning'),
                                message=f"Could not find any DOIs with acknowledgement {ack}")
     html = ack_stat_cards(cnt, internal, external) + html
-    title = f"DOIs with acknowledgement text <span style='color:#51b447 !important'>{ack}</span>"
+    title = safe("DOIs with acknowledgement text <span style='color:#51b447 !important'>"
+                 f"{escape(ack)}</span>")
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
@@ -25362,8 +25369,8 @@ def show_acks_by_curator(curator=None):
     # ack='' -> no highlight (highlight_subtext no-ops on an empty subtext).
     table, cnt, _ = standard_ack_table(union, '', show_count=False)
     html = ack_stat_cards(cnt, internal, external) + table
-    title = ("DOIs curated by <span style='color:#51b447 !important'>"
-             f"{escape(curator_display_name(curator))}</span>")
+    title = safe("DOIs curated by <span style='color:#51b447 !important'>"
+                 f"{escape(curator_display_name(curator))}</span>")
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
@@ -25629,9 +25636,11 @@ def show_doi_by_ack_regex_ui(group):
         else:
             how = f"DOIs tagged with {desc}, or whose acknowledgement text matches it"
         html = f"<p><i>{how}.</i></p>" + html
-    title = f"DOIs with acknowledgements for <span style='color:#51b447 !important'>{group}</span>"
+    title = ("DOIs with acknowledgements for <span style='color:#51b447 !important'>"
+             f"{escape(group)}</span>")
     if doi_type in ('internal', 'external'):
         title += f" ({doi_type.capitalize()} only)"
+    title = safe(title)      # after the +=: str + Safe is a plain str again
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=title, html=html,
