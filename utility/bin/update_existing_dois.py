@@ -2,7 +2,7 @@
     Update existing DOIs
 """
 
-__version__ = '1.0.0'
+__version__ = '1.0.1'
 
 import argparse
 import collections
@@ -60,8 +60,10 @@ def initialize_program():
             DB[source] = JRC.connect_database(dbo)
         except Exception as err:
             terminate_program(err)
+    # From the suporg collection, so jrc_tag[].code is written as the {code,
+    # active} dict the other tag writers use, not the HQ API's bare string.
     try:
-        orgs = DL.get_supervisory_orgs()
+        orgs = DL.get_supervisory_orgs(coll=DB['dis'].suporg)
     except Exception as err:
         terminate_program(err)
     for key, val in orgs.items():
