@@ -1,0 +1,565 @@
+''' Curating a DOI record from the web UI: the Curate tab and /doi_edit.
+
+    The first editable field is jrc_newsletter, chosen because it is the one
+    judgment field on a DOI that no nightly program recomputes: update_dois
+    writes around it, update_tags --auto reads it and skips, nothing else
+    touches it. It is also the "reviewed" mark - setting it freezes jrc_author
+    against the sync - so a change here is a change in behavior, not a label,
+    and it is recorded as such.
+
+    The functions are extracted with ast rather than imported, because importing
+    dis_responder needs Flask, a config file and a database, none of which these
+    rules depend on.
+'''
+
+import ast
+import re
+from datetime import datetime
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+SOURCE = (ROOT / 'api' / 'dis_responder.py').read_text(encoding='utf-8')
+TEMPLATE = (ROOT / 'api' / 'templates' / 'doi.html').read_text(encoding='utf-8')
+
+
+def _block(start, end):
+    seg = SOURCE[SOURCE.index(start):]
+    return seg[:seg.index(end)]
+
+
+HANDLER = _block('def doi_edit(doi)', "@app.route('/pmidui/")
+PANEL = _block('def curate_panel(', 'def _save_newsletter(')
+SAVE = _block('def _save_newsletter(', "@app.route('/doi_edit/")
+TABS = _block('def doi_tabs(', 'def _date_text(')
+
+
+class _Collection:
+    ''' Enough of a collection to record what was asked of it. '''
+    def __init__(self):
+        self.calls = []
+    def update_one(self, query, update, upsert=False):
+        self.calls.append((query, update, upsert))
+
+
+def _ns(dois=None, processing=None, explode=False):
+    ''' _save_newsletter and record_doi_event, wired to fake collections. '''
+    dois = dois or _Collection()
+    processing = processing or _Collection()
+    if explode:
+        def _boom(*_a, **_k):
+            raise RuntimeError("mongo is down")
+        dois.update_one = _boom
+    ns = {'datetime': datetime, 're': re, '__version__': '1.2.3',
+          'ACK_MAX_CHARS': 20000,
+          'DB': {'dis': type('D', (), {'dois': dois, 'processing': processing})()},
+          'print': lambda *a, **k: None,
+          'render_warning': lambda msg, severity='error': f"[{severity}] {msg}"}
+    tree = ast.parse(SOURCE)
+    ns['DERIVED_DEFAULT_TAGS'] = ('AI Initiative', 'Janelia Experimental Technology (jET)',
+                                  'Scientific Computing Software')
+    for name in ('_date_text', 'record_doi_event', '_save_newsletter',
+                 '_ack_text', '_save_acknowledgements', '_derived_tags', '_save_tag'):
+        node = next(n for n in tree.body
+                    if isinstance(n, ast.FunctionDef) and n.name == name)
+        exec(ast.get_source_segment(SOURCE, node), ns)    # pylint: disable=W0122
+    ns['_dois'] = dois
+    ns['_processing'] = processing
+    return ns
+
+
+ME = {'orcid': '0000-0002-1825-0097', 'userIdO365': 'Curator@hhmi.org'}
+
+
+# --- who may write ---------------------------------------------------------
+
+def test_the_write_endpoint_needs_the_curator_term_and_the_page_does_not():
+    ''' /doiui is the public record of a DOI and stays open; the write gets its
+        own door. The term is "curator", not "admin": reviewing papers is a
+        different job from granting access, and "admin" implies it anyway.
+    '''
+    head = SOURCE[SOURCE.index("@app.route('/doi_edit/"):SOURCE.index('def doi_edit')]
+    assert "@restricted(CURATOR_TERM)" in head
+    assert "methods=['POST']" in head
+    assert "CURATOR_TERM = 'curator'" in SOURCE
+    page = SOURCE[SOURCE.index("@app.route('/doiui/<path:doi>')"):SOURCE.index('def show_doi_ui')]
+    assert '@restricted' not in page, '/doiui must stay public'
+
+
+def test_the_tab_is_shown_to_curators_and_admins_only():
+    ''' Tidiness, not security: /doi_edit enforces this independently. The set
+        intersection, not a bare term test, is what lets "admin" through when
+        the cv failed to load - the same shape @restricted uses.
+    '''
+    assert "{'admin', CURATOR_TERM} & authorizations(current_user())" in TABS
+    assert "content['curate'] = curate_panel(doi, row, authors)" in TABS
+
+
+def test_the_tab_looks_like_a_write_control():
+    ''' Every other tab shows the record; this one changes it. It carries the
+        site's amber write color (the same WRITE_COLOR the save buttons use)
+        and a pen, so it reads as what it is from across the room.
+    '''
+    assert "' tab-write' if key == 'curate'" in TABS
+    assert 'fa-pen-to-square' in TABS
+    css = (ROOT / 'api' / 'static' / 'css' / 'main.css').read_text(encoding='utf-8')
+    assert '.nav-tabs .nav-link.tab-write' in css
+    assert '.nav-tabs .nav-link.tab-write.active' in css
+    write_color = re.search(r"WRITE_COLOR = '(#[0-9a-fA-F]{6})'", SOURCE).group(1)
+    assert write_color in css
+
+
+def test_the_tab_is_offered_only_for_a_record_we_hold():
+    ''' When the DOI is not in the collection, show_doi_ui passes the
+        registrar's payload as `row`; it has no Mongo id, and there is nothing
+        to curate.
+    '''
+    assert "row.get('_id')" in TABS
+
+
+# --- what the panel offers -------------------------------------------------
+
+def test_every_handler_action_has_a_control():
+    ''' An action with no control is dead code; a control with no action is a
+        button that does nothing.
+    '''
+    offered = set(re.findall(r"name='action' value='(\w+)'", PANEL))
+    handled = set(re.findall(r"action in \(([^)]+)\)", HANDLER))
+    handled = {a.strip("' ") for group in handled for a in group.split(',')}
+    assert offered == handled == {'newsletter_set', 'newsletter_clear',
+                                  'ack_set', 'ack_clear', 'tag_add', 'tag_remove'}
+
+
+def test_clear_is_offered_only_when_there_is_something_to_clear():
+    assert PANEL.index('if current:') < PANEL.index("value='newsletter_clear'")
+    assert PANEL.index('if ack:') < PANEL.index("value='ack_clear'")
+
+
+def test_the_textarea_holds_the_current_text_escaped():
+    ''' Harvested text is third-party content from publishers' HTML and PDFs;
+        a stray "</textarea>" in it would otherwise end the control.
+    '''
+    assert '{escape(ack)}</textarea>' in PANEL
+
+
+def test_the_panel_says_what_the_date_really_does():
+    ''' Setting it is not labelling: update_dois stops adding authors and
+        update_tags --auto skips the record. A curator should read that beside
+        the button, not discover it.
+    '''
+    assert 'reviewed' in PANEL
+    assert 'stops adding' in PANEL
+    assert 'Processing tab' in PANEL
+
+
+# --- the save --------------------------------------------------------------
+
+def test_set_writes_the_same_string_the_cli_writes():
+    ''' update_tags.py and add_newsletter.py store "YYYY-MM-DD" text, and the
+        nightly programs test the field's presence; a datetime here would be a
+        second shape for one field.
+    '''
+    ns = _ns()
+    note = ns['_save_newsletter']({'doi': '10.1/x'}, ME, 'newsletter_set', '2025-03-04')
+    (query, update, _), = ns['_dois'].calls
+    assert query == {'doi': '10.1/x'}
+    assert update == {'$set': {'jrc_newsletter': '2025-03-04'}}
+    assert note.startswith('[success]')
+
+
+def test_clear_unsets_rather_than_blanking():
+    ''' The nightly programs test for the field's existence
+        ({"$exists": False}); an empty string would still count as reviewed.
+    '''
+    ns = _ns()
+    ns['_save_newsletter']({'doi': '10.1/x', 'jrc_newsletter': '2025-03-04'}, ME,
+                           'newsletter_clear', None)
+    (_, update, _), = ns['_dois'].calls
+    assert update == {'$unset': {'jrc_newsletter': ''}}
+
+
+def test_a_malformed_date_writes_nothing():
+    ns = _ns()
+    for bad in ('', '04/03/2025', 'yesterday', '2025-02-30', '2025-03-04T00:00'):
+        note = ns['_save_newsletter']({'doi': '10.1/x'}, ME, 'newsletter_set', bad)
+        assert note.startswith('[warning]'), bad
+    assert not ns['_dois'].calls
+    assert not ns['_processing'].calls
+
+
+def test_the_stored_date_is_always_zero_padded():
+    ''' strptime accepts "2025-3-4". Stored as typed, the field would hold two
+        shapes, and the string comparisons the nightly programs and this page
+        make would treat the same day as two different dates.
+    '''
+    ns = _ns()
+    ns['_save_newsletter']({'doi': '10.1/x'}, ME, 'newsletter_set', ' 2025-3-4 ')
+    (_, update, _), = ns['_dois'].calls
+    assert update == {'$set': {'jrc_newsletter': '2025-03-04'}}
+
+
+def test_a_no_op_writes_nothing():
+    ''' Setting the date it already has, or clearing one that is not there,
+        would otherwise leave an audit event that records no change.
+    '''
+    ns = _ns()
+    row = {'doi': '10.1/x', 'jrc_newsletter': '2025-03-04'}
+    assert ns['_save_newsletter'](row, ME, 'newsletter_set', '2025-03-04').startswith('[warning]')
+    assert ns['_save_newsletter']({'doi': '10.1/x'}, ME, 'newsletter_clear', None) \
+        .startswith('[warning]')
+    assert not ns['_dois'].calls
+    assert not ns['_processing'].calls
+
+
+def test_a_stored_datetime_compares_as_a_date():
+    ''' A value written by hand could be a datetime; it must still read as the
+        same day, or "set to today" on such a record would be refused as a
+        no-op one moment and recorded as a change the next.
+    '''
+    ns = _ns()
+    row = {'doi': '10.1/x', 'jrc_newsletter': datetime(2025, 3, 4, 13, 45)}
+    assert ns['_save_newsletter'](row, ME, 'newsletter_set', '2025-03-04').startswith('[warning]')
+    assert not ns['_dois'].calls
+
+
+def test_only_the_one_field_changes():
+    ''' jrc_updated means "re-read from the registrar", which this is not; and
+        nothing else on the record is this change's business.
+    '''
+    ns = _ns()
+    ns['_save_newsletter']({'doi': '10.1/x'}, ME, 'newsletter_set', '2025-03-04')
+    (_, update, _), = ns['_dois'].calls
+    touched = {k for op in update.values() for k in op}
+    assert touched == {'jrc_newsletter'}
+
+
+def test_a_failed_write_is_reported_and_leaves_no_audit_event():
+    ns = _ns(explode=True)
+    note = ns['_save_newsletter']({'doi': '10.1/x'}, ME, 'newsletter_set', '2025-03-04')
+    assert note.startswith('[error]')
+    assert not ns['_processing'].calls
+
+
+# --- the audit trail -------------------------------------------------------
+
+def test_the_event_lands_in_the_doi_s_own_processing_record():
+    ''' Same key and shape as doi_common.add_doi_process, so the Processing tab
+        shows a curator's change in the same table as the nightly runs.
+    '''
+    ns = _ns()
+    ns['_save_newsletter']({'doi': '10.1/x', 'jrc_newsletter': '2025-01-02'}, ME,
+                           'newsletter_set', '2025-03-04')
+    (query, update, upsert), = ns['_processing'].calls
+    assert query == {'type': 'doi', 'key': '10.1/x'}
+    assert upsert is True
+    event = update['$push']['processes']
+    assert event['action'] == 'newsletter_set'
+    assert event['program'] == 'dis_responder.py'
+    assert event['version'] == '1.2.3'
+    assert event['notes'] == '2025-01-02 → 2025-03-04'
+    datetime.fromisoformat(event['timestamp'])
+
+
+def test_the_event_names_the_person_the_way_the_tab_resolves_it():
+    ''' The Processing tab translates "user" through user_display_name, which
+        is keyed by the login id (local part of userIdO365, lowercased). The
+        ORCID iD travels too, as "actor", for anyone reading the raw record.
+    '''
+    ns = _ns()
+    ns['_save_newsletter']({'doi': '10.1/x'}, ME, 'newsletter_set', '2025-03-04')
+    (_, update, _), = ns['_processing'].calls
+    event = update['$push']['processes']
+    assert event['user'] == 'curator'
+    assert event['actor'] == ME['orcid']
+
+
+def test_a_person_without_a_login_id_is_still_named():
+    ns = _ns()
+    ns['record_doi_event']('10.1/x', 'newsletter_set', {'orcid': 'X-1'}, '')
+    (_, update, _), = ns['_processing'].calls
+    assert update['$push']['processes']['user'] == 'X-1'
+
+
+def test_clearing_records_what_was_cleared():
+    ns = _ns()
+    ns['_save_newsletter']({'doi': '10.1/x', 'jrc_newsletter': '2025-03-04'}, ME,
+                           'newsletter_clear', None)
+    (_, update, _), = ns['_processing'].calls
+    event = update['$push']['processes']
+    assert event['action'] == 'newsletter_cleared'
+    assert event['notes'] == '2025-03-04 → not set'
+
+
+def test_a_failed_audit_write_does_not_fail_the_change():
+    ''' A lost event is bad; a save that reports failure after succeeding is
+        worse, and the audit runs after the write it describes.
+    '''
+    processing = _Collection()
+    def _boom(*_a, **_k):
+        raise RuntimeError("mongo is down")
+    processing.update_one = _boom
+    ns = _ns(processing=processing)
+    note = ns['_save_newsletter']({'doi': '10.1/x'}, ME, 'newsletter_set', '2025-03-04')
+    assert note.startswith('[success]')
+    assert len(ns['_dois'].calls) == 1
+
+
+# --- acknowledgement text --------------------------------------------------
+
+ACK = 'We thank the Janelia Light Microscopy facility.\n\nFunded by HHMI.'
+
+
+def test_adding_text_marks_it_manual_and_clears_the_no_ack_marker():
+    ''' add_acknowledgement.py sets the source only on external_dois, so until
+        now hand-entered text on a dois record read as harvested. And a record
+        that says both "here is the text" and "there is no text" (the
+        harvester's jrc_no_acknowledgements) contradicts itself.
+    '''
+    ns = _ns()
+    row = {'doi': '10.1/x', 'jrc_no_acknowledgements': True}
+    note = ns['_save_acknowledgements'](row, ME, 'ack_set', ACK)
+    (query, update, _), = ns['_dois'].calls
+    assert query == {'doi': '10.1/x'}
+    assert update == {'$set': {'jrc_acknowledgements': ACK, 'jrc_ack_source': 'Manual'},
+                      '$unset': {'jrc_no_acknowledgements': ''}}
+    assert note.startswith('[success]')
+
+
+def test_clearing_drops_the_text_and_its_source_together():
+    ''' A source with no text would label nothing; and the harvester's queries
+        test for the text field's absence, so $unset is what reopens the record
+        to it.
+    '''
+    ns = _ns()
+    row = {'doi': '10.1/x', 'jrc_acknowledgements': ACK, 'jrc_ack_source': 'PMC'}
+    note = ns['_save_acknowledgements'](row, ME, 'ack_clear', None)
+    (_, update, _), = ns['_dois'].calls
+    assert update == {'$unset': {'jrc_acknowledgements': '', 'jrc_ack_source': ''}}
+    assert 'harvester may fill it again' in note
+
+
+def test_the_replaced_text_travels_with_the_event_in_full():
+    ''' Restorable from the Processing record: the notes say how long it was
+        and where it came from, the event itself holds every character.
+    '''
+    ns = _ns()
+    row = {'doi': '10.1/x', 'jrc_acknowledgements': ACK, 'jrc_ack_source': 'PMC'}
+    ns['_save_acknowledgements'](row, ME, 'ack_set', 'Thanks all.')
+    (_, update, _), = ns['_processing'].calls
+    event = update['$push']['processes']
+    assert event['action'] == 'acknowledgements_set'
+    assert event['previous'] == ACK
+    assert event['previous_source'] == 'PMC'
+    assert event['notes'] == f'replaced {len(ACK)} characters from PMC with 11 characters'
+    ns = _ns()
+    ns['_save_acknowledgements'](row, ME, 'ack_clear', None)
+    (_, update, _), = ns['_processing'].calls
+    event = update['$push']['processes']
+    assert event['action'] == 'acknowledgements_cleared'
+    assert event['previous'] == ACK
+    assert event['notes'] == f'cleared {len(ACK)} characters from PMC'
+
+
+def test_a_first_add_carries_no_previous_text():
+    ns = _ns()
+    ns['_save_acknowledgements']({'doi': '10.1/x'}, ME, 'ack_set', ACK)
+    (_, update, _), = ns['_processing'].calls
+    event = update['$push']['processes']
+    assert 'previous' not in event
+    assert event['notes'] == f'added {len(ACK)} characters'
+
+
+def test_pasted_text_keeps_its_paragraphs_but_not_its_pdf_spacing():
+    ''' Unlike add_acknowledgement.py, which flattens to one line: the
+        Acknowledgements tab renders a newline as a line break, so paragraphs
+        pasted here should survive. Runs of spaces and blank lines do not.
+    '''
+    tidy = _ns()['_ack_text']
+    assert tidy('  We  thank   X. \r\n\r\n\r\n\n  Funded by   Y.  \n') \
+        == 'We thank X.\n\nFunded by Y.'
+    assert tidy('one\ntwo') == 'one\ntwo'
+    assert tidy(None) == ''
+    assert tidy('  \n \n ') == ''
+
+
+def test_empty_oversized_and_unchanged_text_write_nothing():
+    ns = _ns()
+    row = {'doi': '10.1/x', 'jrc_acknowledgements': ACK, 'jrc_ack_source': 'Manual'}
+    assert ns['_save_acknowledgements'](row, ME, 'ack_set', '   ').startswith('[warning]')
+    assert ns['_save_acknowledgements'](row, ME, 'ack_set', 'x' * 20001).startswith('[warning]')
+    assert ns['_save_acknowledgements'](row, ME, 'ack_set', f'  {ACK}  ').startswith('[warning]')
+    assert ns['_save_acknowledgements']({'doi': '10.1/x'}, ME, 'ack_clear', None) \
+        .startswith('[warning]')
+    assert not ns['_dois'].calls
+    assert not ns['_processing'].calls
+
+
+def test_an_empty_box_does_not_clear():
+    ''' Clearing is its own button. Submitting an emptied textarea is more
+        often a slip than a decision, so it is refused with directions.
+    '''
+    ns = _ns()
+    row = {'doi': '10.1/x', 'jrc_acknowledgements': ACK}
+    note = ns['_save_acknowledgements'](row, ME, 'ack_set', '')
+    assert 'Use Clear' in note
+    assert not ns['_dois'].calls
+
+
+# --- tags ------------------------------------------------------------------
+
+SUPORGS = {'Cardona Lab': {'code': 'JRC-CL', 'active': True},
+           'Scientific Computing Software': {'code': 'JRC-SCS', 'active': True},
+           'Old Team': {'code': 'JRC-OLD'}}
+PROJECTS = {'CellMap', 'MouseLight'}
+AUTHORS = [{'family': 'Cardona', 'given': 'Albert', 'janelian': True, 'group': 'Cardona Lab',
+            'tags': ['Cardona Lab', 'Old Team', 'Group Leader/Lab Head'],
+            'managedTeams': [{'supOrgName': 'Cardona Lab', 'supOrgSubType': 'Lab'},
+                             {'supOrgName': 'Connectomics Team', 'supOrgSubType': 'Team'}]},
+           {'family': 'Bock', 'given': 'Davi', 'janelian': True,
+            'tags': ['AI Initiative']},
+           {'name': 'CellMap'}]
+
+
+def _tags(row, action, name, derived=None):
+    ns = _ns()
+    derived = ns['_derived_tags'](AUTHORS, PROJECTS, SUPORGS) if derived is None else derived
+    note = ns['_save_tag'](row, ME, action, name, derived, SUPORGS, PROJECTS)
+    return ns, note
+
+
+def test_the_default_tag_list_matches_update_dois():
+    ''' update_dois.DEFAULT_TAGS is what the nightly sync applies from an
+        author's affiliation list; the panel's copy decides which tags it calls
+        fixed. If they drift, the panel either lets a curator remove a tag the
+        sync restores, or freezes one it would not.
+    '''
+    def constant(source, name):
+        # Module-level assignments include attribute and subscript targets
+        # (app.config[...] = ...), which have no .id; getattr skips them.
+        return next(ast.literal_eval(n.value) for n in ast.parse(source).body
+                    if isinstance(n, ast.Assign)
+                    and getattr(n.targets[0], 'id', None) == name)
+    ud = (ROOT / 'sync' / 'bin' / 'update_dois.py').read_text(encoding='utf-8')
+    assert set(constant(SOURCE, 'DERIVED_DEFAULT_TAGS')) == set(constant(ud, 'DEFAULT_TAGS'))
+
+
+def test_derived_tags_are_what_the_nightly_programs_would_apply():
+    ''' Group (the lab), non-lab managed teams, default tags, ACTIVE suporgs in
+        the affiliation list, and the project an organizational author maps
+        to. Not: labs an author merely lists, inactive orgs, or the
+        "Group Leader/Lab Head" pseudo-tag.
+    '''
+    derived = _ns()['_derived_tags'](AUTHORS, PROJECTS, SUPORGS)
+    assert derived == {'Cardona Lab': ['Cardona'],
+                       'Connectomics Team': ['Cardona'],
+                       'AI Initiative': ['Bock'],
+                       'CellMap': ['CellMap']}
+    assert _ns()['_derived_tags'](None, set(), {}) == {}
+
+
+def test_a_derived_tag_cannot_be_removed_and_says_why():
+    row = {'doi': '10.1/x', 'jrc_tag': [{'name': 'Cardona Lab', 'code': {}, 'type': 'suporg'}]}
+    ns, note = _tags(row, 'tag_remove', 'Cardona Lab')
+    assert note.startswith('[warning]')
+    assert 'Cardona' in note and 'nightly sync' in note
+    assert not ns['_dois'].calls
+
+
+def test_a_hand_added_tag_can_be_removed():
+    row = {'doi': '10.1/x', 'jrc_tag': [{'name': 'Cardona Lab', 'code': {}, 'type': 'suporg'},
+                                       {'name': 'MouseLight', 'code': None,
+                                        'type': 'affiliation'}]}
+    ns, note = _tags(row, 'tag_remove', 'MouseLight')
+    assert note.startswith('[success]')
+    (_, update, _), = ns['_dois'].calls
+    assert update == {'$pull': {'jrc_tag': {'name': 'MouseLight'}}}
+    (_, event, _), = ns['_processing'].calls
+    assert event['$push']['processes']['action'] == 'tag_removed'
+
+
+def test_removing_the_last_tag_unsets_the_field():
+    ''' The nightly programs test for the field's presence; an empty list
+        would read as "tagged, with nothing".
+    '''
+    row = {'doi': '10.1/x', 'jrc_tag': [{'name': 'MouseLight', 'code': None,
+                                        'type': 'affiliation'}]}
+    ns, _ = _tags(row, 'tag_remove', 'MouseLight')
+    assert [u for _, u, _ in ns['_dois'].calls] == [
+        {'$pull': {'jrc_tag': {'name': 'MouseLight'}}},
+        {'$unset': {'jrc_tag': ''}}]
+
+
+def test_adding_builds_the_entry_the_way_update_tags_does():
+    ''' A supervisory organization gets type "suporg" and the {code, active}
+        dict; anything else that is a project gets "affiliation" and no code.
+    '''
+    ns, note = _tags({'doi': '10.1/x'}, 'tag_add', 'Scientific Computing Software')
+    assert note.startswith('[success]')
+    (_, update, _), = ns['_dois'].calls
+    assert update == {'$push': {'jrc_tag': {'name': 'Scientific Computing Software',
+                                            'code': {'code': 'JRC-SCS', 'active': True},
+                                            'type': 'suporg'}}}
+    ns, _ = _tags({'doi': '10.1/x'}, 'tag_add', ' MouseLight ')
+    (_, update, _), = ns['_dois'].calls
+    assert update == {'$push': {'jrc_tag': {'name': 'MouseLight', 'code': None,
+                                            'type': 'affiliation'}}}
+
+
+def test_a_name_outside_the_vocabulary_is_refused():
+    ''' A typo must not create a tag: the vocabulary is the suporg collection
+        plus the projects in project_map, and nothing else.
+    '''
+    for bad in ('Cardonna Lab', '', '  ', 'Group Leader/Lab Head'):
+        ns, note = _tags({'doi': '10.1/x'}, 'tag_add', bad)
+        assert note.startswith('[warning]'), bad
+        assert not ns['_dois'].calls
+
+
+def test_duplicates_and_absent_tags_are_no_ops():
+    row = {'doi': '10.1/x', 'jrc_tag': [{'name': 'MouseLight', 'code': None,
+                                        'type': 'affiliation'}]}
+    ns, note = _tags(row, 'tag_add', 'MouseLight')
+    assert 'already' in note and not ns['_dois'].calls
+    ns, note = _tags(row, 'tag_remove', 'CellMap')
+    assert 'not a tag on this DOI' in note and not ns['_dois'].calls
+
+
+def test_the_derived_set_is_recomputed_on_the_server():
+    ''' The "fixed" label on the page protects nothing on its own; a hand-made
+        POST must meet the same rule, so the handler derives the set itself
+        rather than trusting anything the form sends.
+    '''
+    block = _block('def _save_tag_action(', "@app.route('/doi_edit/")
+    assert 'DL.get_author_details(row' in block
+    assert '_derived_tags(authors, projects, suporgs)' in block
+    assert "request.form.get('name')" in block
+
+
+def test_the_panel_offers_only_active_orgs_and_projects_to_add():
+    assert "(v or {}).get('active')" in PANEL
+    assert "list='tag-choices'" in PANEL
+
+
+# --- the round trip --------------------------------------------------------
+
+def test_a_write_redirects_back_to_the_curate_tab():
+    ''' A refresh would otherwise re-post it. The note travels in the session,
+        and the fragment reopens the tab so the note is seen rather than hidden
+        behind the Authors tab - the template turns a fragment into a click.
+    '''
+    assert "session['doi_note']" in HANDLER
+    assert "url_for('show_doi_ui', doi=doi) + '#curate'" in HANDLER
+    assert "session.pop('doi_note', '')" in PANEL
+    assert 'window.location.hash' in TEMPLATE
+    assert 'data-target="\' + hash + \'"' in TEMPLATE
+
+
+def test_a_doi_we_do_not_hold_is_refused_before_any_action_runs():
+    assert HANDLER.index('if not row:') < HANDLER.index("elif action in (")
+    assert 'nothing to curate' in HANDLER
+
+
+def test_the_doi_is_normalised_like_the_page_normalises_it():
+    ''' /doiui lowercases and strips slashes; a write keyed any other way would
+        miss the record the page just showed.
+    '''
+    assert "doi = doi.lstrip('/').rstrip('/').lower()" in HANDLER

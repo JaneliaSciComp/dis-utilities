@@ -476,6 +476,29 @@ hr {border-color: var(--muted-border);
   }
 }
 
+/* A tab that WRITES (the Curate tab on a DOI page). A solid amber block, open
+   or not: amber is the site's write color - the same #f0ad4e as WRITE_COLOR on
+   every save button - so a reader who has used one control already knows what
+   this tab is for. The open tab goes a shade deeper and loses its bottom edge,
+   the way Bootstrap's own active tab does, so it still reads as the open one. */
+.nav-tabs .nav-link.tab-write {
+  background-color: #f0ad4e;
+  color: #000;
+  font-weight: 600;
+  border-color: #f0ad4e #f0ad4e #dee2e6;
+}
+.nav-tabs .nav-link.tab-write:hover,
+.nav-tabs .nav-link.tab-write:focus {
+  background-color: #ec971f;
+  color: #000;
+  border-color: #ec971f #ec971f #dee2e6;
+}
+.nav-tabs .nav-link.tab-write.active {
+  background-color: #e08e0b;
+  color: #000;
+  border-color: #e08e0b #e08e0b transparent;
+}
+
 /* Navbar color accents (hhmi logo palette) */
 .navbar-dark.bg-dark {
   border-bottom: 2px solid;
