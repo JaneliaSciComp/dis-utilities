@@ -7,7 +7,7 @@
            to DIS MongoDB.
 """
 
-__version__ = '22.8.0'
+__version__ = '22.8.1'
 
 import argparse
 import collections
@@ -148,8 +148,14 @@ def initialize_program():
 
     if ARG.TARGET == 'flyboy':
         return
+    # From the suporg collection, not the HQ API. Both answer name -> code, but
+    # not in the same shape: the API gives the bare code string, the collection
+    # gives {code, active}. jrc_tag[].code is written straight from this, and
+    # update_tags.py, tag_janelia_acks.py and convert_tag_codes.py all write
+    # and expect the dict - so the API form here put a string code on every
+    # tag this program added, re-mixing the shapes after each conversion.
     try:
-        orgs = DL.get_supervisory_orgs()
+        orgs = DL.get_supervisory_orgs(coll=DB['dis'].suporg)
     except Exception as err:
         terminate_program(err)
     for key, val in orgs.items():

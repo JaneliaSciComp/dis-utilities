@@ -5728,7 +5728,15 @@ def _register_openapi_components(spec):
         "type": "object",
         "properties": {
             "name": {"type": "string"},
-            "code": {"type": ["string", "null"]},
+            # The supervisory-organization record as the suporg collection
+            # holds it; null for an affiliation tag, which has no suporg.
+            # Older entries written from the HQ API carry the bare code as a
+            # string until convert_tag_codes.py has been run over them.
+            "code": {"type": ["object", "string", "null"],
+                     "properties": {"code": {"type": "string"},
+                                    "active": {"type": "boolean"}},
+                     "description": "Supervisory-organization code and whether the "
+                                    "org is active; null for an affiliation tag"},
             "type": {"type": ["string", "null"]}}})
     spec.components.schema("DoiAuthorsResult", {
         "type": "object",
