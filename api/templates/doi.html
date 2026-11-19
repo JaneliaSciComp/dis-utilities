@@ -55,4 +55,15 @@ toggleTofull.addEventListener("click", () => {
 });
 </script>
   {{ html|safe }}
+<script>
+// A fragment naming a tab opens it: /doi_edit redirects back to #curate so the
+// note it left is seen rather than hidden behind the Authors tab. Bootstrap's
+// tab data-api activates on click, so clicking the tab button is the whole job.
+(function () {
+  const hash = window.location.hash;
+  if (!hash) return;
+  const tab = document.querySelector('button[data-toggle="tab"][data-target="' + hash + '"]');
+  if (tab) tab.click();
+})();
+</script>
 {% endblock %}

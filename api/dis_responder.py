@@ -70,7 +70,7 @@ from dis_state import CVTERM, PROJECT
 # on the image. feat -> minor, everything else -> patch, in the same commit as
 # the change. Forgetting is survivable: ocbuild warns that the tag already
 # exists in the ImageStream rather than silently overwriting it.
-__version__ = "120.138.1"
+__version__ = "120.139.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -1011,6 +1011,14 @@ IDENTIFIER_FIELDS = ('employeeId', 'jrc_author')
 # Holding any token is not enough. "orcid" is the authorization that covers
 # roster identity; "admin" covers everything, as everywhere else.
 IDENTIFIER_TERMS = {'admin', 'orcid'}
+# Curation: changing what a DOI record says about itself (newsletter date, and
+# in time tags, author credits and relations). A different job from granting
+# access or editing the vocabulary, so it is its own term rather than "admin" -
+# the librarian who reviews every paper should not have to be an administrator
+# to record that they did. "admin" implies it, as it implies every term. The
+# term must exist in the "authorization" cv for /person to offer it as a grant;
+# @restricted works from the stored list either way.
+CURATOR_TERM = 'curator'
 
 
 # Audit events live in the processing collection, the same append-only shape
@@ -1063,6 +1071,42 @@ def record_access_event(key, kind, action, actor, notes=''):
         # bad; a save that reports failure after succeeding is worse, and this
         # runs after the write it describes.
         print(f"Could not record access event for {key}: {err}")
+
+
+def record_doi_event(doi, action, actor, notes='', **extra):
+    """ Append a curation event to a DOI's processing history
+
+        The same record the sync programs write through doi_common's
+        add_doi_process ({type: "doi", key: <DOI>}), and the same event shape,
+        so the Processing tab on /doiui shows a curator's change in the same
+        table as the nightly runs, in order. add_doi_process itself is not
+        used: it takes the user from the RUN, which for a web request is the
+        server process rather than the person who clicked. "user" here is the
+        login id the Processing tab already resolves to a name, falling back to
+        the ORCID iD for a person the roster knows only by that.
+        Keyword arguments:
+          doi: the DOI the event is about
+          action: short verb, e.g. 'newsletter_set'
+          actor: the signed-in person's orcid document
+          notes: what changed, in words - before and after where it helps
+          extra: further fields for the event, e.g. previous= the full text a
+                 change replaced, when it is too long for the notes column
+        Returns:
+          None
+    """
+    login = str(actor.get('userIdO365') or '').split('@')[0].strip().lower()
+    event = {"action": action, "program": "dis_responder.py", "version": __version__,
+             "timestamp": datetime.now().isoformat(),
+             "user": login or actor.get('orcid') or '', "actor": actor.get('orcid'),
+             "notes": notes, **extra}
+    try:
+        DB['dis'].processing.update_one({"type": "doi", "key": doi},
+                                        {"$push": {"processes": event}},
+                                        upsert=True)
+    except Exception as err:
+        # As with record_access_event: never fail the change over the audit
+        # write, which runs after the write it describes.
+        print(f"Could not record curation event for {doi}: {err}")
 
 
 def access_events(key, kind=AUDIT_PERSON):
@@ -10386,7 +10430,7 @@ def doi_tabs(doi, row, rowext, data, authors):
                    'figshare': 'Figshare', 'abstract': 'Abstract',
                    'ack': 'Acknowledgements', 'subjects': 'Subjects', 'related': 'Related DOIs',
                    'legal': 'Legal information', 'funder': 'Funders',
-                   'processing': 'Processing'}
+                   'processing': 'Processing', 'curate': 'Curate'}
     # Author tags
     if row and 'jrc_tag' in row:
         tags = []
@@ -10537,6 +10581,15 @@ def doi_tabs(doi, row, rowext, data, authors):
     phtml = get_processing_events(doi)
     if phtml:
         content['processing'] = phtml
+    # Curation controls: for a record we hold, shown to a curator (or an
+    # administrator). Last, after Processing, where the changes it makes are
+    # recorded. /doi_edit enforces the authorization independently - hiding a
+    # tab protects nothing on its own.
+    # _id, not a jrc_ field: when the DOI is not held, show_doi_ui passes the
+    # registrar's payload as `row`, and that carries no Mongo id.
+    if row and row.get('_id') \
+       and {'admin', CURATOR_TERM} & authorizations(current_user()):
+        content['curate'] = curate_panel(doi, row, authors)
     # Authors
     ahtml = ""
     if authors:
@@ -10564,10 +10617,17 @@ def doi_tabs(doi, row, rowext, data, authors):
            + 'data-target="#home" type="button" role="tab" aria-controls="home" ' \
            + 'aria-selected="true">Authors</button></li>'
     for key in content:
+        # The Curate tab is the one tab that changes the record rather than
+        # showing it, and it should read that way from across the room: amber,
+        # the color every write control on the site already uses, plus a pen.
+        extra = ' tab-write' if key == 'curate' else ''
+        label = display_key[key]
+        if key == 'curate':
+            label = f"<i class='fa-solid fa-pen-to-square'></i> {label}"
         html += '<li class="nav-item" role="presentation">' \
-                + f'<button class="nav-link" id="{key}-tab" data-toggle="tab" ' \
+                + f'<button class="nav-link{extra}" id="{key}-tab" data-toggle="tab" ' \
                 + f'data-target="#{key}" type="button" role="tab" aria-controls="{key}" ' \
-                + f'aria-selected="false">{display_key[key]}</button></li>'
+                + f'aria-selected="false">{label}</button></li>'
     html += '</ul>'
     html += '<div class="tab-content" id="myTabContent">'
     html += '<div class="tab-pane fade show active" id="home" role="tabpanel" ' \
@@ -10894,6 +10954,466 @@ def show_doi_ui(doi):
                                          citepull=citation_style_pulldown(doi),
                                          html=html,
                                          navbar=generate_navbar('DOIs')))
+
+
+def _date_text(val):
+    ''' A stored date as YYYY-MM-DD text
+        jrc_newsletter is written as a "YYYY-MM-DD" string by update_tags.py and
+        add_newsletter.py, but a value stored by hand could be a datetime; both
+        compare and display the same way after this.
+        Keyword arguments:
+          val: stored value, or None
+        Returns:
+          "YYYY-MM-DD", or "" when nothing is set
+    '''
+    return str(val)[:10] if val else ''
+
+
+def curate_panel(doi, row, authors=None):
+    ''' The Curate tab on /doiui: controls that change what the record says
+
+        Newsletter date, acknowledgement text and tags. Each is a small form
+        posting to /doi_edit, which redirects back here - so the note it leaves
+        travels in the session, the way /project_edit's does, and a refresh
+        does not re-post the change.
+        Keyword arguments:
+          doi: DOI
+          row: dois collection document
+          authors: detailed author list (DL.get_author_details), for the tags
+        Returns:
+          HTML
+    '''
+    html = str(session.pop('doi_note', ''))
+    edoi = escape(doi)
+    current = _date_text(row.get('jrc_newsletter'))
+    button = (f"<button type='submit' class='btn btn-sm' "
+              f"style='background-color:{WRITE_COLOR}; color:#000'>")
+    html += "<h4>Newsletter date</h4>"
+    html += (f"<p>Currently <b>{escape(current)}</b>.</p>" if current
+             else "<p>Not set.</p>")
+    html += (f"<form method='POST' action='/doi_edit/{edoi}' style='display:inline'>"
+             "<input type='hidden' name='action' value='newsletter_set'>"
+             "<input type='date' name='date' class='form-control' required "
+             "style='width:auto; display:inline-block; margin-right:6px' "
+             f"value='{escape(current or datetime.now().strftime('%Y-%m-%d'))}'>"
+             f"{button}{'Change' if current else 'Set'}</button></form>")
+    if current:
+        html += (f" <form method='POST' action='/doi_edit/{edoi}' "
+                 "style='display:inline; margin-left:8px'>"
+                 "<input type='hidden' name='action' value='newsletter_clear'>"
+                 f"{button}Clear</button></form>")
+    html += ("<div style='font-size:0.85em; color:#a8c4e0; max-width:720px; "
+             "margin-top:10px'>The date this paper was approved for the newsletter. "
+             "It is also the <b>reviewed</b> mark: once it is set, the nightly DOI "
+             "sync stops adding Janelia authors to this record and the automatic "
+             "tagger skips it. Clearing it reopens both. Every change made here is "
+             "recorded on the Processing tab.</div>")
+    # Acknowledgement text
+    ack = row.get('jrc_acknowledgements') or ''
+    asrc = row.get('jrc_ack_source') or ''
+    html += "<h4 style='margin-top:26px'>Acknowledgements</h4>"
+    if ack:
+        html += (f"<p>Currently {len(ack):,} characters"
+                 + (f", source <b>{escape(asrc)}</b>" if asrc else "") + ".</p>")
+    elif row.get('jrc_no_acknowledgements'):
+        html += ("<p>None recorded. The harvester has looked at every source it "
+                 "has and found no acknowledgements section.</p>")
+    else:
+        html += "<p>None recorded.</p>"
+    # Two forms (Save and Clear post different actions), one button row: the
+    # buttons sit outside both forms and name theirs with the form= attribute,
+    # which is what keeps them on one line without nesting one form in another.
+    html += (f"<form method='POST' action='/doi_edit/{edoi}' id='ack-set'>"
+             "<input type='hidden' name='action' value='ack_set'>"
+             "<textarea name='text' class='form-control' rows='6' "
+             "style='max-width:720px; font-size:0.9em' "
+             f"placeholder='Paste the acknowledgements section'>{escape(ack)}</textarea>"
+             "</form>")
+    if ack:
+        html += (f"<form method='POST' action='/doi_edit/{edoi}' id='ack-clear'>"
+                 "<input type='hidden' name='action' value='ack_clear'></form>")
+    def abtn(form_id, label, margin=''):
+        return (f"<button type='submit' form='{form_id}' class='btn btn-sm' "
+                f"style='background-color:{WRITE_COLOR}; color:#000{margin}'>{label}</button>")
+    html += "<div style='margin-top:6px'>" + abtn('ack-set', 'Save' if ack else 'Add')
+    if ack:
+        html += abtn('ack-clear', 'Clear', '; margin-left:8px')
+    html += "</div>"
+    html += ("<div style='font-size:0.85em; color:#a8c4e0; max-width:720px; "
+             "margin-top:10px'>Shown on the Acknowledgements tab, and scanned nightly "
+             "for mentions of Janelia facilities and labs. Text saved here is marked "
+             "as a <b>Manual</b> source and is never overwritten by the harvester. "
+             "Clearing it lets the harvester look again on its next run. The text "
+             "that was replaced or cleared is kept with the event on the Processing "
+             "tab.</div>")
+    # Tags
+    suporgs, projects = _tag_vocabulary()
+    derived = _derived_tags(authors, projects, suporgs)
+    html += "<h4 style='margin-top:26px'>Tags</h4>"
+    trows = []
+    for tag in row.get('jrc_tag') or []:
+        name = tag.get('name') or ''
+        ename = escape(name)
+        if name in derived:
+            origin = f"from {escape(', '.join(derived[name]))}"
+            control = "<span style='color:#a8c4e0; font-size:0.85em'>fixed</span>"
+        else:
+            origin = "added by hand"
+            control = (f"<form method='POST' action='/doi_edit/{edoi}' style='display:inline'>"
+                       "<input type='hidden' name='action' value='tag_remove'>"
+                       f"<input type='hidden' name='name' value='{ename}'>"
+                       f"{button}Remove</button></form>")
+        trows.append([safe(f"<a href='/tag/{ename}'>{ename}</a>"), tag.get('type') or '',
+                      safe(origin), safe(control)])
+    if trows:
+        html += render_table(['Tag', 'Type', 'Origin', ''], trows, table_id='curate-tags',
+                             css='standard')
+    else:
+        html += "<p>No tags.</p>"
+    choices = sorted(projects | {n for n, v in suporgs.items() if (v or {}).get('active')})
+    options = "".join(f"<option value='{escape(c)}'>" for c in choices)
+    html += (f"<form method='POST' action='/doi_edit/{edoi}' style='margin-top:8px'>"
+             "<input type='hidden' name='action' value='tag_add'>"
+             "<div class='flexcontainer'><div class='flexitem'>"
+             "<input class='form-control' name='name' list='tag-choices' required "
+             "placeholder='Lab, team or project'></div>"
+             f"<datalist id='tag-choices'>{options}</datalist>"
+             f"<div class='flexitemauto'>{button}Add</button></div></div></form>")
+    html += ("<div style='font-size:0.85em; color:#a8c4e0; max-width:720px; "
+             "margin-top:10px'>A tag marked <b>from</b> an author comes from that "
+             "author's lab, team or project and is put back by the nightly sync, so "
+             "it cannot be removed here - to drop it, the author credit has to "
+             "change. A tag added by hand survives every re-sync and can be removed. "
+             "Choose from the list: a name that is not a supervisory organization or "
+             "a project is refused.</div>")
+    return html
+
+
+# The tags update_dois.py applies from an author's own affiliation list (its
+# DEFAULT_TAGS). Mirrored here - and pinned equal by a test - so the panel can
+# tell which tags the nightly sync will put back if they are removed.
+DERIVED_DEFAULT_TAGS = ('AI Initiative', 'Janelia Experimental Technology (jET)',
+                        'Scientific Computing Software')
+
+
+def _tag_vocabulary():
+    ''' The names a tag may carry
+
+        Supervisory organizations from the suporg collection - in the {code,
+        active} shape every tag writer stores in jrc_tag[].code - and the
+        projects from project_map (the "project" side, not the synonyms, which
+        are author names). Either failing to load yields an empty set rather
+        than an error: the panel then offers nothing to add, which is the
+        honest state, instead of refusing the whole page.
+        Keyword arguments:
+          None
+        Returns:
+          (suporgs: name -> {code, active}, projects: set of project names)
+    '''
+    try:
+        suporgs = DL.get_supervisory_orgs(DB['dis'].suporg) or {}
+    except Exception as err:
+        print(f"Could not read supervisory orgs: {err}")
+        suporgs = {}
+    projects = set()
+    try:
+        for rec in DB['dis'].project_map.find({"doNotUse": {"$exists": False}},
+                                              {"name": 1, "project": 1}):
+            if rec.get('project'):
+                projects.add(rec['project'])
+    except Exception as err:
+        print(f"Could not read project map: {err}")
+    return suporgs, projects
+
+
+def _derived_tags(authors, projects, suporgs):
+    ''' The tags the nightly programs derive from a DOI's authors
+
+        The union of what update_dois.py (get_tags_and_projects) and
+        update_tags.py --auto (append_tags) would apply: an author's own group
+        (their lab), the non-lab teams they manage, the default-tag and active
+        supervisory-organization entries in their affiliation list, and the
+        project an organizational author name maps to. Anything in this set
+        that a curator removes is back after the next run, which is why the
+        panel shows these as fixed. Deliberately generous - a tag counted as
+        derived that the sync would not in fact restore costs a curator one
+        extra step, while the reverse silently undoes their work.
+        Keyword arguments:
+          authors: detailed author list (DL.get_author_details), or None
+          projects: set of project names (organizational authors map to these
+                    through PROJECT, which holds both sides of project_map)
+          suporgs: name -> {code, active} from the suporg collection
+        Returns:
+          dict of tag name -> sorted list of the authors it derives from
+    '''
+    derived = {}
+
+    def add(name, who):
+        if name and name != 'Group Leader/Lab Head':
+            derived.setdefault(name, set()).add(who)
+
+    for auth in authors or []:
+        who = auth.get('family') or auth.get('name') or 'an author'
+        add(auth.get('group'), who)
+        for team in auth.get('managedTeams') or []:
+            if team.get('supOrgSubType') != 'Lab':
+                add(team.get('supOrgName'), who)
+        for tag in auth.get('tags') or []:
+            if tag in DERIVED_DEFAULT_TAGS or (suporgs.get(tag) or {}).get('active'):
+                add(tag, who)
+        # An organizational author (a consortium, a project team) carries a
+        # bare "name"; project_map turns that into a project tag.
+        name = auth.get('name')
+        if name and name in projects:
+            add(name, who)
+    return {name: sorted(who) for name, who in derived.items()}
+
+
+def _save_tag(row, me, action, name, derived, suporgs, projects):
+    ''' Add a tag to, or remove one from, a DOI
+
+        The entry is built the way update_tags.py builds it: type "suporg" with
+        the {code, active} dict when the name is a supervisory organization,
+        else type "affiliation" with no code. $push and $pull rather than a
+        rewrite of the list, so two curators on one record cannot overwrite
+        each other; an emptied list is unset, since the nightly programs test
+        the field's presence.
+        Keyword arguments:
+          row: dois collection document
+          me: the signed-in curator
+          action: 'tag_add' or 'tag_remove'
+          name: tag name from the form
+          derived: from _derived_tags
+          suporgs, projects: from _tag_vocabulary
+        Returns:
+          Rendered note
+    '''
+    doi = row['doi']
+    name = (name or '').strip()
+    names = [tag.get('name') for tag in row.get('jrc_tag') or []]
+    if not name:
+        return render_warning("No tag name given.", 'warning')
+    if action == 'tag_remove':
+        if name not in names:
+            return render_warning(f"\"{name}\" is not a tag on this DOI.", 'warning')
+        if name in derived:
+            return render_warning(f"\"{name}\" comes from {', '.join(derived[name])} and "
+                                  "would be put back by the nightly sync. To drop it, "
+                                  "the author credit has to change.", 'warning')
+        change = {"$pull": {"jrc_tag": {"name": name}}}
+        verb, done = 'tag_removed', f"Removed tag \"{name}\"."
+    else:
+        if name in names:
+            return render_warning(f"\"{name}\" is already a tag on this DOI.", 'warning')
+        if name not in suporgs and name not in projects:
+            return render_warning(f"\"{name}\" is not a supervisory organization or a "
+                                  "project, so it cannot be a tag.", 'warning')
+        code = suporgs.get(name)
+        entry = {"name": name, "code": code, "type": 'suporg' if code else 'affiliation'}
+        change = {"$push": {"jrc_tag": entry}}
+        verb, done = 'tag_added', f"Added tag \"{name}\"."
+    try:
+        DB['dis'].dois.update_one({"doi": doi}, change)
+        if action == 'tag_remove' and len(names) == 1:
+            DB['dis'].dois.update_one({"doi": doi}, {"$unset": {"jrc_tag": ""}})
+    except Exception as err:
+        print(f"Could not {action} {name!r} for {doi}: {err}")
+        return render_warning("Could not save that change.", 'error')
+    print(f"{verb} {name!r} on {doi} by {me.get('orcid')}")
+    record_doi_event(doi, verb, me, f"{'added' if verb == 'tag_added' else 'removed'} "
+                                    f"\"{name}\"")
+    return render_warning(done, 'success')
+
+
+def _save_tag_action(row, me, action):
+    ''' Gather what _save_tag needs from the request and the database
+
+        The derived set is recomputed here rather than trusted from the page:
+        the "fixed" label protects nothing on its own, and a hand-made POST
+        must meet the same rule.
+        Keyword arguments:
+          row: dois collection document
+          me: the signed-in curator
+          action: 'tag_add' or 'tag_remove'
+        Returns:
+          Rendered note
+    '''
+    suporgs, projects = _tag_vocabulary()
+    try:
+        authors = DL.get_author_details(row, DB['dis'].orcid)
+    except Exception as err:
+        print(f"Could not get author details for {row.get('doi')}: {err}")
+        return render_warning("Could not read this DOI's authors, so the tag was not "
+                              "changed.", 'error')
+    derived = _derived_tags(authors, projects, suporgs)
+    return _save_tag(row, me, action, request.form.get('name'), derived, suporgs, projects)
+
+
+# Longest acknowledgement text the panel accepts. The longest harvested one is
+# a few thousand characters; this is a guard against a pasted paper, not a
+# limit anyone should meet.
+ACK_MAX_CHARS = 20000
+
+
+def _ack_text(text):
+    ''' Acknowledgement text as pasted, tidied for storage
+
+        Line by line rather than flattened: add_acknowledgement.py joins the
+        lines with spaces, but the Acknowledgements tab renders a newline as a
+        line break, so paragraphs pasted here survive as paragraphs. Runs of
+        spaces within a line (PDF copy-paste leaves many) collapse to one, and
+        runs of blank lines to one.
+        Keyword arguments:
+          text: text from the form, or None
+        Returns:
+          Tidied text, "" when nothing was entered
+    '''
+    lines = [re.sub(r'[ \t\r\f\v]+', ' ', line).strip() for line in (text or '').splitlines()]
+    return re.sub(r'\n{2,}', '\n\n', '\n'.join(lines)).strip()
+
+
+def _save_acknowledgements(row, me, action, text):
+    ''' Add, replace or clear jrc_acknowledgements on one DOI
+
+        Saved text is marked jrc_ack_source "Manual" - add_acknowledgement.py
+        does that only for external_dois, so until now hand-entered text on a
+        dois record was indistinguishable from harvested text. Saving also
+        drops jrc_no_acknowledgements, the harvester's "looked, found none"
+        marker, which would otherwise contradict the record. Clearing drops the
+        text and the source, so the harvester may fill it again on its next run.
+
+        The previous text goes on the audit event in full (previous=), not in
+        the notes: a paragraph in the Processing table's notes column would
+        make the table unreadable, and a note saying how long it was is enough
+        to find the event that holds it.
+        Keyword arguments:
+          row: dois collection document
+          me: the signed-in curator
+          action: 'ack_set' or 'ack_clear'
+          text: the text from the form (ignored for a clear)
+        Returns:
+          Rendered note
+    '''
+    doi = row['doi']
+    before = row.get('jrc_acknowledgements') or ''
+    bsrc = row.get('jrc_ack_source') or ''
+    was = f"{len(before):,} characters" + (f" from {bsrc}" if bsrc else "")
+    if action == 'ack_clear':
+        if not before:
+            return render_warning("No acknowledgement text is recorded.", 'warning')
+        change = {"$unset": {"jrc_acknowledgements": "", "jrc_ack_source": ""}}
+        verb, notes = 'acknowledgements_cleared', f"cleared {was}"
+        done = ("Acknowledgement text cleared. The harvester may fill it again on its "
+                "next run.")
+    else:
+        after = _ack_text(text)
+        if not after:
+            return render_warning("No text was entered. Use Clear to remove the "
+                                  "recorded text.", 'warning')
+        if len(after) > ACK_MAX_CHARS:
+            return render_warning(f"That is {len(after):,} characters; the limit is "
+                                  f"{ACK_MAX_CHARS:,}. Acknowledgements only, not the "
+                                  "paper.", 'warning')
+        if after == before:
+            return render_warning("That is already the recorded text.", 'warning')
+        change = {"$set": {"jrc_acknowledgements": after, "jrc_ack_source": "Manual"},
+                  "$unset": {"jrc_no_acknowledgements": ""}}
+        verb = 'acknowledgements_set'
+        notes = (f"replaced {was} with {len(after):,} characters" if before
+                 else f"added {len(after):,} characters")
+        done = "Acknowledgement text saved."
+    try:
+        DB['dis'].dois.update_one({"doi": doi}, change)
+    except Exception as err:
+        print(f"Could not save acknowledgements for {doi}: {err}")
+        return render_warning("Could not save that change.", 'error')
+    print(f"Acknowledgements for {doi}: {notes} by {me.get('orcid')}")
+    extra = {"previous": before, "previous_source": bsrc} if before else {}
+    record_doi_event(doi, verb, me, notes, **extra)
+    return render_warning(done, 'success')
+
+
+def _save_newsletter(row, me, action, date_text):
+    ''' Set or clear jrc_newsletter on one DOI
+
+        Written as the same "YYYY-MM-DD" string update_tags.py writes, so the
+        nightly programs that test for the field keep working unchanged. Nothing
+        else on the record is touched: the sync's own jrc_updated means "re-read
+        from the registrar", which this is not. The audit is the processing
+        event, which records the value before as well as after.
+        Keyword arguments:
+          row: dois collection document
+          me: the signed-in curator
+          action: 'newsletter_set' or 'newsletter_clear'
+          date_text: the date from the form (ignored for a clear)
+        Returns:
+          Rendered note
+    '''
+    doi = row['doi']
+    before = _date_text(row.get('jrc_newsletter'))
+    if action == 'newsletter_clear':
+        if not before:
+            return render_warning("No newsletter date is set.", 'warning')
+        after = ''
+        change = {"$unset": {"jrc_newsletter": ""}}
+    else:
+        try:
+            parsed = datetime.strptime((date_text or '').strip(), '%Y-%m-%d')
+        except ValueError:
+            return render_warning("The date must be in the form YYYY-MM-DD.", 'warning')
+        # Re-rendered, not stored as typed: strptime accepts "2025-3-4", and the
+        # field must hold one shape for the string comparisons the nightly
+        # programs and this page make.
+        after = parsed.strftime('%Y-%m-%d')
+        if after == before:
+            return render_warning(f"The newsletter date is already {after}.", 'warning')
+        change = {"$set": {"jrc_newsletter": after}}
+    try:
+        DB['dis'].dois.update_one({"doi": doi}, change)
+    except Exception as err:
+        print(f"Could not save newsletter date for {doi}: {err}")
+        return render_warning("Could not save that change.", 'error')
+    print(f"Newsletter date for {doi}: {before or 'not set'} -> {after or 'not set'} "
+          f"by {me.get('orcid')}")
+    record_doi_event(doi, 'newsletter_cleared' if not after else 'newsletter_set', me,
+                     f"{before or 'not set'} → {after or 'not set'}")
+    return render_warning(f"Newsletter date set to {after}." if after
+                          else "Newsletter date cleared.", 'success')
+
+
+@app.route('/doi_edit/<path:doi>', methods=['POST'])
+@restricted(CURATOR_TERM)
+def doi_edit(doi):
+    ''' Apply one curation change to a DOI record
+
+        A separate, gated endpoint rather than a gated /doiui: that page is the
+        public record of a DOI and stays open, so the write needs its own door.
+        Dispatches on "action"; each action is a small, reversible change to one
+        document, and every one is recorded in the processing collection.
+    '''
+    doi = doi.lstrip('/').rstrip('/').lower()
+    me = current_user() or {}
+    action = request.form.get('action', '')
+    try:
+        row = DB['dis'].dois.find_one({"doi": doi})
+    except Exception as err:
+        return inspect_error(err, 'Could not get DOI')
+    if not row:
+        note = render_warning(f"{doi} is not in the database, so there is "
+                              "nothing to curate.", 'warning')
+    elif action in ('newsletter_set', 'newsletter_clear'):
+        note = _save_newsletter(row, me, action, request.form.get('date'))
+    elif action in ('ack_set', 'ack_clear'):
+        note = _save_acknowledgements(row, me, action, request.form.get('text'))
+    elif action in ('tag_add', 'tag_remove'):
+        note = _save_tag_action(row, me, action)
+    else:
+        note = render_warning("Unknown action.", 'warning')
+    # Carried in the session rather than the URL, and a redirect rather than a
+    # render: a refresh then reloads the page instead of re-posting the change.
+    # The fragment reopens the Curate tab (see doi.html) so the note is seen.
+    session['doi_note'] = str(note)
+    return redirect(url_for('show_doi_ui', doi=doi) + '#curate')
 
 
 @app.route('/pmidui/<string:pmid>')
