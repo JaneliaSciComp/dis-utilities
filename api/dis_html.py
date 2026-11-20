@@ -395,7 +395,8 @@ def fcell(value, colspan=None, align=None, header=True):
 
 
 def render_table(headers, rows, table_id=None, css="tablesorter standard-scroll",
-                 row_classes=None, footer=None, width=None, data_attrs=None):
+                 row_classes=None, footer=None, width=None, data_attrs=None,
+                 col_classes=None):
     ''' Build a standard data table.
         Keyword arguments:
           headers: list of column-header values (escaped unless wrapped in safe())
@@ -413,6 +414,12 @@ def render_table(headers, rows, table_id=None, css="tablesorter standard-scroll"
           width: optional fixed table width (px)
           data_attrs: optional dict of data-* attributes to add to the <table> tag,
                       e.g. {"sortlist": "[[0,0]]"} → data-sortlist="[[0,0]]"
+          col_classes: optional list, one entry per column, giving a class stamped
+                       on that column's <th> and every one of its <td>s (falsy
+                       entries get none). What column_toggles() hides by: a class
+                       per column survives reordering, where an nth-child index
+                       would silently point at the wrong column the first time a
+                       column was added.
         Returns:
           HTML table as a string
     '''
@@ -420,22 +427,107 @@ def render_table(headers, rows, table_id=None, css="tablesorter standard-scroll"
     idattr += f' width="{width}"' if width else ''
     if data_attrs:
         idattr += ''.join(f' data-{k}="{v}"' for k, v in data_attrs.items())
-    head = ''.join(f"<th>{_render_cell(h)}</th>" for h in headers)
+    col_classes = list(col_classes or [])
+
+    def colcls(idx):
+        cls = col_classes[idx] if idx < len(col_classes) else None
+        return f" class='{cls}'" if cls else ''
+
+    head = ''.join(f"<th{colcls(i)}>{_render_cell(h)}</th>" for i, h in enumerate(headers))
     body = []
     for idx, cells in enumerate(rows):
         rcls = row_classes[idx] if row_classes else None
         tr_open = f"<tr class='{rcls}'>" if rcls else "<tr>"
-        body.append(tr_open
-                    + ''.join(c if isinstance(c, _Cell) else f"<td>{_render_cell(c)}</td>"
-                              for c in cells)
-                    + "</tr>")
+        tds = []
+        for i, c in enumerate(cells):
+            if isinstance(c, _Cell):
+                # Pre-rendered by cell(): splice the class into its opening tag.
+                tds.append(c.replace('<td', f"<td{colcls(i)}", 1) if colcls(i) else c)
+            else:
+                tds.append(f"<td{colcls(i)}>{_render_cell(c)}</td>")
+        body.append(tr_open + ''.join(tds) + "</tr>")
     foot = ''
     if footer is not None:
-        cells = ''.join(c if isinstance(c, Safe) else f"<th>{_render_cell(c)}</th>"
-                        for c in footer)
-        foot = f"<tfoot><tr>{cells}</tr></tfoot>"
+        fcells = []
+        for i, c in enumerate(footer):
+            if isinstance(c, Safe):
+                # Pre-rendered by fcell() (<th> or <td>): splice the class into
+                # its opening tag, as for body cells, or hiding a column would
+                # leave the footer one cell too wide and every total to its
+                # right under the wrong header.
+                fcells.append(re.sub(r'^<t([hd])', rf"<t\1{colcls(i)}", c, count=1)
+                              if colcls(i) else c)
+            else:
+                fcells.append(f"<th{colcls(i)}>{_render_cell(c)}</th>")
+        foot = f"<tfoot><tr>{''.join(fcells)}</tr></tfoot>"
     return (f'<table{idattr} class="{css}"><thead><tr>{head}</tr></thead>'
             + f"<tbody>{''.join(body)}</tbody>{foot}</table>")
+
+
+def yes_no(flag, yes='yes', no='no'):
+    ''' A yes/no table cell's content as an icon: the site's lime circle-check
+        for yes (credit_mark and the relation legends already use it), a red
+        circle-x for no. The word travels only in the title, so a hover says
+        what the glyph means. A glyph sorts as nothing: wrap the result in
+        cell(..., sort=int(flag)) for a sortable column. The download is the
+        caller's: write its own word there (the TSV cannot carry a glyph).
+        Keyword arguments:
+          flag: truthy for yes
+          yes: hover text for yes
+          no: hover text for no
+        Returns:
+          Safe HTML
+    '''
+    if flag:
+        return Safe(f"<i class='fa-solid fa-circle-check' style='color: lime' "
+                    f"title='{escape(yes)}'></i>")
+    return Safe(f"<i class='fa-solid fa-circle-xmark' style='color: red' "
+                f"title='{escape(no)}'></i>")
+
+
+def column_toggles(table_id, columns, store=None):
+    ''' Checkboxes that show or hide a table's optional columns
+
+        For tables where a few columns are useful to some readers and noise to
+        others. Each checkbox drives dis.js toggleColumn(), which hides every
+        cell carrying the column's class (see render_table's col_classes) and
+        remembers the choice in the browser, so a reader who never wants a
+        column says so once. The download, built on the server, is unaffected;
+        it always carries every column.
+        Keyword arguments:
+          table_id: id of the table (the one given to render_table)
+          columns: list of (label, column class) or (label, column class, shown)
+                   tuples, in display order; shown defaults to True and is the
+                   state for a reader who has never touched the box
+          store: name the browser remembers the choices under (default: the
+                 table id). Give one when the table id is generic - half a
+                 dozen pages render a table called 'dois' - so a choice made
+                 on this page is not applied to another page's table of the
+                 same id that happens to share a column class. The URL path
+                 is no substitute: a page keyed by a date or a year in its
+                 path would forget the choice on the next date.
+        Returns:
+          HTML: the labelled checkboxes, plus a <style> hiding the columns that
+          start hidden, so they never flash into view before the script runs
+    '''
+    store = store or table_id
+    boxes, hidden = [], []
+    for col in columns:
+        label, cls = col[0], col[1]
+        shown = col[2] if len(col) > 2 else True
+        if not shown:
+            hidden.append(f"#{table_id} .{cls}")
+        # The handler reads the table, class and store from the data attributes
+        # rather than from literals in the onchange string: one copy of each
+        # value, and nothing to quote for a JavaScript string.
+        boxes.append(f"<label class='col-toggle'><input type='checkbox'"
+                     f"{' checked' if shown else ''} "
+                     f"data-col-toggle='{escape(table_id)}' data-col-class='{escape(cls)}' "
+                     f"data-col-store='{escape(store)}' onchange='toggleColumn(this)'>"
+                     f" {escape(label)}</label>")
+    style = f"<style>{', '.join(hidden)} {{ display: none; }}</style>" if hidden else ''
+    return (f"{style}<span class='col-toggles'><span class='col-toggles-label'>Columns:</span>"
+            + ''.join(boxes) + "</span>")
 
 
 def generate_navbar_items(items):

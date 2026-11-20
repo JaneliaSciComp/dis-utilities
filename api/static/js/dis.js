@@ -157,6 +157,62 @@ function toggleClass(tid, cls, btn, whenHidden, whenShown, counter) {
   applyRowFilters(tid, counter);
 }
 
+// Optional columns (dis_html.column_toggles): hide or show every cell of class
+// `cls` in table `tid` to match the checkbox, and remember the reader's choices
+// in localStorage as {class: shown} under the store name the page gave the
+// checkbox (data-col-store; the table id unless the page named one, since
+// several pages have a table called 'dois'), so a reader who never wants a
+// column says so once. A column the reader has never touched keeps the server's
+// default (the checkbox's rendered state), which is why the store holds choices
+// rather than a hidden set. Browser storage is a per-viewer convenience here,
+// nothing more: it can be absent or throw (private window, blocked site data),
+// and then the page simply shows the server's defaults.
+function columnStore(store) {
+  try {
+    const saved = JSON.parse(localStorage.getItem('cols:' + store) || '{}');
+    return (saved && typeof saved === 'object' && !Array.isArray(saved)) ? saved : {};
+  } catch (e) {
+    return {};
+  }
+}
+
+// An explicit display value both ways: a column that starts hidden is hidden by
+// a stylesheet rule column_toggles emits (so it never flashes into view), and
+// an empty inline style would fall back to that rule rather than show it.
+function applyColumn(tid, cls, shown) {
+  const table = document.getElementById(tid);
+  if (!table) { return; }
+  table.querySelectorAll('.' + cls).forEach(function (el) {
+    el.style.display = shown ? 'table-cell' : 'none';
+  });
+}
+
+// The checkbox's data attributes say which table, class and store it drives.
+function toggleColumn(box) {
+  const tid = box.dataset.colToggle;
+  const cls = box.dataset.colClass;
+  const store = box.dataset.colStore || tid;
+  applyColumn(tid, cls, box.checked);
+  const choices = columnStore(store);
+  choices[cls] = box.checked;
+  try {
+    localStorage.setItem('cols:' + store, JSON.stringify(choices));
+  } catch (e) { /* no storage: the choice lasts for this page only */ }
+}
+
+// On load, apply each table's remembered choices over the server's defaults and
+// sync the boxes.
+document.addEventListener('DOMContentLoaded', function () {
+  document.querySelectorAll('input[data-col-toggle]').forEach(function (box) {
+    const tid = box.dataset.colToggle;
+    const cls = box.dataset.colClass;
+    const choices = columnStore(box.dataset.colStore || tid);
+    const shown = (cls in choices) ? Boolean(choices[cls]) : box.checked;
+    box.checked = shown;
+    applyColumn(tid, cls, shown);
+  });
+});
+
 // Cycling filter: rotates a table's rows through "A & B" -> "A only" -> "B only".
 // The button label shows the current view. Composes with toggler() via the
 // shared hide set, and keeps the counter span (if given) up to date.

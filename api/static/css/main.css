@@ -11,6 +11,7 @@
   /* Page chrome */
   --page-bg:      #222;
   --muted-border: #666;
+  --muted-label:  #a8c4e0;  /* secondary text: status lines, control labels */
   /* Acknowledgement-tag curator color (see curator_display()) */
   --curator-iris: lime;
 }
@@ -507,6 +508,29 @@ hr {border-color: var(--muted-border);
   padding: 3px 8px;
 }
 
+/* Optional-column checkboxes (dis_html.column_toggles), sitting in the control
+   row above a table next to the filter and download buttons. */
+.col-toggles {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  margin-left: 14px;
+  vertical-align: middle;
+}
+.col-toggles-label {
+  color: var(--muted-label);
+  font-size: 0.9em;
+}
+.col-toggle {
+  margin: 0;
+  cursor: pointer;
+  font-size: 0.9em;
+}
+.col-toggle input {
+  margin-right: 4px;
+  vertical-align: -1px;
+}
+
 /* Curate tab sections: a <details> per field whose summary line is the
    field's current state. Folded, the tab is four lines that already say what
    the record holds; the controls appear on demand. */
@@ -524,7 +548,7 @@ hr {border-color: var(--muted-border);
 .curate-section > summary::-webkit-details-marker { display: none; }
 .curate-section > summary::before {
   content: "\25B8";            /* small right-pointing triangle */
-  color: #a8c4e0;
+  color: var(--muted-label);
   width: 1em;
   flex: none;
 }
@@ -535,7 +559,7 @@ hr {border-color: var(--muted-border);
   flex: none;
 }
 .curate-status {
-  color: #a8c4e0;
+  color: var(--muted-label);
   font-size: 0.9em;
 }
 .curate-body {
@@ -544,7 +568,7 @@ hr {border-color: var(--muted-border);
 }
 .curate-help > summary .curate-title {
   font-weight: 400;
-  color: #a8c4e0;
+  color: var(--muted-label);
   font-size: 0.9em;
 }
 

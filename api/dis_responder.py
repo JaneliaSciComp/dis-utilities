@@ -47,11 +47,11 @@ import jrc_common.jrc_common as JRC
 import doi_common.doi_common as DL
 import dis_plots as DP
 from dis_html import (TOPIC_MIN_CONFIDENCE, DOWNLOAD_ICON, NAV, add_jrc_fields, add_subjects, cell,
-                      create_downloadable, dloop, doi_link, fcell, filter_frame,
+                      column_toggles, create_downloadable, dloop, doi_link, fcell, filter_frame,
                       generate_navbar as _generate_navbar, get_license,
                       oa_status_rank, registrar_switch, render_table, render_warning,
                       safe, see_also, stat_cards, tab_button, tab_pane, tiny_badge,
-                      two_col, year_pulldown as _year_pulldown)
+                      two_col, year_pulldown as _year_pulldown, yes_no)
 from dis_config import (ARTICLES, CITATION_SOURCE_NAME, DATACITE, DOI, DO_NOT_DISPLAY, EMAIL,
                         EPT_ONE, EPT_TWO, LIBRARY, NCBI_MESH, OAREPORT,
                         OPENALEX, ORCID, PMCID, PMID, PREFERRED_AFF,
@@ -71,7 +71,7 @@ from dis_state import CVTERM, PROJECT
 # on the image. feat -> minor, everything else -> patch, in the same commit as
 # the change. Forgetting is survivable: ocbuild warns that the tag already
 # exists in the ImageStream rather than silently overwriting it.
-__version__ = "120.140.0"
+__version__ = "120.141.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -14804,6 +14804,83 @@ def show_newsletter(ndate, source='Crossref'):
                                          html=html, navbar=generate_navbar('DOIs')))
 
 
+INSERT_COLUMNS = ['DOI', 'Type', 'Published', 'Publisher', 'Inserted', 'Is version of',
+                  'Preprints', 'Newsletter', 'Tags', 'Acknowledgements', 'Janelia authors']
+
+
+def _doi_list(value):
+    ''' A record field that should hold a list of DOIs, as a list of strings.
+        A lone string is one DOI; anything that is not a string is skipped
+        rather than allowed to fail the whole page.
+    '''
+    if not value:
+        return []
+    if isinstance(value, str):
+        return [value]
+    return [item for item in value if isinstance(item, str) and item]
+
+
+def _insert_row(row, source, limit):
+    ''' One DOI's row on the inserted-DOIs page: the screen cells, the
+        download line and the row class
+        Keyword arguments:
+          row: DOI record
+          source: the page's registrar (Crossref or DataCite)
+          limit: date two weeks ago; older publications are gray and never
+                 newsletter candidates
+        Returns:
+          (screen cells in INSERT_COLUMNS order, download fields in the same
+           order, 'candidate' or 'other')
+    '''
+    typ = subtype = ""
+    if row.get('type'):
+        typ = row['type']
+        if row.get('subtype'):
+            subtype = row['subtype']
+            typ += f" {subtype}"
+    elif row.get('types', {}).get('resourceTypeGeneral'):
+        typ = row['types']['resourceTypeGeneral']
+    version = []
+    for ver in row.get('relation', {}).get('is-version-of', []):
+        if ver.get('id-type') == 'doi' and ver.get('id') not in version:
+            version.append(ver.get('id'))
+    # jrc_preprint links a journal article to its preprint(s), or the other way
+    # around; a list of DOIs, rendered like "Is version of".
+    preprints = _doi_list(row.get('jrc_preprint'))
+    news = row.get('jrc_newsletter', '')
+    pdate = row['jrc_publishing_date']
+    recent = pdate >= str(limit)
+    if (not news) and recent and (typ == 'journal-article' or subtype == 'preprint'
+                                  or row['jrc_obtained_from'] == source):
+        rclass = 'candidate'
+    else:
+        rclass = 'other'
+    jpd = pdate if recent else f"<span style='color: gray'>{pdate}</span>"
+    tags = ', '.join(sorted([tag['name'] for tag in row['jrc_tag']])) \
+           if 'jrc_tag' in row else ""
+    # Two yes/no facts a curator triages by: is there acknowledgement text to
+    # tag, and is anyone at Janelia credited yet. Icons on screen (sorted by a
+    # 1/0 data-sort), words in the download.
+    has_acks = bool(row.get('jrc_acknowledgements'))
+    has_author = bool(row.get('jrc_author'))
+    publisher = row.get('publisher') or ''
+    inserted = str(row['jrc_inserted'])
+    screen = [safe(doi_link(row['doi'])), typ, safe(jpd), publisher, inserted,
+              safe(doi_link(version)), safe(doi_link(preprints)), news,
+              safe(f"<span style='font-size: 10pt;'>{tags}</span>"),
+              cell(yes_no(has_acks, 'has acknowledgement text', 'no acknowledgement text'),
+                   sort=int(has_acks), align='center'),
+              cell(yes_no(has_author, 'has a credited Janelia author',
+                          'no credited Janelia author'),
+                   sort=int(has_author), align='center')]
+    # The download: the same columns, raw values (bare DOIs, no markup, words
+    # for the glyphs).
+    download = [row['doi'], typ, pdate, publisher, inserted, ', '.join(version),
+                ', '.join(preprints), news, tags,
+                'yes' if has_acks else 'no', 'yes' if has_author else 'no']
+    return screen, download, rclass
+
+
 @app.route('/doiui/insert/<string:idate>')
 @app.route('/doiui/insert/<string:idate>/<string:source>')
 def show_insert(idate, source='Crossref'):
@@ -14828,46 +14905,22 @@ def show_insert(idate, source='Crossref'):
     trows = []
     row_classes = []
     fileoutput = ""
-    cnt = 0
     limit = weeks_ago(2)
     for row in rows:
-        typ = subtype = ""
-        if row.get('type'):
-            typ = row['type']
-            if row.get('subtype'):
-                subtype = row['subtype']
-                typ += f" {subtype}"
-        elif row.get('types', {}).get('resourceTypeGeneral'):
-            typ = row['types']['resourceTypeGeneral']
-        version = []
-        for ver in row.get('relation', {}).get('is-version-of', []):
-            if ver.get('id-type') == 'doi' and ver.get('id') not in version:
-                version.append(ver.get('id'))
-        version = doi_link(version) if version else ""
-        news = row.get('jrc_newsletter', '')
-        if (not news) and (row['jrc_publishing_date'] >= str(limit)) \
-           and (typ == 'journal-article' or subtype == 'preprint' \
-                or row['jrc_obtained_from'] == source):
-            rclass = 'candidate'
-        else:
-            rclass = 'other'
-        jpd = row['jrc_publishing_date'] if row['jrc_publishing_date'] >= str(limit) else \
-              f"<span style='color: gray'>{row['jrc_publishing_date']}</span>"
-        tags = ', '.join(sorted([tag['name'] for tag in row['jrc_tag']])) \
-               if 'jrc_tag' in row else ""
+        screen, download, rclass = _insert_row(row, source, limit)
+        trows.append(screen)
         row_classes.append(rclass)
-        trows.append([safe(doi_link(row['doi'])), typ, safe(jpd), row['publisher'],
-                      str(row['jrc_inserted']), safe(version), news,
-                      safe(f"<span style='font-size: 10pt;'>{tags}</span>")])
-        # Download file keeps its own column set (no Publisher, raw values)
-        frow = "\t".join([row['doi'], typ, row['jrc_publishing_date'],
-                          str(row['jrc_inserted']), version, news, tags])
-        fileoutput += f"{frow}\n"
-        cnt += 1
-    html = render_table(['DOI', 'Type', 'Published', 'Publisher', 'Inserted',
-                         'Is version of', 'Newsletter', 'Tags'], trows,
+        fileoutput += "\t".join(download) + "\n"
+    cnt = len(trows)
+    # Optional columns are hidden by class from a checkbox row above the table
+    # (column_toggles). The rest are required and get no control; the download
+    # keeps every column regardless.
+    html = render_table(INSERT_COLUMNS, trows,
                         table_id='dois', css='tablesorter numbers-scroll',
-                        row_classes=row_classes)
+                        row_classes=row_classes,
+                        col_classes=[None, None, None, 'col-publisher', None,
+                                     'col-version', 'col-preprint', None, 'col-tags',
+                                     'col-acks', 'col-author'])
     # Goes through the shared hide-set like every other row filter in the app.
     # It used to call $('.other').toggle() directly, which flips inline display and
     # so cannot compose with applyRowFilters - any second filter added here would
@@ -14881,8 +14934,17 @@ def show_insert(idate, source='Crossref'):
               + "'Filter for candidate DOIs', 'totalrows');\">" \
               + "Filter for candidate DOIs</button>"
     counter = f"<p>Number of DOIs: <span id='totalrows'>{cnt:,}</span></p>"
+    # store=: this table is called 'dois' like half a dozen others; the reader's
+    # column choices are this page's alone.
     html = counter + cbutton \
-           + f" &nbsp;{create_downloadable('jrc_inserted', None, fileoutput)}{html}"
+           + f" &nbsp;{create_downloadable('jrc_inserted', INSERT_COLUMNS, fileoutput)}" \
+           + column_toggles('dois', [('Publisher', 'col-publisher'),
+                                     ('Is version of', 'col-version'),
+                                     ('Preprints', 'col-preprint', False), ('Tags', 'col-tags'),
+                                     ('Acknowledgements', 'col-acks', False),
+                                     ('Janelia authors', 'col-author', False)],
+                            store='doiui-insert') \
+           + html
     endpoint_access()
     return make_response(render_template('general.html', urlroot=request.url_root,
                                          title=f"DOIs inserted from {source} on or after {idate}",
