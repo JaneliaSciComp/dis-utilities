@@ -30,7 +30,12 @@ def _block(start, end):
 HANDLER = _block('def doi_edit(doi)', "@app.route('/pmidui/")
 PANEL = _block('def curate_panel(', 'def _save_newsletter(')
 SAVE = _block('def _save_newsletter(', "@app.route('/doi_edit/")
-TABS = _block('def doi_tabs(', 'def _date_text(')
+TABS = _block('def doi_tabs(', 'def show_doi_ui(')
+SHOW = _block('def show_doi_ui(', 'def _date_text(')
+GATE = _block('def restricted(arg=None)', "@app.route('/login'")
+
+# Parsed once: ast.parse of a 27,000-line file per test was most of the run.
+_FUNCS = {n.name: n for n in ast.parse(SOURCE).body if isinstance(n, ast.FunctionDef)}
 
 
 class _Collection:
@@ -54,14 +59,14 @@ def _ns(dois=None, processing=None, explode=False):
           'DB': {'dis': type('D', (), {'dois': dois, 'processing': processing})()},
           'print': lambda *a, **k: None,
           'render_warning': lambda msg, severity='error': f"[{severity}] {msg}"}
-    tree = ast.parse(SOURCE)
     ns['DERIVED_DEFAULT_TAGS'] = ('AI Initiative', 'Janelia Experimental Technology (jET)',
                                   'Scientific Computing Software')
+    ns['AUTHOR_MATCHES'] = {'asserted': 'Janelia affiliation', 'ORCID': 'ORCID match',
+                            'name': 'Name match'}
     for name in ('_date_text', 'record_doi_event', '_save_newsletter',
-                 '_ack_text', '_save_acknowledgements', '_derived_tags', '_save_tag'):
-        node = next(n for n in tree.body
-                    if isinstance(n, ast.FunctionDef) and n.name == name)
-        exec(ast.get_source_segment(SOURCE, node), ns)    # pylint: disable=W0122
+                 '_ack_text', '_save_acknowledgements', '_derived_tags', '_save_tag',
+                 '_author_rows', '_first_last_change', '_save_author'):
+        exec(ast.get_source_segment(SOURCE, _FUNCS[name]), ns)    # pylint: disable=W0122
     ns['_dois'] = dois
     ns['_processing'] = processing
     return ns
@@ -91,7 +96,7 @@ def test_the_tab_is_shown_to_curators_and_admins_only():
         the cv failed to load - the same shape @restricted uses.
     '''
     assert "{'admin', CURATOR_TERM} & authorizations(current_user())" in TABS
-    assert "content['curate'] = curate_panel(doi, row, authors)" in TABS
+    assert "content['curate'] = curate_panel(doi, row, authors, curate_note)" in TABS
 
 
 def test_the_tab_looks_like_a_write_control():
@@ -125,8 +130,11 @@ def test_every_handler_action_has_a_control():
     offered = set(re.findall(r"name='action' value='(\w+)'", PANEL))
     handled = set(re.findall(r"action in \(([^)]+)\)", HANDLER))
     handled = {a.strip("' ") for group in handled for a in group.split(',')}
+    dynamic = set(re.findall(r"act = '(\w+)' if arow\['credited'\] else '(\w+)'", PANEL))
+    offered |= {a for pair in dynamic for a in pair}
     assert offered == handled == {'newsletter_set', 'newsletter_clear',
-                                  'ack_set', 'ack_clear', 'tag_add', 'tag_remove'}
+                                  'ack_set', 'ack_clear', 'tag_add', 'tag_remove',
+                                  'author_add', 'author_remove'}
 
 
 def test_clear_is_offered_only_when_there_is_something_to_clear():
@@ -324,17 +332,32 @@ def test_adding_text_marks_it_manual_and_clears_the_no_ack_marker():
     assert note.startswith('[success]')
 
 
-def test_clearing_drops_the_text_and_its_source_together():
-    ''' A source with no text would label nothing; and the harvester's queries
-        test for the text field's absence, so $unset is what reopens the record
-        to it.
+def test_clearing_drops_the_text_its_source_and_the_no_ack_marker():
+    ''' A source with no text would label nothing. The harvester's queries
+        require BOTH the text field and jrc_no_acknowledgements to be absent,
+        so a clear that left the marker behind (a pull script can write text
+        over it) would promise "may fill it again" and never deliver.
     '''
     ns = _ns()
-    row = {'doi': '10.1/x', 'jrc_acknowledgements': ACK, 'jrc_ack_source': 'PMC'}
+    row = {'doi': '10.1/x', 'jrc_acknowledgements': ACK, 'jrc_ack_source': 'PMC',
+           'jrc_no_acknowledgements': True}
     note = ns['_save_acknowledgements'](row, ME, 'ack_clear', None)
     (_, update, _), = ns['_dois'].calls
-    assert update == {'$unset': {'jrc_acknowledgements': '', 'jrc_ack_source': ''}}
+    assert update == {'$unset': {'jrc_acknowledgements': '', 'jrc_ack_source': '',
+                                 'jrc_no_acknowledgements': ''}}
     assert 'harvester may fill it again' in note
+
+
+def test_saving_an_untouched_textarea_is_a_no_op():
+    ''' Harvested text often carries PDF spacing that _ack_text tidies, so a
+        Save with nothing changed used to count as an edit and relabel the
+        harvester's text as Manual.
+    '''
+    ns = _ns()
+    row = {'doi': '10.1/x', 'jrc_acknowledgements': 'We  thank   X.\n\n\nFunded by  Y.',
+           'jrc_ack_source': 'PMC'}
+    note = ns['_save_acknowledgements'](row, ME, 'ack_set', row['jrc_acknowledgements'])
+    assert note.startswith('[warning]') and not ns['_dois'].calls
 
 
 def test_the_replaced_text_travels_with_the_event_in_full():
@@ -408,8 +431,15 @@ def test_an_empty_box_does_not_clear():
 
 SUPORGS = {'Cardona Lab': {'code': 'JRC-CL', 'active': True},
            'Scientific Computing Software': {'code': 'JRC-SCS', 'active': True},
+           'Connectomics Team': {'code': 'JRC-CT', 'active': True},
            'Old Team': {'code': 'JRC-OLD'}}
+# What a curator may ADD: live projects only.
 PROJECTS = {'CellMap', 'MouseLight'}
+# What the nightly programs tag BY: both sides of project_map, synonyms and
+# retired rows included, as DL.get_project_map(inactive=True) returns it.
+PROJECT_MAP = {'CellMap': 'CellMap', 'MouseLight': 'MouseLight',
+               'MouseLight Project Team': 'MouseLight',
+               'GENIE Project Team': 'GENIE Project', 'GENIE Project': 'GENIE Project'}
 AUTHORS = [{'family': 'Cardona', 'given': 'Albert', 'janelian': True, 'group': 'Cardona Lab',
             'tags': ['Cardona Lab', 'Old Team', 'Group Leader/Lab Head'],
             'managedTeams': [{'supOrgName': 'Cardona Lab', 'supOrgSubType': 'Lab'},
@@ -421,7 +451,7 @@ AUTHORS = [{'family': 'Cardona', 'given': 'Albert', 'janelian': True, 'group': '
 
 def _tags(row, action, name, derived=None):
     ns = _ns()
-    derived = ns['_derived_tags'](AUTHORS, PROJECTS, SUPORGS) if derived is None else derived
+    derived = ns['_derived_tags'](AUTHORS, PROJECT_MAP, SUPORGS) if derived is None else derived
     note = ns['_save_tag'](row, ME, action, name, derived, SUPORGS, PROJECTS)
     return ns, note
 
@@ -448,12 +478,41 @@ def test_derived_tags_are_what_the_nightly_programs_would_apply():
         to. Not: labs an author merely lists, inactive orgs, or the
         "Group Leader/Lab Head" pseudo-tag.
     '''
-    derived = _ns()['_derived_tags'](AUTHORS, PROJECTS, SUPORGS)
+    derived = _ns()['_derived_tags'](AUTHORS, PROJECT_MAP, SUPORGS)
     assert derived == {'Cardona Lab': ['Cardona'],
                        'Connectomics Team': ['Cardona'],
                        'AI Initiative': ['Bock'],
                        'CellMap': ['CellMap']}
-    assert _ns()['_derived_tags'](None, set(), {}) == {}
+    assert _ns()['_derived_tags'](None, {}, {}) == {}
+
+
+def test_a_project_derived_through_a_synonym_counts_as_derived():
+    ''' update_dois tags an organizational author "GENIE Project Team" as
+        "GENIE Project" through project_map. The first version checked the
+        author's name against the project names alone, so that tag read as
+        "added by hand" with a Remove button - and the nightly sync put it
+        back. Live data has 23 such synonyms on thousands of DOIs.
+    '''
+    derived = _ns()['_derived_tags']([{'name': 'GENIE Project Team'},
+                                      {'name': 'MouseLight Project Team'}],
+                                     PROJECT_MAP, SUPORGS)
+    assert derived == {'GENIE Project': ['GENIE Project Team'],
+                       'MouseLight': ['MouseLight Project Team']}
+
+
+def test_the_write_rule_is_narrower_than_the_label_rule():
+    ''' The label is generous (anything either nightly program COULD put
+        back). The write made when crediting an author must not be: an active
+        affiliation in the roster's cumulative list that update_dois would
+        never add would otherwise be written and then called fixed.
+    '''
+    author = [{'family': 'Cardona', 'group': 'Cardona Lab',
+               'tags': ['Connectomics Team', 'Scientific Computing Software'],
+               'managedTeams': [{'supOrgName': 'Connectomics Team', 'supOrgSubType': 'Team'}]}]
+    label = _ns()['_derived_tags'](author, PROJECT_MAP, SUPORGS)
+    write = _ns()['_derived_tags'](author, PROJECT_MAP, SUPORGS, strict=True)
+    assert set(label) == {'Cardona Lab', 'Connectomics Team', 'Scientific Computing Software'}
+    assert set(write) == {'Cardona Lab', 'Scientific Computing Software'}
 
 
 def test_a_derived_tag_cannot_be_removed_and_says_why():
@@ -461,6 +520,9 @@ def test_a_derived_tag_cannot_be_removed_and_says_why():
     ns, note = _tags(row, 'tag_remove', 'Cardona Lab')
     assert note.startswith('[warning]')
     assert 'Cardona' in note and 'nightly sync' in note
+    # The nightly programs derive from every MATCHED author, credited or not,
+    # so the refusal must not send the curator to change a credit.
+    assert 'credit' not in note
     assert not ns['_dois'].calls
 
 
@@ -508,10 +570,31 @@ def test_a_name_outside_the_vocabulary_is_refused():
     ''' A typo must not create a tag: the vocabulary is the suporg collection
         plus the projects in project_map, and nothing else.
     '''
-    for bad in ('Cardonna Lab', '', '  ', 'Group Leader/Lab Head'):
+    # 'Old Team' is in the suporg collection but not active: the pick-list does
+    # not offer it, and a datalist is a suggestion, so the server has to apply
+    # the same rule to a typed name.
+    for bad in ('Cardonna Lab', '', '  ', 'Group Leader/Lab Head', 'Old Team'):
         ns, note = _tags({'doi': '10.1/x'}, 'tag_add', bad)
         assert note.startswith('[warning]'), bad
         assert not ns['_dois'].calls
+
+
+def test_removing_a_duplicated_tag_unsets_the_field():
+    ''' $pull takes every entry with the name; judging "last one" by list
+        length alone left jrc_tag: [] when the name was in twice.
+    '''
+    row = {'doi': '10.1/x', 'jrc_tag': [{'name': 'MouseLight', 'code': None, 'type': 'affiliation'},
+                                       {'name': 'MouseLight', 'code': None, 'type': 'affiliation'}]}
+    ns, _ = _tags(row, 'tag_remove', 'MouseLight')
+    assert [u for _, u, _ in ns['_dois'].calls][-1] == {'$unset': {'jrc_tag': ''}}
+
+
+def test_adding_a_tag_does_not_need_the_author_lookup():
+    ''' Author details come from OpenAlex and PubMed as well as the roster; an
+        add has nothing to derive and must not fail because one is down.
+    '''
+    block = _block('def _save_tag_action(', 'ACK_MAX_CHARS')
+    assert block.index("if action == 'tag_remove':") < block.index('DL.get_author_details')
 
 
 def test_duplicates_and_absent_tags_are_no_ops():
@@ -530,13 +613,216 @@ def test_the_derived_set_is_recomputed_on_the_server():
     '''
     block = _block('def _save_tag_action(', "@app.route('/doi_edit/")
     assert 'DL.get_author_details(row' in block
-    assert '_derived_tags(authors, projects, suporgs)' in block
+    assert '_derived_tags(authors, project_map, suporgs)' in block
     assert "request.form.get('name')" in block
 
 
 def test_the_panel_offers_only_active_orgs_and_projects_to_add():
     assert "(v or {}).get('active')" in PANEL
     assert "list='tag-choices'" in PANEL
+
+
+def test_the_vocabulary_reads_orgs_from_the_collection():
+    ''' The same rule tests/test_tag_code_shape.py pins on the scripts: the
+        collection form gives the {code, active} dict, the HQ-API form a bare
+        string, and jrc_tag[].code is written straight from it. (That test
+        cannot list dis_responder.py as a whole, which also uses the API form
+        where it genuinely compares HQ against Mongo.)
+    '''
+    block = _block('def _tag_vocabulary(', 'def _derived_tags(')
+    assert "DL.get_supervisory_orgs(coll=DB['dis'].suporg)" in block
+    # The derivation map carries synonyms and retired rows, as update_dois
+    # reads them; the addable set carries live projects only.
+    assert "project_map[rec['name']] = rec['project']" in block
+    assert "if not rec.get('doNotUse'):" in block
+
+
+# --- author credits --------------------------------------------------------
+
+PAPER = [
+    # position 1, asserted affiliation, on the roster with an ID
+    {'given': 'Albert', 'family': 'Cardona', 'employeeId': 'E1', 'match': 'asserted',
+     'asserted': True, 'janelian': True, 'alumni': False, 'is_first': True,
+     'group': 'Cardona Lab', 'orcid': '0000-0001-0000-0001'},
+    # name match, roster knows them but has no employee ID
+    {'given': 'Pat', 'family': 'Noid', 'match': 'name', 'janelian': True, 'alumni': False,
+     'userIdO365': 'noidp@hhmi.org'},
+    # no evidence at all
+    {'given': 'Someone', 'family': 'Else', 'match': None, 'janelian': False, 'alumni': False},
+    # ORCID match, former employee, last position
+    {'given': 'Davi', 'family': 'Bock', 'employeeId': 'E4', 'match': 'ORCID', 'janelian': True,
+     'alumni': True, 'is_last': True},
+    # no evidence now, but already credited
+    {'given': 'Ghost', 'family': 'Credit', 'employeeId': 'E5', 'match': None,
+     'janelian': False, 'alumni': False},
+]
+
+
+def _authors(row, action, eid, lookup=None):
+    ns = _ns()
+    note = ns['_save_author'](row, ME, action, eid, PAPER, SUPORGS, PROJECT_MAP, lookup)
+    return ns, note
+
+
+def test_eligibility_needs_evidence_and_an_employee_id():
+    ''' The two rules: a match (affiliation, ORCID or name) to be listed at all,
+        and an employee ID to be creditable. Without the ID the row is shown
+        but cannot be acted on, with the reason.
+    '''
+    rows, unlisted = _ns()['_author_rows'](PAPER, ['E5'])
+    by = {r['who']: r for r in rows}
+    assert unlisted == 1, 'Someone Else has no evidence and is not credited'
+    assert by['Albert Cardona']['eligible'] and by['Albert Cardona']['evidence'] == 'Janelia affiliation'
+    assert not by['Pat Noid']['eligible'] and 'No employee ID' in by['Pat Noid']['why']
+    assert by['Pat Noid']['link'] == 'noidp@hhmi.org'
+    assert by['Davi Bock']['eligible'] and by['Davi Bock']['alumni']
+    # A credit with no remaining evidence is listed, and removable, because
+    # that is exactly the row a curator needs to see.
+    assert by['Ghost Credit']['credited'] and by['Ghost Credit']['eligible']
+    assert by['Ghost Credit']['evidence'] == 'none'
+    assert [r['who'] for r in rows] == ['Albert Cardona', 'Pat Noid', 'Davi Bock', 'Ghost Credit']
+
+
+def test_a_credit_matching_no_author_gets_a_row_named_from_the_roster():
+    ''' The author list changed with a new version, or a CLI credit used the
+        wrong ID: the employee ID is in jrc_author but no author on the paper
+        carries it. Without a row it could not be seen or uncredited here.
+    '''
+    roster = {'E9': {'given': ['Orphan', 'O.'], 'family': ['Credit'], 'orcid': '0000-9'}}
+    rows, _ = _ns()['_author_rows'](PAPER, ['E1', 'E9'], roster.get)
+    orphan = rows[-1]
+    assert orphan == {'eid': 'E9', 'who': 'Orphan Credit', 'link': '0000-9',
+                      'evidence': 'not on this paper’s author list', 'eligible': True,
+                      'why': '', 'credited': True, 'alumni': False}
+    # Unknown to the roster too: still a row, named by the ID.
+    rows, _ = _ns()['_author_rows'](PAPER, ['E9'], lambda eid: None)
+    assert rows[-1]['who'] == 'employee E9'
+    # And it can be uncredited.
+    ns, note = _authors({'doi': '10.1/x', 'jrc_author': ['E1', 'E9']}, 'author_remove', 'E9',
+                        roster.get)
+    assert note.startswith('[success]')
+    (_, update, _), = ns['_dois'].calls
+    assert update['$pull'] == {'jrc_author': 'E9'}
+
+
+def test_a_person_listed_twice_gets_one_row():
+    twice = PAPER[:1] + [dict(PAPER[0], is_first=False, is_last=True)]
+    rows, _ = _ns()['_author_rows'](twice, [])
+    assert [r['who'] for r in rows] == ['Albert Cardona']
+
+
+def test_the_panel_disables_rather_than_hides_an_ineligible_author():
+    assert "if not arow['eligible']:" in PANEL
+    assert 'disabled' in PANEL and "title='{escape(arow['why'])}'" in PANEL
+
+
+def test_crediting_adds_the_id_recomputes_first_last_and_adds_derived_tags():
+    ''' After a credit the record should be what the nightly sync would make
+        it, not inconsistent until tomorrow: first/last author from position
+        intersected with the new list, and the author's lab tag present.
+    '''
+    ns, note = _authors({'doi': '10.1/x'}, 'author_add', 'E1')
+    assert note.startswith('[success]')
+    (_, update, _), = ns['_dois'].calls
+    assert update['$addToSet'] == {'jrc_author': 'E1'}
+    assert update['$set'] == {'jrc_first_id': ['E1'], 'jrc_first_author': 'Cardona, Albert'}
+    assert update['$unset'] == {'jrc_last_id': '', 'jrc_last_author': ''}
+    assert update['$push'] == {'jrc_tag': {'$each': [
+        {'name': 'Cardona Lab', 'code': {'code': 'JRC-CL', 'active': True}, 'type': 'suporg'}]}}
+    (_, event, _), = ns['_processing'].calls
+    assert event['$push']['processes']['action'] == 'author_credited'
+    assert event['$push']['processes']['notes'] == \
+        'credited Albert Cardona (Janelia affiliation); added tags Cardona Lab'
+
+
+def test_a_credit_never_duplicates_a_tag_the_record_has():
+    row = {'doi': '10.1/x', 'jrc_tag': [{'name': 'Cardona Lab', 'code': {}, 'type': 'suporg'}]}
+    ns, _ = _authors(row, 'author_add', 'E1')
+    (_, update, _), = ns['_dois'].calls
+    assert '$push' not in update
+
+
+def test_the_audit_names_the_person_not_the_employee_id():
+    ''' The Processing tab is public; the employee ID is the identifier the
+        API redacts from unauthorized callers.
+    '''
+    ns, _ = _authors({'doi': '10.1/x'}, 'author_add', 'E1')
+    (_, event, _), = ns['_processing'].calls
+    assert 'E1' not in event['$push']['processes']['notes']
+
+
+def test_credits_outside_the_rules_are_refused():
+    for eid, why in (('E2', 'unknown id'), ('', 'empty'), ('E9', 'not on the paper')):
+        ns, note = _authors({'doi': '10.1/x'}, 'author_add', eid)
+        assert note.startswith('[warning]'), why
+        assert not ns['_dois'].calls
+    ns, note = _authors({'doi': '10.1/x', 'jrc_author': ['E1']}, 'author_add', 'E1')
+    assert 'already credited' in note and not ns['_dois'].calls
+
+
+def test_uncrediting_pulls_the_id_and_recomputes_first_last():
+    row = {'doi': '10.1/x', 'jrc_author': ['E1', 'E4'], 'jrc_newsletter': '2025-01-01',
+           'jrc_first_id': ['E1'], 'jrc_last_id': 'E4'}
+    ns, note = _authors(row, 'author_remove', 'E4')
+    assert note.startswith('[success]')
+    (_, update, _), = ns['_dois'].calls
+    assert update == {'$pull': {'jrc_author': 'E4'},
+                      '$set': {'jrc_first_id': ['E1'], 'jrc_first_author': 'Cardona, Albert'},
+                      '$unset': {'jrc_last_id': '', 'jrc_last_author': ''}}
+    assert 'nightly sync' not in note, 'reviewed record: no re-add warning'
+
+
+def test_uncrediting_on_an_unreviewed_record_warns_about_the_nightly_sync():
+    ''' update_dois re-credits any Janelian it detects unless jrc_newsletter
+        is set. The note has to say so, or the curator's change evaporates
+        overnight with nothing to explain why.
+    '''
+    row = {'doi': '10.1/x', 'jrc_author': ['E1', 'E4']}
+    _, note = _authors(row, 'author_remove', 'E4')
+    assert note.startswith('[success]') and 'newsletter date' in note
+    # A credit with no detector evidence will not be re-added, so no warning.
+    _, note = _authors({'doi': '10.1/x', 'jrc_author': ['E1', 'E5']}, 'author_remove', 'E5')
+    assert note.startswith('[success]') and 'newsletter date' not in note
+
+
+def test_uncrediting_the_last_author_unsets_the_field():
+    row = {'doi': '10.1/x', 'jrc_author': ['E1']}
+    ns, _ = _authors(row, 'author_remove', 'E1')
+    assert [u for _, u, _ in ns['_dois'].calls] == [
+        {'$pull': {'jrc_author': 'E1'},
+         '$unset': {'jrc_first_id': '', 'jrc_first_author': '',
+                    'jrc_last_id': '', 'jrc_last_author': ''}},
+        {'$unset': {'jrc_author': ''}}]
+
+
+def test_first_last_follow_update_dois_rules():
+    ''' Position in the registrar record intersected with the credit list;
+        co-first authors make jrc_first_id a list; nothing behind a field means
+        it is unset, not left stale.
+    '''
+    fl = _ns()['_first_last_change']
+    co = [{'employeeId': 'A', 'given': 'X', 'family': 'Ay', 'is_first': True},
+          {'employeeId': 'B', 'given': 'Y', 'family': 'Bee', 'is_first': True},
+          {'employeeId': 'C', 'given': 'Z', 'family': 'Cee', 'is_last': True}]
+    assert fl(co, ['A', 'B', 'C']) == ({'jrc_first_id': ['A', 'B'],
+                                        'jrc_first_author': 'Ay, X, Bee, Y',
+                                        'jrc_last_id': 'C', 'jrc_last_author': 'Cee, Z'}, {})
+    assert fl(co, ['B']) == ({'jrc_first_id': ['B'], 'jrc_first_author': 'Bee, Y'},
+                             {'jrc_last_id': '', 'jrc_last_author': ''})
+    assert fl(co, []) == ({}, {'jrc_first_id': '', 'jrc_first_author': '',
+                               'jrc_last_id': '', 'jrc_last_author': ''})
+
+
+def test_the_token_api_merges_rather_than_rewriting_jrc_author():
+    ''' POST /doi/jrc_author used to $set a from-scratch list, which would
+        have wiped any credit added on /doiui. It now starts from what is
+        stored and only appends, as update_dois.persist_author does.
+    '''
+    body = _block('def set_jrc_author(doi)', "@app.route('/raw/")
+    assert "jrc_author = list(row.get('jrc_author') or [])" in body
+    assert "jrc_author = []" not in body
+    assert "auth['employeeId'] not in jrc_author" in body
+    assert 'Never removes' in body
 
 
 # --- the round trip --------------------------------------------------------
@@ -546,11 +832,78 @@ def test_a_write_redirects_back_to_the_curate_tab():
         and the fragment reopens the tab so the note is seen rather than hidden
         behind the Authors tab - the template turns a fragment into a click.
     '''
-    assert "session['doi_note']" in HANDLER
+    assert 'session[\'doi_note\'] = {"doi": doi, "html": str(note)' in HANDLER
     assert "url_for('show_doi_ui', doi=doi) + '#curate'" in HANDLER
-    assert "session.pop('doi_note', '')" in PANEL
+    assert "getElementById(hash.slice(1) + '-tab')" in TEMPLATE
+
+
+def test_a_note_never_outlives_the_page_load_that_follows_it():
+    ''' The note used to be popped inside curate_panel, which runs only when
+        the DOI is held, the registrar answered, and the viewer is still a
+        curator. On any other path (a Crossref timeout is the common one) it
+        stayed in the cookie and surfaced on the next DOI the curator opened -
+        a success message about record A, shown on record B. Now show_doi_ui
+        pops it first thing, on every path, and keeps it only for its own DOI.
+    '''
+    assert "session.pop('doi_note'" not in PANEL
+    assert "pending = session.pop('doi_note', None)" in SHOW
+    assert "pending.get('doi') != doi" in SHOW
+    # It is popped before the first early return.
+    assert SHOW.index("session.pop('doi_note'") < SHOW.index('return ')
+    # A DOI deleted between the page load and the click: no Curate tab to hold
+    # the note, so it is shown above the banner rather than dropped.
+    assert "if pending and not row:" in SHOW
+    assert "recsec = pending['html'] + recsec" in SHOW
+    assert "doi_tabs(doi, row, rowext, data, authors, pending)" in SHOW
+
+
+def test_the_section_acted_on_reopens_with_the_note_inside_it():
+    ''' The sections fold to one status line each. After a change, the one the
+        action belonged to is the one open, holding the note, so the round
+        trip lands where the curator was. The key is the action's prefix, so
+        every action maps to a section without a table to maintain.
+    '''
+    assert '"section": action.split(\'_\', 1)[0]' in HANDLER
+    assert "opened = pending.get('section', '')" in PANEL
+    keys = set(re.findall(r"html \+= section\('(\w+)'", PANEL))
+    assert keys == {'newsletter', 'ack', 'tag', 'author'}
+    assert "CURATE_SECTIONS = ('newsletter', 'ack', 'tag', 'author')" in SOURCE
+    actions = {'newsletter_set', 'newsletter_clear', 'ack_set', 'ack_clear',
+               'tag_add', 'tag_remove', 'author_add', 'author_remove'}
+    assert {a.split('_', 1)[0] for a in actions} == keys
+    assert "{note if is_open else ''}" in PANEL
+    # A note for no section (an unknown action) is shown above them, not lost.
+    assert 'html = note if note and opened not in CURATE_SECTIONS else ""' in PANEL
+
+
+def test_a_lapsed_session_on_a_save_button_goes_back_to_the_page():
+    ''' @restricted sends a signed-out request to /login?next=<path>, and
+        sign-in replays "next" with a GET. For a POST-only route that is a
+        405. The POST's referrer - the page the form was on - is the right
+        place to land; the change itself is lost either way.
+    '''
+    assert "if request.method != 'GET':" in GATE
+    assert "ref = urlsplit(request.referrer or '')" in GATE
+    assert "if ref.path.startswith('/') else '/'" in GATE
+
+
+def test_today_is_the_curators_today():
+    ''' Production runs in UTC, where a Virginia evening is already tomorrow;
+        the newsletter date box must not default to a date that has not
+        happened yet for the person setting it.
+    '''
+    assert "CURATION_TZ = 'America/New_York'" in SOURCE
+    assert "datetime.now(ZoneInfo(CURATION_TZ))" in PANEL
+    assert "datetime.now().strftime" not in PANEL
+
+
+def test_each_summary_line_is_the_field_s_state():
+    ''' Folded, the tab must still answer "what does this record say". '''
+    assert "&middot; reviewed" in PANEL and "not set &middot; not reviewed" in PANEL
+    assert "characters" in PANEL and "none recorded" in PANEL
+    assert "', '.join(names) if names else 'none'" in PANEL
+    assert 'f"{ncred} credited"' in PANEL
     assert 'window.location.hash' in TEMPLATE
-    assert 'data-target="\' + hash + \'"' in TEMPLATE
 
 
 def test_a_doi_we_do_not_hold_is_refused_before_any_action_runs():

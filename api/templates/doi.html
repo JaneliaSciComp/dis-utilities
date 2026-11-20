@@ -62,8 +62,10 @@ toggleTofull.addEventListener("click", () => {
 (function () {
   const hash = window.location.hash;
   if (!hash) return;
-  const tab = document.querySelector('button[data-toggle="tab"][data-target="' + hash + '"]');
-  if (tab) tab.click();
+  // By id, not by interpolating the hash into a selector: a hash holding a
+  // quote or bracket would make the selector invalid and throw.
+  const tab = document.getElementById(hash.slice(1) + '-tab');
+  if (tab && tab.dataset.toggle === 'tab') tab.click();
 })();
 </script>
 {% endblock %}
