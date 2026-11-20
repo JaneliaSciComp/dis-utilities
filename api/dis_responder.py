@@ -25,7 +25,8 @@ import sys
 import unicodedata
 from time import sleep, time
 from types import SimpleNamespace
-from urllib.parse import quote, unquote
+from urllib.parse import quote, unquote, urlsplit
+from zoneinfo import ZoneInfo
 import concurrent.futures
 import dateutil.parser
 import dateutil.tz
@@ -70,7 +71,7 @@ from dis_state import CVTERM, PROJECT
 # on the image. feat -> minor, everything else -> patch, in the same commit as
 # the change. Forgetting is survivable: ocbuild warns that the tag already
 # exists in the ImageStream rather than silently overwriting it.
-__version__ = "120.139.0"
+__version__ = "120.140.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -1369,6 +1370,15 @@ def restricted(arg=None):
                 # full_path appends a bare '?' when there is no query string, which
                 # would otherwise show up in the address bar after signing in.
                 target = request.full_path.rstrip('?')
+                if request.method != 'GET':
+                    # A POST (a Save button on a session that lapsed while the
+                    # page sat open) cannot be replayed by the GET that follows
+                    # sign-in: /doi_edit and /project_edit are POST-only, so
+                    # "next" would land on a 405. Go back to the page the form
+                    # was on instead; the change itself is lost either way.
+                    ref = urlsplit(request.referrer or '')
+                    target = (ref.path + (f"?{ref.query}" if ref.query else '')) \
+                             if ref.path.startswith('/') else '/'
                 return redirect(url_for('login', next=target))
             # {'admin', term} rather than term alone: authorizations() expands
             # admin by reading the cv, so a cvterm load that failed at start-up
@@ -6900,10 +6910,12 @@ def show_types():
 def set_jrc_author(doi):
     '''
     Update Janelia authors for a given DOI
-    Recompute the Janelia authors (their employee IDs) from the stored record and
-    write them to jrc_author. Returns the employee IDs written. Takes no request
-    body. Requires an API token carrying the "author" or "admin" authorization:
-    this is the only endpoint in the API that writes to the dois collection.
+    Detect the Janelia authors (their employee IDs) from the stored record and
+    ADD any that jrc_author lacks. Never removes: a credit a curator added by
+    hand on /doiui is not something the detector knows about, and the previous
+    version - a from-scratch $set - would have wiped it. Returns the full
+    jrc_author list as it stands after the call. Takes no request body.
+    Requires an API token carrying the "author" or "admin" authorization.
     ---
     tags:
       - DOI
@@ -6954,21 +6966,23 @@ def set_jrc_author(doi):
         authors = DL.get_author_details(row, DB['dis'].orcid)
     except Exception as err:
         raise InvalidUsage(str(err), 500) from err
-    jrc_author = []
+    # Merge, as update_dois.persist_author does: start from what is stored and
+    # append what is detected. The stored list may hold credits the detector
+    # cannot see (added on /doiui, or from a name variant it does not know).
+    jrc_author = list(row.get('jrc_author') or [])
     for auth in authors:
-        if auth['janelian'] and 'employeeId' in auth and auth['employeeId']:
+        if auth['janelian'] and auth.get('employeeId') \
+           and auth['employeeId'] not in jrc_author:
             jrc_author.append(auth['employeeId'])
-    if not jrc_author:
+    result['data'] = jrc_author
+    if jrc_author == list(row.get('jrc_author') or []):
         return generate_response(result)
-    payload = {"$set": {"jrc_author": jrc_author}}
     try:
-        res = DB['dis'].dois.update_one({"doi": doi}, payload)
+        res = DB['dis'].dois.update_one({"doi": doi}, {"$set": {"jrc_author": jrc_author}})
     except Exception as err:
         raise InvalidUsage(str(err), 500) from err
-    if hasattr(res, 'matched_count') and res.matched_count:
-        if hasattr(res, 'modified_count') and res.modified_count:
-            result['rest']['rows_updated'] = res.modified_count
-        result['data'] = jrc_author
+    if hasattr(res, 'modified_count') and res.modified_count:
+        result['rest']['rows_updated'] = res.modified_count
     return generate_response(result)
 
 
@@ -10414,7 +10428,7 @@ def get_processing_events(doi):
                           data_attrs={"sortlist": "[[0,0]]"})
 
 
-def doi_tabs(doi, row, rowext, data, authors):
+def doi_tabs(doi, row, rowext, data, authors, curate_note=None):
     ''' Generate DOI tabs
         Keyword arguments:
           doi: DOI
@@ -10422,6 +10436,7 @@ def doi_tabs(doi, row, rowext, data, authors):
           rowext: row from external_dois collection
           data: data from Crossref/DataCite API
           authors: authors from Crossref/DataCite API
+          curate_note: the note /doi_edit left for this DOI, if any
         Returns:
           DOI tabs as HTML
     '''
@@ -10589,7 +10604,7 @@ def doi_tabs(doi, row, rowext, data, authors):
     # registrar's payload as `row`, and that carries no Mongo id.
     if row and row.get('_id') \
        and {'admin', CURATOR_TERM} & authorizations(current_user()):
-        content['curate'] = curate_panel(doi, row, authors)
+        content['curate'] = curate_panel(doi, row, authors, curate_note)
     # Authors
     ahtml = ""
     if authors:
@@ -10804,6 +10819,12 @@ def show_doi_ui(doi):
     '''
     # pylint: disable=too-many-return-statements
     doi = doi.lstrip('/').rstrip('/').lower()
+    # Popped here, on every path, so a note never outlives the page load that
+    # follows its redirect: left in the session it would surface on whatever
+    # DOI the curator opened next. Kept only when it is about this DOI.
+    pending = session.pop('doi_note', None)
+    if not isinstance(pending, dict) or pending.get('doi') != doi:
+        pending = None
     if doi.isdigit():
         pmid = doi.lstrip('/').rstrip('/').lower()
         try:
@@ -10845,6 +10866,11 @@ def show_doi_ui(doi):
                 msg += f" &mdash; reason: {escape(ignored['reason'])}"
             recsec += "<h4 style='color:red'><i class='fa-solid fa-warning'></i> " \
                      + msg + "</h4><br>"
+    if pending and not row:
+        # The DOI was curated a moment ago and is not held now (deleted in
+        # between): there is no Curate tab to show the note in, so it goes
+        # above the banner rather than being lost.
+        recsec = pending['html'] + recsec
     try:
         _, data = get_doi(doi)
     except Exception as err:
@@ -10920,7 +10946,7 @@ def show_doi_ui(doi):
         authors = DL.get_author_details(row, DB['dis'].orcid)
     except Exception as err:
         return inspect_error(err, 'Could not get author list details')
-    html += doi_tabs(doi, row, rowext, data, authors)
+    html += doi_tabs(doi, row, rowext, data, authors, pending)
     # Title
     # escape(): doi is the path segment, and it lands in an href, in the link
     # text, and inside a JS string in an onclick. The assembled heading is real
@@ -10969,94 +10995,106 @@ def _date_text(val):
     return str(val)[:10] if val else ''
 
 
-def curate_panel(doi, row, authors=None):
+def curate_panel(doi, row, authors=None, pending=None):
     ''' The Curate tab on /doiui: controls that change what the record says
 
-        Newsletter date, acknowledgement text and tags. Each is a small form
-        posting to /doi_edit, which redirects back here - so the note it leaves
-        travels in the session, the way /project_edit's does, and a refresh
-        does not re-post the change.
+        Newsletter date, acknowledgement text, tags and author credits. Each is
+        a small form posting to /doi_edit, which redirects back here - so the
+        note it leaves travels in the session, the way /project_edit's does,
+        and a refresh does not re-post the change.
         Keyword arguments:
           doi: DOI
           row: dois collection document
-          authors: detailed author list (DL.get_author_details), for the tags
+          authors: detailed author list (DL.get_author_details)
+          pending: the note left by /doi_edit for THIS DOI, as show_doi_ui
+                   popped it: {html, section}, or None
         Returns:
           HTML
     '''
-    html = str(session.pop('doi_note', ''))
+    pending = pending or {}
+    note = pending.get('html', '')
+    # The section the last change was made in: it is the one that reopens,
+    # with the note inside it, so the round trip lands where the curator was.
+    opened = pending.get('section', '')
     edoi = escape(doi)
-    current = _date_text(row.get('jrc_newsletter'))
     button = (f"<button type='submit' class='btn btn-sm' "
               f"style='background-color:{WRITE_COLOR}; color:#000'>")
-    html += "<h4>Newsletter date</h4>"
-    html += (f"<p>Currently <b>{escape(current)}</b>.</p>" if current
-             else "<p>Not set.</p>")
-    html += (f"<form method='POST' action='/doi_edit/{edoi}' style='display:inline'>"
-             "<input type='hidden' name='action' value='newsletter_set'>"
-             "<input type='date' name='date' class='form-control' required "
-             "style='width:auto; display:inline-block; margin-right:6px' "
-             f"value='{escape(current or datetime.now().strftime('%Y-%m-%d'))}'>"
-             f"{button}{'Change' if current else 'Set'}</button></form>")
+    muted = "color:#a8c4e0; font-size:0.85em"
+
+    def section(key, title, status, body):
+        ''' One collapsible section. The summary line IS the record's state for
+            that field, so the tab answers "what does this record say" with
+            everything folded; the controls appear on demand.
+        '''
+        is_open = key == opened
+        return (f"<details class='curate-section' id='curate-{key}'"
+                f"{' open' if is_open else ''}>"
+                f"<summary><span class='curate-title'>{title}</span>"
+                f"<span class='curate-status'>{status}</span></summary>"
+                f"<div class='curate-body'>{note if is_open else ''}{body}</div></details>")
+
+    # A note whose section no section claims (an action the dispatcher did
+    # not know) would otherwise vanish; it goes above the sections instead.
+    html = note if note and opened not in CURATE_SECTIONS else ""
+    # Newsletter date
+    current = _date_text(row.get('jrc_newsletter'))
+    # Today in the curators' zone, not the server's: prod runs in UTC, where
+    # an evening in Virginia is already tomorrow.
+    today = datetime.now(ZoneInfo(CURATION_TZ)).strftime('%Y-%m-%d')
+    body = (f"<form method='POST' action='/doi_edit/{edoi}' style='display:inline'>"
+            "<input type='hidden' name='action' value='newsletter_set'>"
+            "<input type='date' name='date' class='form-control' required "
+            "style='width:auto; display:inline-block; margin-right:6px' "
+            f"value='{escape(current or today)}'>"
+            f"{button}{'Change' if current else 'Set'}</button></form>")
     if current:
-        html += (f" <form method='POST' action='/doi_edit/{edoi}' "
+        body += (f" <form method='POST' action='/doi_edit/{edoi}' "
                  "style='display:inline; margin-left:8px'>"
                  "<input type='hidden' name='action' value='newsletter_clear'>"
                  f"{button}Clear</button></form>")
-    html += ("<div style='font-size:0.85em; color:#a8c4e0; max-width:720px; "
-             "margin-top:10px'>The date this paper was approved for the newsletter. "
-             "It is also the <b>reviewed</b> mark: once it is set, the nightly DOI "
-             "sync stops adding Janelia authors to this record and the automatic "
-             "tagger skips it. Clearing it reopens both. Every change made here is "
-             "recorded on the Processing tab.</div>")
+    html += section('newsletter', 'Newsletter date',
+                    f"{escape(current)} &middot; reviewed" if current
+                    else "not set &middot; not reviewed", body)
     # Acknowledgement text
     ack = row.get('jrc_acknowledgements') or ''
     asrc = row.get('jrc_ack_source') or ''
-    html += "<h4 style='margin-top:26px'>Acknowledgements</h4>"
     if ack:
-        html += (f"<p>Currently {len(ack):,} characters"
-                 + (f", source <b>{escape(asrc)}</b>" if asrc else "") + ".</p>")
+        status = f"{len(ack):,} characters" + (f" &middot; {escape(asrc)}" if asrc else "")
     elif row.get('jrc_no_acknowledgements'):
-        html += ("<p>None recorded. The harvester has looked at every source it "
-                 "has and found no acknowledgements section.</p>")
+        status = "none recorded &middot; harvester found none"
     else:
-        html += "<p>None recorded.</p>"
+        status = "none recorded"
     # Two forms (Save and Clear post different actions), one button row: the
     # buttons sit outside both forms and name theirs with the form= attribute,
     # which is what keeps them on one line without nesting one form in another.
-    html += (f"<form method='POST' action='/doi_edit/{edoi}' id='ack-set'>"
-             "<input type='hidden' name='action' value='ack_set'>"
-             "<textarea name='text' class='form-control' rows='6' "
-             "style='max-width:720px; font-size:0.9em' "
-             f"placeholder='Paste the acknowledgements section'>{escape(ack)}</textarea>"
-             "</form>")
+    body = (f"<form method='POST' action='/doi_edit/{edoi}' id='ack-set'>"
+            "<input type='hidden' name='action' value='ack_set'>"
+            "<textarea name='text' class='form-control' rows='3' "
+            "style='max-width:720px; font-size:0.9em' "
+            f"placeholder='Paste the acknowledgements section'>{escape(ack)}</textarea>"
+            "</form>")
     if ack:
-        html += (f"<form method='POST' action='/doi_edit/{edoi}' id='ack-clear'>"
+        body += (f"<form method='POST' action='/doi_edit/{edoi}' id='ack-clear'>"
                  "<input type='hidden' name='action' value='ack_clear'></form>")
     def abtn(form_id, label, margin=''):
         return (f"<button type='submit' form='{form_id}' class='btn btn-sm' "
                 f"style='background-color:{WRITE_COLOR}; color:#000{margin}'>{label}</button>")
-    html += "<div style='margin-top:6px'>" + abtn('ack-set', 'Save' if ack else 'Add')
+    body += "<div style='margin-top:6px'>" + abtn('ack-set', 'Save' if ack else 'Add')
     if ack:
-        html += abtn('ack-clear', 'Clear', '; margin-left:8px')
-    html += "</div>"
-    html += ("<div style='font-size:0.85em; color:#a8c4e0; max-width:720px; "
-             "margin-top:10px'>Shown on the Acknowledgements tab, and scanned nightly "
-             "for mentions of Janelia facilities and labs. Text saved here is marked "
-             "as a <b>Manual</b> source and is never overwritten by the harvester. "
-             "Clearing it lets the harvester look again on its next run. The text "
-             "that was replaced or cleared is kept with the event on the Processing "
-             "tab.</div>")
+        body += abtn('ack-clear', 'Clear', '; margin-left:8px')
+    body += "</div>"
+    html += section('ack', 'Acknowledgements', status, body)
     # Tags
-    suporgs, projects = _tag_vocabulary()
-    derived = _derived_tags(authors, projects, suporgs)
-    html += "<h4 style='margin-top:26px'>Tags</h4>"
-    trows = []
+    suporgs, projects, project_map = _tag_vocabulary()
+    derived = _derived_tags(authors, project_map, suporgs)
+    trows, names = [], []
     for tag in row.get('jrc_tag') or []:
         name = tag.get('name') or ''
         ename = escape(name)
+        names.append(ename)
         if name in derived:
             origin = f"from {escape(', '.join(derived[name]))}"
-            control = "<span style='color:#a8c4e0; font-size:0.85em'>fixed</span>"
+            control = f"<span style='{muted}'>fixed</span>"
         else:
             origin = "added by hand"
             control = (f"<form method='POST' action='/doi_edit/{edoi}' style='display:inline'>"
@@ -11066,27 +11104,339 @@ def curate_panel(doi, row, authors=None):
         trows.append([safe(f"<a href='/tag/{ename}'>{ename}</a>"), tag.get('type') or '',
                       safe(origin), safe(control)])
     if trows:
-        html += render_table(['Tag', 'Type', 'Origin', ''], trows, table_id='curate-tags',
-                             css='standard')
+        body = render_table(['Tag', 'Type', 'Origin', ''], trows, table_id='curate-tags',
+                            css='standard curate-table')
     else:
-        html += "<p>No tags.</p>"
+        body = "<p>No tags.</p>"
     choices = sorted(projects | {n for n, v in suporgs.items() if (v or {}).get('active')})
     options = "".join(f"<option value='{escape(c)}'>" for c in choices)
-    html += (f"<form method='POST' action='/doi_edit/{edoi}' style='margin-top:8px'>"
+    body += (f"<form method='POST' action='/doi_edit/{edoi}' style='margin-top:8px'>"
              "<input type='hidden' name='action' value='tag_add'>"
              "<div class='flexcontainer'><div class='flexitem'>"
              "<input class='form-control' name='name' list='tag-choices' required "
              "placeholder='Lab, team or project'></div>"
              f"<datalist id='tag-choices'>{options}</datalist>"
              f"<div class='flexitemauto'>{button}Add</button></div></div></form>")
-    html += ("<div style='font-size:0.85em; color:#a8c4e0; max-width:720px; "
-             "margin-top:10px'>A tag marked <b>from</b> an author comes from that "
-             "author's lab, team or project and is put back by the nightly sync, so "
-             "it cannot be removed here - to drop it, the author credit has to "
-             "change. A tag added by hand survives every re-sync and can be removed. "
-             "Choose from the list: a name that is not a supervisory organization or "
-             "a project is refused.</div>")
+    html += section('tag', 'Tags', ', '.join(names) if names else 'none', body)
+    # Janelia author credits
+    credited = row.get('jrc_author') or []
+    rows_, unlisted = _author_rows(authors, credited, _person_by_employee_id)
+    trows = []
+    for arow in rows_:
+        who = escape(arow['who'])
+        if arow['link']:
+            who = f"<a href='/userui/{escape(arow['link'])}'>{who}</a>"
+        if arow['credited']:
+            status = "<span style='color:lime'>credited</span>"
+        else:
+            status = "&mdash;"
+        if not arow['eligible']:
+            # Gray and disabled rather than hidden: the curator should see that
+            # the person was matched and why nothing can be done about it yet.
+            who = f"<span style='color:#888'>{who}</span>"
+            control = (f"<button type='button' class='btn btn-sm' disabled "
+                       f"title='{escape(arow['why'])}' "
+                       "style='background-color:#555; color:#999'>Credit</button>")
+        else:
+            act = 'author_remove' if arow['credited'] else 'author_add'
+            control = (f"<form method='POST' action='/doi_edit/{edoi}' style='display:inline'>"
+                       f"<input type='hidden' name='action' value='{act}'>"
+                       f"<input type='hidden' name='employeeId' value='{escape(arow['eid'])}'>"
+                       f"{button}{'Uncredit' if arow['credited'] else 'Credit'}</button></form>")
+        evidence = escape(arow['evidence'])
+        if arow['alumni']:
+            evidence += f" <span style='{muted}'>(former employee)</span>"
+        trows.append([safe(who), safe(evidence), safe(status), safe(control)])
+    if trows:
+        body = render_table(['Author', 'Evidence', 'Status', ''], trows,
+                            table_id='curate-authors', css='standard curate-table')
+    else:
+        body = "<p>No author on this paper matches anyone on the Janelia roster.</p>"
+    if unlisted:
+        body += (f"<p style='{muted}'>{unlisted:,} other "
+                 f"author{'s' if unlisted != 1 else ''} with no Janelia evidence "
+                 "not listed.</p>")
+    if not current:
+        # The one caution that matters at the moment of acting, kept inline;
+        # the rest of the explanation lives in the help section below.
+        body += (f"<p style='{muted}'><b>Not yet reviewed:</b> the nightly sync will "
+                 "re-credit any author it detects. To make an uncredit stick, set "
+                 "the newsletter date.</p>")
+    ncred = sum(1 for r in rows_ if r['credited'])
+    nopen = sum(1 for r in rows_ if r['eligible'] and not r['credited'])
+    noid = sum(1 for r in rows_ if not r['eid'])
+    status = f"{ncred} credited"
+    if nopen:
+        status += f" &middot; {nopen} matched, uncredited"
+    if noid:
+        status += f" &middot; {noid} no employee ID"
+    html += section('author', 'Janelia author credits', status, body)
+    # How it all works: one fold for the explanations, instead of a paragraph
+    # under every section.
+    html += ("<details class='curate-section curate-help'>"
+             "<summary><span class='curate-title'>How curation works</span></summary>"
+             "<div class='curate-body'>"
+             "<p><b>Newsletter date</b> is the date the paper was approved for the "
+             "newsletter, and the <b>reviewed</b> mark: once set, the nightly DOI "
+             "sync stops adding Janelia authors to this record and the automatic "
+             "tagger skips it. Clearing it reopens both.</p>"
+             "<p><b>Acknowledgements</b> are shown on their own tab and scanned "
+             "nightly for Janelia facilities and labs. Text saved here is marked as a "
+             "<b>Manual</b> source and is never overwritten by the harvester; clearing "
+             "it lets the harvester look again. The text replaced or cleared is kept "
+             "with the event on the Processing tab.</p>"
+             "<p><b>Tags</b> marked <i>from</i> an author come from that author's "
+             "roster record - their lab, team or project - and are put back by the "
+             "nightly sync for every author it matches, credited or not, so they "
+             "cannot be removed here. If the match itself is wrong, the roster record "
+             "(its name variants) is what needs correcting. A tag added by hand "
+             "survives every re-sync and can be removed. Only active supervisory "
+             "organizations and projects may be tags.</p>"
+             "<p><b>Author credits</b> are the employee IDs in <code>jrc_author</code>: "
+             "what puts a paper on a person's page and in the author counts, and what "
+             "decides first/last Janelia author. An author can be credited only with "
+             "evidence they are this person (a Janelia affiliation, an ORCID match or "
+             "a name match) and an employee ID on the roster. Crediting also adds the "
+             "tags the nightly sync would (their lab, default tags, project); "
+             "uncrediting does not remove tags.</p>"
+             "<p>Every change made here is recorded on the Processing tab.</p>"
+             "</div></details>")
     return html
+
+
+# Evidence that an author on the paper is a particular Janelian, as
+# doi_common.get_author_details reports it: an asserted Janelia affiliation
+# (Crossref/DataCite, Elsevier or PubMed), an ORCID iD on the paper that the
+# roster knows, or a name match. Anything else is not evidence enough to credit.
+AUTHOR_MATCHES = {'asserted': 'Janelia affiliation', 'ORCID': 'ORCID match',
+                  'name': 'Name match'}
+
+
+def _person_by_employee_id(eid):
+    ''' The roster record for an employee ID, for naming a credit that matches
+        no author on the paper
+        Keyword arguments:
+          eid: employee ID
+        Returns:
+          orcid document (given, family, orcid, userIdO365), or None
+    '''
+    try:
+        return DB['dis'].orcid.find_one({"employeeId": eid},
+                                        {"given": 1, "family": 1, "orcid": 1, "userIdO365": 1})
+    except Exception as err:
+        print(f"Could not look up employee {eid}: {err}")
+        return None
+
+
+def _author_rows(authors, credited, lookup=None):
+    ''' The Janelia-author table for the panel, and the server's eligibility rule
+
+        One function for both so the page can never offer a credit the handler
+        refuses. An author is listed when there is evidence they are a Janelian
+        or when they are already credited (a credit with no remaining evidence
+        is exactly the row a curator needs to see). They are ELIGIBLE for a
+        credit when that evidence exists AND the roster has an employee ID for
+        them - without one there is nothing to put in jrc_author, so the row
+        shows grayed with the reason.
+
+        A person listed twice on a paper (it happens) gets one row. A credit
+        whose employee ID matches NO author on the paper - the author list
+        changed with a new version, or a CLI credit with the wrong ID - gets a
+        trailing row named from the roster, so it can be seen and uncredited;
+        otherwise the only way out would be the CLI.
+        Keyword arguments:
+          authors: detailed author list (DL.get_author_details), or None
+          credited: the current jrc_author list
+          lookup: employee ID -> orcid document, for the trailing rows
+        Returns:
+          (rows, unlisted): rows as dicts with eid, who, link, evidence,
+          eligible, why, credited, alumni, in paper order; unlisted is the
+          count of authors with no Janelia evidence
+    '''
+    rows, unlisted, seen = [], 0, set()
+    credited = [str(e) for e in credited or []]
+    for auth in authors or []:
+        eid = str(auth.get('employeeId') or '')
+        match = auth.get('match')
+        is_credited = bool(eid) and eid in credited
+        if match not in AUTHOR_MATCHES and not is_credited:
+            unlisted += 1
+            continue
+        if eid and eid in seen:
+            continue
+        seen.add(eid)
+        if auth.get('family'):
+            who = f"{auth.get('given') or ''} {auth['family']}".strip()
+        else:
+            who = auth.get('name') or auth.get('given') or 'unnamed author'
+        why = ''
+        if not eid:
+            why = 'No employee ID on the roster for this person'
+        elif match not in AUTHOR_MATCHES:
+            why = 'No evidence this is a Janelian (credited by hand or by an earlier match)'
+        rows.append({'eid': eid, 'who': who,
+                     'link': auth.get('orcid') or auth.get('userIdO365') or '',
+                     'evidence': AUTHOR_MATCHES.get(match, 'none'),
+                     # A credited author stays removable even without evidence,
+                     # which is the point of listing them.
+                     'eligible': bool(eid) and (match in AUTHOR_MATCHES or is_credited),
+                     'why': why, 'credited': is_credited,
+                     'alumni': bool(auth.get('alumni'))})
+    for eid in credited:
+        if eid in seen:
+            continue
+        seen.add(eid)
+        person = (lookup(eid) if lookup else None) or {}
+        given = person.get('given')
+        family = person.get('family')
+        given = given[0] if isinstance(given, list) and given else given
+        family = family[0] if isinstance(family, list) and family else family
+        who = f"{given or ''} {family or ''}".strip() or f"employee {eid}"
+        rows.append({'eid': eid, 'who': who,
+                     'link': person.get('orcid') or person.get('userIdO365') or '',
+                     'evidence': 'not on this paper’s author list',
+                     'eligible': True, 'why': '', 'credited': True, 'alumni': False})
+    return rows, unlisted
+
+
+def _first_last_change(authors, credited):
+    ''' The first/last Janelia author fields for a given credit list
+
+        The same rule as update_dois.add_first_last_authors: an author's
+        position in the registrar record, intersected with jrc_author. Several
+        authors may be first (Crossref marks co-first authors "first"), so
+        jrc_first_id is a list and jrc_first_author a joined string; last is
+        one of each. Fields with nothing behind them are UNSET rather than
+        left as they were - update_dois leaves stale values, which is how a
+        removed author stayed "last author" until the next re-sync.
+        Keyword arguments:
+          authors: detailed author list
+          credited: the jrc_author list after the change
+        Returns:
+          ($set dict, $unset dict), either possibly empty
+    '''
+    first_ids, first_names, last_id, last_name = [], [], None, None
+    for auth in authors or []:
+        eid = str(auth.get('employeeId') or '')
+        if not eid or eid not in credited:
+            continue
+        name = ', '.join([auth.get('family') or '', auth.get('given') or '']).strip(', ')
+        if auth.get('is_first'):
+            first_ids.append(eid)
+            first_names.append(name)
+        if auth.get('is_last'):
+            last_id, last_name = eid, name
+    sets, unsets = {}, {}
+    if first_ids:
+        sets.update({"jrc_first_id": first_ids, "jrc_first_author": ', '.join(first_names)})
+    else:
+        unsets.update({"jrc_first_id": "", "jrc_first_author": ""})
+    if last_id:
+        sets.update({"jrc_last_id": last_id, "jrc_last_author": last_name})
+    else:
+        unsets.update({"jrc_last_id": "", "jrc_last_author": ""})
+    return sets, unsets
+
+
+def _save_author(row, me, action, eid, authors, suporgs, project_map, lookup=None):
+    ''' Credit or uncredit one Janelia author on a DOI
+
+        A credit is an employee ID in jrc_author. It is only ever one the
+        paper's own author list supplies - picked from the rows _author_rows
+        builds, never typed - and only for an author that function calls
+        eligible. After the change the first/last-author fields are recomputed
+        and, on a credit, the tags update_dois would add for that author (lab,
+        default tags, project - the strict rule) are added, so the record is
+        immediately what the nightly sync would make it rather than
+        inconsistent until tomorrow. Uncrediting removes no tags: the nightly
+        programs derive from every matched author, credited or not.
+        Keyword arguments:
+          row: dois collection document
+          me: the signed-in curator
+          action: 'author_add' or 'author_remove'
+          eid: employee ID from the form
+          authors: detailed author list
+          suporgs, project_map: from _tag_vocabulary, for the derived tags
+          lookup: employee ID -> orcid document, for credits not on the paper
+        Returns:
+          Rendered note
+    '''
+    doi = row['doi']
+    eid = str(eid or '').strip()
+    credited = [str(e) for e in row.get('jrc_author') or []]
+    rows, _ = _author_rows(authors, credited, lookup)
+    arow = next((r for r in rows if r['eid'] == eid), None) if eid else None
+    if not arow:
+        return render_warning("That is not a Janelia author on this paper.", 'warning')
+    if action == 'author_remove':
+        if not arow['credited']:
+            return render_warning(f"{arow['who']} is not credited.", 'warning')
+        after = [e for e in credited if e != eid]
+        change = {"$pull": {"jrc_author": eid}}
+        verb, notes = 'author_uncredited', f"uncredited {arow['who']}"
+        done = f"{arow['who']} is no longer credited."
+        if not row.get('jrc_newsletter') and arow['evidence'] in AUTHOR_MATCHES.values():
+            done += (" This record is not reviewed, so the nightly sync will credit "
+                     "them again unless the newsletter date is set.")
+    else:
+        if arow['credited']:
+            return render_warning(f"{arow['who']} is already credited.", 'warning')
+        if not arow['eligible']:
+            return render_warning(f"{arow['who']} cannot be credited: {arow['why']}.",
+                                  'warning')
+        after = credited + [eid]
+        change = {"$addToSet": {"jrc_author": eid}}
+        verb, notes = 'author_credited', f"credited {arow['who']} ({arow['evidence']})"
+        done = f"{arow['who']} is now credited."
+        auth = next(a for a in authors if str(a.get('employeeId') or '') == eid)
+        have = {t.get('name') for t in row.get('jrc_tag') or []}
+        # strict: write only what update_dois itself would add for this author
+        # (lab, default tags, project), never an affiliation it would not.
+        new_tags = [{"name": n, "code": suporgs.get(n),
+                     "type": 'suporg' if suporgs.get(n) else 'affiliation'}
+                    for n in _derived_tags([auth], project_map, suporgs, strict=True)
+                    if n not in have]
+        if new_tags:
+            change["$push"] = {"jrc_tag": {"$each": new_tags}}
+            notes += "; added tags " + ', '.join(t['name'] for t in new_tags)
+    sets, unsets = _first_last_change(authors, after)
+    if sets:
+        change["$set"] = sets
+    if unsets:
+        change["$unset"] = unsets
+    try:
+        DB['dis'].dois.update_one({"doi": doi}, change)
+        if not after:
+            # Presence of jrc_author is what the sync and the pages test.
+            DB['dis'].dois.update_one({"doi": doi}, {"$unset": {"jrc_author": ""}})
+    except Exception as err:
+        print(f"Could not {action} on {doi}: {err}")
+        return render_warning("Could not save that change.", 'error')
+    print(f"{verb} on {doi} by {me.get('orcid')}: {notes}")
+    # The name, not the employee ID: the Processing tab is public, and the ID
+    # is the identifier the API redacts from unauthorized callers.
+    record_doi_event(doi, verb, me, notes)
+    return render_warning(done, 'success')
+
+
+def _save_author_action(row, me, action):
+    ''' Gather what _save_author needs from the request and the database
+        Keyword arguments:
+          row: dois collection document
+          me: the signed-in curator
+          action: 'author_add' or 'author_remove'
+        Returns:
+          Rendered note
+    '''
+    try:
+        authors = DL.get_author_details(row, DB['dis'].orcid)
+    except Exception as err:
+        print(f"Could not get author details for {row.get('doi')}: {err}")
+        return render_warning("Could not read this DOI's authors, so nothing was "
+                              "changed.", 'error')
+    suporgs, _, project_map = _tag_vocabulary()
+    return _save_author(row, me, action, request.form.get('employeeId'), authors,
+                        suporgs, project_map, _person_by_employee_id)
 
 
 # The tags update_dois.py applies from an author's own affiliation list (its
@@ -11094,55 +11444,82 @@ def curate_panel(doi, row, authors=None):
 # tell which tags the nightly sync will put back if they are removed.
 DERIVED_DEFAULT_TAGS = ('AI Initiative', 'Janelia Experimental Technology (jET)',
                         'Scientific Computing Software')
+# The Curate tab's collapsible sections, keyed by the prefix of the actions
+# that belong to them (newsletter_set -> newsletter, tag_add -> tag, ...).
+CURATE_SECTIONS = ('newsletter', 'ack', 'tag', 'author')
+# Where the curators are. "Today" for the newsletter date is computed here,
+# not in the server's zone (UTC in production).
+CURATION_TZ = 'America/New_York'
 
 
 def _tag_vocabulary():
-    ''' The names a tag may carry
+    ''' The names a tag may carry, and the map the nightly programs tag by
 
         Supervisory organizations from the suporg collection - in the {code,
-        active} shape every tag writer stores in jrc_tag[].code - and the
-        projects from project_map (the "project" side, not the synonyms, which
-        are author names). Either failing to load yields an empty set rather
+        active} shape every tag writer stores in jrc_tag[].code; the projects
+        a curator may ADD (the "project" side of project_map, live rows only);
+        and the full name -> project map the nightly programs derive tags
+        through. The last is wider than the second on purpose: it includes the
+        synonyms (an organizational author named "GENIE Project Team" is tagged
+        "GENIE Project") and retired (doNotUse) rows, because that is what
+        update_dois reads (DL.get_project_map, inactive=True) and so what it
+        will put back. Either collection failing to load yields empty rather
         than an error: the panel then offers nothing to add, which is the
         honest state, instead of refusing the whole page.
         Keyword arguments:
           None
         Returns:
-          (suporgs: name -> {code, active}, projects: set of project names)
+          (suporgs: name -> {code, active}, projects: set of addable project
+           names, project_map: name -> project, both sides, all rows)
     '''
     try:
-        suporgs = DL.get_supervisory_orgs(DB['dis'].suporg) or {}
+        suporgs = DL.get_supervisory_orgs(coll=DB['dis'].suporg) or {}
     except Exception as err:
         print(f"Could not read supervisory orgs: {err}")
         suporgs = {}
-    projects = set()
+    projects, project_map = set(), {}
     try:
-        for rec in DB['dis'].project_map.find({"doNotUse": {"$exists": False}},
-                                              {"name": 1, "project": 1}):
-            if rec.get('project'):
+        for rec in DB['dis'].project_map.find({}, {"name": 1, "project": 1, "doNotUse": 1}):
+            if not rec.get('project'):
+                continue
+            project_map[rec['name']] = rec['project']
+            project_map[rec['project']] = rec['project']
+            if not rec.get('doNotUse'):
                 projects.add(rec['project'])
     except Exception as err:
         print(f"Could not read project map: {err}")
-    return suporgs, projects
+    return suporgs, projects, project_map
 
 
-def _derived_tags(authors, projects, suporgs):
+def _derived_tags(authors, project_map, suporgs, strict=False):
     ''' The tags the nightly programs derive from a DOI's authors
 
-        The union of what update_dois.py (get_tags_and_projects) and
-        update_tags.py --auto (append_tags) would apply: an author's own group
-        (their lab), the non-lab teams they manage, the default-tag and active
-        supervisory-organization entries in their affiliation list, and the
-        project an organizational author name maps to. Anything in this set
-        that a curator removes is back after the next run, which is why the
-        panel shows these as fixed. Deliberately generous - a tag counted as
-        derived that the sync would not in fact restore costs a curator one
-        extra step, while the reverse silently undoes their work.
+        Two readings of the same author list, for two different jobs:
+
+        strict=False (the LABEL): the union of what update_dois.py
+        (get_tags_and_projects) and update_tags.py --auto (append_tags) could
+        apply - an author's own group (their lab), the non-lab teams they
+        manage, the default-tag and active supervisory-organization entries in
+        their affiliation list, and the project an organizational author name
+        maps to. Anything in this set that a curator removes may be back after
+        the next run, which is why the panel shows these as fixed. Deliberately
+        generous: a tag counted as derived that the sync would not in fact
+        restore costs a curator one extra step, while the reverse silently
+        undoes their work.
+
+        strict=True (the WRITE, when crediting an author): only what update_dois
+        itself adds on a re-sync - group, default tags, project - so a credit
+        never writes an affiliation the nightly sync would not have, and then
+        calls it fixed.
+
+        Note that the nightly programs derive from EVERY matched author, not
+        only credited ones, so uncrediting an author does not release their
+        tags; the label and the help text say so.
         Keyword arguments:
           authors: detailed author list (DL.get_author_details), or None
-          projects: set of project names (organizational authors map to these
-                    through PROJECT, which holds both sides of project_map)
+          project_map: name -> project, both sides of project_map
           suporgs: name -> {code, active} from the suporg collection
+          strict: the write rule rather than the label rule
         Returns:
           dict of tag name -> sorted list of the authors it derives from
     '''
@@ -11155,17 +11532,20 @@ def _derived_tags(authors, projects, suporgs):
     for auth in authors or []:
         who = auth.get('family') or auth.get('name') or 'an author'
         add(auth.get('group'), who)
-        for team in auth.get('managedTeams') or []:
-            if team.get('supOrgSubType') != 'Lab':
-                add(team.get('supOrgName'), who)
         for tag in auth.get('tags') or []:
-            if tag in DERIVED_DEFAULT_TAGS or (suporgs.get(tag) or {}).get('active'):
+            if tag in DERIVED_DEFAULT_TAGS:
                 add(tag, who)
+            elif not strict and (suporgs.get(tag) or {}).get('active'):
+                add(tag, who)
+        if not strict:
+            for team in auth.get('managedTeams') or []:
+                if team.get('supOrgSubType') != 'Lab':
+                    add(team.get('supOrgName'), who)
         # An organizational author (a consortium, a project team) carries a
-        # bare "name"; project_map turns that into a project tag.
+        # bare "name"; project_map turns that - or its synonym - into a project.
         name = auth.get('name')
-        if name and name in projects:
-            add(name, who)
+        if name and project_map.get(name):
+            add(project_map[name], who)
     return {name: sorted(who) for name, who in derived.items()}
 
 
@@ -11197,24 +11577,28 @@ def _save_tag(row, me, action, name, derived, suporgs, projects):
         if name not in names:
             return render_warning(f"\"{name}\" is not a tag on this DOI.", 'warning')
         if name in derived:
-            return render_warning(f"\"{name}\" comes from {', '.join(derived[name])} and "
-                                  "would be put back by the nightly sync. To drop it, "
-                                  "the author credit has to change.", 'warning')
+            return render_warning(f"\"{name}\" comes from {', '.join(derived[name])}'s "
+                                  "roster record and would be put back by the nightly "
+                                  "sync, so it cannot be removed here.", 'warning')
         change = {"$pull": {"jrc_tag": {"name": name}}}
         verb, done = 'tag_removed', f"Removed tag \"{name}\"."
     else:
         if name in names:
             return render_warning(f"\"{name}\" is already a tag on this DOI.", 'warning')
-        if name not in suporgs and name not in projects:
-            return render_warning(f"\"{name}\" is not a supervisory organization or a "
-                                  "project, so it cannot be a tag.", 'warning')
+        # Active orgs only - the same list the pick-list offers. A datalist is
+        # a suggestion, not a constraint, so the rule has to be applied here.
+        if not (suporgs.get(name) or {}).get('active') and name not in projects:
+            return render_warning(f"\"{name}\" is not an active supervisory organization "
+                                  "or a project, so it cannot be a tag.", 'warning')
         code = suporgs.get(name)
         entry = {"name": name, "code": code, "type": 'suporg' if code else 'affiliation'}
         change = {"$push": {"jrc_tag": entry}}
         verb, done = 'tag_added', f"Added tag \"{name}\"."
     try:
         DB['dis'].dois.update_one({"doi": doi}, change)
-        if action == 'tag_remove' and len(names) == 1:
+        # $pull takes every entry with that name; the field is unset when
+        # nothing else was in the list, duplicates included.
+        if action == 'tag_remove' and names.count(name) == len(names):
             DB['dis'].dois.update_one({"doi": doi}, {"$unset": {"jrc_tag": ""}})
     except Exception as err:
         print(f"Could not {action} {name!r} for {doi}: {err}")
@@ -11238,14 +11622,19 @@ def _save_tag_action(row, me, action):
         Returns:
           Rendered note
     '''
-    suporgs, projects = _tag_vocabulary()
-    try:
-        authors = DL.get_author_details(row, DB['dis'].orcid)
-    except Exception as err:
-        print(f"Could not get author details for {row.get('doi')}: {err}")
-        return render_warning("Could not read this DOI's authors, so the tag was not "
-                              "changed.", 'error')
-    derived = _derived_tags(authors, projects, suporgs)
+    suporgs, projects, project_map = _tag_vocabulary()
+    derived = {}
+    if action == 'tag_remove':
+        # Only a removal needs to know what is derived. Author details come
+        # from OpenAlex and PubMed as well as the roster, so an add should not
+        # fail because an outside service is down.
+        try:
+            authors = DL.get_author_details(row, DB['dis'].orcid)
+        except Exception as err:
+            print(f"Could not get author details for {row.get('doi')}: {err}")
+            return render_warning("Could not read this DOI's authors, so the tag was "
+                                  "not removed.", 'error')
+        derived = _derived_tags(authors, project_map, suporgs)
     return _save_tag(row, me, action, request.form.get('name'), derived, suporgs, projects)
 
 
@@ -11301,7 +11690,11 @@ def _save_acknowledgements(row, me, action, text):
     if action == 'ack_clear':
         if not before:
             return render_warning("No acknowledgement text is recorded.", 'warning')
-        change = {"$unset": {"jrc_acknowledgements": "", "jrc_ack_source": ""}}
+        # jrc_no_acknowledgements goes too: the harvester's queries skip any
+        # record carrying it, so left behind it would make "may fill it again"
+        # untrue for a record where a pull script wrote text over the marker.
+        change = {"$unset": {"jrc_acknowledgements": "", "jrc_ack_source": "",
+                             "jrc_no_acknowledgements": ""}}
         verb, notes = 'acknowledgements_cleared', f"cleared {was}"
         done = ("Acknowledgement text cleared. The harvester may fill it again on its "
                 "next run.")
@@ -11314,7 +11707,10 @@ def _save_acknowledgements(row, me, action, text):
             return render_warning(f"That is {len(after):,} characters; the limit is "
                                   f"{ACK_MAX_CHARS:,}. Acknowledgements only, not the "
                                   "paper.", 'warning')
-        if after == before:
+        if after in (before, _ack_text(before)):
+            # Harvested text often carries PDF spacing that _ack_text tidies,
+            # so an untouched textarea would otherwise count as an edit and
+            # relabel the harvester's text as Manual.
             return render_warning("That is already the recorded text.", 'warning')
         change = {"$set": {"jrc_acknowledgements": after, "jrc_ack_source": "Manual"},
                   "$unset": {"jrc_no_acknowledgements": ""}}
@@ -11407,12 +11803,20 @@ def doi_edit(doi):
         note = _save_acknowledgements(row, me, action, request.form.get('text'))
     elif action in ('tag_add', 'tag_remove'):
         note = _save_tag_action(row, me, action)
+    elif action in ('author_add', 'author_remove'):
+        note = _save_author_action(row, me, action)
     else:
         note = render_warning("Unknown action.", 'warning')
     # Carried in the session rather than the URL, and a redirect rather than a
     # render: a refresh then reloads the page instead of re-posting the change.
     # The fragment reopens the Curate tab (see doi.html) so the note is seen.
-    session['doi_note'] = str(note)
+    # Keyed by DOI so show_doi_ui can discard it if the redirect does not land
+    # on this DOI's page (registrar timeout, record deleted meanwhile) rather
+    # than show it on whatever DOI the curator opens next. "section" is the
+    # collapsible section to reopen with the note inside it: the one the
+    # action belongs to (newsletter_set -> newsletter, tag_add -> tag, ...).
+    session['doi_note'] = {"doi": doi, "html": str(note),
+                           "section": action.split('_', 1)[0]}
     return redirect(url_for('show_doi_ui', doi=doi) + '#curate')
 
 

@@ -499,6 +499,55 @@ hr {border-color: var(--muted-border);
   border-color: #e08e0b #e08e0b transparent;
 }
 
+/* The Tags and Janelia-author tables on the Curate tab: text, a badge and a
+   button share each row, and .standard's flush cells ran them together. A
+   little horizontal room per cell, without touching .standard itself, which
+   every other table on the site uses. */
+.curate-table th, .curate-table td {
+  padding: 3px 8px;
+}
+
+/* Curate tab sections: a <details> per field whose summary line is the
+   field's current state. Folded, the tab is four lines that already say what
+   the record holds; the controls appear on demand. */
+.curate-section {
+  border-bottom: 1px solid #3a4a5a;
+  padding: 6px 0;
+}
+.curate-section > summary {
+  cursor: pointer;
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  list-style: none;
+}
+.curate-section > summary::-webkit-details-marker { display: none; }
+.curate-section > summary::before {
+  content: "\25B8";            /* small right-pointing triangle */
+  color: #a8c4e0;
+  width: 1em;
+  flex: none;
+}
+.curate-section[open] > summary::before { content: "\25BE"; }
+.curate-title {
+  font-weight: 600;
+  min-width: 190px;
+  flex: none;
+}
+.curate-status {
+  color: #a8c4e0;
+  font-size: 0.9em;
+}
+.curate-body {
+  padding: 8px 0 6px 1.9em;
+  max-width: 760px;
+}
+.curate-help > summary .curate-title {
+  font-weight: 400;
+  color: #a8c4e0;
+  font-size: 0.9em;
+}
+
 /* Navbar color accents (hhmi logo palette) */
 .navbar-dark.bg-dark {
   border-bottom: 2px solid;
