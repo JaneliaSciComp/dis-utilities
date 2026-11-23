@@ -213,6 +213,39 @@ document.addEventListener('DOMContentLoaded', function () {
   });
 });
 
+// Row selection (standard_ack_table's select= column): the header box ticks or
+// clears every row the filters currently show - a hidden row is one the reader
+// filtered out, so "select all" must not sweep it in - and the count of ticked
+// rows is kept in any element with data-selected-count="<table id>".
+function countSelected(tid) {
+  const n = $('#' + tid + ' > tbody input[type=checkbox]:checked').length;
+  $('[data-selected-count="' + tid + '"]').text(n.toLocaleString());
+  // The header box mirrors the visible rows: checked when all are ticked,
+  // indeterminate when some are, clear when none - so it always reads as
+  // the state it would change.
+  const visible = $('#' + tid + ' > tbody > tr:visible input[type=checkbox]');
+  const ticked = visible.filter(':checked').length;
+  $('#' + tid + ' > thead input[type=checkbox]').each(function () {
+    this.checked = visible.length > 0 && ticked === visible.length;
+    this.indeterminate = ticked > 0 && ticked < visible.length;
+  });
+}
+
+// The header box lives in a <th>, and the site's tablesorter sorts on any
+// header click and returns false from its handler - which also cancels the
+// checkbox's own toggle, so without stopPropagation the box could never be
+// seen checked and a second click could only select all again, never clear.
+function selectVisibleRows(tid, box, event) {
+  if (event) { event.stopPropagation(); }
+  $('#' + tid + ' > tbody > tr:visible input[type=checkbox]').prop('checked', box.checked);
+  countSelected(tid);
+}
+
+function clearSelected(tid) {
+  $('#' + tid + ' > tbody input[type=checkbox]').prop('checked', false);
+  countSelected(tid);
+}
+
 // Cycling filter: rotates a table's rows through "A & B" -> "A only" -> "B only".
 // The button label shows the current view. Composes with toggler() via the
 // shared hide set, and keeps the counter span (if given) up to date.

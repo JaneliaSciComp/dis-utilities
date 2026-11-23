@@ -68,7 +68,7 @@ def _ns(dois=None, processing=None, explode=False):
     for name in ('_date_text', 'record_doi_event', '_save_newsletter',
                  '_ack_text', '_save_acknowledgements', '_derived_tags', '_save_tag',
                  '_author_rows', '_first_last_change', '_save_author',
-                 '_acktag_in_text', '_save_ack_tag'):
+                 '_acktag_in_text', '_ack_tag_change', '_save_ack_tag'):
         exec(ast.get_source_segment(SOURCE, _FUNCS[name]), ns)    # pylint: disable=W0122
     ns['_dois'] = dois
     ns['_processing'] = processing
