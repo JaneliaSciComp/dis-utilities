@@ -33,6 +33,7 @@ SAVE = _block('def _save_newsletter(', "@app.route('/doi_edit/")
 TABS = _block('def doi_tabs(', 'def show_doi_ui(')
 SHOW = _block('def show_doi_ui(', 'def _date_text(')
 GATE = _block('def restricted(arg=None)', "@app.route('/login'")
+ACKTAG = _block('def _acktag_section(', 'def _save_ack_tag(')
 
 # Parsed once: ast.parse of a 27,000-line file per test was most of the run.
 _FUNCS = {n.name: n for n in ast.parse(SOURCE).body if isinstance(n, ast.FunctionDef)}
@@ -63,9 +64,11 @@ def _ns(dois=None, processing=None, explode=False):
                                   'Scientific Computing Software')
     ns['AUTHOR_MATCHES'] = {'asserted': 'Janelia affiliation', 'ORCID': 'ORCID match',
                             'name': 'Name match'}
+    ns['IRIS_CURATOR'] = 'IRIS'
     for name in ('_date_text', 'record_doi_event', '_save_newsletter',
                  '_ack_text', '_save_acknowledgements', '_derived_tags', '_save_tag',
-                 '_author_rows', '_first_last_change', '_save_author'):
+                 '_author_rows', '_first_last_change', '_save_author',
+                 '_acktag_in_text', '_save_ack_tag'):
         exec(ast.get_source_segment(SOURCE, _FUNCS[name]), ns)    # pylint: disable=W0122
     ns['_dois'] = dois
     ns['_processing'] = processing
@@ -83,9 +86,11 @@ def test_the_write_endpoint_needs_the_curator_term_and_the_page_does_not():
         different job from granting access, and "admin" implies it anyway.
     '''
     head = SOURCE[SOURCE.index("@app.route('/doi_edit/"):SOURCE.index('def doi_edit')]
-    assert "@restricted(CURATOR_TERM)" in head
+    assert "@restricted(CURATE_TERMS)" in head
     assert "methods=['POST']" in head
     assert "CURATOR_TERM = 'curator'" in SOURCE
+    assert "ACK_TAG_TERM = 'ack_tag'" in SOURCE
+    assert "CURATE_TERMS = (CURATOR_TERM, ACK_TAG_TERM)" in SOURCE
     page = SOURCE[SOURCE.index("@app.route('/doiui/<path:doi>')"):SOURCE.index('def show_doi_ui')]
     assert '@restricted' not in page, '/doiui must stay public'
 
@@ -95,8 +100,9 @@ def test_the_tab_is_shown_to_curators_and_admins_only():
         intersection, not a bare term test, is what lets "admin" through when
         the cv failed to load - the same shape @restricted uses.
     '''
-    assert "{'admin', CURATOR_TERM} & authorizations(current_user())" in TABS
-    assert "content['curate'] = curate_panel(doi, row, authors, curate_note)" in TABS
+    assert "held = authorizations(current_user())" in TABS
+    assert "({'admin', *CURATE_TERMS} & held)" in TABS
+    assert "content['curate'] = curate_panel(doi, row, authors, curate_note, held)" in TABS
 
 
 def test_the_tab_looks_like_a_write_control():
@@ -133,8 +139,8 @@ def test_every_handler_action_has_a_control():
     dynamic = set(re.findall(r"act = '(\w+)' if arow\['credited'\] else '(\w+)'", PANEL))
     offered |= {a for pair in dynamic for a in pair}
     assert offered == handled == {'newsletter_set', 'newsletter_clear',
-                                  'ack_set', 'ack_clear', 'tag_add', 'tag_remove',
-                                  'author_add', 'author_remove'}
+                                  'ack_set', 'ack_clear', 'acktag_add', 'acktag_remove',
+                                  'tag_add', 'tag_remove', 'author_add', 'author_remove'}
 
 
 def test_clear_is_offered_only_when_there_is_something_to_clear():
@@ -866,9 +872,11 @@ def test_the_section_acted_on_reopens_with_the_note_inside_it():
     assert '"section": action.split(\'_\', 1)[0]' in HANDLER
     assert "opened = pending.get('section', '')" in PANEL
     keys = set(re.findall(r"html \+= section\('(\w+)'", PANEL))
-    assert keys == {'newsletter', 'ack', 'tag', 'author'}
-    assert "CURATE_SECTIONS = ('newsletter', 'ack', 'tag', 'author')" in SOURCE
+    keys |= set(re.findall(r"return section\('(\w+)'", ACKTAG))
+    assert keys == {'newsletter', 'ack', 'acktag', 'tag', 'author'}
+    assert "CURATE_SECTIONS = ('newsletter', 'ack', 'acktag', 'tag', 'author')" in SOURCE
     actions = {'newsletter_set', 'newsletter_clear', 'ack_set', 'ack_clear',
+               'acktag_add', 'acktag_remove',
                'tag_add', 'tag_remove', 'author_add', 'author_remove'}
     assert {a.split('_', 1)[0] for a in actions} == keys
     assert "{note if is_open else ''}" in PANEL
@@ -916,3 +924,154 @@ def test_the_doi_is_normalised_like_the_page_normalises_it():
         miss the record the page just showed.
     '''
     assert "doi = doi.lstrip('/').rstrip('/').lower()" in HANDLER
+
+
+# --- acknowledgement tags --------------------------------------------------
+
+VOCAB = {'FlyLight': r'fly\s*light', 'Vivarium': r'vivarium', 'Rubin Lab': r'rubin'}
+ACK_SUPORGS = {'Vivarium': {'code': 'VIV', 'active': True}}
+TAGGER = {'orcid': '0000-0003-0000-0001', 'userIdO365': 'Tagger@hhmi.org'}
+
+
+def _ack_row(tags=None, text='We thank the FlyLight team and the Vivarium.'):
+    row = {'doi': '10.1/ack'}
+    if text:
+        row['jrc_acknowledgements'] = text
+    if tags is not None:
+        row['jrc_acknowledge'] = tags
+    return row
+
+
+def _iris(name):
+    return {'name': name, 'code': None, 'type': 'acknowledgement', 'curator': 'IRIS',
+            'updated': datetime(2026, 1, 1)}
+
+
+def test_the_door_admits_either_term_and_the_view_sorts_them_out():
+    ''' @restricted grew an any-of form for this: the acknowledgement tagger
+        and the curator share /doi_edit. Inside, only the acktag actions are
+        open to both; everything else still needs the curator term, checked
+        on the POST and not only by which sections the tab drew.
+    '''
+    assert "elif isinstance(arg, str):\n        terms = {arg}" in GATE
+    assert "terms = set(arg)" in GATE
+    assert "if terms and not ({'admin'} | terms) & authorizations(person):" in GATE
+    assert "' or '.join(" in GATE
+    assert "curator = bool({'admin', CURATOR_TERM} & authorizations(me))" in HANDLER
+    order = [HANDLER.index("elif action in ('acktag_add', 'acktag_remove'):"),
+             HANDLER.index("elif not curator:"),
+             HANDLER.index("elif action in ('newsletter_set', 'newsletter_clear'):")]
+    assert order == sorted(order), 'acktag actions must be dispatched before the curator check'
+    assert "covers acknowledgement tags only" in HANDLER
+
+
+def test_a_tagger_without_the_curator_term_sees_only_their_section():
+    ''' The text read-only (it is what they are tagging), the tag section, and
+        the help for it; none of the other controls.
+    '''
+    assert "curator = held is None or bool({'admin', CURATOR_TERM} & held)" in PANEL
+    tagger_view = PANEL[PANEL.index('if not curator:'):PANEL.index('# Newsletter date')]
+    assert "_acktag_section(section, row, edoi, button, muted)" in tagger_view
+    assert "white-space:pre-wrap" in tagger_view and "{escape(ack)}" in tagger_view
+    assert "return html" in tagger_view
+    assert "newsletter" not in tagger_view and "tag_add" not in tagger_view
+    panel_fn = _block('def curate_panel(', 'IRIS_CURATOR =')
+    assert panel_fn.count("_acktag_section(section, row, edoi, button, muted)") == 2
+    assert panel_fn.count("{ACKTAG_HELP}") == 2
+
+
+def test_an_automatic_tag_has_no_remove_control_and_a_hand_placed_one_does():
+    assert "if tag.get('curator') == IRIS_CURATOR:" in ACKTAG
+    assert ">automatic</span>" in ACKTAG
+    assert "value='acktag_remove'" in ACKTAG
+    assert "name='name' list='acktag-choices'" in ACKTAG
+    # The pick list leaves out what is already tagged, and there is no form
+    # without text to describe.
+    assert "choices = sorted(n for n in vocabulary if n not in names)" in ACKTAG
+    assert "if not ack:" in ACKTAG and "add the text in the Acknowledgements section first" in ACKTAG
+
+
+def test_the_in_text_hint_runs_the_entity_s_pattern_over_the_stored_text():
+    ns = _ns()
+    hint = ns['_acktag_in_text']
+    assert hint(r'fly\s*light', 'We thank FlyLight.') is True
+    assert hint(r'fly\s*light', 'We thank the Vivarium.') is False
+    assert hint('', 'anything') is None and hint(r'x', '') is None
+    assert hint(r'(', 'unbalanced') is None, 'a bad pattern is a hint, not a crash'
+
+
+def test_adding_an_acknowledgement_tag_writes_the_tagger_s_shape_with_a_human_curator():
+    ns = _ns()
+    note = ns['_save_ack_tag'](_ack_row([_iris('FlyLight')]), TAGGER, 'acktag_add',
+                               ' Vivarium ', VOCAB, ACK_SUPORGS)
+    assert note.startswith('[success]')
+    (query, update, _), = ns['_dois'].calls
+    assert query == {'doi': '10.1/ack'}
+    entry = update['$push']['jrc_acknowledge']
+    assert entry['name'] == 'Vivarium' and entry['type'] == 'suporg'
+    assert entry['code'] == {'code': 'VIV', 'active': True}
+    assert entry['curator'] == 'Tagger@hhmi.org', 'curator_display looks the person up by userIdO365'
+    assert isinstance(entry['updated'], datetime)
+    event = ns['_processing'].calls[0][1]['$push']['processes']
+    assert event['action'] == 'acktag_added' and 'Vivarium' in event['notes']
+    assert event['user'] == 'tagger'
+
+
+def test_a_name_that_is_not_a_supervisory_org_is_an_acknowledgement_tag_with_no_code():
+    ns = _ns()
+    ns['_save_ack_tag'](_ack_row([]), TAGGER, 'acktag_add', 'Rubin Lab', VOCAB, ACK_SUPORGS)
+    entry = ns['_dois'].calls[0][1]['$push']['jrc_acknowledge']
+    assert entry['type'] == 'acknowledgement' and entry['code'] is None
+
+
+def test_an_add_is_refused_without_text_for_an_unknown_entity_or_a_duplicate():
+    ns = _ns()
+    save = ns['_save_ack_tag']
+    assert 'no acknowledgement text' in save(_ack_row([], text=''), TAGGER, 'acktag_add',
+                                             'FlyLight', VOCAB, ACK_SUPORGS)
+    assert 'not an entity' in save(_ack_row([]), TAGGER, 'acktag_add', 'Imaginary Lab',
+                                   VOCAB, ACK_SUPORGS)
+    assert 'already an acknowledgement tag' in save(_ack_row([_iris('FlyLight')]), TAGGER,
+                                                    'acktag_add', 'FlyLight', VOCAB, ACK_SUPORGS)
+    assert 'No entity name' in save(_ack_row([]), TAGGER, 'acktag_add', '  ', VOCAB, ACK_SUPORGS)
+    assert ns['_dois'].calls == [] and ns['_processing'].calls == []
+
+
+def test_an_automatic_tag_cannot_be_removed_but_a_hand_placed_one_can():
+    ''' The tagger would match the text and put an IRIS tag back tonight, so
+        refusing is more honest than a one-night removal. A tag a person
+        placed is never touched by the tagger, so its removal sticks.
+    '''
+    ns = _ns()
+    save = ns['_save_ack_tag']
+    note = save(_ack_row([_iris('FlyLight')]), TAGGER, 'acktag_remove', 'FlyLight', VOCAB, {})
+    assert 'placed by the nightly tagger' in note and ns['_dois'].calls == []
+    assert 'not an acknowledgement tag' in save(_ack_row([]), TAGGER, 'acktag_remove',
+                                                'FlyLight', VOCAB, {})
+    human = {'name': 'Vivarium', 'code': None, 'type': 'acknowledgement',
+             'curator': 'Someone@hhmi.org'}
+    note = save(_ack_row([_iris('FlyLight'), human]), TAGGER, 'acktag_remove', 'Vivarium',
+                VOCAB, {})
+    assert note.startswith('[success]')
+    assert ns['_dois'].calls == [({'doi': '10.1/ack'},
+                                  {'$pull': {'jrc_acknowledge': {'name': 'Vivarium'}}}, False)]
+    assert ns['_processing'].calls[0][1]['$push']['processes']['action'] == 'acktag_removed'
+
+
+def test_removing_the_last_acknowledgement_tag_unsets_the_field():
+    ''' The metrics and the untagged queue test jrc_acknowledge.0 / the
+        field's presence; an empty list would count as tagged.
+    '''
+    ns = _ns()
+    human = {'name': 'Vivarium', 'curator': 'Someone@hhmi.org'}
+    ns['_save_ack_tag'](_ack_row([human]), TAGGER, 'acktag_remove', 'Vivarium', VOCAB, {})
+    assert [u for _, u, _ in ns['_dois'].calls] == [
+        {'$pull': {'jrc_acknowledge': {'name': 'Vivarium'}}},
+        {'$unset': {'jrc_acknowledge': ''}}]
+
+
+def test_a_failed_acknowledgement_tag_write_is_reported_and_not_audited():
+    ns = _ns(explode=True)
+    note = ns['_save_ack_tag'](_ack_row([]), TAGGER, 'acktag_add', 'FlyLight', VOCAB, {})
+    assert note == '[error] Could not save that change.'
+    assert ns['_processing'].calls == []
