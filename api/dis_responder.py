@@ -71,7 +71,7 @@ from dis_state import CVTERM, PROJECT
 # on the image. feat -> minor, everything else -> patch, in the same commit as
 # the change. Forgetting is survivable: ocbuild warns that the tag already
 # exists in the ImageStream rather than silently overwriting it.
-__version__ = "120.142.0"
+__version__ = "120.143.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -4514,11 +4514,15 @@ def highlight_subtext(text, subtext, is_regex=False):
 
 
 def standard_ack_table(rows, ack, is_regex=False, show_count=True, match_key=None,  # pylint: disable=too-many-arguments,too-many-positional-arguments
-                       show_match=False):
+                       show_match=False, select=None):
     ''' Create a standard table of DOIs/acknowledgements
         Keyword arguments:
           rows: rows from dois collection
           ack: acknowledgement text to highlight (treated as a regex if is_regex is True)
+          select: (input name, form id) to lead every row with a checkbox carrying the
+                  row's DOI, bound to that form by its form= attribute (the table itself
+                  is never inside the form: its filter buttons would submit it). The
+                  header gets a select-all box for the visible rows. Not in the download.
           show_count: if False, emit no built-in counter - for callers that display
                       the count themselves (e.g. via ack_stat_cards). That caller's
                       count element must carry id='totalrows' so the version/internal
@@ -4555,8 +4559,17 @@ def standard_ack_table(rows, ack, is_regex=False, show_count=True, match_key=Non
     # data-initial-hide/data-counter: default the view to journal-articles/preprints
     # only (hide 'other' rows on load); the type cycle button below reveals all types.
     initial_hide = "" if restricted else "data-initial-hide='other' "
+    select_th = ""
+    if select:
+        # The click must not reach the <th>: this tablesorter sorts on any
+        # header click (it predates the sorter-false class, kept here for the
+        # day it is upgraded) and its handler returns false, which would also
+        # cancel the box's own toggle - see selectVisibleRows in dis.js.
+        select_th = ("<th class='sorter-false'><input type='checkbox' "
+                     "title='Select or clear every visible row' "
+                     "onclick=\"selectVisibleRows('dois', this, event)\"></th>")
     html = "<table id='dois' class='tablesorter standard-scroll' " \
-           + f"{initial_hide}data-counter='totalrows'><thead><tr>" \
+           + f"{initial_hide}data-counter='totalrows'><thead><tr>{select_th}" \
            + ''.join([f"<th>{itm}</th>" for itm in header]) + "</tr></thead><tbody>"
     fileoutput = ""
     cnt = oacnt = untagged_count = 0
@@ -4575,7 +4588,11 @@ def standard_ack_table(rows, ack, is_regex=False, show_count=True, match_key=Non
         # the precomputed field directly (present on both internal and external rows).
         row['published'] = row.get('jrc_publishing_date', 'unknown')
         row['link'] = doi_link(row['doi'])
-        row['jrc_ack2'] = row['jrc_acknowledgements'].replace('\n', '<br>')
+        # Escaped before it becomes markup: harvested text can carry '<'
+        # (publisher italics, or anything else), and this table had put it
+        # into the page as-is. quote=False keeps ' and " as typed, so a
+        # highlighted term containing them still matches what Mongo matched.
+        row['jrc_ack2'] = escape(row['jrc_acknowledgements'], quote=False).replace('\n', '<br>')
         row['jrc_ack2'] = highlight_subtext(row['jrc_ack2'], ack, is_regex=is_regex)
         # dedupe by name (keeping the last tag object seen), in case a row
         # somehow carries the same tag name twice
@@ -4614,7 +4631,12 @@ def standard_ack_table(rows, ack, is_regex=False, show_count=True, match_key=Non
         # Caller-supplied row class, so a count card can be wired to it
         if row.get('match_class'):
             cls.append(row['match_class'])
-        html += f"<tr class=\'{' '.join(cls)}\'><td>" \
+        select_td = ""
+        if select:
+            select_td = (f"<td><input type='checkbox' name='{escape(select[0])}' "
+                         f"value='{escape(row['doi'])}' form='{escape(select[1])}' "
+                         "onchange=\"countSelected('dois')\"></td>")
+        html += f"<tr class=\'{' '.join(cls)}\'>{select_td}<td>" \
             + dloop(row, fields, "</td><td>") \
             + "</td></tr>"
         cnt += 1
@@ -8095,7 +8117,7 @@ def show_acknowledgement_metrics(limit=10):
             f"<b>Tagging gaps:</b> {gap_int:,} Internal and {gap_ext:,} External "
             "acknowledgements name &ldquo;Janelia&rdquo; but have no entity tag &ndash; "
             "<a href='/acks_untagged'>review the list</a> to improve entity/regex "
-            "coverage.</div>")
+            "coverage, or <a href='/acktag_search'>search and tag</a> them by hand.</div>")
     # Tab builders: Stored (corpus stats), By year (temporal), Sources (jrc_ack_source)
     m_html, m_chartscript, m_chartdiv = _build_ack_metrics(limit)
     by_html, by_chartscript, by_chartdiv = _build_ack_byyear()
@@ -11281,7 +11303,9 @@ ACKTAG_HELP = (
     "needs fixing. A tag added by hand names its curator, survives every re-run "
     "(the tagger never adds a second tag for a name a person has already placed) "
     "and can be removed. Only entities the tagger knows may be tags, and a tag "
-    "needs acknowledgement text to describe.</p>")
+    "needs acknowledgement text to describe. To tag many papers at once, "
+    "<a href='/acktag_search'>search the acknowledgements</a> for a phrase and "
+    "tick the matches.</p>")
 
 
 def _ack_vocabulary():
@@ -11397,7 +11421,7 @@ def _acktag_section(section, row, edoi, button, muted):
     return section('acktag', 'Acknowledgement tags', status, body)
 
 
-def _save_ack_tag(row, me, action, name, vocabulary, suporgs):
+def _ack_tag_change(row, me, action, name, vocabulary, suporgs):
     ''' Add an acknowledgement tag to, or remove one from, a DOI
 
         The entry is built the way tag_janelia_acks.py builds it: {name, code,
@@ -11412,6 +11436,10 @@ def _save_ack_tag(row, me, action, name, vocabulary, suporgs):
         on every run and would put it back, so the removal would last one
         night and mislead until then. A tag a person placed is never touched
         by the tagger, so adding and removing those is safe.
+
+        Returns words and a severity rather than rendered HTML so the bulk
+        page can tell a success from a refusal and roll many into one report;
+        _save_ack_tag renders the single-DOI note.
         Keyword arguments:
           row: dois collection document
           me: the signed-in person
@@ -11420,37 +11448,41 @@ def _save_ack_tag(row, me, action, name, vocabulary, suporgs):
           vocabulary: from _ack_vocabulary
           suporgs: from _tag_vocabulary
         Returns:
-          Rendered note
+          (message, severity) - severity 'success', 'warning' or 'error'
     '''
     doi = row['doi']
     name = (name or '').strip()
     tags = row.get('jrc_acknowledge') or []
     names = [tag.get('name') for tag in tags]
     if not name:
-        return render_warning("No entity name given.", 'warning')
+        return "No entity name given.", 'warning'
     if action == 'acktag_remove':
         if name not in names:
-            return render_warning(f"\"{name}\" is not an acknowledgement tag on this DOI.",
-                                  'warning')
+            return f"\"{name}\" is not an acknowledgement tag on this DOI.", 'warning'
         if any(tag.get('curator') == IRIS_CURATOR for tag in tags if tag.get('name') == name):
-            return render_warning(f"\"{name}\" was placed by the nightly tagger, whose pattern "
-                                  "matches this text; it would be put back tonight. If the "
-                                  "match is wrong, the pattern needs correcting.", 'warning')
+            return (f"\"{name}\" was placed by the nightly tagger, whose pattern matches "
+                    "this text; it would be put back tonight. If the match is wrong, the "
+                    "pattern needs correcting.", 'warning')
         change = {"$pull": {"jrc_acknowledge": {"name": name}}}
         verb, done = 'acktag_removed', f"Removed acknowledgement tag \"{name}\"."
     else:
         if not row.get('jrc_acknowledgements'):
-            return render_warning("This DOI has no acknowledgement text, so there is nothing "
-                                  "for a tag to describe. Add the text first.", 'warning')
+            return ("This DOI has no acknowledgement text, so there is nothing for a tag "
+                    "to describe. Add the text first.", 'warning')
         if name in names:
-            return render_warning(f"\"{name}\" is already an acknowledgement tag on this DOI.",
-                                  'warning')
+            return f"\"{name}\" is already an acknowledgement tag on this DOI.", 'warning'
         # A datalist is a suggestion, not a constraint, so the rule is applied
         # here: only entities the tagger knows, or /tag/<name> and the metrics
         # would show a name nothing else recognizes.
         if name not in vocabulary:
-            return render_warning(f"\"{name}\" is not an entity the acknowledgement tagger "
-                                  "knows, so it cannot be a tag.", 'warning')
+            return (f"\"{name}\" is not an entity the acknowledgement tagger knows, so it "
+                    "cannot be a tag.", 'warning')
+        if suporgs is None:
+            # The type (suporg or acknowledgement) and the code come from the
+            # suporg list; without it the entry would be written wrong and
+            # look right. Refuse rather than guess.
+            return ("The supervisory-organization list could not be read, so the tag's "
+                    "type cannot be decided. Try again in a moment.", 'error')
         code = suporgs.get(name)
         entry = {"name": name, "code": code,
                  "type": 'suporg' if code else 'acknowledgement',
@@ -11466,11 +11498,17 @@ def _save_ack_tag(row, me, action, name, vocabulary, suporgs):
             DB['dis'].dois.update_one({"doi": doi}, {"$unset": {"jrc_acknowledge": ""}})
     except Exception as err:
         print(f"Could not {action} {name!r} for {doi}: {err}")
-        return render_warning("Could not save that change.", 'error')
+        return "Could not save that change.", 'error'
     print(f"{verb} {name!r} on {doi} by {me.get('orcid')}")
     record_doi_event(doi, verb, me, f"{'added' if verb == 'acktag_added' else 'removed'} "
                                     f"\"{name}\"")
-    return render_warning(done, 'success')
+    return done, 'success'
+
+
+def _save_ack_tag(row, me, action, name, vocabulary, suporgs):
+    ''' One acknowledgement-tag change, as the Curate tab's note (see _ack_tag_change) '''
+    message, severity = _ack_tag_change(row, me, action, name, vocabulary, suporgs)
+    return render_warning(message, severity)
 
 
 def _save_ack_tag_action(row, me, action):
@@ -11482,8 +11520,287 @@ def _save_ack_tag_action(row, me, action):
         Returns:
           Rendered note
     '''
-    suporgs = _tag_vocabulary()[0] if action == 'acktag_add' else {}
+    suporgs = _suporgs_or_none() if action == 'acktag_add' else {}
     return _save_ack_tag(row, me, action, request.form.get('name'), _ack_vocabulary(), suporgs)
+
+
+# The most matches the search page lists, and the most DOIs one bulk tagging
+# will take. A term like "Janelia" matches thousands; a page of thousands of
+# checkboxes is not a worklist, and the note says to narrow the search.
+ACKTAG_SEARCH_LIMIT = 500
+# Longest search term accepted: it becomes a database regex.
+ACKTAG_TERM_MAX = 200
+
+
+def _acktag_search_form(term, tag, vocabulary):
+    ''' The search form at the top of /acktag_search
+        Keyword arguments:
+          term: current search term (echoed into the box)
+          tag: current "not tagged with" entity, or ''
+          vocabulary: from _ack_vocabulary
+        Returns:
+          HTML
+    '''
+    # The entity is required: without one this page would be /acksui with a
+    # smaller scope and a gate in front, so a plain search is sent there.
+    options = "<option value='' disabled{}>Entity to tag with</option>".format(
+        '' if tag else ' selected') + "".join(
+        f"<option value='{escape(name)}'{' selected' if name == tag else ''}>{escape(name)}"
+        "</option>" for name in sorted(vocabulary))
+    return (f"<form method='GET' action='/acktag_search' style='max-width:900px'>"
+            "<div class='flexcontainer'>"
+            "<div class='flexitem' style='flex:2'>"
+            f"<input class='form-control' name='term' value='{escape(term)}' required "
+            f"maxlength='{ACKTAG_TERM_MAX}' "
+            "placeholder='Word or phrase in the acknowledgements (a regex is fine)'></div>"
+            "<div class='flexitem'>"
+            f"<select class='form-control' name='tag' required>{options}</select></div>"
+            "<div class='flexitemauto'>"
+            "<button type='submit' class='btn btn-outline-success'>Search</button></div>"
+            "</div>"
+            "<p style='color:#a8c4e0; font-size:0.85em; margin-top:6px'>"
+            "Lists the DOIs we hold whose acknowledgement text matches the phrase "
+            "(case-insensitive) and are <b>not</b> yet tagged with the entity; tick the "
+            "ones that should be, and one button tags them all. For a plain search of the "
+            "acknowledgements, internal and external, use the <a href='/'>home page</a> "
+            "search with &ldquo;acknowledgement text&rdquo;.</p></form>")
+
+
+def _suporgs_or_none():
+    ''' The supervisory organizations an acknowledgement tag's type is decided by
+
+        None, not {}, when the collection cannot be read: an empty dict would
+        type every entity "acknowledgement" and the write would go through
+        looking normal. _ack_tag_change refuses on None.
+        Keyword arguments:
+          None
+        Returns:
+          name -> {code, active}, or None when the read failed
+    '''
+    try:
+        return DL.get_supervisory_orgs(coll=DB['dis'].suporg) or {}
+    except Exception as err:
+        print(f"Could not read supervisory orgs: {err}")
+        return None
+
+
+# Regex forms that can take exponential time: a quantified group that is
+# itself quantified ((a+)+, (\w+\s?)*, (x|y)+{2,}). The term also runs in
+# Python's re over every row shown (the highlighter), where a pathological
+# pattern hangs the request rather than the database, so these are refused
+# up front. A heuristic, not a proof - it catches the classic shapes.
+RISKY_REGEX = re.compile(r'\)\s*[*+{]|\)\?[*+]|[*+]\s*[*+]')
+
+
+def _regex_problem(term):
+    ''' Why a search term cannot be used as a pattern, or None
+        Keyword arguments:
+          term: the search term
+        Returns:
+          A sentence for the reader, or None when the term is usable
+    '''
+    try:
+        re.compile(term)
+    except re.error as err:
+        return f"That is not a valid pattern: {err}."
+    if RISKY_REGEX.search(term):
+        return ("That pattern repeats a repeated group (something like (a+)+), which can "
+                "take forever to run. Simplify it.")
+    return None
+
+
+def _bulk_ack_tags(dois, tag, me, vocabulary, suporgs, fetch):
+    ''' Add one acknowledgement tag to many DOIs
+
+        Each DOI goes through the same _ack_tag_change the Curate tab uses, so
+        the rules (text required, no duplicates, vocabulary only) and the
+        audit (one processing event per DOI) are the same; this only rolls up
+        the outcomes. Stops at ACKTAG_SEARCH_LIMIT, the most a page can offer,
+        and says how many it did not reach.
+        Keyword arguments:
+          dois: DOIs from the form, in order
+          tag: entity name
+          me: the signed-in person
+          vocabulary: from _ack_vocabulary
+          suporgs: from _suporgs_or_none (None refuses every add)
+          fetch: DOI -> dois document, None when not found; may raise
+        Returns:
+          (tagged: list of DOIs, skipped: list of (DOI, reason),
+           unattempted: DOIs beyond the cap)
+    '''
+    tagged, skipped = [], []
+    seen = set()
+    cleaned = []
+    for doi in dois:
+        doi = (doi or '').strip().lower()
+        if doi and doi not in seen:
+            seen.add(doi)
+            cleaned.append(doi)
+    unattempted = max(0, len(cleaned) - ACKTAG_SEARCH_LIMIT)
+    for doi in cleaned[:ACKTAG_SEARCH_LIMIT]:
+        try:
+            row = fetch(doi)
+        except Exception as err:
+            # Its own reason: "not in the database" would send a curator
+            # looking for a deletion that did not happen.
+            print(f"Could not read {doi}: {err}")
+            skipped.append((doi, "could not be read from the database"))
+            continue
+        if not row:
+            skipped.append((doi, "not in the database"))
+            continue
+        message, severity = _ack_tag_change(row, me, 'acktag_add', tag, vocabulary, suporgs)
+        if severity == 'success':
+            tagged.append(doi)
+        else:
+            skipped.append((doi, message))
+    return tagged, skipped, unattempted
+
+
+@app.route('/acktag_search')
+@restricted(CURATE_TERMS)
+def show_acktag_search():
+    ''' Find acknowledgements by their text and tag the matches
+
+        The worklist behind the Curate tab's one-at-a-time tagging: every DOI
+        whose acknowledgement text matches a term, optionally only those not
+        yet tagged with a chosen entity - and then, with that entity chosen, a
+        checkbox per row and one button to tag the selection. Same door as
+        /doi_edit, same write (_ack_tag_change), same audit.
+    '''
+    term = (request.args.get('term') or '').strip()[:ACKTAG_TERM_MAX]
+    tag = (request.args.get('tag') or '').strip()
+    vocabulary = _ack_vocabulary()
+    html = _acktag_search_form(term, tag, vocabulary)
+    title = "Search and tag acknowledgements"
+    if not term:
+        endpoint_access()
+        return make_response(render_template('general.html', urlroot=request.url_root,
+                                             title=title, html=html,
+                                             navbar=generate_navbar('Acknowledgements')))
+    problem = _regex_problem(term)
+    if problem:
+        html += render_warning(problem, 'warning')
+        return make_response(render_template('general.html', urlroot=request.url_root,
+                                             title=title, html=html,
+                                             navbar=generate_navbar('Acknowledgements')))
+    if not tag:
+        # A search with no entity is /acksui's job (and that page also covers
+        # external DOIs); this one exists to tag what it lists.
+        # render_warning escapes its message, so the link sits beside it.
+        html += render_warning("Choose the entity to tag with.", 'warning')
+        html += ("<p>For a plain search of the acknowledgements, see "
+                 f"<a href='/acksui/{escape(quote(term, safe=''))}'>DOIs with acknowledgement "
+                 f"text &ldquo;{escape(term)}&rdquo;</a>.</p>")
+        return make_response(render_template('general.html', urlroot=request.url_root,
+                                             title=title, html=html,
+                                             navbar=generate_navbar('Acknowledgements')))
+    if tag not in vocabulary:
+        html += render_warning(f"\"{tag}\" is not an entity the acknowledgement tagger knows.",
+                               'warning')
+        return make_response(render_template('general.html', urlroot=request.url_root,
+                                             title=title, html=html,
+                                             navbar=generate_navbar('Acknowledgements')))
+    # $ne on an array field: true when no element has that name, and for
+    # records with no jrc_acknowledge at all.
+    payload = {"jrc_acknowledgements": {"$regex": term, "$options": "i"},
+               "jrc_acknowledge.name": {"$ne": tag}}
+    # One more than the cap, in place of a count: a $regex over an unindexed
+    # field is a full scan, and the count would be a second one just to say
+    # "there are more".
+    try:
+        rows = list(DB['dis'].dois.find(payload).sort("jrc_publishing_date", -1)
+                    .limit(ACKTAG_SEARCH_LIMIT + 1))
+    except Exception as err:
+        return inspect_error(err, 'Could not search acknowledgements')
+    more = len(rows) > ACKTAG_SEARCH_LIMIT
+    rows = rows[:ACKTAG_SEARCH_LIMIT]
+    if not rows:
+        html += render_warning(f"No acknowledgement not yet tagged \"{tag}\" matches "
+                               f"\"{term}\".", 'info')
+    else:
+        for row in rows:
+            row['doi_type'] = 'internal'
+        table, cnt, _ = standard_ack_table(rows, term, is_regex=True,
+                                           select=('doi', 'acktag-bulk'))
+        if more:
+            html += render_warning(f"More than {cnt:,} DOIs match; showing the {cnt:,} most "
+                                   "recently published. Narrow the search to see the rest.",
+                                   'info')
+        etag = escape(tag)
+        html += (f"<form method='POST' action='/acktag_bulk' id='acktag-bulk' "
+                 "style='margin:10px 0'>"
+                 f"<input type='hidden' name='tag' value='{etag}'>"
+                 f"<input type='hidden' name='term' value='{escape(term)}'>"
+                 f"<button type='submit' class='btn btn-sm' "
+                 f"style='background-color:{WRITE_COLOR}; color:#000'>"
+                 f"Add &ldquo;{etag}&rdquo; to the selected DOIs</button> "
+                 "<span style='color:#a8c4e0; font-size:0.9em'>"
+                 "<span data-selected-count='dois'>0</span> selected &middot; "
+                 "<a href='javascript:void(0)' onclick=\"clearSelected('dois')\">clear</a> "
+                 "&middot; the box in the header selects or clears every visible row"
+                 "</span></form>")
+        html += table
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=title, html=html,
+                                         navbar=generate_navbar('Acknowledgements')))
+
+
+@app.route('/acktag_bulk', methods=['POST'])
+@restricted(CURATE_TERMS)
+def acktag_bulk():
+    ''' Add one acknowledgement tag to the DOIs selected on /acktag_search
+
+        Renders the report itself rather than redirecting with it in the
+        session: the session is a cookie, and a report listing hundreds of
+        skipped DOIs would overflow it - and the sign-in travels in the same
+        cookie, so the browser dropping it would sign the curator out. A
+        refresh re-posts, which is harmless here: every DOI already tagged is
+        refused, not tagged twice. A link leads back to the same search, whose
+        "not tagged with" filter now leaves out what was just tagged.
+    '''
+    me = current_user() or {}
+    tag = (request.form.get('tag') or '').strip()
+    term = (request.form.get('term') or '').strip()[:ACKTAG_TERM_MAX]
+    dois = request.form.getlist('doi')
+    vocabulary = _ack_vocabulary()
+    title = "Search and tag acknowledgements"
+    back = (f"<p style='margin-top:10px'><a href='{url_for('show_acktag_search', term=term, tag=tag)}'>"
+            f"Back to the search</a> (the DOIs just tagged are no longer listed).</p>")
+    if not dois:
+        note = render_warning("No DOIs were selected.", 'warning')
+    elif tag not in vocabulary:
+        note = render_warning(f"\"{tag}\" is not an entity the acknowledgement tagger knows.",
+                              'warning')
+    else:
+        tagged, skipped, unattempted = _bulk_ack_tags(
+            dois, tag, me, vocabulary, _suporgs_or_none(),
+            lambda doi: DB['dis'].dois.find_one({"doi": doi}))
+        print(f"Bulk acktag {tag!r}: {len(tagged)} tagged, {len(skipped)} skipped, "
+              f"{unattempted} unattempted by {me.get('orcid')}")
+        if tagged:
+            note = render_warning(f"Added \"{tag}\" to {len(tagged):,} "
+                                  f"DOI{'s' if len(tagged) != 1 else ''}.", 'success')
+        else:
+            note = render_warning(f"\"{tag}\" was not added to any DOI.", 'warning')
+        if unattempted:
+            note += render_warning(f"{unattempted:,} more DOI{'s were' if unattempted != 1 else ' was'} "
+                                   f"not attempted: one tagging takes at most "
+                                   f"{ACKTAG_SEARCH_LIMIT:,}. Search again for the rest.",
+                                   'warning')
+        if skipped:
+            # The DOI came from the form, not the database, so it is escaped
+            # before doi_link, which does not escape.
+            trows = [[safe(doi_link(escape(doi))), reason] for doi, reason in skipped]
+            note += (f"<p style='margin-top:8px'>{len(skipped):,} skipped:</p>"
+                     + render_table(['DOI', 'Reason'], trows, table_id='acktag-skipped',
+                                    css='standard curate-table'))
+    html = _acktag_search_form(term, tag, vocabulary) + note + back
+    endpoint_access()
+    return make_response(render_template('general.html', urlroot=request.url_root,
+                                         title=title, html=html,
+                                         navbar=generate_navbar('Acknowledgements')))
 
 
 # Evidence that an author on the paper is a particular Janelian, as
