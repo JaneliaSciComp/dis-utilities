@@ -71,7 +71,7 @@ from dis_state import CVTERM, PROJECT
 # on the image. feat -> minor, everything else -> patch, in the same commit as
 # the change. Forgetting is survivable: ocbuild warns that the tag already
 # exists in the ImageStream rather than silently overwriting it.
-__version__ = "120.141.0"
+__version__ = "120.142.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -784,6 +784,18 @@ def avatar_html(person, photo_url=None, px=None):
                 f"title='{tip}'>{escape(initials)}</span>")
 
 
+def _terms_of(term):
+    ''' The authorization names a view's dis_authorization mark stands for
+        Keyword arguments:
+          term: None (sign-in only), one name, or a tuple of names (any-of)
+        Returns:
+          tuple of names, empty for sign-in only
+    '''
+    if not term:
+        return ()
+    return (term,) if isinstance(term, str) else tuple(term)
+
+
 def _gated_targets():
     ''' Menu targets that require a sign-in, and what else they require.
 
@@ -855,8 +867,9 @@ def generate_navbar(active):
         return _generate_navbar(active)
     person = current_user()
     held = authorizations(person)
+    # term is None, a name, or a tuple of names (any one of which opens the page).
     hidden = {nav for nav, term in gated.items()
-              if not person or (term and not {'admin', term} & held)}
+              if not person or (term and not ({'admin', *_terms_of(term)} & held))}
     if not hidden:
         return _generate_navbar(active)
     return _generate_navbar(active, menu=_visible_nav(NAV, hidden))
@@ -1020,6 +1033,15 @@ IDENTIFIER_TERMS = {'admin', 'orcid'}
 # term must exist in the "authorization" cv for /person to offer it as a grant;
 # @restricted works from the stored list either way.
 CURATOR_TERM = 'curator'
+# Acknowledgement tagging is a narrower job than curation: reading a paper's
+# acknowledgements and recording which Janelia labs and facilities it thanks.
+# Its own term, so an annotator can be given that and nothing else; "curator"
+# (and so "admin") covers it as well.
+ACK_TAG_TERM = 'ack_tag'
+# What opens the Curate tab and the /doi_edit door: either term. Which sections
+# and actions a holder then gets is decided per term (see curate_panel and
+# doi_edit); the gate only says "has some business here".
+CURATE_TERMS = (CURATOR_TERM, ACK_TAG_TERM)
 
 
 # Audit events live in the processing collection, the same append-only shape
@@ -1304,18 +1326,31 @@ def api_restricted(*terms):
 def restricted(arg=None):
     ''' Require a signed-in reader, and optionally an authorization
 
-        Two forms:
+        Three forms:
           @restricted                 any signed-in reader
           @restricted('datacite')     signed in AND holding that authorization
+          @restricted(('a', 'b'))     signed in AND holding at least one of them
 
         One decorator rather than two, so an authorization check can never be
-        applied to a page that forgot the sign-in check beneath it.
+        applied to a page that forgot the sign-in check beneath it. The any-of
+        form is for a door shared by two jobs (curating a DOI and tagging its
+        acknowledgements); the view decides what each may do once inside.
         Keyword arguments:
-          arg: the decorated view (bare form) or an authorization name
+          arg: the decorated view (bare form), an authorization name, or a
+               tuple/list/set of names
         Returns:
           Decorator, or the wrapped view
     '''
-    term = None if callable(arg) else arg
+    if callable(arg):
+        terms = set()
+    elif isinstance(arg, str):
+        terms = {arg}
+    else:
+        terms = set(arg)
+    # What the view is marked with, for the menu and the /authorization report:
+    # None for sign-in only, the name for one term, a tuple for any-of.
+    term = None if not terms else (next(iter(terms)) if len(terms) == 1
+                                   else tuple(sorted(terms)))
 
     def decorate(view):
         @wraps(view)
@@ -1383,12 +1418,14 @@ def restricted(arg=None):
             # {'admin', term} rather than term alone: authorizations() expands
             # admin by reading the cv, so a cvterm load that failed at start-up
             # would silently strip an administrator of everything but "admin".
-            if term and not {'admin', term} & authorizations(person):
+            if terms and not ({'admin'} | terms) & authorizations(person):
                 # 403, not a redirect: they are signed in correctly and signing
                 # in again changes nothing. Name the authorization so they can
                 # ask for the right thing.
-                print(f"{person.get('orcid')} lacks '{term}' for {request.path}")
-                label = (CVTERM.get('authorization', {}).get(term) or {}).get('display', term)
+                print(f"{person.get('orcid')} lacks {sorted(terms)} for {request.path}")
+                label = ' or '.join(
+                    (CVTERM.get('authorization', {}).get(t) or {}).get('display', t)
+                    for t in sorted(terms))
                 # Plain text, no entities and no escape(): message= is
                 # autoescaped by the template (see Safe.__html__), so "&quot;"
                 # reached the reader as literal "&quot;" and an escaped label
@@ -9373,7 +9410,9 @@ def show_restrictions():
 
     rows, classes = [], []
     for path, endpoint, methods, term in inv['pages']:
-        rows.append([path, safe(_term_label(term)), ', '.join(methods), endpoint])
+        rows.append([path, safe(' or '.join(_term_label(t) for t in _terms_of(term))
+                                or _term_label(None)),
+                     ', '.join(methods), endpoint])
         # 'signinonly' is what the toggle hides, leaving the rows that demand a
         # named authorization. Classed per row rather than filtered server-side
         # so the answer is instant and the counts stay honest.
@@ -10602,9 +10641,9 @@ def doi_tabs(doi, row, rowext, data, authors, curate_note=None):
     # tab protects nothing on its own.
     # _id, not a jrc_ field: when the DOI is not held, show_doi_ui passes the
     # registrar's payload as `row`, and that carries no Mongo id.
-    if row and row.get('_id') \
-       and {'admin', CURATOR_TERM} & authorizations(current_user()):
-        content['curate'] = curate_panel(doi, row, authors, curate_note)
+    held = authorizations(current_user())
+    if row and row.get('_id') and ({'admin', *CURATE_TERMS} & held):
+        content['curate'] = curate_panel(doi, row, authors, curate_note, held)
     # Authors
     ahtml = ""
     if authors:
@@ -10995,22 +11034,27 @@ def _date_text(val):
     return str(val)[:10] if val else ''
 
 
-def curate_panel(doi, row, authors=None, pending=None):
+def curate_panel(doi, row, authors=None, pending=None, held=None):
     ''' The Curate tab on /doiui: controls that change what the record says
 
-        Newsletter date, acknowledgement text, tags and author credits. Each is
-        a small form posting to /doi_edit, which redirects back here - so the
-        note it leaves travels in the session, the way /project_edit's does,
-        and a refresh does not re-post the change.
+        Newsletter date, acknowledgement text, acknowledgement tags, tags and
+        author credits. Each is a small form posting to /doi_edit, which
+        redirects back here - so the note it leaves travels in the session,
+        the way /project_edit's does, and a refresh does not re-post the
+        change. A reader holding only the acknowledgement-tag term sees that
+        section alone; /doi_edit applies the same rule to the POST.
         Keyword arguments:
           doi: DOI
           row: dois collection document
           authors: detailed author list (DL.get_author_details)
           pending: the note left by /doi_edit for THIS DOI, as show_doi_ui
                    popped it: {html, section}, or None
+          held: the reader's authorizations (authorizations()); None means
+                everything, for callers that gated already
         Returns:
           HTML
     '''
+    curator = held is None or bool({'admin', CURATOR_TERM} & held)
     pending = pending or {}
     note = pending.get('html', '')
     # The section the last change was made in: it is the one that reopens,
@@ -11036,6 +11080,24 @@ def curate_panel(doi, row, authors=None, pending=None):
     # A note whose section no section claims (an action the dispatcher did
     # not know) would otherwise vanish; it goes above the sections instead.
     html = note if note and opened not in CURATE_SECTIONS else ""
+    ack = row.get('jrc_acknowledgements') or ''
+    if not curator:
+        # Acknowledgement tags only. The text is shown read-only above them:
+        # it is what the annotator is tagging, and the tab should not send
+        # them to another tab to read it.
+        html += section('ack', 'Acknowledgements',
+                        f"{len(ack):,} characters" if ack else "none recorded",
+                        (f"<div style='max-width:720px; font-size:0.9em; white-space:pre-wrap'>"
+                         f"{escape(ack)}</div>") if ack
+                        else "<p>No acknowledgement text is recorded, so there is nothing "
+                             "to tag. A curator can add the text.</p>")
+        html += _acktag_section(section, row, edoi, button, muted)
+        html += ("<details class='curate-section curate-help'>"
+                 "<summary><span class='curate-title'>How tagging works</span></summary>"
+                 f"<div class='curate-body'>{ACKTAG_HELP}"
+                 "<p>Every change made here is recorded on the Processing tab.</p>"
+                 "</div></details>")
+        return html
     # Newsletter date
     current = _date_text(row.get('jrc_newsletter'))
     # Today in the curators' zone, not the server's: prod runs in UTC, where
@@ -11056,7 +11118,6 @@ def curate_panel(doi, row, authors=None, pending=None):
                     f"{escape(current)} &middot; reviewed" if current
                     else "not set &middot; not reviewed", body)
     # Acknowledgement text
-    ack = row.get('jrc_acknowledgements') or ''
     asrc = row.get('jrc_ack_source') or ''
     if ack:
         status = f"{len(ack):,} characters" + (f" &middot; {escape(asrc)}" if asrc else "")
@@ -11084,6 +11145,8 @@ def curate_panel(doi, row, authors=None, pending=None):
         body += abtn('ack-clear', 'Clear', '; margin-left:8px')
     body += "</div>"
     html += section('ack', 'Acknowledgements', status, body)
+    # Acknowledgement tags
+    html += _acktag_section(section, row, edoi, button, muted)
     # Tags
     suporgs, projects, project_map = _tag_vocabulary()
     derived = _derived_tags(authors, project_map, suporgs)
@@ -11185,6 +11248,7 @@ def curate_panel(doi, row, authors=None, pending=None):
              "<b>Manual</b> source and is never overwritten by the harvester; clearing "
              "it lets the harvester look again. The text replaced or cleared is kept "
              "with the event on the Processing tab.</p>"
+             f"{ACKTAG_HELP}"
              "<p><b>Tags</b> marked <i>from</i> an author come from that author's "
              "roster record - their lab, team or project - and are put back by the "
              "nightly sync for every author it matches, credited or not, so they "
@@ -11202,6 +11266,224 @@ def curate_panel(doi, row, authors=None, pending=None):
              "<p>Every change made here is recorded on the Processing tab.</p>"
              "</div></details>")
     return html
+
+
+# The curator value the automatic tagger (tag_janelia_acks.py) stamps on the
+# acknowledgement tags it adds. A tag carrying anything else was placed by a
+# person, and that person is named by their login id.
+IRIS_CURATOR = 'IRIS'
+ACKTAG_HELP = (
+    "<p><b>Acknowledgement tags</b> record which Janelia labs, facilities and "
+    "projects a paper thanks. The nightly tagger (IRIS) adds one for every entity "
+    "whose pattern matches the acknowledgement text; those are marked "
+    "<i>automatic</i> and cannot be removed here, because the tagger would match "
+    "the text and add them back - if the pattern is wrong, the pattern is what "
+    "needs fixing. A tag added by hand names its curator, survives every re-run "
+    "(the tagger never adds a second tag for a name a person has already placed) "
+    "and can be removed. Only entities the tagger knows may be tags, and a tag "
+    "needs acknowledgement text to describe.</p>")
+
+
+def _ack_vocabulary():
+    ''' The entities an acknowledgement tag may name, with their patterns
+
+        The search_regex collection: one entry per entity, keyed by the
+        canonical name the tagger stores in jrc_acknowledge[].name. The
+        pattern comes along so the panel can say whether the text would be
+        matched - a hand-placed tag whose pattern does match is one the tagger
+        would have placed itself, which is worth knowing when a run was missed.
+        Keyword arguments:
+          None
+        Returns:
+          name -> regex string (may be empty when the collection cannot be read)
+    '''
+    try:
+        return {rec['key']: rec.get('regex') or ''
+                for rec in DB['dis'].search_regex.find({}, {"key": 1, "regex": 1})
+                if rec.get('key')}
+    except Exception as err:
+        print(f"Could not read search_regex: {err}")
+        return {}
+
+
+def _acktag_in_text(pattern, text):
+    ''' Whether an entity's pattern matches acknowledgement text
+        Keyword arguments:
+          pattern: regex string from search_regex, or ''
+          text: acknowledgement text
+        Returns:
+          True/False, or None when there is no pattern or it will not compile
+    '''
+    if not pattern or not text:
+        return None
+    try:
+        return re.search(pattern, text, re.IGNORECASE) is not None
+    except re.error:
+        return None
+
+
+def _acktag_section(section, row, edoi, button, muted):
+    ''' The Curate tab's acknowledgement-tags section
+
+        A table of the tags jrc_acknowledge carries - who placed each (IRIS or
+        a person), when, and whether its pattern matches the stored text - and
+        a form to add one from the tagger's vocabulary. Shared by both views
+        of the tab (curator, acknowledgement tagger).
+        Keyword arguments:
+          section: curate_panel's section builder
+          row: dois collection document
+          edoi: escaped DOI
+          button: the opening tag of a Save-colored button
+          muted: inline style for secondary text
+        Returns:
+          HTML
+    '''
+    ack = row.get('jrc_acknowledgements') or ''
+    vocabulary = _ack_vocabulary()
+    trows, names = [], []
+    for tag in row.get('jrc_acknowledge') or []:
+        name = tag.get('name') or ''
+        ename = escape(name)
+        names.append(name)
+        if tag.get('curator') == IRIS_CURATOR:
+            control = (f"<span style='{muted}' title='Placed by the nightly tagger, which "
+                       "would put it back; fix the pattern instead'>automatic</span>")
+        else:
+            control = (f"<form method='POST' action='/doi_edit/{edoi}' style='display:inline'>"
+                       "<input type='hidden' name='action' value='acktag_remove'>"
+                       f"<input type='hidden' name='name' value='{ename}'>"
+                       f"{button}Remove</button></form>")
+        match = _acktag_in_text(vocabulary.get(name), ack)
+        if match is None:
+            intext = f"<span style='{muted}'>&mdash;</span>"
+        elif match:
+            intext = "<span style='color:lime'>matches</span>"
+        else:
+            intext = f"<span style='{muted}' title='The entity&#x27;s pattern does not match " \
+                     "the stored text'>no match</span>"
+        updated = str(tag.get('updated') or '').split(' ', maxsplit=1)[0]
+        trows.append([safe(f"<a href='/tag/{ename}'>{ename}</a>"), tag.get('type') or '',
+                      safe(curator_display(tag)), updated, safe(intext), safe(control)])
+    if trows:
+        body = render_table(['Tag', 'Type', 'Curator', 'Updated', 'In text', ''], trows,
+                            table_id='curate-acktags', css='standard curate-table')
+    else:
+        body = "<p>No acknowledgement tags.</p>"
+    if not ack:
+        body += (f"<p style='{muted}'>No acknowledgement text is recorded, so no tag can be "
+                 "added; add the text in the Acknowledgements section first.</p>")
+    elif not vocabulary:
+        body += f"<p style='{muted}'>The entity list could not be read.</p>"
+    else:
+        choices = sorted(n for n in vocabulary if n not in names)
+        options = "".join(f"<option value='{escape(c)}'>" for c in choices)
+        body += (f"<form method='POST' action='/doi_edit/{edoi}' style='margin-top:8px'>"
+                 "<input type='hidden' name='action' value='acktag_add'>"
+                 "<div class='flexcontainer'><div class='flexitem'>"
+                 "<input class='form-control' name='name' list='acktag-choices' required "
+                 "placeholder='Lab, facility or project thanked'></div>"
+                 f"<datalist id='acktag-choices'>{options}</datalist>"
+                 f"<div class='flexitemauto'>{button}Add</button></div></div></form>")
+    auto = sum(1 for tag in row.get('jrc_acknowledge') or []
+               if tag.get('curator') == IRIS_CURATOR)
+    if names:
+        status = f"{len(names)} tag{'s' if len(names) != 1 else ''}"
+        if auto and auto < len(names):
+            status += f" &middot; {auto} automatic"
+        elif auto:
+            status += " &middot; all automatic"
+    else:
+        status = 'none'
+    return section('acktag', 'Acknowledgement tags', status, body)
+
+
+def _save_ack_tag(row, me, action, name, vocabulary, suporgs):
+    ''' Add an acknowledgement tag to, or remove one from, a DOI
+
+        The entry is built the way tag_janelia_acks.py builds it: {name, code,
+        type, curator, updated}, type "suporg" with the {code, active} dict
+        when the name is a supervisory organization, else "acknowledgement"
+        with no code. curator is the person's login id, which curator_display
+        resolves to their name. $push and $pull rather than a rewrite, so two
+        people on one record cannot overwrite each other; an emptied list is
+        unset, since the metrics test the field's presence.
+
+        An automatic (IRIS) tag cannot be removed: the tagger matches the text
+        on every run and would put it back, so the removal would last one
+        night and mislead until then. A tag a person placed is never touched
+        by the tagger, so adding and removing those is safe.
+        Keyword arguments:
+          row: dois collection document
+          me: the signed-in person
+          action: 'acktag_add' or 'acktag_remove'
+          name: entity name from the form
+          vocabulary: from _ack_vocabulary
+          suporgs: from _tag_vocabulary
+        Returns:
+          Rendered note
+    '''
+    doi = row['doi']
+    name = (name or '').strip()
+    tags = row.get('jrc_acknowledge') or []
+    names = [tag.get('name') for tag in tags]
+    if not name:
+        return render_warning("No entity name given.", 'warning')
+    if action == 'acktag_remove':
+        if name not in names:
+            return render_warning(f"\"{name}\" is not an acknowledgement tag on this DOI.",
+                                  'warning')
+        if any(tag.get('curator') == IRIS_CURATOR for tag in tags if tag.get('name') == name):
+            return render_warning(f"\"{name}\" was placed by the nightly tagger, whose pattern "
+                                  "matches this text; it would be put back tonight. If the "
+                                  "match is wrong, the pattern needs correcting.", 'warning')
+        change = {"$pull": {"jrc_acknowledge": {"name": name}}}
+        verb, done = 'acktag_removed', f"Removed acknowledgement tag \"{name}\"."
+    else:
+        if not row.get('jrc_acknowledgements'):
+            return render_warning("This DOI has no acknowledgement text, so there is nothing "
+                                  "for a tag to describe. Add the text first.", 'warning')
+        if name in names:
+            return render_warning(f"\"{name}\" is already an acknowledgement tag on this DOI.",
+                                  'warning')
+        # A datalist is a suggestion, not a constraint, so the rule is applied
+        # here: only entities the tagger knows, or /tag/<name> and the metrics
+        # would show a name nothing else recognizes.
+        if name not in vocabulary:
+            return render_warning(f"\"{name}\" is not an entity the acknowledgement tagger "
+                                  "knows, so it cannot be a tag.", 'warning')
+        code = suporgs.get(name)
+        entry = {"name": name, "code": code,
+                 "type": 'suporg' if code else 'acknowledgement',
+                 "curator": me.get('userIdO365') or me.get('orcid') or '',
+                 "updated": datetime.now()}
+        change = {"$push": {"jrc_acknowledge": entry}}
+        verb, done = 'acktag_added', f"Added acknowledgement tag \"{name}\"."
+    try:
+        DB['dis'].dois.update_one({"doi": doi}, change)
+        # $pull takes every entry with that name; the field is unset when
+        # nothing else was in the list, duplicates included.
+        if action == 'acktag_remove' and names.count(name) == len(names):
+            DB['dis'].dois.update_one({"doi": doi}, {"$unset": {"jrc_acknowledge": ""}})
+    except Exception as err:
+        print(f"Could not {action} {name!r} for {doi}: {err}")
+        return render_warning("Could not save that change.", 'error')
+    print(f"{verb} {name!r} on {doi} by {me.get('orcid')}")
+    record_doi_event(doi, verb, me, f"{'added' if verb == 'acktag_added' else 'removed'} "
+                                    f"\"{name}\"")
+    return render_warning(done, 'success')
+
+
+def _save_ack_tag_action(row, me, action):
+    ''' Gather what _save_ack_tag needs from the request and the database
+        Keyword arguments:
+          row: dois collection document
+          me: the signed-in person
+          action: 'acktag_add' or 'acktag_remove'
+        Returns:
+          Rendered note
+    '''
+    suporgs = _tag_vocabulary()[0] if action == 'acktag_add' else {}
+    return _save_ack_tag(row, me, action, request.form.get('name'), _ack_vocabulary(), suporgs)
 
 
 # Evidence that an author on the paper is a particular Janelian, as
@@ -11446,7 +11728,7 @@ DERIVED_DEFAULT_TAGS = ('AI Initiative', 'Janelia Experimental Technology (jET)'
                         'Scientific Computing Software')
 # The Curate tab's collapsible sections, keyed by the prefix of the actions
 # that belong to them (newsletter_set -> newsletter, tag_add -> tag, ...).
-CURATE_SECTIONS = ('newsletter', 'ack', 'tag', 'author')
+CURATE_SECTIONS = ('newsletter', 'ack', 'acktag', 'tag', 'author')
 # Where the curators are. "Today" for the newsletter date is computed here,
 # not in the server's zone (UTC in production).
 CURATION_TZ = 'America/New_York'
@@ -11778,7 +12060,7 @@ def _save_newsletter(row, me, action, date_text):
 
 
 @app.route('/doi_edit/<path:doi>', methods=['POST'])
-@restricted(CURATOR_TERM)
+@restricted(CURATE_TERMS)
 def doi_edit(doi):
     ''' Apply one curation change to a DOI record
 
@@ -11790,6 +12072,10 @@ def doi_edit(doi):
     doi = doi.lstrip('/').rstrip('/').lower()
     me = current_user() or {}
     action = request.form.get('action', '')
+    # The door admits either term; everything but acknowledgement tagging
+    # needs the curator's. Checked here, not only by which sections the tab
+    # drew: a hand-made POST must meet the same rule.
+    curator = bool({'admin', CURATOR_TERM} & authorizations(me))
     try:
         row = DB['dis'].dois.find_one({"doi": doi})
     except Exception as err:
@@ -11797,6 +12083,11 @@ def doi_edit(doi):
     if not row:
         note = render_warning(f"{doi} is not in the database, so there is "
                               "nothing to curate.", 'warning')
+    elif action in ('acktag_add', 'acktag_remove'):
+        note = _save_ack_tag_action(row, me, action)
+    elif not curator:
+        note = render_warning("That change needs the curator authorization; yours "
+                              "covers acknowledgement tags only.", 'warning')
     elif action in ('newsletter_set', 'newsletter_clear'):
         note = _save_newsletter(row, me, action, request.form.get('date'))
     elif action in ('ack_set', 'ack_clear'):

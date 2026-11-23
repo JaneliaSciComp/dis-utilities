@@ -174,10 +174,15 @@ def test_the_personal_pages_need_only_a_sign_in():
 
 
 def test_the_decorator_supports_both_forms():
-    ''' @restricted and @restricted('term') must both work, or applying one
-        would silently drop the sign-in check beneath it.
+    ''' @restricted, @restricted('term') and @restricted(('a', 'b')) must all
+        work, or applying one would silently drop the sign-in check beneath it.
+        The any-of form is for a door two jobs share (/doi_edit: curator and
+        acknowledgement tagger).
     '''
-    assert 'term = None if callable(arg) else arg' in SOURCE
+    block = SOURCE.split('def restricted(')[1].split('\ndef ')[0]
+    assert "if callable(arg):\n        terms = set()" in block
+    assert "elif isinstance(arg, str):\n        terms = {arg}" in block
+    assert "terms = set(arg)" in block
     assert 'return decorate(arg) if callable(arg) else decorate' in SOURCE
 
 
@@ -293,9 +298,9 @@ def test_an_admin_passes_even_if_the_cv_failed_to_load():
         test for admin directly rather than relying on the expansion.
     '''
     block = SOURCE.split('def restricted(')[1].split('\ndef ')[0]
-    assert "not {'admin', term} & authorizations(person)" in block
+    assert "not ({'admin'} | terms) & authorizations(person)" in block
     nav = SOURCE.split('def generate_navbar')[1].split('\ndef ')[0]
-    assert "not {'admin', term} & held" in nav
+    assert "not ({'admin', *_terms_of(term)} & held)" in nav
 
 
 def test_the_checkboxes_are_built_disabled_not_patched_afterwards():
@@ -707,3 +712,20 @@ def test_badge_admin_class_actually_exists():
     ''' A badge class with no CSS renders as unstyled text, silently. '''
     css = (ROOT / 'api' / 'static' / 'css' / 'main.css').read_text(encoding='utf-8')
     assert '.badge-admin {' in css
+
+
+def test_a_view_s_mark_is_one_name_a_tuple_for_any_of_or_none():
+    ''' dis_authorization is what the menu and /restrictions read. A bare
+        @restricted marks None, one term marks the name itself (as before),
+        and the any-of form marks a tuple; _terms_of() reads all three. The
+        start-up crash this pins: the mark used to be set from a variable the
+        any-of rewrite had renamed.
+    '''
+    block = SOURCE.split('def restricted(')[1].split('\ndef ')[0]
+    assert "term = None if not terms else (next(iter(terms)) if len(terms) == 1" in block
+    assert "else tuple(sorted(terms)))" in block
+    assert 'wrapper.dis_authorization = term' in block
+    helper = SOURCE.split('def _terms_of(term)')[1].split('\ndef ')[0]
+    assert "return (term,) if isinstance(term, str) else tuple(term)" in helper
+    report = SOURCE.split('def show_restrictions')[1].split('\ndef ')[0]
+    assert "' or '.join(_term_label(t) for t in _terms_of(term))" in report
