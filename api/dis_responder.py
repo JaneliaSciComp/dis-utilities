@@ -71,7 +71,7 @@ from dis_state import CVTERM, PROJECT
 # on the image. feat -> minor, everything else -> patch, in the same commit as
 # the change. Forgetting is survivable: ocbuild warns that the tag already
 # exists in the ImageStream rather than silently overwriting it.
-__version__ = "120.143.0"
+__version__ = "120.144.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -15412,8 +15412,28 @@ def show_newsletter(ndate, source='Crossref'):
                                          html=html, navbar=generate_navbar('DOIs')))
 
 
-INSERT_COLUMNS = ['DOI', 'Type', 'Published', 'Publisher', 'Inserted', 'Is version of',
-                  'Preprints', 'Newsletter', 'Tags', 'Acknowledgements', 'Janelia authors']
+INSERT_COLUMNS = ['DOI', 'Type', 'Published', 'Publisher', 'Title', 'Inserted',
+                  'Is version of', 'Preprints', 'Newsletter', 'Tags', 'Acknowledgements',
+                  'Janelia authors']
+
+
+def _insert_title(row):
+    ''' A record's title for the inserted-DOIs page, raw
+        DL.get_title() returns the literal "No title" for a record without one
+        (true of a few held DOIs, mostly grant records); that is nothing, not
+        a title, so it comes back empty.
+        Keyword arguments:
+          row: DOI record
+        Returns:
+          Title string, '' when the record has none
+    '''
+    try:
+        title = DL.get_title(row)
+    except Exception:
+        return ''
+    if not title or str(title).strip().lower() == 'no title':
+        return ''
+    return str(title)
 
 
 def _doi_list(value):
@@ -15473,8 +15493,12 @@ def _insert_row(row, source, limit):
     has_author = bool(row.get('jrc_author'))
     publisher = row.get('publisher') or ''
     inserted = str(row['jrc_inserted'])
-    screen = [safe(doi_link(row['doi'])), typ, safe(jpd), publisher, inserted,
-              safe(doi_link(version)), safe(doi_link(preprints)), news,
+    # The title: render_title_html on screen (escaped, de-TeXed, a few inline
+    # tags kept); raw in the file, on one line so it cannot break the TSV.
+    title = _insert_title(row)
+    screen = [safe(doi_link(row['doi'])), typ, safe(jpd), publisher,
+              safe(f"<span style='font-size: 10pt;'>{render_title_html(title)}</span>"),
+              inserted, safe(doi_link(version)), safe(doi_link(preprints)), news,
               safe(f"<span style='font-size: 10pt;'>{tags}</span>"),
               cell(yes_no(has_acks, 'has acknowledgement text', 'no acknowledgement text'),
                    sort=int(has_acks), align='center'),
@@ -15483,8 +15507,8 @@ def _insert_row(row, source, limit):
                    sort=int(has_author), align='center')]
     # The download: the same columns, raw values (bare DOIs, no markup, words
     # for the glyphs).
-    download = [row['doi'], typ, pdate, publisher, inserted, ', '.join(version),
-                ', '.join(preprints), news, tags,
+    download = [row['doi'], typ, pdate, publisher, ' '.join(title.split()), inserted,
+                ', '.join(version), ', '.join(preprints), news, tags,
                 'yes' if has_acks else 'no', 'yes' if has_author else 'no']
     return screen, download, rclass
 
@@ -15526,7 +15550,7 @@ def show_insert(idate, source='Crossref'):
     html = render_table(INSERT_COLUMNS, trows,
                         table_id='dois', css='tablesorter numbers-scroll',
                         row_classes=row_classes,
-                        col_classes=[None, None, None, 'col-publisher', None,
+                        col_classes=[None, None, None, 'col-publisher', 'col-title', None,
                                      'col-version', 'col-preprint', None, 'col-tags',
                                      'col-acks', 'col-author'])
     # Goes through the shared hide-set like every other row filter in the app.
@@ -15547,6 +15571,7 @@ def show_insert(idate, source='Crossref'):
     html = counter + cbutton \
            + f" &nbsp;{create_downloadable('jrc_inserted', INSERT_COLUMNS, fileoutput)}" \
            + column_toggles('dois', [('Publisher', 'col-publisher'),
+                                     ('Title', 'col-title', False),
                                      ('Is version of', 'col-version'),
                                      ('Preprints', 'col-preprint', False), ('Tags', 'col-tags'),
                                      ('Acknowledgements', 'col-acks', False),
