@@ -17,6 +17,7 @@
 import ast
 import re
 from datetime import date
+from html import escape
 from pathlib import Path
 
 import dis_html as DH
@@ -35,10 +36,25 @@ def _block(start, end):
 INSERT = _block('def show_insert(', "@app.route('/doiui/custom/")
 
 
+class _FakeDL:
+    ''' doi_common.get_title as the library defines it: Crossref title[0] or
+        DataCite titles[0].title, else the literal "No title". '''
+    @staticmethod
+    def get_title(rec):
+        if 'DOI' in rec:
+            if rec.get('title') and rec['title'][0]:
+                return rec['title'][0].replace("\n", " ")
+            return 'No title'
+        if rec.get('titles') and 'title' in rec['titles'][0]:
+            return rec['titles'][0]['title'].replace("\n", " ")
+        return 'No title'
+
+
 def _extract(*names):
     ''' Pull named top-level functions and assignments out of dis_responder. '''
     tree = ast.parse(RESPONDER)
-    ns = {'safe': DH.safe, 'doi_link': DH.doi_link, 'cell': DH.cell, 'yes_no': DH.yes_no}
+    ns = {'safe': DH.safe, 'doi_link': DH.doi_link, 'cell': DH.cell, 'yes_no': DH.yes_no,
+          'escape': escape, 're': re, 'DL': _FakeDL}
     for name in names:
         node = next(n for n in tree.body
                     if (isinstance(n, ast.FunctionDef) and n.name == name)
@@ -48,7 +64,8 @@ def _extract(*names):
     return ns
 
 
-NS = _extract('INSERT_COLUMNS', '_doi_list', '_insert_row')
+NS = _extract('TITLE_SAFE_TAGS', 'strip_tex_math', 'render_title_html', 'INSERT_COLUMNS',
+              '_doi_list', '_insert_title', '_insert_row')
 COLUMNS = NS['INSERT_COLUMNS']
 insert_row = NS['_insert_row']
 LIMIT = date(2026, 11, 6)
@@ -206,20 +223,23 @@ def test_remembered_choices_are_reapplied_on_load_and_the_boxes_synced():
 def test_insert_page_makes_exactly_the_optional_columns_toggleable():
     ''' DOI, type, published, inserted and newsletter are required and get no
         control; the rest are optional. Publisher, Is version of and Tags start
-        shown; Preprints, Acknowledgements and Janelia authors start hidden.
+        shown; Title, Preprints, Acknowledgements and Janelia authors start
+        hidden.
     '''
-    assert COLUMNS == ['DOI', 'Type', 'Published', 'Publisher', 'Inserted', 'Is version of',
-                       'Preprints', 'Newsletter', 'Tags', 'Acknowledgements', 'Janelia authors']
+    assert COLUMNS == ['DOI', 'Type', 'Published', 'Publisher', 'Title', 'Inserted',
+                       'Is version of', 'Preprints', 'Newsletter', 'Tags', 'Acknowledgements',
+                       'Janelia authors']
     classes = re.search(r"col_classes=\[(.*?)\]\)", INSERT, re.S).group(1)
     classes = [c.strip(" '\n") for c in classes.split(',')]
     assert dict(zip(COLUMNS, classes)) == {
-        'DOI': 'None', 'Type': 'None', 'Published': 'None', 'Publisher': 'col-publisher',
-        'Inserted': 'None', 'Is version of': 'col-version', 'Preprints': 'col-preprint',
-        'Newsletter': 'None', 'Tags': 'col-tags', 'Acknowledgements': 'col-acks',
-        'Janelia authors': 'col-author'}
+        'DOI': 'None', 'Title': 'col-title', 'Type': 'None', 'Published': 'None',
+        'Publisher': 'col-publisher', 'Inserted': 'None', 'Is version of': 'col-version',
+        'Preprints': 'col-preprint', 'Newsletter': 'None', 'Tags': 'col-tags',
+        'Acknowledgements': 'col-acks', 'Janelia authors': 'col-author'}
     toggles = re.search(r"column_toggles\('dois', \[(.*?)\],", INSERT, re.S).group(1)
     assert re.findall(r"\('([^']+)', '([^']+)'(?:, (False))?\)", toggles) == [
         ('Publisher', 'col-publisher', ''),
+        ('Title', 'col-title', 'False'),
         ('Is version of', 'col-version', ''), ('Preprints', 'col-preprint', 'False'),
         ('Tags', 'col-tags', ''), ('Acknowledgements', 'col-acks', 'False'),
         ('Janelia authors', 'col-author', 'False')]
@@ -233,9 +253,34 @@ def test_insert_page_makes_exactly_the_optional_columns_toggleable():
 def test_a_row_has_one_screen_cell_and_one_download_field_per_column():
     screen, download, _ = insert_row(_row(), 'Crossref', LIMIT)
     assert len(screen) == len(COLUMNS) == len(download)
-    assert download[:5] == ['10.1/abc', 'journal-article', '2026-11-10', 'Elsevier',
+    assert download[:6] == ['10.1/abc', 'journal-article', '2026-11-10', 'Elsevier', '',
                             '2026-11-19 11:45:14']
     assert '<a ' not in '\t'.join(download)
+
+
+def test_the_title_is_rendered_on_screen_and_raw_on_one_line_in_the_file():
+    ''' Crossref keeps the title in title[0], DataCite in titles[0].title;
+        DL.get_title says "No title" for neither, which is nothing, not a
+        title. On screen it goes through render_title_html (escaped, a few
+        inline tags kept); the file gets the raw text with newlines and tabs
+        collapsed, so a title can never break the TSV.
+    '''
+    col = COLUMNS.index('Title')
+    row = _row(DOI='10.1/abc', title=['Imaging <i>Drosophila</i> in\tvivo & <script>x</script>'])
+    screen, download, _ = insert_row(row, 'Crossref', LIMIT)
+    assert '<i>Drosophila</i>' in screen[col]
+    assert '&lt;script&gt;x&lt;/script&gt;' in screen[col] and '<script>' not in screen[col]
+    assert '&amp;' in screen[col]
+    assert download[col] == 'Imaging <i>Drosophila</i> in vivo & <script>x</script>'
+    assert '\t' not in download[col]
+    # DataCite shape.
+    row = _row(titles=[{'title': 'A dataset'}])
+    screen, download, _ = insert_row(row, 'Crossref', LIMIT)
+    assert 'A dataset' in screen[col] and download[col] == 'A dataset'
+    # No title at all: empty, not the literal "No title".
+    screen, download, _ = insert_row(_row(DOI='10.1/abc'), 'Crossref', LIMIT)
+    assert download[col] == '' and 'No title' not in screen[col]
+    assert NS['_insert_title']({'doi': 'x'}) == ''
 
 
 def test_the_download_has_a_header_matching_its_columns():
