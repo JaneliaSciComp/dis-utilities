@@ -75,10 +75,10 @@ def test_every_redacting_endpoint_carries_the_marker():
             func = dec.func if isinstance(dec, ast.Call) else dec
             if getattr(func, 'id', '') == 'redacts':
                 marked.add(node.name)
-        if node.name == 'strip_identifiers':
+        if node.name in ('strip_identifiers', 'strip_roster'):
             continue
         body = '\n'.join(lines[node.body[0].lineno - 1:node.end_lineno])
-        if 'strip_identifiers(' in body:
+        if 'strip_identifiers(' in body or 'strip_roster(' in body:
             calls.add(node.name)
     assert calls, "no endpoint calls strip_identifiers - has it been renamed?"
     assert calls <= marked, f"redacting but unmarked: {sorted(calls - marked)}"
