@@ -71,7 +71,7 @@ from dis_state import CVTERM, PROJECT
 # on the image. feat -> minor, everything else -> patch, in the same commit as
 # the change. Forgetting is survivable: ocbuild warns that the tag already
 # exists in the ImageStream rather than silently overwriting it.
-__version__ = "120.144.0"
+__version__ = "120.145.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -1255,6 +1255,38 @@ def strip_identifiers(record):
     for item in (record if isinstance(record, list) else [record]):
         if isinstance(item, dict):
             for field in IDENTIFIER_FIELDS:
+                item.pop(field, None)
+    return record
+
+
+# What the roster listing endpoints (/orcid, /orcid/active, /orcid/<oid>) show
+# a caller without the orcid authorization: enough to look a person up and
+# cite them, nothing about their employment. An allowlist rather than a
+# denylist, because the orcid document grows fields faster than anyone would
+# remember to hide them: userIdO365, employeeId, hireDate, workerType, the
+# authorization list, the API-token stamp and managed-group data have all been
+# added since the endpoints were written, and every one went out to the world.
+ROSTER_PUBLIC_FIELDS = ('orcid', 'given', 'family', 'affiliations')
+
+
+def strip_roster(record):
+    """ Reduce a roster (orcid collection) document to its public fields
+
+        Mutates and returns the record, like strip_identifiers; an entitled
+        caller (admin or orcid, by session or Bearer token) gets it untouched.
+        Separate from strip_identifiers because that one removes two named
+        fields from records that are mostly public, while a roster document is
+        mostly private: there the right question is what to keep.
+        Keyword arguments:
+          record: a dict, or a list of dicts
+        Returns:
+          The record
+    """
+    if may_see_identifiers():
+        return record
+    for item in (record if isinstance(record, list) else [record]):
+        if isinstance(item, dict):
+            for field in [key for key in item if key not in ROSTER_PUBLIC_FIELDS]:
                 item.pop(field, None)
     return record
 
@@ -7130,10 +7162,13 @@ def return_xml(resource='elsevier', doi=None):
 # ******************************************************************************
 
 @app.route('/orcid')
+@redacts('admin', 'orcid', fields='everything but orcid, given, family, affiliations')
 def show_oids():
     '''
     Show saved ORCID IDs
-    Return information for saved ORCID IDs
+    Return information for saved ORCID IDs. Without authorization (a Bearer
+    token holding admin or orcid) each record is reduced to orcid, given,
+    family and affiliations.
     # Do not display
     tags:
       - ORCID
@@ -7151,16 +7186,20 @@ def show_oids():
     result['rest']['source'] = 'mongo'
     result['data'] = []
     for row in rows:
-        result['data'].append(row)
+        result['data'].append(strip_roster(row))
     result['rest']['row_count'] = len(result['data'])
     return generate_response(result)
 
 
 @app.route('/orcid/active')
+@redacts('admin', 'orcid', fields='everything but orcid, given, family, affiliations')
 def show_active_oids():
     '''
     Return active ORCID records
-    Return information for active ORCID IDs
+    Return information for active ORCID IDs. Without authorization (a Bearer
+    token holding admin or orcid) each record is reduced to orcid, given,
+    family and affiliations - so hireDate and employeeId, which
+    find_early_dois.py reads from this endpoint, need the token.
     # Do not display
     tags:
       - ORCID
@@ -7183,16 +7222,19 @@ def show_active_oids():
     result['rest']['source'] = 'mongo'
     result['data'] = []
     for row in rows:
-        result['data'].append(row)
+        result['data'].append(strip_roster(row))
     result['rest']['row_count'] = len(result['data'])
     return generate_response(result)
 
 
 @app.route('/orcid/<string:oid>')
+@redacts('admin', 'orcid', fields='everything but orcid, given, family, affiliations')
 def show_oid(oid):
     '''
     Show an ORCID ID
-    Return information for an ORCID ID or name
+    Return information for an ORCID ID or name. Without authorization (a
+    Bearer token holding admin or orcid) each record is reduced to orcid,
+    given, family and affiliations.
     # Do not display
     tags:
       - ORCID
@@ -7223,7 +7265,7 @@ def show_oid(oid):
     result['rest']['source'] = 'mongo'
     result['data'] = []
     for row in rows:
-        result['data'].append(row)
+        result['data'].append(strip_roster(row))
     return generate_response(result)
 
 
