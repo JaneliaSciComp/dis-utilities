@@ -71,7 +71,7 @@ from dis_state import CVTERM, PROJECT
 # on the image. feat -> minor, everything else -> patch, in the same commit as
 # the change. Forgetting is survivable: ocbuild warns that the tag already
 # exists in the ImageStream rather than silently overwriting it.
-__version__ = "120.145.0"
+__version__ = "120.146.0"
 # Database
 DB = {}
 INSENSITIVE = Collation(locale='en', strength=CollationStrength.PRIMARY)
@@ -330,6 +330,98 @@ def before_request():
         return generate_response(result)
     return None
 
+
+@app.before_request
+def public_gate():
+    ''' On a public-facing host, refuse every request that is not signed in
+
+        One image serves two hosts. The internal one (dis.int.janelia.org)
+        sets DIS_REQUIRE_SIGNIN=0 and this function does nothing, so the site
+        behaves as it always has: public pages public, @restricted pages
+        asking for a sign-in. The DMZ host (iris.janelia.org, reachable from
+        the internet so that ORCID sign-in can call back) leaves it on, and
+        then nothing outside PUBLIC_ENDPOINTS answers an anonymous request.
+
+        This is the floor, not the authorization model: @restricted('term'),
+        @api_restricted and @redacts still run afterwards and decide what a
+        signed-in person may do. A session cookie and a Bearer token are
+        equally good here, because current_user() resolves both - the page's
+        own JavaScript keeps working on JSON routes, and scripts send a token.
+
+        Runs after before_request (Flask keeps registration order), so the
+        database is connected; a before_request that returned a page has
+        already ended the request and this never runs.
+    '''
+    if not REQUIRE_SIGNIN or request.method == 'OPTIONS':
+        return None
+    if request.endpoint in PUBLIC_ENDPOINTS:
+        return None
+    # An unmatched path (request.endpoint is None) is refused like any other:
+    # a 404 for anonymous callers would say which paths exist.
+    problem = _restriction_unavailable()
+    if problem:
+        print(f"Public gate cannot run for {request.path}: {problem}")
+        return _refuse_anonymous(503, problem)
+    if current_user():
+        return None
+    return _refuse_anonymous()
+
+
+def _wants_html(accepted, fetch_mode=None):
+    ''' Whether a request comes from a person in a browser rather than a program
+
+        Decided from the request, not the route, because several routes serve
+        both (/peoplerec renders HTML to a browser and JSON to anything else,
+        using this same test). A browser navigating sends text/html in Accept;
+        fetch(), curl and requests send */* or application/json. */* must NOT
+        count as HTML, which is why this does not use MIMEAccept.accept_html.
+        Keyword arguments:
+          accepted: the Accept header's media types (lower-cased strings)
+          fetch_mode: the Sec-Fetch-Mode header, if any
+        Returns:
+          True for a browser navigation
+    '''
+    if fetch_mode == 'navigate':
+        return True
+    return bool({'text/html', 'application/xhtml+xml'} & set(accepted))
+
+
+def _refuse_anonymous(status=401, problem=None):
+    ''' The public gate's answer to a request with nobody behind it
+
+        A browser is sent to sign in and brought back afterwards; a program
+        gets a JSON 401 with WWW-Authenticate, which is what an API client
+        can act on. A POST from a browser goes back to the page the form was
+        on (the GET after sign-in could not replay it), the same rule
+        @restricted applies.
+        Keyword arguments:
+          status: 401, or 503 when the gate itself cannot run
+          problem: the 503 explanation
+        Returns:
+          Response
+    '''
+    accepted = [value.lower() for value, _ in request.accept_mimetypes]
+    if _wants_html(accepted, request.headers.get('Sec-Fetch-Mode')):
+        if status != 401:
+            return make_response(render_template('error.html', urlroot=request.url_root,
+                                                 title=render_warning("Restricted site"),
+                                                 message=problem), status)
+        if request.method in ('GET', 'HEAD'):
+            target = request.full_path.rstrip('?')
+        else:
+            ref = urlsplit(request.referrer or '')
+            target = (ref.path + (f"?{ref.query}" if ref.query else '')) \
+                     if ref.path.startswith('/') else '/'
+        return redirect(url_for('login', next=target))
+    message = problem or ("This site requires a sign-in. Send a personal API token as "
+                          "'Authorization: Bearer <token>' (issued on /profile), or sign "
+                          "in through a browser.")
+    response = jsonify({"error": message, "status": status})
+    response.status_code = status
+    if status == 401:
+        response.headers['WWW-Authenticate'] = 'Bearer realm="DIS"'
+    return response
+
 # ******************************************************************************
 # * Error utility functions                                                    *
 # ******************************************************************************
@@ -422,6 +514,28 @@ app.config['SESSION_COOKIE_SECURE'] = not ALLOW_HTTP_SESSION
 # is a signed cookie with no server-side store, so a per-pod value would log
 # people out as the Service moved them between pods.
 app.secret_key = os.environ.get('DIS_SESSION_SECRET') or ''
+
+
+def _signin_required(raw):
+    ''' Read the DIS_REQUIRE_SIGNIN switch
+
+        Fails closed: unset means required. The internal host must say
+        DIS_REQUIRE_SIGNIN=0 to stay open; a public host that forgets the
+        variable asks everyone to sign in rather than publishing the roster.
+        Keyword arguments:
+          raw: the environment variable's value, or None
+        Returns:
+          True when every page and endpoint needs a signed-in person
+    '''
+    return (raw if raw is not None else '1').strip().lower() not in ('0', 'false', 'no', 'off')
+
+
+REQUIRE_SIGNIN = _signin_required(os.environ.get('DIS_REQUIRE_SIGNIN'))
+# What answers an anonymous request when REQUIRE_SIGNIN is on, by Flask
+# endpoint name. The sign-in pages themselves, the probe and robots routes,
+# and static files; the ORCID callback joins this set when it exists. Public is
+# the exception you declare: a new route is gated the day it is written.
+PUBLIC_ENDPOINTS = frozenset({'login', 'logout', 'healthz', 'robots', 'static'})
 
 
 def may_sign_in(person):
@@ -8572,6 +8686,25 @@ def show_tag_metrics(limit=15):
 # ******************************************************************************
 # * UI endpoints (general)                                                     *
 # ******************************************************************************
+@app.route('/healthz')
+def healthz():
+    ''' Liveness and readiness probe target
+
+        Answers without touching the database or a template, so a pod that is
+        merely busy (every gunicorn worker on a slow request) still answers in
+        microseconds and is not restarted for it; the probes used to hit "/",
+        which renders the home page. Public on both hosts.
+    '''
+    return 'ok', 200, {'Content-Type': 'text/plain; charset=utf-8'}
+
+
+@app.route('/robots.txt')
+def robots():
+    ''' Crawler policy: nothing on a sign-in-only host is for indexing '''
+    body = "User-agent: *\nDisallow: /\n" if REQUIRE_SIGNIN else "User-agent: *\nAllow: /\n"
+    return body, 200, {'Content-Type': 'text/plain; charset=utf-8'}
+
+
 @app.route('/download/<string:fname>')
 def download(fname):
     ''' Downloadable content
@@ -9466,11 +9599,18 @@ def show_restrictions():
     inv = _restriction_inventory()
     tot = inv['totals']
     html = stat_cards([
+        ("Sign-in required everywhere",
+         "<span style='color:lime'>on</span>" if REQUIRE_SIGNIN
+         else "<span style='color:goldenrod'>off</span>"),
         ("Routes", f"{tot['all']:,}"),
         ("Pages requiring sign-in", f"{len(inv['pages']):,}"),
         ("API endpoints requiring a token", f"{len(inv['apis']):,}"),
         ("Endpoints that redact", f"{tot['reduced']:,}"),
     ], div_id='restriction-stats')
+    html += ("<p style='color:#a8c4e0; font-size:0.9em'>DIS_REQUIRE_SIGNIN "
+             f"{'is on: every route outside ' if REQUIRE_SIGNIN else 'is off: only the pages below ask for a sign-in; on a public host the switch gates every route outside '}"
+             f"<code>{escape(', '.join(sorted(PUBLIC_ENDPOINTS)))}</code>"
+             f"{' refuses an anonymous request (browsers are sent to sign in, programs get a JSON 401).' if REQUIRE_SIGNIN else '.'}</p>")
 
     rows, classes = [], []
     for path, endpoint, methods, term in inv['pages']:
